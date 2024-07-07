@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "timbal"
 version = "0.1.1"
-description = ""
+description = "Better containers for machine learning"
 authors = ["berges99 <daviid.bergees@gmail.com>"]
 readme = "README.md"
 license = "Apache-2.0"
