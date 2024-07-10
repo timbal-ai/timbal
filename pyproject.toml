@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "timbal"
-version = "0.1.2"
+version = "0.2.0"
 description = "Better containers for machine learning"
 authors = ["berges99 <daviid.bergees@gmail.com>"]
 readme = "README.md"
@@ -17,6 +17,8 @@ classifiers = [
 [tool.poetry.dependencies]
 python = "^3.10"
 pydantic = "^2.8.2"
+requests = "^2.32.3"
+boto3 = "^1.34.142"
 
 
 [build-system]
