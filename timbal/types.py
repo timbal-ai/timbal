@@ -159,6 +159,8 @@ class File(io.IOBase):
     @classmethod 
     def validate(cls, value: Any) -> "File":
         """Create a new Field instance validating a local path, an url, an s3 uri, a data url or a file-like object."""
+        if isinstance(value, (bytes, bytearray)):
+            return File(io.BytesIO(value))
         if isinstance(value, io.IOBase):
             return File(value)
         if not isinstance(value, str):
