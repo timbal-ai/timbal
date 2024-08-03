@@ -39,6 +39,7 @@ Note: Ensure appropriate error handling and resource management, especially when
 
 
 import io
+import os
 import boto3
 import pathlib
 import requests
@@ -90,6 +91,7 @@ def Field(
 
 class File(io.IOBase):
     __slots__ = ("__source__", "__fileobj__", "__fetcher__")
+    __max_file_size__: Optional[int] = int(os.getenv("TIMBAL_MAX_FILE_SIZE")) if os.getenv("TIMBAL_MAX_FILE_SIZE") else None
 
     def __init__(
         self, 
@@ -154,7 +156,6 @@ class File(io.IOBase):
         """Pydantic calls this method to retrieve the validators when validating data against this class."""
         yield cls.validate
     
-    # TODO - Validate some stuff like content-length before pulling files.
     @classmethod 
     def validate(cls, value: Any) -> "File":
         """Create a new Field instance validating a local path, an url, an s3 uri, a data url or a file-like object."""
@@ -166,22 +167,63 @@ class File(io.IOBase):
         # Check for valid local path.
         if parsed_url.scheme == "":
             path = pathlib.Path(value).expanduser().resolve()
-            if path.exists() and path.is_file():
-                return File(path.open("rb"))
-            else:
+            if not path.exists() or not path.is_file():
                 raise ValueError("Invalid file path.")
-        # Data urls: data:[<mediatype>][;base64],<data>
+            if cls.__max_file_size__ is not None:
+                file_size = path.stat().st_size # bytes
+                print(type(file_size), type(cls.__max_file_size__))
+                if file_size > cls.__max_file_size__:
+                    raise ValueError(f"File size exceeds the maximum allowed size of {cls.__max_file_size__} bytes.")
+            # ? File type restrictions
+            return File(value, fetcher=lambda: cls._fetch_local_file(path=value))
+        # Data urls: data:[<mediatype>][;base64],<data>.
         if parsed_url.scheme == "data":
-            res = urlopen(value) # noqa: S310
-            return File(io.BytesIO(res.read()))
+            if cls.__max_file_size__ is not None:
+                comma_idx = value.find(",")
+                # Redundant check.
+                if comma_idx == -1:
+                    raise ValueError("Invalid data URL.")
+                encoded = value[comma_idx + 1:]
+                # ? We could count the padding if we want to be more precise.
+                estimated_size = len(encoded) * 3 // 4
+                if estimated_size > cls.__max_file_size__:
+                    raise ValueError(f"File size exceeds the maximum allowed size of {cls.__max_file_size__} bytes.")
+            # ? File type restrictions
+            return File(value, fetcher=lambda: cls._fetch_data_url_file(data_url=value))
         # HTTP/HTTPS URLs.
         if parsed_url.scheme == "http" or parsed_url.scheme == "https":
+            response = requests.head(value)
+            if cls.__max_file_size__ is not None:
+                content_length = int(response.headers.get("Content-Length", 0))
+                if content_length > cls.__max_file_size__:
+                    raise ValueError(f"File size exceeds the maximum allowed size of {cls.__max_file_size__} bytes.")
+            # ? File type restrictions
             return File(value, fetcher=lambda: cls._fetch_http_file(url=value))
         # S3 URIs.
         if parsed_url.scheme == "s3":
-            return File(value, fetcher=lambda: cls._fetch_s3_file(bucket=parsed_url.netloc, key=parsed_url.path.lstrip("/")))
+            bucket = parsed_url.netloc
+            key = parsed_url.path.lstrip("/")
+            s3_client = boto3.client("s3")
+            response = s3_client.head_object(Bucket=bucket, Key=key)
+            if cls.__max_file_size__ is not None:
+                content_length = int(response.get("ContentLength", 0))
+                if content_length > cls.__max_file_size__:
+                    raise ValueError(f"File size exceeds the maximum allowed size of {cls.__max_file_size__} bytes.")
+            # ? File type restrictions
+            return File(value, fetcher=lambda: cls._fetch_s3_file(bucket=bucket, key=key))
         # Else the file is invalid.
         raise ValueError("Invalid file source. Must be a local file path, data URL, HTTP URL, or S3 URI.")
+
+    @classmethod
+    def _fetch_local_file(cls, path: pathlib.Path) -> io.IOBase:
+        """Fetch a local file from a valid path in the system."""
+        return path.open("rb")
+
+    @classmethod
+    def _fetch_data_url_file(cls, data_url: str) -> io.IOBase:
+        """Parse a data URL and return a file-like object."""
+        res = urlopen(data_url) # noqa: S310
+        return io.BytesIO(res.read())
 
     @classmethod
     def _fetch_http_file(cls, url: str) -> io.IOBase:
@@ -194,8 +236,8 @@ class File(io.IOBase):
     def _fetch_s3_file(cls, bucket: str, key: str) -> io.IOBase:
         """Fetch a file from an S3 bucket."""
         # Pull configuration directly from the environment.
-        client = boto3.client("s3")
-        res = client.get_object(
+        s3_client = boto3.client("s3")
+        res = s3_client.get_object(
             Bucket=bucket,
             Key=key,
         )
