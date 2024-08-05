@@ -183,7 +183,7 @@ class File(io.IOBase):
                 if file_size > cls.__max_file_size__:
                     raise ValueError(f"File size exceeds the maximum allowed size of {cls.__max_file_size__} bytes.")
             # ? File type restrictions
-            return File(value, fetcher=lambda: cls._fetch_local_file(path=value))
+            return File(value, fetcher=lambda: cls._fetch_local_file(path=path))
         # Data urls: data:[<mediatype>][;base64],<data>.
         if parsed_url.scheme == "data":
             if cls.__max_file_size__ is not None:
