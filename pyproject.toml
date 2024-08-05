@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "timbal"
-version = "0.2.2"
+version = "0.2.3"
 description = "Better containers for machine learning"
 authors = ["berges99 <daviid.bergees@gmail.com>"]
 readme = "README.md"

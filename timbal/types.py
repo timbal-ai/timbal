@@ -44,7 +44,11 @@ import boto3
 import pathlib
 import requests
 
-from pydantic import Field as PydanticField
+from pydantic import (
+    Field as PydanticField,
+    GetJsonSchemaHandler,
+)
+from pydantic_core import CoreSchema
 from typing import (
     Any, 
     List, 
@@ -246,7 +250,12 @@ class File(io.IOBase):
         return io.BytesIO(res["Body"].read())
 
     @classmethod
-    def __modify_schema__(cls, field_schema: Dict[str, Any]) -> None:
+    def __get_pydantic_json_schema__(lcs, _core_schema: CoreSchema, _handler: GetJsonSchemaHandler) -> Dict[str, Any]:
         """Defines what this type should be in openapi.json."""
-        # https://json-schema.org/understanding-json-schema/reference/string.html#uri-template
-        field_schema.update(type="string", format="uri")
+        # https://docs.pydantic.dev/2.8/errors/usage_errors/#custom-json-schema
+        json_schema = {
+            "type": "string",
+            "format": "uri",
+            "description": "A file reference which can be a local path, a URL, an S3 URI, or a data URL.",
+        }
+        return json_schema
