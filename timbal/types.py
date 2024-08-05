@@ -47,6 +47,8 @@ import requests
 from pydantic import (
     Field as PydanticField,
     GetJsonSchemaHandler,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
 )
 from pydantic_core import CoreSchema
 from typing import (
@@ -161,7 +163,7 @@ class File(io.IOBase):
         yield cls.validate
     
     @classmethod 
-    def validate(cls, value: Any) -> "File":
+    def validate(cls, value: ValidatorFunctionWrapHandler, info: ValidationInfo) -> "File":
         """Create a new Field instance validating a local path, an url, an s3 uri, a data url or a file-like object."""
         if isinstance(value, (bytes, bytearray)):
             return File(io.BytesIO(value))
