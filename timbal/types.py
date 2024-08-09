@@ -46,19 +46,20 @@ import requests
 
 from pydantic import (
     Field as PydanticField,
+    GetCoreSchemaHandler,
     GetJsonSchemaHandler,
-    ValidationInfo,
     ValidatorFunctionWrapHandler,
 )
-from pydantic_core import CoreSchema
+from pydantic_core import CoreSchema, core_schema
 from typing import (
     Any, 
-    List, 
-    Union,
-    Iterator,
-    Dict,
-    Optional,
     Callable,
+    Dict,
+    Iterator,
+    List, 
+    Optional,
+    Type,
+    Union,
 )
 from urllib.parse import urlparse
 from urllib.request import urlopen
@@ -110,6 +111,13 @@ class File(io.IOBase):
             object.__setattr__(self, "__fileobj__", source)
         else:
             object.__setattr__(self, "__fileobj__", None)
+
+    # TODO Handle scenarios when source is bytes-like or io.IOBase.
+    def __str__(self) -> str:
+        return self.__source__
+
+    def __repr__(self) -> str:
+        return f"File(source={str(self)})"
 
     # Proxy getattr/setattr/delattr through to the wrapped file object.
     def __getattr__(self, name: str) -> Any:
@@ -163,7 +171,7 @@ class File(io.IOBase):
         yield cls.validate
     
     @classmethod 
-    def validate(cls, value: ValidatorFunctionWrapHandler, info: ValidationInfo) -> "File":
+    def validate(cls, value: ValidatorFunctionWrapHandler) -> "File":
         """Create a new Field instance validating a local path, an url, an s3 uri, a data url or a file-like object."""
         if isinstance(value, (bytes, bytearray)):
             return File(io.BytesIO(value))
@@ -252,7 +260,7 @@ class File(io.IOBase):
         return io.BytesIO(res["Body"].read())
 
     @classmethod
-    def __get_pydantic_json_schema__(lcs, _core_schema: CoreSchema, _handler: GetJsonSchemaHandler) -> Dict[str, Any]:
+    def __get_pydantic_json_schema__(cls, _core_schema: CoreSchema, _handler: GetJsonSchemaHandler) -> Dict[str, Any]:
         """Defines what this type should be in openapi.json."""
         # https://docs.pydantic.dev/2.8/errors/usage_errors/#custom-json-schema
         json_schema = {
@@ -261,3 +269,15 @@ class File(io.IOBase):
             "description": "A file reference which can be a local path, a URL, an S3 URI, or a data URL.",
         }
         return json_schema
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, _source: Type[Any], _handler: GetCoreSchemaHandler) -> core_schema.CoreSchema:
+        def serialize(value: Any) -> str:
+            if isinstance(value, cls):
+                return str(value)
+            else:
+                return value
+        return core_schema.no_info_plain_validator_function(
+            cls.validate,
+            serialization=core_schema.plain_serializer_function_ser_schema(serialize, when_used="always")
+        )
