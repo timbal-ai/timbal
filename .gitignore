@@ -8,6 +8,9 @@ wheels/
 .pytest_cache
 _version.py
 
+.zig-cache
+zig-out
+
 .venv
 .env
 .DS_Store

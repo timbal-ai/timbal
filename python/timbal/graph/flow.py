@@ -814,6 +814,7 @@ class Flow(BaseStep):
                 data_key = f"{id}.memory"
                 self.set_data_map(data_key, memory_key)
             # We're creating a new memory.
+            # TODO No need to check that memory_id == id. We can create a new entry and that's it. Let users do whatever they want.
             elif memory_id == id:
                 self.set_data_value(memory_key, [])
             else:

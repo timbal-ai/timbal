@@ -1,0 +1,20 @@
+# Configuration for timbal.️
+# TODO Add reference to the timbal docs.
+
+
+build:
+
+  # A list of ubuntu apt packages to install.
+  # system_packages:
+  #   - "libgl1-mesa-glx"
+  #   - "libglib2.0-0"
+
+  # Commands run after the environment is setup.
+  # run:
+  #   - "echo env is ready!"
+  #   - "echo another command if needed"
+
+
+# Path to the flow to be run. 
+# TODO Add the interface there.
+serve: "flow.py:flow"
