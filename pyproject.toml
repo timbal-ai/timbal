@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "timbal"
+dynamic = ["version"]
+description = "A strongly opinionated framework for building and orchestrating agentic AI applications"
+readme = "README.md"
+authors = [
+    { name = "berges99", email = "daviid.bergees@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.45.0",
+    "boto3>=1.36.5",
+    "fastapi>=0.115.8",
+    "openai>=1.60.0",
+    "pydantic>=2.10.6",
+    "python-dotenv>=1.0.1",
+    "requests>=2.32.3",
+    "structlog>=25.1.0",
+    "uvicorn>=0.34.0",
+]
+
+[dependency-groups]
+dev = [
+    "pyngrok>=7.2.3",
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.2",
+    "ruff>=0.9.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/timbal"]
+
+[tool.hatch.envs.default]
+path = "python"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "python/timbal/_version.py"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = [
+    "UP", # pyupgrade
+    # "D", # pydocstyle
+    "I", # isort
+    "B", # bugbear rules
+    "F401", # unused imports
+    "E722", # bare except statements
+    "ARG", # unused arguments
+    "T201", # print statements
+    "T203", # print statements
+    "TC004", # Prevents misuse of TYPE_CHECKING
+    "TID251", # Enforces import conventions
+]
+ignore = [
+    "B006", # mutable defaults
+    "B008", # function calls in argument defaults
+]
+unfixable = [
+    "T201", # print statements
+    "T203", # print statements
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
