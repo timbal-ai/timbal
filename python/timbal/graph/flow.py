@@ -813,12 +813,9 @@ class Flow(BaseStep):
             if memory_key in self.data:
                 data_key = f"{id}.memory"
                 self.set_data_map(data_key, memory_key)
-            # We're creating a new memory.
-            # TODO No need to check that memory_id == id. We can create a new entry and that's it. Let users do whatever they want.
-            elif memory_id == id:
-                self.set_data_value(memory_key, [])
+            # We're creating a new memory with the specified key. 
             else:
-                raise ValueError(f"Memory id {memory_id} should be the same as the step id {id} or another valid memory id.")
+                self.set_data_value(memory_key, [])
             
             # Store memory config in the llm step, for resolving the memory at runtime.
             self.steps[id]._memory_key = memory_key
