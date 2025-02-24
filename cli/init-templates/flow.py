@@ -11,13 +11,3 @@ flow = (
     .set_output("response", "llm.return")
     .compile(state_saver=InMemorySaver())
 )
-
-
-if __name__ == "__main__":
-    import asyncio 
-    
-    async def main():
-        response = await flow.complete(prompt="Hello, world!")
-        print(response)
-
-    asyncio.run(main())
