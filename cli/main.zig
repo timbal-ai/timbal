@@ -1,5 +1,36 @@
 const std = @import("std");
+
 const init_cmd = @import("commands/init.zig");
+const build_cmd = @import("commands/build.zig");
+
+
+fn printUsage() !void {
+    const stderr = std.io.getStdErr().writer();
+    try stderr.writeAll(
+        "A strongly opinionated framework for building and orchestrating agentic AI applications.\n" ++
+        "\n" ++
+        "\x1b[1;32mUsage: \x1b[1;36mtimbal \x1b[0;36m[OPTIONS] <COMMAND>\n" ++
+        "\n" ++
+        "\x1b[1;32mCommands:\n" ++
+        "    \x1b[1;36minit  \x1b[0mInitialize a new project\n" ++
+        "    \x1b[1;36mbuild \x1b[0mBuild the project\n" ++
+        "    \x1b[1;36mhelp  \x1b[0mDisplay this help message\n" ++
+        "\n" ++
+        "\x1b[1;32mGlobal options:\n" ++
+        "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet      \x1b[0mDo not print any output\n" ++
+        "    \x1b[1;36m-v\x1b[0m, \x1b[1;36m--verbose\x1b[0;36m... \x1b[0mUse verbose output\n" ++
+        "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help       \x1b[0mDisplay the concise help for this command\n" ++
+        "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version    \x1b[0mDisplay the timbal version\n" ++
+        "\n"
+    );
+}
+
+
+fn printUsageWithError(err: []const u8) !void {
+    const stderr = std.io.getStdErr().writer();
+    try stderr.print("{s}\n\n", .{err});
+    try printUsage();
+}
 
 
 pub fn main() !void {
@@ -11,38 +42,19 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 2) {
-        try printUsage();
+        try printUsageWithError("Error: missing command");
         return;
     }
 
     const action = args[1];
+
     if (std.mem.eql(u8, action, "init")) {
-        if (args.len < 3) {
-            try printUsageWithError("Error: init command requires a path argument");
-            return;
-        }
-        try init_cmd.run(args[2]);
-    } else {
+        try init_cmd.run(allocator, args[2..]);
+    } else if (std.mem.eql(u8, action, "build")) {
+        try build_cmd.run(allocator, args[2..]);
+    } else if (std.mem.eql(u8, action, "help")) {
         try printUsage();
+    } else {
+        try printUsageWithError("Error: unknown command");
     }
-}
-
-
-fn printUsageWithError(err: []const u8) !void {
-    const stderr = std.io.getStdErr().writer();
-    try stderr.print("{s}\n\n", .{err});
-    try printUsage();
-}
-
-
-fn printUsage() !void {
-    const stderr = std.io.getStdErr().writer();
-    try stderr.writeAll(
-        \\Usage: timbal <command> [args...]
-        \\
-        \\Commands:
-        \\    init <path>    Initialize a new project
-        \\                   Use "." to initialize in current directory
-        \\
-    );
 }
