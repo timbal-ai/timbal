@@ -2,6 +2,34 @@ const std = @import("std");
 const fs = std.fs;
 
 
+const DOCKERFILE_TEMPLATE =
+    \\FROM ubuntu:22.04
+    \\
+    \\ENV PYTHONUNBUFFERED=1
+    \\ENV PYTHONDONTWRITEBYTECODE=1
+    \\ENV DEBIAN_FRONTEND=noninteractive
+    \\
+    \\WORKDIR /timbal
+    \\
+    \\RUN apt update && \
+    \\    apt install -yqq --no-install-recommends \
+    \\        {s} && \
+    \\    apt clean && \
+    \\    rm -rf /var/lib/apt/lists/*
+    \\
+    \\RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+    \\
+    \\ENV PATH="/root/.local/bin:$PATH"
+    \\
+    \\COPY . .
+    \\
+    \\RUN uv sync --python 3.12 --python-preference managed
+    \\
+    \\CMD ["tail", "-f", "/dev/null"]
+    \\
+;
+
+
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.print("{s}\n\n", .{err});
@@ -9,6 +37,8 @@ fn printUsageWithError(err: []const u8) !void {
 }
 
 
+// --progress string               Set type of progress output ("auto", "quiet", "plain", "tty",
+//                                       "rawjson"). Use plain to show container output (default "auto")
 fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.writeAll(
@@ -207,35 +237,43 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const dockerfile = try app_dir.createFile("Dockerfile", .{});
     defer dockerfile.close();
 
-    // TODO Use the timbal yaml properties to modify the Dockerfile contents.
-    try dockerfile.writeAll(
-        \\FROM ubuntu:22.04
-        \\
-        \\ENV PYTHONUNBUFFERED=1
-        \\ENV PYTHONDONTWRITEBYTECODE=1
-        \\ENV DEBIAN_FRONTEND=noninteractive
-        \\
-        \\WORKDIR /timbal
-        \\
-        \\RUN apt update && \
-        \\    apt install -yqq --no-install-recommends \
-        \\        curl \
-        \\        ca-certificates \
-        \\        git && \
-        \\    apt clean && \
-        \\    rm -rf /var/lib/apt/lists/*
-        \\
-        \\RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-        \\
-        \\ENV PATH="$HOME/.local/bin:$PATH"
-        \\
-        \\COPY . .
-        \\
-        \\RUN uv sync --python 3.12 --python-preference managed
-        \\
-        \\CMD ["tail", "-f", "/dev/null"]
-        \\
-    );
+    // Format the system packages for the Dockerfile.
+    var system_packages_buffer = std.ArrayList(u8).init(allocator);
+    defer system_packages_buffer.deinit();
 
-    // TODO Run docker build
+    try system_packages_buffer.appendSlice("curl \\\n        ca-certificates \\\n        git");
+
+    for (timbal_yaml.system_packages.items) |pkg| {
+        try system_packages_buffer.appendSlice(" \\\n        ");
+        try system_packages_buffer.appendSlice(pkg);
+    }
+
+    try dockerfile.writer().print(DOCKERFILE_TEMPLATE, .{system_packages_buffer.items});
+
+    // Build the container.
+    const docker_tag = tag orelse blk: {
+        const app_name = std.fs.path.basename(path);
+        const result = try std.fmt.allocPrint(allocator, "{s}:latest", .{app_name});
+        break :blk result;
+    };
+    defer allocator.free(docker_tag);
+
+    const docker_build_args = [_][]const u8{
+        "docker", "build",
+        "-t", docker_tag,
+        ".",
+    };
+
+    // TODO We want the output stream here.
+    const docker_build_result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &docker_build_args,
+        .cwd = path,
+    });
+    defer allocator.free(docker_build_result.stdout);
+    defer allocator.free(docker_build_result.stderr);
+
+    if (docker_build_result.stderr.len > 0 and !quiet) {
+        std.debug.print("{s}", .{docker_build_result.stderr});
+    }
 }
