@@ -2,6 +2,7 @@ const std = @import("std");
 
 const init_cmd = @import("commands/init.zig");
 const build_cmd = @import("commands/build.zig");
+const run_cmd = @import("commands/run.zig");
 
 
 fn printUsage() !void {
@@ -56,6 +57,8 @@ pub fn main() !void {
         try init_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "build")) {
         try build_cmd.run(allocator, args[2..]);
+    } else if (std.mem.eql(u8, action, "run")) {
+        try run_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "help")) {
         try printUsage();
     } else {

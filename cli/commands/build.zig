@@ -195,6 +195,7 @@ fn writeDockerfile(
     timbal_yaml: TimbalYaml,
     app_dir: fs.Dir,
 ) !void {
+    // TODO Think default CMD. If we want the container to run indefinitely, better use "sleep infinity".
     const dockerfile_template =
         \\FROM ubuntu:22.04
         \\
@@ -250,6 +251,7 @@ fn buildContainer(
     no_cache: bool,
     path: []const u8,
 ) !void {
+    // TODO Print the docker tag that we're using.
     const docker_tag = tag orelse blk: {
         const app_name = std.fs.path.basename(path);
         const result = try std.fmt.allocPrint(allocator, "{s}:latest", .{app_name});
