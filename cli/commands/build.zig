@@ -218,6 +218,8 @@ fn writeDockerfile(
         \\
         \\RUN uv sync --python 3.12 --python-preference managed
         \\
+        \\ENV PATH=".venv/bin:$PATH"
+        \\
         \\CMD ["tail", "-f", "/dev/null"]
         \\
     ;
