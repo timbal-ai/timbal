@@ -12,8 +12,12 @@ fn printUsage() !void {
         "\x1b[1;32mUsage: \x1b[1;36mtimbal \x1b[0;36m[OPTIONS] <COMMAND>\n" ++
         "\n" ++
         "\x1b[1;32mCommands:\n" ++
-        "    \x1b[1;36minit  \x1b[0mInitialize a new project\n" ++
-        "    \x1b[1;36mbuild \x1b[0mBuild the project\n" ++
+        "    \x1b[1;36minit  \x1b[0mInitialize a new application\n" ++
+        "    \x1b[1;36mbuild \x1b[0mBuild the application into a container\n" ++
+        "    \x1b[1;36mrun   \x1b[0mRun a command inside the built container\n" ++
+        "    \x1b[1;36mserve \x1b[0mBuild and Run the application at once\n" ++
+        "    \x1b[1;36mlogin \x1b[0mLogin to the Timbal Platform\n" ++
+        "    \x1b[1;36mpush  \x1b[0mPush an application to the Timbal Platform\n" ++
         "    \x1b[1;36mhelp  \x1b[0mDisplay this help message\n" ++
         "\n" ++
         "\x1b[1;32mGlobal options:\n" ++

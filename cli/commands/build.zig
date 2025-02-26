@@ -14,9 +14,10 @@ fn printUsage() !void {
     try stderr.writeAll(
         "Build a container for the application ready for deployment.\n" ++
         "\n" ++
-        "\x1b[1;32mUsage: \x1b[1;36mtimbal build \x1b[0;36m[OPTIONS]\n" ++
+        "\x1b[1;32mUsage: \x1b[1;36mtimbal build \x1b[0;36m[OPTIONS] [PATH]\n" ++
         "\n" ++
         "\x1b[1;32mArguments:\n" ++
+        "    \x1b[1;36mPATH\x1b[0m The path to the project to build\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
         "    \x1b[1;36m-t\x1b[0m, \x1b[1;36m--tag \x1b[0mThe tag to use for the container\n" ++
@@ -32,6 +33,7 @@ fn printUsage() !void {
 
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var arg_path: ?[]const u8 = null;
     var tag: ?[]const u8 = null;
     var verbose: bool = false;
     var quiet: bool = false;
@@ -61,23 +63,72 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
             tag = args[i + 1];
             i += 1;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (arg_path != null) {
+                try printUsageWithError("Error: multiple target paths provided");
+                return;
+            }
+            arg_path = arg;
         } else {
             try printUsageWithError("Error: unknown option");
             return;
         }
     }
 
-    _ = allocator;
-
-    if (tag) |t| {
-        std.debug.print("Tag: {s}\n", .{t});
-    } else {
-        std.debug.print("No tag provided\n", .{});
-    }
+    const target_path = arg_path orelse ".";
 
     const cwd = fs.cwd();
 
-    // TODO Check if timbal.yaml exists
+    const use_current_dir = std.mem.eql(u8, target_path, ".");
+
+    if (!use_current_dir) {
+        // Ensure that the target path exists
+        const target_stat = cwd.statFile(target_path) catch |err| {
+            if (err == error.FileNotFound) {
+                try printUsageWithError("Error: target path does not exist");
+                return;
+            } else {
+                return err;
+            }
+        };
+        
+        // Ensure it is a directory
+        if (target_stat.kind != .directory) {
+            try printUsageWithError("Error: target path is not a directory");
+            return;
+        }
+    }
+
+    var app_dir = if (use_current_dir)
+        cwd
+    else
+        try cwd.openDir(target_path, .{});
+
+    const path = try app_dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    if (!quiet) {
+        std.debug.print("Building application in {s}\n", .{path});
+    }
+
+    // Check if timbal.yaml exists in the directory (i.e. is a valid timbal project)
+    const timbal_yaml_path = "timbal.yaml";
+    const timbal_yaml_file = try app_dir.openFile(timbal_yaml_path, .{});
+    defer timbal_yaml_file.close();
+
+    const file_size = (try timbal_yaml_file.stat()).size;
+    const yaml_content = try allocator.alloc(u8, file_size);
+    defer allocator.free(yaml_content);
+    const bytes_read = try timbal_yaml_file.readAll(yaml_content);
+    if (bytes_read != file_size) {
+        try printUsageWithError("Error: could not read entire timbal.yaml file");
+        return;
+    }
+
+    if (verbose) {
+        std.debug.print("Loaded timbal.yaml ({d} bytes)\n", .{bytes_read});
+        std.debug.print("{s}\n", .{yaml_content});
+    }
 
     // Create the Dockerfile
     // Right now we create and edit the file in the cwd. We don't create a temporary directory,
