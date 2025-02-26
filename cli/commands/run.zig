@@ -23,6 +23,7 @@ fn printUsage() !void {
         "            If not provided, the container will run the default command (CMD instruction)\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
+        "    \x1b[1;36m-d\x1b[0m, \x1b[1;36m--detach  \x1b[0mRun container in the background and print container ID\n" ++
         "    \x1b[1;36m-p\x1b[0m, \x1b[1;36m--publish \x1b[0mPublish a container's port to the host, e.g. -p 8000\n" ++
         "\n" ++
         "\x1b[1;32mGlobal options:\n" ++
@@ -38,6 +39,7 @@ fn printUsage() !void {
 const TimbalRunArgs = struct {
     quiet: bool,
     verbose: bool,
+    detach: bool,
     image: []const u8,
     command: ?[]const u8,
     publish: ?[]const u8,
@@ -47,6 +49,7 @@ const TimbalRunArgs = struct {
 fn parseArgs(args: []const []const u8) !TimbalRunArgs {
     var quiet: bool = false;
     var verbose: bool = false;
+    var detach: bool = false;
     var image: ?[]const u8 = null;
     var command: ?[]const u8 = null;
     var publish: ?[]const u8 = null;
@@ -65,6 +68,8 @@ fn parseArgs(args: []const []const u8) !TimbalRunArgs {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--detach")) {
+            detach = true;
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--publish")) {
             if (i + 1 >= args.len) {
                 try printUsageWithError("Error: --publish requires a value");
@@ -99,6 +104,7 @@ fn parseArgs(args: []const []const u8) !TimbalRunArgs {
     return TimbalRunArgs{
         .quiet = quiet,
         .verbose = verbose,
+        .detach = detach,
         .image = image.?,
         .command = command,
         .publish = publish,
@@ -109,6 +115,7 @@ fn parseArgs(args: []const []const u8) !TimbalRunArgs {
 fn runContainerCmd(
     allocator: std.mem.Allocator, 
     quiet: bool,
+    detach: bool,
     image: []const u8,
     publish: ?[]const u8,
     command: ?[]const u8,
@@ -127,12 +134,21 @@ fn runContainerCmd(
         try docker_run_args.append(publish.?);
     }
 
+    if (detach) {
+        try docker_run_args.append("-d");
+    }
+
     // TODO Think if we want to specify a --name for easier identification.
 
     try docker_run_args.append(image);
 
     if (command != null) {
-        try docker_run_args.append(command.?);
+        // docker run sends the command directly to the container, not as a string.
+        // So we need to split the command string into individual arguments.
+        var cmd_iter = std.mem.tokenizeScalar(u8, command.?, ' ');
+        while (cmd_iter.next()) |arg| {
+            try docker_run_args.append(arg);
+        }
     }
 
     // Don't use std.process.Child.run here. We want to inherit the stderr and stdout
@@ -162,6 +178,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     try runContainerCmd(
         allocator,
         parsed_args.quiet,
+        parsed_args.detach,
         parsed_args.image,
         parsed_args.publish,
         parsed_args.command,
