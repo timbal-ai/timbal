@@ -2,34 +2,6 @@ const std = @import("std");
 const fs = std.fs;
 
 
-const DOCKERFILE_TEMPLATE =
-    \\FROM ubuntu:22.04
-    \\
-    \\ENV PYTHONUNBUFFERED=1
-    \\ENV PYTHONDONTWRITEBYTECODE=1
-    \\ENV DEBIAN_FRONTEND=noninteractive
-    \\
-    \\WORKDIR /timbal
-    \\
-    \\RUN apt update && \
-    \\    apt install -yqq --no-install-recommends \
-    \\        {s} && \
-    \\    apt clean && \
-    \\    rm -rf /var/lib/apt/lists/*
-    \\
-    \\RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-    \\
-    \\ENV PATH="/root/.local/bin:$PATH"
-    \\
-    \\COPY . .
-    \\
-    \\RUN uv sync --python 3.12 --python-preference managed
-    \\
-    \\CMD ["tail", "-f", "/dev/null"]
-    \\
-;
-
-
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.print("{s}\n\n", .{err});
@@ -37,8 +9,6 @@ fn printUsageWithError(err: []const u8) !void {
 }
 
 
-// --progress string               Set type of progress output ("auto", "quiet", "plain", "tty",
-//                                       "rawjson"). Use plain to show container output (default "auto")
 fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.writeAll(
@@ -50,7 +20,10 @@ fn printUsage() !void {
         "    \x1b[1;36mPATH\x1b[0m The path to the project to build\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
-        "    \x1b[1;36m-t\x1b[0m, \x1b[1;36m--tag \x1b[0mThe tag to use for the container\n" ++
+        "    \x1b[1;36m-t\x1b[0m, \x1b[1;36m--tag      \x1b[0mThe tag to use for the container\n" ++
+        "        \x1b[1;36m--progress \x1b[0mSet type of progress output (\"auto\", \"quiet\", \"plain\", \"tty\",\n" ++
+        "                   \"rawjson\"). Use plain to show container output (default \"auto\")\n" ++
+        "        \x1b[1;36m--no-cache \x1b[0mDo not use cache when building the image\n" ++
         "\n" ++
         "\x1b[1;32mGlobal options:\n" ++
         "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet      \x1b[0mDo not print any output\n" ++
@@ -59,6 +32,85 @@ fn printUsage() !void {
         "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version    \x1b[0mDisplay the timbal version\n" ++
         "\n"
     );
+}
+
+
+const TimbalBuildArgs = struct {
+    quiet: bool,
+    verbose: bool,
+    no_cache: bool,
+    tag: ?[]const u8,
+    progress: ?[]const u8,
+    path: ?[]const u8,
+};
+
+
+fn parseArgs(args: []const []const u8) !TimbalBuildArgs {
+    var path: ?[]const u8 = null;
+    var tag: ?[]const u8 = null;
+    var progress: ?[]const u8 = null;
+    var verbose: bool = false;
+    var quiet: bool = false;
+    var no_cache: bool = false;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            try printUsage();
+            std.process.exit(0);
+        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
+            // TODO Real versioning
+            std.debug.print("timbal version 0.1.0\n", .{});
+            std.process.exit(0);
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "--no-cache")) {
+            no_cache = true;
+        } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--tag")) {
+            if (tag != null) {
+                try printUsageWithError("Error: multiple tags are not supported");
+                std.process.exit(1);
+            }
+            if (i + 1 >= args.len) {
+                try printUsageWithError("Error: --tag requires a value");
+                std.process.exit(1);
+            }
+            tag = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--progress")) {
+            if (progress != null) {
+                try printUsageWithError("Error: multiple progress options provided");
+                std.process.exit(1);
+            }
+            if (i + 1 >= args.len) {
+                try printUsageWithError("Error: --progress requires a value");
+                std.process.exit(1);
+            }
+            progress = args[i + 1];
+            i += 1;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (path != null) {
+                try printUsageWithError("Error: multiple target paths provided");
+                std.process.exit(1);
+            }
+            path = arg;
+        } else {
+            try printUsageWithError("Error: unknown option");
+            std.process.exit(1);
+        }
+    }
+
+    return TimbalBuildArgs{
+        .quiet = quiet,
+        .verbose = verbose,
+        .no_cache = no_cache,
+        .tag = tag,
+        .progress = progress,
+        .path = path,
+    };
 }
 
 
@@ -138,50 +190,108 @@ fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !Tim
 }
 
 
-pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    var arg_path: ?[]const u8 = null;
-    var tag: ?[]const u8 = null;
-    var verbose: bool = false;
-    var quiet: bool = false;
+fn writeDockerfile(
+    allocator: std.mem.Allocator, 
+    timbal_yaml: TimbalYaml,
+    app_dir: fs.Dir,
+) !void {
+    const dockerfile_template =
+        \\FROM ubuntu:22.04
+        \\
+        \\ENV PYTHONUNBUFFERED=1
+        \\ENV PYTHONDONTWRITEBYTECODE=1
+        \\ENV DEBIAN_FRONTEND=noninteractive
+        \\
+        \\WORKDIR /timbal
+        \\
+        \\RUN apt update && \
+        \\    apt install -yqq --no-install-recommends \
+        \\        {s} && \
+        \\    apt clean && \
+        \\    rm -rf /var/lib/apt/lists/*
+        \\
+        \\RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+        \\
+        \\ENV PATH="/root/.local/bin:$PATH"
+        \\
+        \\COPY . .
+        \\
+        \\RUN uv sync --python 3.12 --python-preference managed
+        \\
+        \\CMD ["tail", "-f", "/dev/null"]
+        \\
+    ;
 
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            try printUsage();
-            return;
-        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            // TODO Real versioning
-            std.debug.print("timbal version 0.1.0\n", .{});
-            return;
-        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
-            verbose = true;
-        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
-            quiet = true;
-        } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--tag")) {
-            if (tag != null) {
-                try printUsageWithError("Error: multiple tags are not supported");
-                return;
-            }
-            if (i + 1 >= args.len) {
-                try printUsageWithError("Error: --tag requires a value");
-                return;
-            }
-            tag = args[i + 1];
-            i += 1;
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            if (arg_path != null) {
-                try printUsageWithError("Error: multiple target paths provided");
-                return;
-            }
-            arg_path = arg;
-        } else {
-            try printUsageWithError("Error: unknown option");
-            return;
-        }
+    const dockerfile = try app_dir.createFile("Dockerfile", .{});
+    defer dockerfile.close();
+
+    // Format the system packages for the Dockerfile.
+    var system_packages_buffer = std.ArrayList(u8).init(allocator);
+    defer system_packages_buffer.deinit();
+
+    try system_packages_buffer.appendSlice("curl \\\n        ca-certificates \\\n        git");
+
+    for (timbal_yaml.system_packages.items) |pkg| {
+        try system_packages_buffer.appendSlice(" \\\n        ");
+        try system_packages_buffer.appendSlice(pkg);
     }
 
-    const target_path = arg_path orelse ".";
+    try dockerfile.writer().print(dockerfile_template, .{system_packages_buffer.items});
+}
+
+
+fn buildContainer(
+    allocator: std.mem.Allocator, 
+    tag: ?[]const u8,
+    progress: ?[]const u8,
+    quiet: bool,
+    no_cache: bool,
+    path: []const u8,
+) !void {
+    const docker_tag = tag orelse blk: {
+        const app_name = std.fs.path.basename(path);
+        const result = try std.fmt.allocPrint(allocator, "{s}:latest", .{app_name});
+        break :blk result;
+    };
+    defer if (tag == null) allocator.free(docker_tag);
+
+    const docker_progress = progress orelse "auto";
+
+    var docker_build_args = std.ArrayList([]const u8).init(allocator);
+    defer docker_build_args.deinit();
+
+    try docker_build_args.appendSlice(&[_][]const u8{
+        "docker", "build",
+        "-t", docker_tag,
+        "--progress", docker_progress,
+    });
+
+    if (quiet) {
+        try docker_build_args.append("-q");
+    }
+
+    if (no_cache) {
+        try docker_build_args.append("--no-cache");
+    }
+
+    try docker_build_args.append(".");
+
+    // Don't use std.process.Child.run here. We want to inherit the stderr and stdout
+    // to stream the output to the main console.
+    var child = std.process.Child.init(docker_build_args.items, allocator);
+    child.cwd = path;
+    child.stderr_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+
+    try child.spawn();
+    _ = try child.wait();
+}
+
+
+pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const parsed_args = try parseArgs(args);
+
+    const target_path = parsed_args.path orelse ".";
 
     const cwd = fs.cwd();
 
@@ -213,7 +323,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const path = try app_dir.realpathAlloc(allocator, ".");
     defer allocator.free(path);
 
-    if (!quiet) {
+    if (!parsed_args.quiet) {
         std.debug.print("Building application in {s}\n", .{path});
     }
 
@@ -231,49 +341,16 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var timbal_yaml = try parseTimbalYaml(allocator, timbal_yaml_file);
     defer timbal_yaml.deinit();
 
-    // Create the Dockerfile
     // Right now we create and edit the file in the cwd. We don't create a temporary directory,
     // so that we're able to debug the Dockerfile during development.
-    const dockerfile = try app_dir.createFile("Dockerfile", .{});
-    defer dockerfile.close();
+    try writeDockerfile(allocator, timbal_yaml, app_dir);
 
-    // Format the system packages for the Dockerfile.
-    var system_packages_buffer = std.ArrayList(u8).init(allocator);
-    defer system_packages_buffer.deinit();
-
-    try system_packages_buffer.appendSlice("curl \\\n        ca-certificates \\\n        git");
-
-    for (timbal_yaml.system_packages.items) |pkg| {
-        try system_packages_buffer.appendSlice(" \\\n        ");
-        try system_packages_buffer.appendSlice(pkg);
-    }
-
-    try dockerfile.writer().print(DOCKERFILE_TEMPLATE, .{system_packages_buffer.items});
-
-    // Build the container.
-    const docker_tag = tag orelse blk: {
-        const app_name = std.fs.path.basename(path);
-        const result = try std.fmt.allocPrint(allocator, "{s}:latest", .{app_name});
-        break :blk result;
-    };
-    defer allocator.free(docker_tag);
-
-    const docker_build_args = [_][]const u8{
-        "docker", "build",
-        "-t", docker_tag,
-        ".",
-    };
-
-    // TODO We want the output stream here.
-    const docker_build_result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &docker_build_args,
-        .cwd = path,
-    });
-    defer allocator.free(docker_build_result.stdout);
-    defer allocator.free(docker_build_result.stderr);
-
-    if (docker_build_result.stderr.len > 0 and !quiet) {
-        std.debug.print("{s}", .{docker_build_result.stderr});
-    }
+    try buildContainer(
+        allocator, 
+        parsed_args.tag, 
+        parsed_args.progress, 
+        parsed_args.quiet, 
+        parsed_args.no_cache,
+        path,
+    );
 }
