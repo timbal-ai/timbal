@@ -15,6 +15,5 @@ build:
   #   - "echo another command if needed"
 
 
-# Path to the flow to be run. 
-# TODO Add the interface there.
-serve: "flow.py:flow"
+# Path to the flow to be run in the application.
+flow: "flow.py:flow"

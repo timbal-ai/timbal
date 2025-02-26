@@ -32,6 +32,82 @@ fn printUsage() !void {
 }
 
 
+const TimbalYaml = struct {
+    system_packages: std.ArrayList([]const u8),
+    flow: ?[]const u8 = null,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) TimbalYaml {
+        return TimbalYaml{
+            .system_packages = std.ArrayList([]const u8).init(allocator),
+            .flow = null,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *TimbalYaml) void {
+        for (self.system_packages.items) |pkg| {
+            self.allocator.free(pkg);
+        }
+        self.system_packages.deinit();
+    }
+};
+
+// Note on custom YAML parser:
+// We're using a simple custom YAML parser here because:
+// 1. Our timbal.yaml structure is very minimal and well-defined
+// 2. We avoid external Zig dependencies which are often unstable and difficult to maintain
+// 3. We avoid C library dependencies which would complicate CLI installation
+// 4. For our limited needs, a full YAML parser would be overkill
+// This approach keeps our tool lightweight and installation simple.
+
+fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !TimbalYaml {
+    var buf_reader = std.io.bufferedReader(timbal_yaml_file.reader());
+    var in_stream = buf_reader.reader();
+    var buf: [4096]u8 = undefined;
+
+    var timbal_yaml = TimbalYaml.init(allocator);
+
+    // Track the current section of the file we're parsing.
+    var current_section: enum {
+        None,
+        SystemPackages,
+    } = .None;
+
+    while (try in_stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
+        const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+
+        // Skip empty lines and comments.
+        if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "#")) {
+            continue;
+        }
+
+        if (current_section == .SystemPackages and std.mem.startsWith(u8, trimmed, "-")) {
+            var system_package = std.mem.trim(u8, trimmed[1..], &std.ascii.whitespace);
+            system_package = std.mem.trim(u8, system_package, "\"");
+            try timbal_yaml.system_packages.append(try allocator.dupe(u8, system_package));
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "system_packages:")) {
+            current_section = .SystemPackages;
+        } else if (std.mem.startsWith(u8, trimmed, "flow:")) {
+            current_section = .None;
+            var flow = std.mem.trim(u8, trimmed[5..], &std.ascii.whitespace);
+            flow = std.mem.trim(u8, flow, "\"");
+            timbal_yaml.flow = flow;
+        } else {
+            current_section = .None;
+        }
+    }
+
+    // We'd need to reset the file pointer if we want to use the file again.
+    // try timbal_yaml_file.seekTo(0);
+
+    return timbal_yaml;
+}
+
+
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var arg_path: ?[]const u8 = null;
     var tag: ?[]const u8 = null;
@@ -113,30 +189,25 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Check if timbal.yaml exists in the directory (i.e. is a valid timbal project)
     const timbal_yaml_path = "timbal.yaml";
-    const timbal_yaml_file = try app_dir.openFile(timbal_yaml_path, .{});
-    defer timbal_yaml_file.close();
+    const timbal_yaml_file = app_dir.openFile(timbal_yaml_path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            try printUsageWithError("Error: timbal.yaml not found");
+            return;
+        } else {
+            return err;
+        }
+    };
 
-    const file_size = (try timbal_yaml_file.stat()).size;
-    const yaml_content = try allocator.alloc(u8, file_size);
-    defer allocator.free(yaml_content);
-    const bytes_read = try timbal_yaml_file.readAll(yaml_content);
-    if (bytes_read != file_size) {
-        try printUsageWithError("Error: could not read entire timbal.yaml file");
-        return;
-    }
-
-    if (verbose) {
-        std.debug.print("Loaded timbal.yaml ({d} bytes)\n", .{bytes_read});
-        std.debug.print("{s}\n", .{yaml_content});
-    }
+    var timbal_yaml = try parseTimbalYaml(allocator, timbal_yaml_file);
+    defer timbal_yaml.deinit();
 
     // Create the Dockerfile
     // Right now we create and edit the file in the cwd. We don't create a temporary directory,
     // so that we're able to debug the Dockerfile during development.
-    const dockerfile = try cwd.createFile("Dockerfile", .{});
+    const dockerfile = try app_dir.createFile("Dockerfile", .{});
     defer dockerfile.close();
 
-    // TODO Write the Dockerfile content
+    // TODO Use the timbal yaml properties to modify the Dockerfile contents.
     try dockerfile.writeAll(
         \\FROM ubuntu:22.04
         \\
@@ -154,7 +225,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         \\    apt clean && \
         \\    rm -rf /var/lib/apt/lists/*
         \\
-        \\# Install uv
         \\RUN curl -LsSf https://astral.sh/uv/install.sh | sh
         \\
         \\ENV PATH="$HOME/.local/bin:$PATH"
