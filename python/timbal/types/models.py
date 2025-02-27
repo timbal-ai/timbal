@@ -37,13 +37,18 @@ from pydantic import (
 )
 from pydantic.fields import FieldInfo
 
-from . import Field, File
+from . import Field, File, Message
 
 
 def dump(value: Any, context: Any | None = None) -> Any:
     """Dumps all models that live within a nested structure of arbitrary depth."""
     if isinstance(value, BaseModel):
         return value.model_dump(context=context)
+    elif isinstance(value, Message): # Message is no longer a BaseModel.
+        return {
+            "role": value.role,
+            "content": [dump(c, context=context) for c in value.content],
+        }
     elif isinstance(value, dict):
         return {k: dump(v, context=context) for k, v in value.items()}
     elif isinstance(value, list):

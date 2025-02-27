@@ -11,19 +11,22 @@ from typing import Any
 import structlog
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 
 from .. import __version__
 from ..logs import setup_logging
-from .utils import is_port_in_use
+from ..types.models import dump
+from .utils import ModuleSpec, is_port_in_use
 
-logger = structlog.get_logger("timbal.servers.http")
+
+logger = structlog.get_logger("timbal.server.http")
 
 
 @asynccontextmanager
 async def lifespan(
     app: FastAPI,
-    module_spec: tuple[Path, str | None],
+    module_spec: ModuleSpec,
 ) -> AsyncGenerator[None, None]:
     """Manages the lifecycle of the FastAPI application.
 
@@ -33,43 +36,99 @@ async def lifespan(
     Args:
         app: The FastAPI application instance.
         module_spec: A tuple containing (Path to Python module, Optional object name).
-                    If object name is provided, it will be loaded from the module
-                    and set as app.state.flow.
+                     If object name is provided, it will be loaded from the module
+                     and set as app.state.flow.
 
     Raises:
         ValueError: If the module or specified object cannot be loaded.
         NotImplementedError: If no object name is specified (currently unsupported).
     """
-    
-    # TODO Any additional setup
+    # ? Any additional setup
 
     logger.info("loading_module", module_spec=module_spec)
-    spec = importlib.util.spec_from_file_location(module_spec[0].stem, module_spec[0].as_posix())
+    
+    path = module_spec.path 
+    object_name = module_spec.object_name
+
+    spec = importlib.util.spec_from_file_location(path.stem, path.as_posix())
     if spec and spec.loader:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        if module_spec[1]:
-            if hasattr(module, module_spec[1]):
-                obj = getattr(module, module_spec[1])
+        if object_name:
+            if hasattr(module, object_name):
+                obj = getattr(module, object_name)
                 app.state.flow = obj
             else:
-                raise ValueError(f"Module {module_spec[0]} has no object {module_spec[1]}")
+                raise ValueError(f"Module {path} has no object {object_name}")
         else:
             raise NotImplementedError("? support loading entire module")
     else:
-        raise ValueError(f"Failed to load module {module_spec[0]}")
+        raise ValueError(f"Failed to load module {path}")
     
     yield
     
-    # TODO Any additional cleanup
-    
+    # ? Any additional cleanup
+
+
+def create_app(
+    module_spec: ModuleSpec, 
+    shutdown_event: asyncio.Event,
+) -> FastAPI:
+    """HTTP server implementation for Timbal.
+
+    This module provides the HTTP server implementation for running Timbal flows over a REST API.
+    It handles module loading, parameter validation, and flow execution.
+
+    Args:
+        module_spec: Path to the flow module and object name.
+        shutdown_event: Event to signal shutdown.
+    """
+    app = FastAPI(lifespan=lambda app: lifespan(app, module_spec))
+
+    @app.get("/healthcheck")
+    async def healthcheck() -> Response:
+        return Response(status_code=204)
+
+    @app.post("/shutdown")
+    async def shutdown() -> Response:
+        shutdown_event.set()
+        return Response(status_code=204)
+
+    @app.get("/params_model_schema")
+    async def params_model_schema() -> Response:
+        params_model_schema = app.state.flow.params_model_schema()
+        return JSONResponse(
+            status_code=200,
+            content=params_model_schema,
+        )
+
+    @app.get("/return_model_schema")
+    async def return_model_schema() -> Response:
+        return_model_schema = app.state.flow.return_model_schema()
+        return JSONResponse(
+            status_code=200,
+            content=return_model_schema,
+        )
+
+    @app.post("/run")
+    async def run(req: Request) -> Response:
+        req_data = await req.json()
+        res_content = await app.state.flow.complete(**req_data)
+        res_content = dump(res_content)
+        return JSONResponse(
+            status_code=200,
+            content=res_content,
+        )
+
+    return app
+
 
 async def main(
     host: str,
     port: int,
     workers: int,
-    module_spec: tuple[Path, str | None],
+    module_spec: ModuleSpec,
 ) -> None:
     """Runs the HTTP server with the specified configuration.
 
@@ -80,28 +139,13 @@ async def main(
         host: The hostname to bind the server to.
         port: The port number to listen on.
         workers: Number of worker processes to spawn.
-        module_spec: A tuple containing (Path to Python module, Optional object name)
-                    to be loaded by the lifespan manager.
+        module_spec: A tuple containing (Path to Python module, Optional object name).
+                     If object name is provided, it will be loaded from the module
+                     and set as app.state.flow.
     """
     shutdown_event = asyncio.Event()
-    app = FastAPI(lifespan=lambda app: lifespan(app, module_spec))
 
-    @app.get("/healthcheck")
-    async def healthcheck() -> dict[str, str]:
-        return {"status": "ok"}
-
-    @app.post("/shutdown")
-    async def shutdown() -> dict[str, str]:
-        shutdown_event.set()
-        return {"status": "ok"}
-
-    @app.post("/run")
-    async def run(request: Request) -> dict[str, Any]:
-        data = await request.json()
-        response = await app.state.flow.complete(**data)
-        # TODO Serializers
-        response = response["response"].content[0].text
-        return {"status": "ok", "response": response}
+    app = create_app(module_spec, shutdown_event)
 
     config = uvicorn.Config(
         app, 
@@ -176,9 +220,15 @@ if __name__ == "__main__":
         sys.exit(1)
     elif len(module_parts) == 2:
         module_path, module_name = module_parts
-        module_spec = (Path(module_path).expanduser().resolve(), module_name)
+        module_spec = ModuleSpec(
+            path=Path(module_path).expanduser().resolve(), 
+            object_name=module_name,
+        )
     else:
-        module_spec = (Path(module_parts[0]).expanduser().resolve(), None)
+        module_spec = ModuleSpec(
+            path=Path(module_parts[0]).expanduser().resolve(), 
+            object_name=None,
+        )
 
     if is_port_in_use(args.port):
         print(f"Port {args.port} is already in use. Please use a different port.") # noqa: T201

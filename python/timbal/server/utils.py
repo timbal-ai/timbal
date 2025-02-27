@@ -1,4 +1,12 @@
 import socket
+from pathlib import Path
+
+from pydantic import BaseModel
+
+
+class ModuleSpec(BaseModel):
+    path: Path
+    object_name: str | None = None
 
 
 def is_port_in_use(port: int) -> bool:
