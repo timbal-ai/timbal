@@ -6,7 +6,6 @@ import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 import structlog
 import uvicorn
@@ -18,7 +17,6 @@ from .. import __version__
 from ..logs import setup_logging
 from ..types.models import dump
 from .utils import ModuleSpec, is_port_in_use
-
 
 logger = structlog.get_logger("timbal.server.http")
 

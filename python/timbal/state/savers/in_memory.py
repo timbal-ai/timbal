@@ -1,3 +1,5 @@
+from uuid_extensions import uuid7
+
 from ..snapshot import Snapshot
 from .base import BaseSaver
 
@@ -9,7 +11,7 @@ class InMemorySaver(BaseSaver):
 
     Note:
         Only use `InMemorySaver` for debugging or testing purposes.
-        For production use cases, use a persistent state saver like JSONLSaver or PostgresSaver.
+        For production use cases, use a persistent state saver like `PostgresSaver`.
     """
 
     def __init__(self, snapshots: list[Snapshot] | None = None) -> None:
@@ -17,7 +19,7 @@ class InMemorySaver(BaseSaver):
 
         Args:
             snapshots: Optional list of Snapshot objects to initialize the saver with.
-                      If None, starts with an empty list.
+                       If None, starts with an empty list.
         """
         if snapshots is not None:
             self.snapshots = snapshots
@@ -87,11 +89,12 @@ class InMemorySaver(BaseSaver):
             ValueError: If a snapshot with the same ID already exists.
 
         Note:
-            If the snapshot has no ID, one will be automatically assigned
-            based on the current number of stored snapshots.
+            If the snapshot has no ID, one will be automatically assigned.
         """
         if snapshot.id is None:
-            snapshot.id = str(len(self.snapshots))
+            snapshot.id = uuid7(as_type="str")
+
         if self.get(snapshot.id) is not None:
             raise ValueError(f"Snapshot with id {snapshot.id} already exists.")
+
         self.snapshots.append(snapshot)

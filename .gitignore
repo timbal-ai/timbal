@@ -14,3 +14,6 @@ zig-out
 .venv
 .env
 .DS_Store
+
+# State savers artifacts
+*.jsonl
