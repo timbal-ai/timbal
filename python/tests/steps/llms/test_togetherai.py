@@ -58,7 +58,8 @@ async def test_image_upload():
 
     assert response_chunks, "Response should not be empty"
     assert isinstance(response_chunks, str), "Response should be a string"
-    assert "dog" in response_chunks.lower(), "Response should mention that there are dogs in the image"
+    assert "dog" in response_chunks.lower() or "pup" in response_chunks.lower(), \
+        "Response should mention that there are dogs or puppies in the image"
 
 
 @pytest.mark.asyncio
