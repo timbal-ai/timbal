@@ -15,7 +15,7 @@ async def search(
     query: str = Field(description="Query to search for."),
     model: str = Field(default="sonar", description="Model to use."),
     system_prompt: str = Field(default=None, description="System prompt to guide the LLM's behavior and role."),
-    max_tokens: int | None = Field(default= None,description="Maximum number of tokens to generate."),
+    # max_tokens: int | None = Field(default= None,description="Maximum number of tokens to generate."),
     temperature: float = Field(default=0.2, description="Amount of randomness in the response. Ranges from 0 to 2."),
     top_p: float = Field(default=0.9, description="Nucleus sampling threshold. Ranges from 0 to 1."),
     search_domain_filter: Any = Field(default=None, description="Given a list of domains, limit the citations used by the online model to URLs from the specified domains. Currently limited to only 3 domains for whitelisting and blacklisting. For blacklisting add a - to the beginning of the domain string. Only available in certain tiers"),
@@ -60,7 +60,7 @@ async def search(
     model = model.default if hasattr(model, 'default') else model
     system_prompt = system_prompt.default if hasattr(system_prompt, 'default') else system_prompt
     temperature = temperature.default if hasattr(temperature, 'default') else temperature
-    max_tokens = max_tokens.default if hasattr(max_tokens, 'default') else max_tokens
+    # max_tokens = max_tokens.default if hasattr(max_tokens, 'default') else max_tokens
     top_p = top_p.default if hasattr(top_p, 'default') else top_p
     search_domain_filter = search_domain_filter.default if hasattr(search_domain_filter, 'default') else search_domain_filter
     return_images = return_images.default if hasattr(return_images, 'default') else return_images
@@ -80,7 +80,7 @@ async def search(
     response = await client.chat.completions.create(
             model=model,
             messages=messages,
-            max_tokens=max_tokens,
+            # max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
             stream=True,

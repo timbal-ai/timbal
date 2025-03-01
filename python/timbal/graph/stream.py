@@ -54,7 +54,7 @@ class AsyncGenState(BaseModel):
         results (list[Any]): Accumulated results from generator yields (e.g. LLM message chunks)
         usage (dict[str, Any]): Resource usage stats (e.g. token counts for LLM calls)
     """
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     gen: AsyncGenerator[Any, None]
     inputs: BaseModel
@@ -117,6 +117,11 @@ def handle_openai_event(
             "type": "text",
             "text": text_chunk,
         }
+
+        # Extra is allowed in the async gen pydantic model.
+        if hasattr(openai_event, "citations"):
+            async_gen_state.citations = openai_event.citations
+
         if len(async_gen_state.results):
             async_gen_state.results[-1]["text"] += text_chunk
         else:
