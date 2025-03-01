@@ -1,9 +1,12 @@
 from typing import Any
 
+import structlog
 from pydantic import BaseModel, ConfigDict, computed_field
 
 from ..state.data import DATA_KEY_INTERPOLATION_PATTERN, BaseData, get_data_key
 from ..types import Message, ToolUseContent
+
+logger = structlog.get_logger("timbal.graph.link")
 
 
 class Link(BaseModel):

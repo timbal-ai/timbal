@@ -501,10 +501,9 @@ class Flow(BaseStep):
                     async_gen_state = async_gens[step_id]
                     step_args = async_gen_state.inputs
                     step_result = async_gen_state.results
-                    step_result_type = async_gen_state.results_type
                     step_usage = async_gen_state.usage
 
-                    if step_result_type in ["openai", "anthropic"]:
+                    if self.steps[step_id].is_llm:
                         step_result = Message.validate({
                             "role": "assistant",
                             "content": step_result,
@@ -513,6 +512,7 @@ class Flow(BaseStep):
                         memory_key = f"{step_id}.memory"
                         if memory_key in data:
                             memory = data[memory_key]
+                            # TODO We could handle an arbitrary number of nested memories here
                             if isinstance(memory, DataMap): 
                                 assert memory.key.endswith(".memory"), \
                                     f"Memory data map should point to a memory key. Found '{memory.key}'."
@@ -816,6 +816,8 @@ class Flow(BaseStep):
             # We're creating a new memory with the specified key. 
             else:
                 self.set_data_value(memory_key, [])
+                if memory_id != id:
+                    self.set_data_map(f"{id}.memory", memory_key, autolink=False)
             
             # Store memory config in the llm step, for resolving the memory at runtime.
             self.steps[id]._memory_key = memory_key
@@ -949,6 +951,8 @@ class Flow(BaseStep):
                 raise InvalidLinkError(f"Cannot add link '{step_id}-{next_step_id}' as a tool result, " \
                                        f"because step '{next_step_id}' is not an LLM.")
             # TODO We could further validate that the next step shares de memory with the previous tool step.
+            # ! I don't love this. 'memory' is not an argument of the tool per se. We're abusing the data maps.
+            self.set_data_map(f"{step_id}.memory", f"{next_step_id}.memory", autolink=False)
         
         link = Link(
             step_id=step_id, 
@@ -1050,6 +1054,7 @@ class Flow(BaseStep):
         self,
         data_key: str,
         map_key: str,
+        autolink: bool = True,
     ) -> "Flow":
         """Sets a map from a step param to a data key.
 
@@ -1067,9 +1072,17 @@ class Flow(BaseStep):
         # TODO We could validate that the data key is of an appropriate type.
         self.data[data_key] = DataMap(key=map_key)
 
-        if "." in data_key and "." in map_key:
+        if autolink and "." in data_key and "." in map_key:
             target_step_id = data_key.split(".")[0]
+            if target_step_id not in self.steps:
+                logger.warning(f"Cannot auto-add link for {data_key} -> {map_key}")
+                return self
+
             source_step_id = map_key.split(".")[0]
+            if source_step_id not in self.steps:
+                logger.warning(f"Cannot auto-add link for {data_key} -> {map_key}")
+                return self
+
             if f"{source_step_id}-{target_step_id}" not in self.links:
                 self.add_link(source_step_id, target_step_id)
 
@@ -1130,7 +1143,7 @@ class Flow(BaseStep):
         self,
         model: str,
         tools: list[Callable | BaseStep | dict[str, Any]],
-        name: str = "llm",
+        name: str = "agent",
         memory_id: str | None = None,
         max_iter: int = 1,
         **kwargs,
@@ -1167,21 +1180,24 @@ class Flow(BaseStep):
             memory_id = name
 
         # Create initial LLM step that receives the prompt
-        flow = (
-            self.set_data_map(f"{name}.prompt", "prompt")
+        entrypoint_llm_id = f"{name}_llm_0"
+        agent = (
+            Flow()
             .add_llm(
-                id=name,
+                id=entrypoint_llm_id,
                 model=model,
                 memory_id=memory_id,
                 **kwargs,
             )
+            .set_data_map(f"{entrypoint_llm_id}.prompt", "prompt")
         )
 
-        prev_step_id = name
+        prev_step_id = entrypoint_llm_id
         # Create additional LLM steps for each iteration, allowing the agent to use tools multiple times
         for i in range(max_iter):
-            flow.add_llm(
-                id=f"{name}-agent-{i}",
+            iter_llm_id = f"{name}_llm_{i + 1}"
+            agent.add_llm(
+                id=iter_llm_id,
                 model=model,
                 memory_id=memory_id,
                 **kwargs,
@@ -1201,24 +1217,31 @@ class Flow(BaseStep):
                 elif isinstance(tool, BaseStep):
                     tool_id = tool.id
 
-                iter_tool_id = f"{tool_id}-{i}"
+                iter_tool_id = f"{name}_{tool_id}_{i}"
 
                 if iter_tool_id not in self.steps:
-                    flow.add_step(iter_tool_id, tool)
+                    agent.add_step(iter_tool_id, tool)
 
-                flow.add_link(
+                agent.add_link(
                     step_id=prev_step_id,
                     description=description,
                     next_step_id=iter_tool_id,
                     is_tool=True,
-                ).add_link(
+                )
+                agent.add_link(
                     step_id=iter_tool_id,
-                    next_step_id=f"{name}-agent-{i}",
+                    next_step_id=iter_llm_id,
                     is_tool_result=True,
                 )
 
-            prev_step_id = f"{name}-agent-{i}"
+            prev_step_id = iter_llm_id
 
-        return flow
+        # TODO Deep review this. Especially when max_iterations > 1.
+        agent.set_output("response", f"{prev_step_id}.return")
+
+        # Add the subflow to the parent flow
+        self.add_step(name, agent)
+
+        return self
 
         

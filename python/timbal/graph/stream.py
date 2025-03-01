@@ -3,6 +3,7 @@ import copy
 from collections.abc import AsyncGenerator, Generator
 from typing import Any
 
+import structlog
 from anthropic.types import (
     InputJSONDelta,
     RawContentBlockDeltaEvent,
@@ -23,6 +24,8 @@ from ..types.events import (
     StepStartEvent,
     TimbalEvent,
 )
+
+logger = structlog.get_logger("timbal.graph.stream")
 
 
 async def sync_to_async_gen(gen: Generator[Any, None, None], loop: asyncio.AbstractEventLoop) -> AsyncGenerator[Any, None]:
@@ -57,8 +60,6 @@ class AsyncGenState(BaseModel):
     inputs: BaseModel
     results: list[Any] = []
     usage: dict[str, Any] = {}
-    # TODO Hardcoded-ish for the moment
-    results_type: str | None = None
 
 
 def handle_openai_event(
@@ -249,15 +250,12 @@ def handle_event(
         Processed event content if available, None otherwise
     """
     if isinstance(event, OpenAIEvent):
-        async_gen_state.results_type = "openai"
         return handle_openai_event(event, async_gen_state)
 
     if isinstance(event, AnthropicEvent):
-        async_gen_state.results_type = "anthropic"
         return handle_anthropic_event(event, async_gen_state)
 
     if isinstance(event, TimbalEvent):
-        async_gen_state.results_type = "timbal"
         return handle_timbal_event(event, async_gen_state)
 
     if isinstance(event, str):
