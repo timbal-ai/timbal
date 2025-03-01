@@ -5,7 +5,7 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any
 
 import structlog
 from pydantic import BaseModel, Field
@@ -83,7 +83,7 @@ class Flow(BaseStep):
 
         # ? Think if a subflow could ever act as an LLM (for the moment no, because it does not return anthropic or openai events).
         self.is_llm = False
-        self.agent_mode = None
+        self.is_agent = False
         # These are used to determine if we need to run the step in an executor.
         self.is_coroutine = False
         self.is_async_gen = True
@@ -206,40 +206,24 @@ class Flow(BaseStep):
         """Aux method to collect the outputs from the data dictionary."""
         outputs = {}
 
-        if self.agent_mode is not None:
+        if self.is_agent:
             _, rev_dag = self.get_dags()
             rev_sources = list(get_sources(rev_dag))
 
-            if self.agent_mode == "tool_to_llm":
-                assert len(rev_sources) == 1, "Tool to LLM agent mode should have a single LLM as last step"
-                last_llm_output = None
-                last_llm_id = rev_sources[0]
-                while last_llm_output is None:
-                    try: 
-                        last_llm_output = get_data_key(data, f"{last_llm_id}.return")
-                    except DataKeyError:
-                        last_llm_output = None
-                        last_tools = list(rev_dag[last_llm_id])
-                        assert len(last_tools) >= 1, "The last LLM of a tool to LLM agent must have at least one tool result."
-                        last_llms = list(rev_dag[last_tools[0]])
-                        assert len(last_llms) == 1, "Tool to LLM agent mode should have a single LLM as last step"
-                        last_llm_id = last_llms[0]
-                outputs["response"] = last_llm_output
-            else:
-                last_tools_outputs = {}
-                last_tools_ids = rev_sources
-                while not len(last_tools_outputs):
-                    for step_id in last_tools_ids:
-                        try:
-                            step_output = get_data_key(data, f"{step_id}.return")
-                            last_tools_outputs[step_id] = step_output
-                        except DataKeyError:
-                            pass
-                    if not len(last_tools_outputs):
-                        last_llms = list(rev_dag[rev_sources[0]])
-                        assert len(last_llms) == 1, "Tools in an agent must have a single LLM as a caller"
-                        last_tools_ids = list(rev_dag[last_llms[0]])
-                outputs["response"] = last_tools_outputs
+            assert len(rev_sources) == 1, "Tool to LLM agent mode should have a single LLM as last step"
+            last_llm_output = None
+            last_llm_id = rev_sources[0]
+            while last_llm_output is None:
+                try: 
+                    last_llm_output = get_data_key(data, f"{last_llm_id}.return")
+                except DataKeyError:
+                    last_llm_output = None
+                    last_tools = list(rev_dag[last_llm_id])
+                    assert len(last_tools) >= 1, "The last LLM of a tool to LLM agent must have at least one tool result."
+                    last_llms = list(rev_dag[last_tools[0]])
+                    assert len(last_llms) == 1, "Tool to LLM agent mode should have a single LLM as last step"
+                    last_llm_id = last_llms[0]
+            outputs["response"] = last_llm_output
 
         else:
             for output_name, data_key in self.outputs.items():
@@ -1191,7 +1175,6 @@ class Flow(BaseStep):
         name: str = "agent",
         memory_id: str | None = None,
         max_iter: int = 1,
-        mode: Literal["tool_only", "tool_to_llm"] = "tool_to_llm",
         **kwargs,
     ) -> "Flow":
         """Adds an agent to the flow.
@@ -1213,7 +1196,6 @@ class Flow(BaseStep):
             name: Name of the agent. Defaults to "llm".
             memory_id: Memory id to use for the agent. Defaults to the agent name.
             max_iter: Maximum number of iterations the agent will run. Defaults to 1.
-            mode: Mode of the agent. Whether to call an LLM to process tool results or return immediately.
             **kwargs: Additional keyword arguments to pass to the underlying LLM configuration.
         
         Returns:
@@ -1247,26 +1229,16 @@ class Flow(BaseStep):
             tool_result_llm_system_prompt = kwargs_system_prompt
 
         prev_llm_id = entrypoint_llm_id
-        prev_tools_ids = []
         # Create additional LLM steps for each iteration, allowing the agent to use tools multiple times
         for i in range(max_iter):
-            if mode == "tool_to_llm" or i > 0:
-                iter_llm_id = f"{name}_llm_{i}" if mode == "tool_only" else f"{name}_llm_{i + 1}"
-                agent.add_llm(
-                    id=iter_llm_id,
-                    model=model,
-                    memory_id=memory_id,
-                    system_prompt=tool_result_llm_system_prompt,
-                    **kwargs,
-                )
-                if mode == "tool_only":
-                    prev_llm_id = iter_llm_id
-                    for prev_tool_id in prev_tools_ids:
-                        agent.add_link(
-                            step_id=prev_tool_id,
-                            next_step_id=prev_llm_id,
-                            is_tool_result=True,
-                        )
+            iter_llm_id = f"{name}_llm_{i + 1}"
+            agent.add_llm(
+                id=iter_llm_id,
+                model=model,
+                memory_id=memory_id,
+                system_prompt=tool_result_llm_system_prompt,
+                **kwargs,
+            )
 
             # For each tool, create a step and add links for tool use and tool result
             for tool_item in tools:
@@ -1287,8 +1259,6 @@ class Flow(BaseStep):
                 if iter_tool_id not in self.steps:
                     agent.add_step(iter_tool_id, tool)
 
-                prev_tools_ids.append(iter_tool_id)
-
                 # TODO Consider the idea of disabling tool params from here.
                 agent.add_link(
                     step_id=prev_llm_id,
@@ -1297,18 +1267,16 @@ class Flow(BaseStep):
                     is_tool=True,
                 )
 
-                if mode == "tool_to_llm":
-                    agent.add_link(
-                        step_id=iter_tool_id,
-                        next_step_id=iter_llm_id,
-                        is_tool_result=True,
-                    )
+                agent.add_link(
+                    step_id=iter_tool_id,
+                    next_step_id=iter_llm_id,
+                    is_tool_result=True,
+                )
     
-            if mode == "tool_to_llm":
-                prev_llm_id = iter_llm_id
+            prev_llm_id = iter_llm_id
 
         # Agents collect outputs differently. See _collect_outputs.
-        agent.agent_mode = mode
+        agent.is_agent = True
 
         # Add the subflow to the parent flow
         self.add_step(name, agent)
