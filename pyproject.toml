@@ -51,6 +51,17 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["python/timbal"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/**/.*",
+    "/**/__pycache__",
+    "/.git",
+    "/.github",
+    "/dist",
+    "/examples",
+    "/cli",
+]
+
 [tool.hatch.envs.default]
 path = "python"
 
