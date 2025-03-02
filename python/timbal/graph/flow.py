@@ -299,10 +299,11 @@ class Flow(BaseStep):
                 if step_memory is None:
                     continue
                 step_memory = step_memory.resolve(context_data=data)
+                step_memory_tool_result_inserted = False
                 for message in step_memory[::-1]: # Check in reverse. Tool calls will likely be the last messages.
                     for content in message.content:
                         if isinstance(content, ToolUseContent):
-                            if content.name == link.step_id:
+                            if content.name == link.step_id and not step_memory_tool_result_inserted:
                                 tool_result_message = Message(
                                     role="user",
                                     content=[ToolResultContent(
@@ -311,6 +312,7 @@ class Flow(BaseStep):
                                     )]
                                 )
                                 step_memory.append(tool_result_message)
+                                step_memory_tool_result_inserted = True
 
         # Hack for injecting a prompt into the LLM's memory as last message
         if step.is_llm:
@@ -1175,6 +1177,7 @@ class Flow(BaseStep):
         name: str = "agent",
         memory_id: str | None = None,
         max_iter: int = 1,
+        state_saver: BaseSaver | None = None,
         **kwargs,
     ) -> "Flow":
         """Adds an agent to the flow.
@@ -1277,6 +1280,7 @@ class Flow(BaseStep):
 
         # Agents collect outputs differently. See _collect_outputs.
         agent.is_agent = True
+        agent.compile(state_saver=state_saver)
 
         # Add the subflow to the parent flow
         self.add_step(name, agent)
