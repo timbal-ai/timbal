@@ -238,6 +238,59 @@ class Flow(BaseStep):
                 outputs[output_name] = output_value
 
         return outputs
+    
+
+    @staticmethod
+    def _cut_memory(memory: list[Message], max_window_size: int) -> list[Message]:
+        """Cuts the memory list to maintain the specified window size while preserving tool context.
+
+        This method ensures that when truncating the conversation history:
+        1. The memory stays within the specified max window size
+        2. Tool use/result pairs remain together - if a tool result is in the window, 
+           its corresponding tool use call is also preserved
+        
+        Args:
+            memory: List of Message objects representing the conversation history
+            max_window_size: Maximum number of messages to keep in the window
+
+        Returns:
+            list[Message]: Truncated memory list that preserves tool context
+            
+        Example:
+            If max_window_size=3 but message 4 contains a tool result referencing 
+            a tool use in message 1, the returned window will include message 1 
+            to maintain the tool context:
+            [msg1(tool_use), msg2, msg3, msg4(tool_result)] -> [msg1, msg3, msg4]
+        """
+        if len(memory) <= max_window_size:
+            return memory
+        
+        final_window_size = max_window_size
+        window_tool_use_ids = set()
+        window_tool_result_ids = set()
+        for message in memory[-max_window_size:]:
+            for content in message.content:
+                if isinstance(content, ToolResultContent):
+                    window_tool_result_ids.add(content.id)
+                if isinstance(content, ToolUseContent):
+                    window_tool_use_ids.add(content.id)
+        window_tool_result_ids_missing = window_tool_result_ids - window_tool_use_ids
+
+        i = len(memory) - max_window_size - 1
+        while i >= 0:
+            if not len(window_tool_result_ids_missing):
+                break
+            message = memory[i]
+            for content in message.content:
+                if isinstance(content, ToolUseContent):
+                    if content.id in window_tool_result_ids_missing:
+                        window_tool_result_ids_missing.remove(content.id)
+                        # ? We could study grabbing the message that triggered the tool call as well for context. 
+
+            final_window_size += 1
+            i -= 1
+
+        return memory[-final_window_size:]
 
 
     def _resolve_step_args(
@@ -308,7 +361,7 @@ class Flow(BaseStep):
                                     role="user",
                                     content=[ToolResultContent(
                                         id=content.id,
-                                        content=[TextContent(text=str(ancestor_output))]
+                                        content=[TextContent(text=str(ancestor_output))] # TODO Rethink str() cast.
                                     )]
                                 )
                                 step_memory.append(tool_result_message)
@@ -336,9 +389,10 @@ class Flow(BaseStep):
 
                 if "memory" in step_args:
                     step_args["memory"].append(message)
-                    # Limit the memory size. 
-                    if step._memory_window_size is not None and len(step_args["memory"]) > step._memory_window_size + 1:
-                        step_args["memory"] = step_args["memory"][-step._memory_window_size-1:]
+                    # Limit the memory size. This is individual per llm step. Hence, we can have multiple LLMs pointing
+                    # to the same memory key but have different memory window sizes.
+                    if step._memory_window_size is not None:
+                        step_args["memory"] = self._cut_memory(step_args["memory"], step._memory_window_size)
                 else:
                     step_args["memory"] = [message]
 
@@ -474,7 +528,8 @@ class Flow(BaseStep):
                         else:
                             memory = data[memory_key].resolve(context_data=last_snapshot_data)
                             if len(memory) > max_window_size:
-                                data[memory_key] = DataValue(value=memory[-max_window_size:])
+                                memory = self._cut_memory(memory, max_window_size)
+                                data[memory_key] = DataValue(value=memory)
 
         # Compute (or retrieve the pre-computed) DAGs that determine the flow's execution order.
         dag, rev_dag = self.get_dags()
