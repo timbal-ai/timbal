@@ -415,7 +415,6 @@ class Flow(BaseStep):
         dump_context: dict[str, Any] | None = None, # noqa: ARG002
         **kwargs: Any
     ) -> Any:
-        logger.info(f"Running flow {self.id} with run_id {run_id}, run_parent_id {run_parent_id}, run_group_id {run_group_id}")
         """Executes the step's processing logic.
         
         Args:
@@ -461,6 +460,10 @@ class Flow(BaseStep):
                         else:
                             window_sizes[memory_key] = None
                         data[memory_key] = copy.deepcopy(last_snapshot_data[memory_key])
+                        # We could defer this to pydantic inbuilt validation. We do it here to avoid issues when
+                        # processing tools results, where code expects memory to contain a list of proper messages.
+                        if isinstance(data[memory_key], DataValue):
+                            data[memory_key] = DataValue(value=[Message.validate(message) for message in data[memory_key].resolve()])
                 
                 # Limit the memory sizes. Take into account the maximum amount of memory required by any of the steps.
                 # If we can cut it, we cut it to avoid storing always all the data (potentially growing indefinitely).
