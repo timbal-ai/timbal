@@ -349,6 +349,10 @@ class Flow(BaseStep):
         self, 
         step_id: str, 
         data: dict[str, Any],
+        run_id: str | None = None, # noqa: ARG002
+        run_parent_id: str | None = None, # noqa: ARG002
+        run_group_id: str | None = None, # noqa: ARG002
+        dump_context: dict[str, Any] | None = None, # noqa: ARG002
     ) -> Any:
         """Executes a single step in the flow and returns its result.
 
@@ -358,6 +362,8 @@ class Flow(BaseStep):
         Args:
             step_id: Identifier of the step to execute
             data: Dictionary containing all flow data, including inputs and previous step results
+            ...
+
 
         Returns:
             The step's result (direct value, generator, or awaited coroutine)
@@ -376,12 +382,24 @@ class Flow(BaseStep):
         # avoid blocking the event loop.
         if not step.is_coroutine and not step.is_async_gen:
             loop = asyncio.get_running_loop()
-            step_result = await loop.run_in_executor(None, lambda: step.run(**dict(step_args)))
+            step_result = await loop.run_in_executor(None, lambda: step.run(
+                run_id=run_id,
+                run_parent_id=run_parent_id,
+                run_group_id=run_group_id,
+                dump_context=dump_context,
+                **dict(step_args)
+            ))
             if inspect.isgenerator(step_result):
                 return step_args, sync_to_async_gen(step_result, loop)
             return step_args, step_result
         
-        step_result = step.run(**dict(step_args))
+        step_result = step.run(
+            run_id=run_id,
+            run_parent_id=run_parent_id,
+            run_group_id=run_group_id,
+            dump_context=dump_context,
+            **dict(step_args)
+        )
 
         if step.is_coroutine:
             step_result = await step_result
