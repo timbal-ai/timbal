@@ -25,10 +25,9 @@ async def handler(
         "Qwen/Qwen2.5-Coder-32B-Instruct",
         "Qwen/Qwen2-VL-72B-Instruct",
         "mistralai/Mistral-Small-24B-Instruct-2501",
-        "mistralai/Mistral-7B-Instruct-v0.3"
-        "mistralai/Mixtral-8x22B-Instruct-v0.1"
-        "meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo"
-        ""
+        "mistralai/Mistral-7B-Instruct-v0.3",
+        "mistralai/Mixtral-8x22B-Instruct-v0.1",
+        "meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo",
     ] | str = Field(default="meta-llama/Llama-3.2-3B-Instruct-Turbo", description="Name of the LLM model to use"),
     tools: list[Tool | dict] = Field(default=None, description="List of tools/functions that the LLM can call"),
     tool_choice: dict[str, Any] | str = Field(default = {"type": "auto"}, description="How the model should use the provided tools"),

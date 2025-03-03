@@ -630,6 +630,7 @@ class Flow(BaseStep):
         self,
         run_id: str | None = None,
         run_parent_id: str | None = None,
+        run_group_id: str | None = None,
         dump_context: dict[str, Any] | None = None,
         **kwargs: Any
     ) -> dict[str, Any]:
@@ -639,6 +640,8 @@ class Flow(BaseStep):
             run_id: Identifier for the single run. 
                 Handled separately from kwargs to avoid passing it downstream.
             run_parent_id: Identifier for the parent run.
+                Handled separately from kwargs to avoid passing it downstream.
+            run_group_id: Identifier for the group of runs.
                 Handled separately from kwargs to avoid passing it downstream.
             dump_context: Context for dumping intermediate results. 
                 Handled separately from kwargs to avoid passing it downstream.
@@ -650,6 +653,7 @@ class Flow(BaseStep):
         async for event in self.run(
             run_id=run_id,
             run_parent_id=run_parent_id,
+            run_group_id=run_group_id,
             dump_context=dump_context,
             **kwargs,
         ):
