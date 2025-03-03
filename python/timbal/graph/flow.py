@@ -415,6 +415,7 @@ class Flow(BaseStep):
         dump_context: dict[str, Any] | None = None, # noqa: ARG002
         **kwargs: Any
     ) -> Any:
+        logger.info(f"Running flow {self.id} with run_id {run_id}, run_parent_id {run_parent_id}, run_group_id {run_group_id}")
         """Executes the step's processing logic.
         
         Args:
@@ -491,7 +492,14 @@ class Flow(BaseStep):
                 parent_step_id=self.id,
                 step_id=source_id,
             )
-            task = asyncio.create_task(self._run_step(step_id=source_id, data=data))
+            task = asyncio.create_task(self._run_step(
+                step_id=source_id, 
+                data=data,
+                run_id=run_id,
+                run_parent_id=run_parent_id,
+                run_group_id=run_group_id,
+                dump_context=dump_context,
+            ))
             task.step_id = source_id
             tasks.append(task)
             start_times[source_id] = int(time.time() * 1000)
@@ -598,7 +606,14 @@ class Flow(BaseStep):
                                 parent_step_id=self.id,
                                 step_id=successor_id,
                             )
-                            task = asyncio.create_task(self._run_step(step_id=successor_id, data=data))
+                            task = asyncio.create_task(self._run_step(
+                                step_id=successor_id, 
+                                data=data,
+                                run_id=run_id,
+                                run_parent_id=run_parent_id,
+                                run_group_id=run_group_id,
+                                dump_context=dump_context,
+                            ))
                             task.step_id = successor_id
                             tasks.append(task)
                             start_times[successor_id] = int(time.time() * 1000)
