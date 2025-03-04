@@ -9,19 +9,20 @@ fn printUsageWithError(err: []const u8) !void {
 }
 
 
-// TODO Add --app
-// TODO Add --version
 fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.writeAll(
-        "Push an application to the Timbal Platform.\n" ++
+        "Push a container image to an existing Timbal Platform app.\n" ++
+        "You must first create an app on the platform if you don't have one yet.\n" ++
         "\n" ++
-        "\x1b[1;32mUsage: \x1b[1;36mtimbal push \x1b[0;36m[OPTIONS] IMAGE\n" ++
+        "\x1b[1;32mUsage: \x1b[1;36mtimbal push \x1b[0;36m[OPTIONS] IMAGE APP\n" ++
         "\n" ++
         "\x1b[1;32mArguments:\n" ++
-        "    \x1b[1;36mIMAGE\x1b[0m   The tag of the container to push\n" ++
+        "    \x1b[1;36mIMAGE\x1b[0m The tag of the container to push\n" ++
+        "    \x1b[1;36mAPP\x1b[0m   The URI of the app you want to push the image to (as provided in the platform)\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
+        "    \x1b[1;36m--name \x1b[0m The name of the app version that will be created\n" ++
         "\n" ++
         "\x1b[1;32mGlobal options:\n" ++
         "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet      \x1b[0mDo not print any output\n" ++
@@ -33,10 +34,44 @@ fn printUsage() !void {
 }
 
 
+fn validateApp(app: []const u8) !struct { org_id: usize, app_id: usize } {
+    var app_parts = std.mem.split(u8, app, "/");
+
+    const domain = app_parts.next().?;
+    if (!std.mem.eql(u8, domain, "cr.timbal.ai")) {
+        return error.InvalidAppURI;
+    }
+
+    const orgs_part = app_parts.next() orelse return error.InvalidAppURI;
+    if (!std.mem.eql(u8, orgs_part, "orgs")) {
+        return error.InvalidAppURI;
+    }
+
+    const org_id_part = app_parts.next() orelse return error.InvalidAppURI;
+    const org_id = try std.fmt.parseInt(usize, org_id_part, 10);
+
+    const apps_part = app_parts.next() orelse return error.InvalidAppURI;
+    if (!std.mem.eql(u8, apps_part, "apps")) {
+        return error.InvalidAppURI;
+    }
+
+    const app_id_part = app_parts.next() orelse return error.InvalidAppURI;
+    const app_id = try std.fmt.parseInt(usize, app_id_part, 10);
+
+    return .{
+        .org_id = org_id,
+        .app_id = app_id,
+    };
+}
+
+
 const TimbalPushArgs = struct {
     quiet: bool,
     verbose: bool,
     image: []const u8,
+    org_id: usize,
+    app_id: usize,
+    version_name: ?[]const u8,
 };
 
 
@@ -44,6 +79,8 @@ fn parseArgs(args: []const []const u8) !TimbalPushArgs {
     var quiet: bool = false;
     var verbose: bool = false;
     var image: ?[]const u8 = null;
+    var app: ?[]const u8 = null;
+    var version_name: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -59,12 +96,21 @@ fn parseArgs(args: []const []const u8) !TimbalPushArgs {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            if (image != null) {
-                try printUsageWithError("Error: multiple images provided");
+        } else if (std.mem.eql(u8, arg, "--name")) {
+            if (version_name != null) {
+                try printUsageWithError("Error: multiple version names provided");
                 std.process.exit(1);
             }
-            image = arg;
+            version_name = args[i + 1];
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (image == null) {
+                image = arg;
+            } else if (app == null) {
+                app = arg;
+            } else {
+                try printUsageWithError("Error: too many arguments provided");
+                std.process.exit(1);
+            }
         } else {
             try printUsageWithError("Error: unknown option");
             std.process.exit(1);
@@ -76,10 +122,23 @@ fn parseArgs(args: []const []const u8) !TimbalPushArgs {
         std.process.exit(1);
     }
 
+    if (app == null) {
+        try printUsageWithError("Error: app not provided");
+        std.process.exit(1);
+    }
+
+    const app_parts = validateApp(app.?) catch {
+        try printUsageWithError("Error: Invalid app URI provided");
+        std.process.exit(1);
+    };
+
     return TimbalPushArgs{
         .quiet = quiet,
         .verbose = verbose,
         .image = image.?,
+        .org_id = app_parts.org_id,
+        .app_id = app_parts.app_id,
+        .version_name = version_name,
     };
 }
 
@@ -95,9 +154,17 @@ fn getDockerLogin(
     allocator: std.mem.Allocator, 
     timbal_api_token: []const u8,
     verbose: bool,
+    org_id: usize,
+    app_id: usize,
 ) !DockerLogin {
+    // TODO Perhaps add the version name to check if it exists.
     // TODO Change URL.
-    const auth_url = "https://dev.timbal.ai/orgs/1/apps/1/versions";
+    const auth_url = try std.fmt.allocPrint(
+        allocator,
+        "https://dev.timbal.ai/orgs/{d}/apps/{d}/versions",
+        .{ org_id, app_id }
+    );
+    defer allocator.free(auth_url);
 
     if (verbose) {
         std.debug.print("Authenticating with Timbal Platform...\n", .{});
@@ -149,7 +216,7 @@ fn getDockerLogin(
 }
 
 
-fn loginToDockerRegistry(
+fn loginToCR(
     allocator: std.mem.Allocator,
     docker_login: DockerLogin,
     quiet: bool,
@@ -259,6 +326,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         allocator, 
         timbal_api_token,
         parsed_args.verbose,
+        parsed_args.org_id,
+        parsed_args.app_id,
     );
     defer {
         allocator.free(docker_login.user);
@@ -266,7 +335,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         allocator.free(docker_login.server);
     }
 
-    try loginToDockerRegistry(allocator, docker_login, parsed_args.quiet);
+    try loginToCR(allocator, docker_login, parsed_args.quiet);
     
     const registry_tag = try tagImage(
         allocator, 
@@ -277,4 +346,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer allocator.free(registry_tag);
 
     try pushImage(allocator, registry_tag, parsed_args.quiet);
+
+    // TODO Untag image.
 }
