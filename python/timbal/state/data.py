@@ -46,12 +46,15 @@ from typing import (
     Literal,
 )
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Discriminator
 
 from ..errors import DataKeyError
 
 DATA_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_.]{0,128}$")
 DATA_KEY_INTERPOLATION_PATTERN = re.compile(r"{{([a-zA-Z0-9_.]{0,128})}}")
+
+logger = structlog.get_logger("timbal.state.data")
 
 
 class BaseData(BaseModel, ABC):
@@ -74,6 +77,7 @@ class BaseData(BaseModel, ABC):
 def get_data_key(
     data: dict[str, BaseData], 
     data_key: str,
+    default: Any | None = "__NO_DEFAULT__", # We don't use an object() sentinel value here to avoid issues with serialization.
 ) -> Any:
     """Retrieves the value associated with a given data key from the flow's data dictionary during execution.
 
@@ -82,14 +86,12 @@ def get_data_key(
     Args:
         data: The data dictionary containing all flow execution data.
         data_key: The key to look up in the data dictionary, which can include 
-                nested keys separated by dots and list indices.
+                  nested keys separated by dots and list indices.
+        default: The default value to return if the key is not found.
+                 If not provided, a DataKeyError will be raised.
 
     Returns:
         Any: The resolved value associated with the specified data key.
-
-    Raises:
-        ValueError: If the data key format is invalid.
-        KeyError: If the data key does not exist or if an invalid index/property is accessed.
     """
     if not DATA_KEY_PATTERN.match(data_key):
         raise ValueError(f"Invalid data key: {data_key}. Expected a string of 0-128 alphanumeric characters, underscores, or dots.")
@@ -98,6 +100,7 @@ def get_data_key(
     data_key_builder = ""
 
     data_key_found = False
+    data_value = None
     for i, data_key_part in enumerate(data_key_parts): # noqa: B007
         if len(data_key_builder):
             data_key_builder = f"{data_key_builder}.{data_key_part}"
@@ -112,7 +115,13 @@ def get_data_key(
             break
     
     if not data_key_found:
-        raise DataKeyError(f"Cannot find data key '{data_key}'.")
+        if default == "__NO_DEFAULT__":
+            raise DataKeyError(f"Cannot find data key '{data_key}'.")
+        else:
+            return default
+    
+    if data_value is None and default != "__NO_DEFAULT__":
+        return default
 
     # When a data key is found, we need to check if we need to grab nested items or properties.
     if len(data_key_parts) > i + 1:
@@ -197,11 +206,13 @@ class DataMap(BaseData):
     type: Literal["map"] = "map"
     key: str
     """The key path to the referenced data."""
+    default: Any | None = "__NO_DEFAULT__"
+    """The default value to return if the key is not found."""
 
     def resolve(self, context_data: dict[str, BaseData] | None = None) -> Any:
         assert isinstance(context_data, dict), \
             f"Cannot resolve data key '{self.key}' because context_data is not defined."
-        return get_data_key(context_data, self.key)
+        return get_data_key(context_data, self.key, default=self.default)
 
 
 Data = Annotated[

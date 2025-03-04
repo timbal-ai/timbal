@@ -66,3 +66,8 @@ async def test_max_iter():
     result = await flow.complete(prompt=prompt)
     assert "59" in result["response"].content[0].text.lower()
     assert "pretty heavy" not in result["response"].content[0].text.lower()
+
+
+# TODO Add test for an agent with no tools.
+# TODO Add test for multiple agent inputs (from the parent flow).
+# TODO Add test for setting optional inputs with default values.

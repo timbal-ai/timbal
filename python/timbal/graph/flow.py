@@ -318,11 +318,18 @@ class Flow(BaseStep):
         for step_param_name in step_params_model.model_fields.keys():
             step_param_key = f"{step_id}.{step_param_name}"
             step_param_data = data.get(step_param_key, None)
-            
+
             if step_param_data is None:
                 continue
 
             step_param = step_param_data.resolve(context_data=data)
+
+            # This param will go directly to the step params model validation.
+            # We don't want to pass an explicit None. 
+            # The pydantic model validation will handle this if the field is optional.
+            if step_param is None:
+                continue
+
             step_args[step_param_name] = step_param
         
         _, rev_dag = self.get_dags()
@@ -938,7 +945,7 @@ class Flow(BaseStep):
             # We're reusing the memory of another step.
             if memory_key in self.data:
                 data_key = f"{id}.memory"
-                self.set_data_map(data_key, memory_key)
+                self.set_data_map(data_key, memory_key, autolink=False)
             # We're creating a new memory with the specified key. 
             else:
                 self.set_data_value(memory_key, [])
@@ -1000,6 +1007,7 @@ class Flow(BaseStep):
         return self
 
     
+    # TODO Consider the idea of disabling tool params from here.
     def add_link(
         self, 
         step_id: str, 
@@ -1148,6 +1156,7 @@ class Flow(BaseStep):
         self,
         data_key: str,
         data_value: Any,
+        autolink: bool = True,
     ) -> "Flow":
         """Sets a data value for a data key.
 
@@ -1158,11 +1167,15 @@ class Flow(BaseStep):
         Args:
             data_key: The data key to set the value for.
             data_value: The value to set.
-        
+            autolink: If string interpolation is used to map to other steps values, 
+                      whether to automatically add a link between the source and target steps.
         Returns:
             The flow instance for method chaining.
         """
         self.data[data_key] = DataValue(value=data_value)
+
+        if not autolink:
+            return self
 
         if isinstance(data_value, str) and "{{" in data_value and "}}" in data_value:
             target_step_id = data_key.split(".")[0] if "." in data_key else None
@@ -1180,6 +1193,7 @@ class Flow(BaseStep):
         self,
         data_key: str,
         map_key: str,
+        default: Any | None = "__NO_DEFAULT__",
         autolink: bool = True,
     ) -> "Flow":
         """Sets a map from a step param to a data key.
@@ -1191,12 +1205,28 @@ class Flow(BaseStep):
         Args:
             data_key: The data key of the step param to map.
             map_key: The key to map the data key to.
+            default: The default value to return if the data key is not found.
+            autolink: Whether to automatically add a link between the source and target steps.
         
         Returns:
             The flow instance for method chaining.
         """
         # TODO We could validate that the data key is of an appropriate type.
-        self.data[data_key] = DataMap(key=map_key)
+
+        if data_key in self.data:
+            existing_data = self.data[data_key]
+            if isinstance(existing_data, DataMap):
+                # ? We could study overriding the existing map.
+                raise ValueError(f"Cannot set multiple data maps for the same data key: {data_key}.")
+            elif isinstance(existing_data, DataValue):
+                # We use the previous data value as the default for the new map.
+                if default is None:
+                    default = existing_data.value
+            else:
+                raise NotImplementedError(
+                    f"Cannot set data map for data key: {data_key} with value of type {type(existing_data)}.")
+
+        self.data[data_key] = DataMap(key=map_key, default=default)
 
         if autolink and "." in data_key and "." in map_key:
             target_step_id = data_key.split(".")[0]
@@ -1267,13 +1297,16 @@ class Flow(BaseStep):
 
     def add_agent(
         self,
-        model: str,
-        tools: list[Callable | BaseStep | dict[str, Any]],
-        name: str = "agent",
-        memory_id: str | None = None,
+        id: str | None = None,
+        tools: list[Callable | BaseStep | dict[str, Any]] = [],
         max_iter: int = 1,
         state_saver: BaseSaver | None = None,
+        model: str | None = None,
+        # We don't allow to pass a memory_id here. Agents will always use the same memory.
+        # And they must have one, so they can use tool results with the corresponding tool calls.
+        memory_window_size: int | None = None,
         **kwargs,
+        # TODO Remove kwargs. Specify all the params.
     ) -> "Flow":
         """Adds an agent to the flow.
 
@@ -1285,17 +1318,8 @@ class Flow(BaseStep):
         4. Continue this process until reaching a final response
 
         Args:
-            model: LLM model to use for the agent.
-            tools: List of tools. Each tool can be:
-                  - A function or BaseStep directly
-                  - A dict with keys:
-                    - "tool": The function or BaseStep
-                    - "description": Optional description to help the agent understand the tool
-            name: Name of the agent. Defaults to "llm".
-            memory_id: Memory id to use for the agent. Defaults to the agent name.
-            max_iter: Maximum number of iterations the agent will run. Defaults to 1.
-            **kwargs: Additional keyword arguments to pass to the underlying LLM configuration.
-        
+            TODO        
+
         Returns:
             The flow instance for method chaining.
 
@@ -1303,81 +1327,83 @@ class Flow(BaseStep):
             The agent will maintain conversation history between iterations, allowing it to
             build upon previous interactions with tools to reach its final response.
         """
-        if memory_id is None:
-            memory_id = name
+        if id is None:
+            id = "agent"
 
         # Create initial LLM step that receives the prompt
-        entrypoint_llm_id = f"{name}_llm_0"
+        entrypoint_llm_id = f"{id}_llm_0"
+        memory_id = entrypoint_llm_id
         agent = (
             Flow()
             .add_llm(
                 id=entrypoint_llm_id,
                 model=model,
                 memory_id=memory_id,
-                **kwargs,
+                memory_window_size=memory_window_size,
             )
             .set_data_map(f"{entrypoint_llm_id}.prompt", "prompt")
+            .set_data_map(f"{entrypoint_llm_id}.system_prompt", "system_prompt")
         )
 
-        # Default system prompt when processing tool results. Give the ability to the user to override this from the outside.
-        tool_result_llm_system_prompt = """Please process the tool result given the call. 
-        Do not remove references or citations from text. Leave them in markdown format."""
-        kwargs_system_prompt = kwargs.pop("system_prompt", None)
-        if kwargs_system_prompt is not None:
-            tool_result_llm_system_prompt = kwargs_system_prompt
+        if len(tools):
+            # Default system prompt when processing tool results. Give the ability to the user to override this from the outside.
+            tool_result_llm_system_prompt = """Please process the tool result given the call. 
+            Do not remove references or citations from text. Leave them in markdown format."""
+            kwargs_system_prompt = kwargs.pop("system_prompt", None)
+            if kwargs_system_prompt is not None:
+                tool_result_llm_system_prompt = kwargs_system_prompt
 
-        prev_llm_id = entrypoint_llm_id
-        # Create additional LLM steps for each iteration, allowing the agent to use tools multiple times
-        for i in range(max_iter):
-            iter_llm_id = f"{name}_llm_{i + 1}"
-            agent.add_llm(
-                id=iter_llm_id,
-                model=model,
-                memory_id=memory_id,
-                system_prompt=tool_result_llm_system_prompt,
-                **kwargs,
-            )
-
-            # For each tool, create a step and add links for tool use and tool result
-            for tool_item in tools:
-                if isinstance(tool_item, dict):
-                    tool = tool_item["tool"]
-                    description = tool_item.get("description")
-                else:
-                    tool = tool_item
-                    description = None
-
-                if callable(tool):
-                    tool_id = tool.__name__
-                elif isinstance(tool, BaseStep):
-                    tool_id = tool.id
-
-                iter_tool_id = f"{name}_{tool_id}_{i}"
-
-                if iter_tool_id not in self.steps:
-                    agent.add_step(iter_tool_id, tool)
-
-                # TODO Consider the idea of disabling tool params from here.
-                agent.add_link(
-                    step_id=prev_llm_id,
-                    description=description,
-                    next_step_id=iter_tool_id,
-                    is_tool=True,
+            prev_llm_id = entrypoint_llm_id
+            # Create additional LLM steps for each iteration, allowing the agent to use tools multiple times
+            for i in range(max_iter):
+                iter_llm_id = f"{id}_llm_{i + 1}"
+                agent.add_llm(
+                    id=iter_llm_id,
+                    memory_id=memory_id,
+                    memory_window_size=memory_window_size,
+                    system_prompt=tool_result_llm_system_prompt,
                 )
+                agent.set_data_map(f"{iter_llm_id}.model", f"{entrypoint_llm_id}.model", autolink=False)
 
-                agent.add_link(
-                    step_id=iter_tool_id,
-                    next_step_id=iter_llm_id,
-                    is_tool_result=True,
-                )
-    
-            prev_llm_id = iter_llm_id
+                # For each tool, create a step and add links for tool use and tool result
+                for tool_item in tools:
+                    if isinstance(tool_item, dict):
+                        tool = tool_item["tool"]
+                        description = tool_item.get("description")
+                    else:
+                        tool = tool_item
+                        description = None
+
+                    if callable(tool):
+                        tool_id = tool.__name__
+                    elif isinstance(tool, BaseStep):
+                        tool_id = tool.id
+
+                    iter_tool_id = f"{id}_{tool_id}_{i}"
+
+                    if iter_tool_id not in self.steps:
+                        agent.add_step(iter_tool_id, tool)
+
+                    agent.add_link(
+                        step_id=prev_llm_id,
+                        description=description,
+                        next_step_id=iter_tool_id,
+                        is_tool=True,
+                    )
+
+                    agent.add_link(
+                        step_id=iter_tool_id,
+                        next_step_id=iter_llm_id,
+                        is_tool_result=True,
+                    )
+        
+                prev_llm_id = iter_llm_id
 
         # Agents collect outputs differently. See _collect_outputs.
         agent.is_agent = True
         agent.compile(state_saver=state_saver)
 
         # Add the subflow to the parent flow
-        self.add_step(name, agent)
+        self.add_step(id, agent)
 
         return self
