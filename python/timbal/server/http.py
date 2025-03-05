@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import importlib.util
 import signal
 import sys
 from collections.abc import AsyncGenerator
@@ -16,7 +15,7 @@ from fastapi.responses import JSONResponse
 from .. import __version__
 from ..logs import setup_logging
 from ..types.models import dump
-from .utils import ModuleSpec, is_port_in_use
+from .utils import ModuleSpec, is_port_in_use, load_module
 
 logger = structlog.get_logger("timbal.server.http")
 
@@ -45,24 +44,7 @@ async def lifespan(
 
     logger.info("loading_module", module_spec=module_spec)
     
-    path = module_spec.path 
-    object_name = module_spec.object_name
-
-    spec = importlib.util.spec_from_file_location(path.stem, path.as_posix())
-    if spec and spec.loader:
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        if object_name:
-            if hasattr(module, object_name):
-                obj = getattr(module, object_name)
-                app.state.flow = obj
-            else:
-                raise ValueError(f"Module {path} has no object {object_name}")
-        else:
-            raise NotImplementedError("? support loading entire module")
-    else:
-        raise ValueError(f"Failed to load module {path}")
+    app.state.flow = load_module(module_spec)
     
     yield
     
