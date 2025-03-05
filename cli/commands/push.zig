@@ -34,13 +34,17 @@ fn printUsage() !void {
 }
 
 
-fn validateApp(app: []const u8) !struct { org_id: usize, app_id: usize } {
+const AppParts = struct {
+    domain: []const u8,
+    org_id: usize,
+    app_id: usize,
+};
+
+
+fn validateApp(app: []const u8) !AppParts {
     var app_parts = std.mem.split(u8, app, "/");
 
     const domain = app_parts.next().?;
-    if (!std.mem.eql(u8, domain, "cr.timbal.ai")) {
-        return error.InvalidAppURI;
-    }
 
     const orgs_part = app_parts.next() orelse return error.InvalidAppURI;
     if (!std.mem.eql(u8, orgs_part, "orgs")) {
@@ -58,7 +62,8 @@ fn validateApp(app: []const u8) !struct { org_id: usize, app_id: usize } {
     const app_id_part = app_parts.next() orelse return error.InvalidAppURI;
     const app_id = try std.fmt.parseInt(usize, app_id_part, 10);
 
-    return .{
+    return AppParts{
+        .domain = domain,
         .org_id = org_id,
         .app_id = app_id,
     };
@@ -69,8 +74,7 @@ const TimbalPushArgs = struct {
     quiet: bool,
     verbose: bool,
     image: []const u8,
-    org_id: usize,
-    app_id: usize,
+    app_parts: AppParts,
     version_name: ?[]const u8,
 };
 
@@ -102,6 +106,7 @@ fn parseArgs(args: []const []const u8) !TimbalPushArgs {
                 std.process.exit(1);
             }
             version_name = args[i + 1];
+            i += 1;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             if (image == null) {
                 image = arg;
@@ -136,39 +141,118 @@ fn parseArgs(args: []const []const u8) !TimbalPushArgs {
         .quiet = quiet,
         .verbose = verbose,
         .image = image.?,
-        .org_id = app_parts.org_id,
-        .app_id = app_parts.app_id,
+        .app_parts = app_parts,
         .version_name = version_name,
     };
 }
 
 
-const DockerLogin = struct {
-    user: []const u8,
-    password: []const u8,
-    server: []const u8,
+const ImageDigestInfo = struct {
+    hash: []const u8,
+    size: usize,
 };
 
 
-fn getDockerLogin(
-    allocator: std.mem.Allocator, 
-    timbal_api_token: []const u8,
+fn inspectImage(
+    allocator: std.mem.Allocator,
+    image: []const u8,
+    quiet: bool,
     verbose: bool,
-    org_id: usize,
-    app_id: usize,
-) !DockerLogin {
-    // TODO Perhaps add the version name to check if it exists.
-    // TODO Change URL.
-    const auth_url = try std.fmt.allocPrint(
-        allocator,
-        "https://dev.timbal.ai/orgs/{d}/apps/{d}/versions",
-        .{ org_id, app_id }
-    );
-    defer allocator.free(auth_url);
+) !ImageDigestInfo {
+    if (!quiet) {
+        std.debug.print("Inspecting image: {s}\n", .{image});
+    }
+
+    // Force docker to refresh image metadata cache.
+    const docker_ls_args = [_][]const u8{
+        "docker", "image", "ls", image,
+    };
+    const ls_result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &docker_ls_args,
+    });
+    allocator.free(ls_result.stdout);
+    allocator.free(ls_result.stderr);
+
+    const docker_inspect_args = [_][]const u8{
+        "docker", "image", "inspect",
+        "--format={{.Id}}\t{{.Size}}",
+        image,
+    };
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &docker_inspect_args,
+    });
+    defer allocator.free(result.stderr);
+    defer allocator.free(result.stdout);
+
+    if (result.term.Exited != 0) {
+        const stderr = std.io.getStdErr().writer();
+        try stderr.print("Error: {s}\n", .{result.stderr});
+        std.process.exit(1);
+    }
+
+    var parts = std.mem.split(u8, std.mem.trim(u8, result.stdout, "\n\r"), "\t");
+    const hash = parts.next().?;
+    const size_str = parts.next().?;
+    const size = try std.fmt.parseInt(usize, size_str, 10);
 
     if (verbose) {
+        std.debug.print("Image hash: {s}\n", .{hash});
+        std.debug.print("Image size: {d}\n", .{size});
+    }
+
+    return ImageDigestInfo{
+        .hash = try allocator.dupe(u8, hash),
+        .size = size,
+    };
+}
+
+
+const DockerLoginInfo = struct {
+    user: []const u8,
+    password: []const u8,
+    server: []const u8,
+
+    pub fn deinit(self: *DockerLoginInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.user);
+        allocator.free(self.password);
+        allocator.free(self.server);
+    }
+};
+
+
+const AuthRes = struct {
+    docker_login: DockerLoginInfo,
+    uri: []const u8,
+
+    pub fn deinit(self: *AuthRes, allocator: std.mem.Allocator) void {
+        self.docker_login.deinit(allocator);
+        allocator.free(self.uri);
+    }
+};
+
+
+fn authenticate(
+    allocator: std.mem.Allocator, 
+    timbal_api_token: []const u8,
+    image_digest_info: ImageDigestInfo,
+    app_parts: AppParts,
+    version_name: ?[]const u8,
+    quiet: bool,
+    verbose: bool,
+) !AuthRes {
+    if (!quiet) {
         std.debug.print("Authenticating with Timbal Platform...\n", .{});
     }
+
+    const auth_url = try std.fmt.allocPrint(
+        allocator,
+        "https://{s}/orgs/{d}/apps/{d}/versions",
+        .{ app_parts.domain, app_parts.org_id, app_parts.app_id }
+    );
+    defer allocator.free(auth_url);
 
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
@@ -179,6 +263,13 @@ fn getDockerLogin(
     var res_buffer = std.ArrayList(u8).init(allocator);
     defer res_buffer.deinit();
 
+    const payload = try std.json.stringifyAlloc(allocator, .{
+        .hash = image_digest_info.hash,
+        .size = image_digest_info.size,
+        .name = version_name,
+    }, .{});
+    defer allocator.free(payload);
+
     const res = try client.fetch(.{
         .location = .{ .url = auth_url },
         .method = .POST,
@@ -186,6 +277,7 @@ fn getDockerLogin(
             .authorization = .{ .override = auth_header },
             .content_type = .{ .override = "application/json" },
         },
+        .payload = payload,
         .response_storage = .{ .dynamic = &res_buffer },
     });
 
@@ -200,29 +292,41 @@ fn getDockerLogin(
         std.process.exit(1);
     }
 
+    if (verbose) {
+        std.debug.print("Response: {s}\n", .{res_buffer.items});
+    }
+
     var parsed = try std.json.parseFromSlice(
-        DockerLogin,
+        AuthRes,
         allocator,
         res_buffer.items,
         .{ .ignore_unknown_fields = true },
     );
     defer parsed.deinit();
 
-    return DockerLogin{
-        .user = try allocator.dupe(u8, parsed.value.user),
-        .password = try allocator.dupe(u8, parsed.value.password),
-        .server = try allocator.dupe(u8, parsed.value.server),
+    const auth_res = AuthRes{
+        .docker_login = DockerLoginInfo{
+            .user = try allocator.dupe(u8, parsed.value.docker_login.user),
+            .password = try allocator.dupe(u8, parsed.value.docker_login.password),
+            .server = try allocator.dupe(u8, parsed.value.docker_login.server),
+        },
+        .uri = try allocator.dupe(u8, parsed.value.uri),
     };
+
+    return auth_res;
 }
 
 
 fn loginToCR(
     allocator: std.mem.Allocator,
-    docker_login: DockerLogin,
+    docker_login: DockerLoginInfo,
     quiet: bool,
+    verbose: bool,
 ) !void {
+    _ = verbose;
+
     if (!quiet) {
-        std.debug.print("Logging in to Docker server...\n", .{});
+        std.debug.print("Logging in to container registry...\n", .{});
     }
 
     const docker_login_args = [_][]const u8{
@@ -232,48 +336,81 @@ fn loginToCR(
         docker_login.server,
     };
 
-    // Don't use std.process.Child.run here. We want to inherit the stderr and stdout
-    // to stream the output to the main console.
-    var child = std.process.Child.init(&docker_login_args, allocator);
-    child.stderr_behavior = .Ignore; // Supress -p vs --password-stdin warning.
-    child.stdout_behavior = .Inherit;
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &docker_login_args,
+    });
+    defer allocator.free(result.stderr);
+    defer allocator.free(result.stdout);
 
-    try child.spawn();
-    _ = try child.wait();
+    if (result.term.Exited != 0) {
+        const stderr = std.io.getStdErr().writer();
+        try stderr.print("Error: {s}\n", .{result.stderr});
+        std.process.exit(1);
+    }
 }
 
 
 fn tagImage(
     allocator: std.mem.Allocator,
-    server: []const u8,
     image: []const u8,
+    tag: []const u8,
     quiet: bool,
-) ![]const u8 {
+    verbose: bool,
+) !void {
+    _ = verbose;
+
     if (!quiet) {
         std.debug.print("Tagging image...\n", .{});
     }
 
-    // TODO Change this. The repo name must be something of the actual Timbal Platform app.
-    const target_image = try std.fmt.allocPrint(
-        allocator,
-        "{s}/timbal/{s}",
-        .{ server, image },
-    );
-
     const docker_tag_args = [_][]const u8{
-        "docker", "tag", image, target_image
+        "docker", "tag", image, tag,
     };
 
-    // Don't use std.process.Child.run here. We want to inherit the stderr and stdout
-    // to stream the output to the main console.
-    var child = std.process.Child.init(&docker_tag_args, allocator);
-    child.stderr_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &docker_tag_args,
+    });
+    defer allocator.free(result.stderr);
+    defer allocator.free(result.stdout);
 
-    try child.spawn();
-    _ = try child.wait();
+    if (result.term.Exited != 0) {
+        const stderr = std.io.getStdErr().writer();
+        try stderr.print("Error: {s}\n", .{result.stderr});
+        std.process.exit(1);
+    }
+}
 
-    return target_image;
+
+fn untagImage(
+    allocator: std.mem.Allocator,
+    tag: []const u8,
+    quiet: bool,
+    verbose: bool,
+) !void {
+    _ = verbose;
+
+    if (!quiet) {
+        std.debug.print("Cleaning up tags...\n", .{});
+    }
+
+    const docker_untag_args = [_][]const u8{
+        "docker", "rmi", tag,
+    };
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &docker_untag_args,
+    });
+    defer allocator.free(result.stderr);
+    defer allocator.free(result.stdout);
+
+    if (result.term.Exited != 0) {
+        const stderr = std.io.getStdErr().writer();
+        try stderr.print("Error: {s}\n", .{result.stderr});
+        std.process.exit(1);
+    }
 }
 
 
@@ -281,9 +418,12 @@ fn pushImage(
     allocator: std.mem.Allocator,
     tag: []const u8,
     quiet: bool,
+    verbose: bool,
 ) !void {
+    _ = verbose;
+
     if (!quiet) {
-        std.debug.print("Pushing image: {s}\n", .{tag});
+        std.debug.print("Pushing image...\n", .{});
     }
 
     const docker_push_args = [_][]const u8{
@@ -302,12 +442,6 @@ fn pushImage(
 
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const parsed_args = try parseArgs(args);
-
-    if (!parsed_args.quiet) {
-        std.debug.print("Pushing image: {s}\n", .{parsed_args.image});
-    }
-
     // Ensure TIMBAL_API_TOKEN is set.
     const timbal_api_token = std.process.getEnvVarOwned(allocator, "TIMBAL_API_TOKEN") catch |err| {
         if (err == error.EnvironmentVariableNotFound) {
@@ -321,31 +455,56 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer allocator.free(timbal_api_token);
 
-    // Retrieve login user and pwd for aws ecr registry (this authorizes access to the app too).
-    const docker_login = try getDockerLogin(
+    const parsed_args = try parseArgs(args);
+
+    // Ensure the image exists and fetch some specs, like the hash and size.
+    const image_digest_info = try inspectImage(
+        allocator, 
+        parsed_args.image, 
+        parsed_args.quiet, 
+        parsed_args.verbose
+    );
+    defer allocator.free(image_digest_info.hash);
+
+    // Authenticate with the Timbal Platform.
+    // Retrieve login user and pwd for the container registry.
+    var auth_res = try authenticate(
         allocator, 
         timbal_api_token,
-        parsed_args.verbose,
-        parsed_args.org_id,
-        parsed_args.app_id,
-    );
-    defer {
-        allocator.free(docker_login.user);
-        allocator.free(docker_login.password);
-        allocator.free(docker_login.server);
-    }
-
-    try loginToCR(allocator, docker_login, parsed_args.quiet);
-    
-    const registry_tag = try tagImage(
-        allocator, 
-        docker_login.server,
-        parsed_args.image, 
+        image_digest_info,
+        parsed_args.app_parts,
+        parsed_args.version_name,
         parsed_args.quiet,
+        parsed_args.verbose,
     );
-    defer allocator.free(registry_tag);
+    defer auth_res.deinit(allocator);
 
-    try pushImage(allocator, registry_tag, parsed_args.quiet);
+    try loginToCR(
+        allocator, 
+        auth_res.docker_login, 
+        parsed_args.quiet,
+        parsed_args.verbose,
+    );
 
-    // TODO Untag image.
+    try tagImage(
+        allocator, 
+        parsed_args.image, 
+        auth_res.uri,
+        parsed_args.quiet,
+        parsed_args.verbose,
+    );
+
+    try pushImage(
+        allocator, 
+        auth_res.uri, 
+        parsed_args.quiet,
+        parsed_args.verbose,
+    );
+
+    try untagImage(
+        allocator,
+        auth_res.uri,
+        parsed_args.quiet,
+        parsed_args.verbose,
+    );
 }
