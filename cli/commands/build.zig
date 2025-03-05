@@ -115,25 +115,15 @@ fn parseArgs(args: []const []const u8) !TimbalBuildArgs {
 
 
 const TimbalYaml = struct {
-    system_packages: std.ArrayList([]const u8),
-    flow: ?[]const u8 = null,
-    allocator: std.mem.Allocator,
+    system_packages: []const []const u8,
+    flow: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator) TimbalYaml {
-        return TimbalYaml{
-            .system_packages = std.ArrayList([]const u8).init(allocator),
-            .flow = null,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *TimbalYaml) void {
-        for (self.system_packages.items) |pkg| {
-            self.allocator.free(pkg);
-        }
-        self.system_packages.deinit();
+    pub fn deinit(self: *TimbalYaml, allocator: std.mem.Allocator) void {
+        allocator.free(self.system_packages);
+        allocator.free(self.flow);
     }
 };
+
 
 // Note on custom YAML parser:
 // We're using a simple custom YAML parser here because:
@@ -148,7 +138,8 @@ fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !Tim
     var in_stream = buf_reader.reader();
     var buf: [4096]u8 = undefined;
 
-    var timbal_yaml = TimbalYaml.init(allocator);
+    var timbal_yaml_system_packages: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(allocator);
+    var timbal_yaml_flow: ?[]const u8 = null;
 
     // Track the current section of the file we're parsing.
     var current_section: enum {
@@ -167,7 +158,7 @@ fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !Tim
         if (current_section == .SystemPackages and std.mem.startsWith(u8, trimmed, "-")) {
             var system_package = std.mem.trim(u8, trimmed[1..], &std.ascii.whitespace);
             system_package = std.mem.trim(u8, system_package, "\"");
-            try timbal_yaml.system_packages.append(try allocator.dupe(u8, system_package));
+            try timbal_yaml_system_packages.append(try allocator.dupe(u8, system_package));
             continue;
         }
 
@@ -177,16 +168,24 @@ fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !Tim
             current_section = .None;
             var flow = std.mem.trim(u8, trimmed[5..], &std.ascii.whitespace);
             flow = std.mem.trim(u8, flow, "\"");
-            timbal_yaml.flow = flow;
+            timbal_yaml_flow = flow;
         } else {
             current_section = .None;
         }
     }
 
+    if (timbal_yaml_flow == null) {
+        try printUsageWithError("Error: flow spec not found in timbal.yaml");
+        std.process.exit(1);
+    }
+
     // We'd need to reset the file pointer if we want to use the file again.
     // try timbal_yaml_file.seekTo(0);
 
-    return timbal_yaml;
+    return TimbalYaml{
+        .system_packages = try timbal_yaml_system_packages.toOwnedSlice(),
+        .flow = try allocator.dupe(u8, timbal_yaml_flow.?),
+    };
 }
 
 
@@ -221,6 +220,8 @@ fn writeDockerfile(
         \\
         \\ENV PATH=".venv/bin:$PATH"
         \\
+        \\ENV TIMBAL_FLOW={s}
+        \\
         \\CMD ["tail", "-f", "/dev/null"]
         \\
     ;
@@ -234,12 +235,15 @@ fn writeDockerfile(
 
     try system_packages_buffer.appendSlice("curl \\\n        ca-certificates \\\n        git");
 
-    for (timbal_yaml.system_packages.items) |pkg| {
+    for (timbal_yaml.system_packages) |pkg| {
         try system_packages_buffer.appendSlice(" \\\n        ");
         try system_packages_buffer.appendSlice(pkg);
     }
 
-    try dockerfile.writer().print(dockerfile_template, .{system_packages_buffer.items});
+    try dockerfile.writer().print(dockerfile_template, .{
+        system_packages_buffer.items, 
+        timbal_yaml.flow
+    });
 }
 
 
@@ -343,7 +347,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
 
     var timbal_yaml = try parseTimbalYaml(allocator, timbal_yaml_file);
-    defer timbal_yaml.deinit();
+    defer timbal_yaml.deinit(allocator);
 
     // Right now we create and edit the file in the cwd. We don't create a temporary directory,
     // so that we're able to debug the Dockerfile during development.
