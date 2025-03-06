@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -33,11 +34,16 @@ if __name__ == "__main__":
         print(f"timbal.servers.http {__version__}") # noqa: T201
         sys.exit(0)
 
-    if not args.module_spec:
-        print("No module spec provided. Use --module_spec to specify a module to load.") # noqa: T201
+    # We can overwrite the env TIMBAL_FLOW variable with the --module_spec flag.
+    module_spec = args.module_spec
+    if not module_spec:
+        module_spec = os.getenv("TIMBAL_FLOW")
+
+    if not module_spec:
+        print("No module spec provided. Set TIMBAL_FLOW env variable or use --module_spec to specify a module to load.") # noqa: T201
         sys.exit(1)
 
-    module_parts = args.module_spec.split(":")
+    module_parts = module_spec.split(":")
     if len(module_parts) > 2:
         print("Invalid module spec format. Use 'path/to/file.py:object_name' or 'path/to/file.py'") # noqa: T201
         sys.exit(1)

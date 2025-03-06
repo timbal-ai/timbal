@@ -119,6 +119,9 @@ const TimbalYaml = struct {
     flow: []const u8,
 
     pub fn deinit(self: *TimbalYaml, allocator: std.mem.Allocator) void {
+        for (self.system_packages) |pkg| {
+            allocator.free(pkg);
+        }
         allocator.free(self.system_packages);
         allocator.free(self.flow);
     }
