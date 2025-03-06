@@ -8,7 +8,9 @@ from .togetherai_llm import handler as togetherai_llm
 
 
 async def handler(
-    prompt: str = Field(default=None, description="Hack to pass an input to the LLM."), # noqa: ARG001
+    # This is not actually used inside the function. It's a hack to have it as an argument
+    # so we can use it when mapping data in the flow.
+    prompt: str | list[Any] | dict[str, Any] | Message = Field(default=None, description="Message to send to the LLM."), # noqa: ARG001
     memory: list[Message] = Field(description="Chat history containing user and LLM messages."),
     system_prompt: str | list[dict] = Field(default=None, description="System prompt to guide the LLM's behavior and role."),
     model: str = Field(default="gpt-4o", description="Name of the LLM model to use."),
@@ -83,7 +85,7 @@ async def handler(
         default=None,
         description="JSON schema for structured output."
     ),
-) -> Any:
+) -> Message: # type: ignore
     """Route requests to appropriate LLM providers based on model name prefix.
 
     This gateway function handles routing to different LLM providers (OpenAI, Anthropic,

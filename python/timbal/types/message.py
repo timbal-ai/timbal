@@ -159,10 +159,21 @@ class Message:
     def __get_pydantic_json_schema__(cls, _core_schema: CoreSchema, _handler: GetJsonSchemaHandler) -> dict[str, Any]:
         """Defines what this type should be in openapi.json."""
         # https://docs.pydantic.dev/2.8/errors/usage_errors/#custom-json-schema
+        # TODO
+        # ? print("TextContent schema:", TextContent.model_json_schema())
         json_schema = {
-            "type": "string",
-            "format": "message",
-            "description": "An LLM message with role and content",
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string",
+                    "enum": ["user", "assistant", "system"],
+                },
+                "content": {
+                    "type": "array",
+                    "items": {},
+                }
+            },
+            "description": "A message in an LLM conversation with role and typed content",
         }
         return json_schema
 
