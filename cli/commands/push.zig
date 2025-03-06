@@ -150,6 +150,10 @@ fn parseArgs(args: []const []const u8) !TimbalPushArgs {
 const ImageDigestInfo = struct {
     hash: []const u8,
     size: usize,
+
+    pub fn deinit(self: *ImageDigestInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.hash);
+    }
 };
 
 
@@ -210,6 +214,79 @@ fn inspectImage(
 }
 
 
+const ProbeResJson = struct {
+    params_model_schema: std.json.Value,
+    return_model_schema: std.json.Value,
+
+    pub fn deinit(self: *ProbeRes, allocator: std.mem.Allocator) void {
+        self.params_model_schema.deinit(allocator);
+        self.return_model_schema.deinit(allocator);
+    }
+};
+
+
+const ProbeRes = struct {
+    params_model_schema: []const u8,
+    return_model_schema: []const u8,
+
+    pub fn deinit(self: *ProbeRes, allocator: std.mem.Allocator) void {
+        allocator.free(self.params_model_schema);
+        allocator.free(self.return_model_schema);
+    }
+};
+
+
+fn probeImage(
+    allocator: std.mem.Allocator,
+    image: []const u8,
+    quiet: bool,
+    verbose: bool,
+) !ProbeRes {
+    _ = verbose;
+    
+    if (!quiet) {
+        std.debug.print("Probing image...\n", .{});
+    }
+
+    const docker_run_args = [_][]const u8{
+        "docker", "run", "--rm", image,
+        "uv", "run", "-m", "timbal.server.probe",
+    };
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &docker_run_args,
+    });
+    defer allocator.free(result.stderr);
+    defer allocator.free(result.stdout);
+
+    if (result.term.Exited != 0) {
+        const stderr = std.io.getStdErr().writer();
+        try stderr.print("Error: {s}\n", .{result.stderr});
+        std.process.exit(1);
+    }
+
+    var parsed = try std.json.parseFromSlice(
+        ProbeResJson,
+        allocator,
+        result.stdout,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    var params_model_schema = std.ArrayList(u8).init(allocator);
+    try std.json.stringify(parsed.value.params_model_schema, .{}, params_model_schema.writer());
+
+    var return_model_schema = std.ArrayList(u8).init(allocator);
+    try std.json.stringify(parsed.value.return_model_schema, .{}, return_model_schema.writer());
+
+    return ProbeRes{
+        .params_model_schema = try params_model_schema.toOwnedSlice(),
+        .return_model_schema = try return_model_schema.toOwnedSlice(),
+    };
+}
+
+
 const DockerLoginInfo = struct {
     user: []const u8,
     password: []const u8,
@@ -238,6 +315,7 @@ fn authenticate(
     allocator: std.mem.Allocator, 
     timbal_api_token: []const u8,
     image_digest_info: ImageDigestInfo,
+    probe_res: ProbeRes,
     app_parts: AppParts,
     version_name: ?[]const u8,
     quiet: bool,
@@ -267,6 +345,8 @@ fn authenticate(
         .hash = image_digest_info.hash,
         .size = image_digest_info.size,
         .name = version_name,
+        .params_model_schema = probe_res.params_model_schema,
+        .return_model_schema = probe_res.return_model_schema,
     }, .{});
     defer allocator.free(payload);
 
@@ -458,13 +538,21 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const parsed_args = try parseArgs(args);
 
     // Ensure the image exists and fetch some specs, like the hash and size.
-    const image_digest_info = try inspectImage(
+    var image_digest_info = try inspectImage(
         allocator, 
         parsed_args.image, 
         parsed_args.quiet, 
         parsed_args.verbose
     );
-    defer allocator.free(image_digest_info.hash);
+    defer image_digest_info.deinit(allocator);
+
+    var probe_res = try probeImage(
+        allocator,
+        parsed_args.image,
+        parsed_args.quiet,
+        parsed_args.verbose,
+    );
+    defer probe_res.deinit(allocator);
 
     // Authenticate with the Timbal Platform.
     // Retrieve login user and pwd for the container registry.
@@ -472,6 +560,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         allocator, 
         timbal_api_token,
         image_digest_info,
+        probe_res,
         parsed_args.app_parts,
         parsed_args.version_name,
         parsed_args.quiet,
