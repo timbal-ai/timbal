@@ -16,6 +16,10 @@ class BaseStep(BaseModel, ABC):
 
     id: str 
     """Unique identifier for the step instance."""
+    path: str 
+    """Any step will be a part of a flow. With potentially multiple nested sub-flows.
+    We will use the path to uniquely identify the step's position in the overall flow.
+    """
     metadata: dict[str, Any] = {}
     """Optional metadata associated with the step."""
 

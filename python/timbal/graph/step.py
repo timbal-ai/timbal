@@ -36,16 +36,22 @@ class Step(BaseStep):
 
     def __init__(
         self, 
+        id: str,
+        path: str | None = None,
         handler_fn: Callable[..., Any] | None = None,
         **kwargs: Any,
     ) -> None:
         """Overrides the __init__ method that is inherited from BaseStep, i.e. a pydantic BaseModel.
 
         Args:
+            id: The unique identifier for the step (within a flow or subflow).
+            path: Optional path for the flow. Use when directly adding this to a flow or subflow.
             handler_fn: The handler function to be used.
             **kwargs: Additional keyword arguments will be passed to the BaseStep's __init__ method.
         """
-        super().__init__(**kwargs)
+        if path is None:
+            path = id
+        super().__init__(id=id, path=path, **kwargs)
         
         if not inspect.isfunction(handler_fn):
             raise TypeError(f"handler_fn must be a function, got {type(handler_fn)}")

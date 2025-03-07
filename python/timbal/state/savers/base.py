@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Any
 
 from ..snapshot import Snapshot
 
@@ -14,7 +15,7 @@ class BaseSaver(ABC):
     """
     
     @abstractmethod
-    def get(self, id: str) -> Snapshot:
+    def get(self, id: str) -> Snapshot | None:
         pass
 
 
@@ -24,6 +25,7 @@ class BaseSaver(ABC):
         n: int = 1, 
         parent_id: str | None = None, 
         group_id: str | None = None,
+        flow_path: str | None = None,
     ) -> list[Snapshot]:
         pass
 

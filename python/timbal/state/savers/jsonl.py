@@ -72,6 +72,7 @@ class JSONLSaver(BaseSaver):
         n: int = 1,
         parent_id: str | None = None,
         group_id: str | None = None,
+        flow_path: str | None = None,
     ) -> list[Snapshot]:
         """Retrieve the last n snapshots matching the specified criteria.
 
@@ -82,8 +83,9 @@ class JSONLSaver(BaseSaver):
         Args:
             n: Number of snapshots to retrieve (default: 1).
             parent_id: If provided, only returns snapshots in the ancestry chain
-                      starting from this parent ID.
+                       starting from this parent ID.
             group_id: If provided, only returns snapshots belonging to this group.
+            flow_path: If provided, only returns snapshots from this flow.
 
         Returns:
             A list of matching Snapshot objects in chronological order.
@@ -99,6 +101,9 @@ class JSONLSaver(BaseSaver):
                 snapshot = self._load_snapshot_from_line(line)
 
                 if snapshot.group_id != group_id:
+                    continue
+
+                if snapshot.flow_path != flow_path:
                     continue
 
                 if not current_parent_id:

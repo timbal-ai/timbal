@@ -65,14 +65,22 @@ class Flow(BaseStep):
         _is_compiled: Whether the flow has been compiled
     """
     
-    def __init__(self, id: str = "flow", **kwargs: Any) -> None:
+    def __init__(
+        self, 
+        id: str = "flow", 
+        path: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         """Initialize a new Flow instance.
 
         Args:
             id: Optional identifier for the flow. Defaults to "flow".
+            path: Optional path for the flow. Use when directly adding this to a flow or subflow.
             **kwargs: Keyword arguments will be passed to the BaseStep's __init__ method.
         """
-        super().__init__(id=id, **kwargs)
+        if path is None:
+            path = id
+        super().__init__(id=id, path=path, **kwargs)
 
         self.steps: dict[str, BaseStep] = {}
         self.links: dict[str, Link] = {}
@@ -505,6 +513,7 @@ class Flow(BaseStep):
                 n=1, 
                 parent_id=run_parent_id,
                 group_id=run_group_id,
+                flow_path=self.path,
             )
             if len(last_snapshots) > 0:
                 last_snapshot = last_snapshots[0]
@@ -700,26 +709,31 @@ class Flow(BaseStep):
                 )
 
         # Grab the properties as defined in the return_model.
-        outputs = self._collect_outputs(data)
+        output = self._collect_outputs(data)
         t1 = int(time.time() * 1000)
         elapsed_time = t1 - t0
 
         if self.state_saver is not None:
             snapshot = Snapshot(
-                v="0.1.0",
+                v="0.2.0",
                 id=run_id,
                 parent_id=run_parent_id,
                 group_id=run_group_id,
-                ts=t0,
+                flow_path=self.path,
+                input=kwargs,
+                output=output,
+                t0=t0,
+                t1=t1,
+                status="success", # TODO
+                steps=[], # TODO
                 data=copy.deepcopy(data),
-                elapsed_time=elapsed_time,
             )
             self.state_saver.put(snapshot)
         
         yield FlowOutputEvent(
             run_id=run_id,
             step_id=self.id,
-            outputs=outputs,
+            outputs=output,
             elapsed_time=elapsed_time,
         )
 
@@ -796,21 +810,36 @@ class Flow(BaseStep):
         elif callable(step):
             id = step.__name__
         elif isinstance(step, BaseStep):
+            # Unfortunatelly we cannot grab the object name since python does not have access 
+            # to the variable name the flow is assigned to.
             id = step.id
         
         if id in self.steps:
             raise ValueError(f"Step {id} already exists in the flow.")
 
+        def _update_path(step: BaseStep, path: str) -> None:
+            if isinstance(step, Step):
+                step.path = f"{path}.{step.id}"
+                return
+            elif isinstance(step, Flow):
+                step.path = f"{path}.{step.id}"
+                for sub_step in step.steps.values():
+                    _update_path(sub_step, step.path)
+            else:
+                raise NotImplementedError(f"Invalid step type {type(step)}.")
+
         if isinstance(step, BaseStep):
-            # TODO Think.
             step = copy.deepcopy(step)
             step.id = id
+            # This recursively updates recursively the steps paths so that we can uniquely 
+            # identify each step, and subflow within the parent flow.
+            _update_path(step, self.path)
             # When adding a subflow, ensure it is compiled with all the possible optimizations.
             if isinstance(step, Flow) and not step._is_compiled:
                 step.compile()
             self.steps[id] = step
         elif callable(step):
-            step = Step(id=id, handler_fn=step)
+            step = Step(id=id, path=f"{self.path}.{id}", handler_fn=step)
             self.steps[id] = step
         else:
             raise NotImplementedError(f"Invalid step type {step}.")
