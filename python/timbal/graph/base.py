@@ -3,6 +3,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from ..state import RunContext
+
 
 class BaseStep(BaseModel, ABC):
     """Abstract base class for defining processing steps in a workflow.
@@ -48,7 +50,12 @@ class BaseStep(BaseModel, ABC):
         pass
 
 
+    # TODO Better method definition. Then we can use "See base class" in the child classes.
     @abstractmethod
-    def run(self, **kwargs: Any) -> Any:
+    def run(
+        self, 
+        context: RunContext | None = None, # noqa: ARG002
+        **kwargs: Any,
+    ) -> Any:
         """Executes the step's processing logic."""
         pass

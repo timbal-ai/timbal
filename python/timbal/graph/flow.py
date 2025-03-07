@@ -9,9 +9,10 @@ from typing import Any
 
 import structlog
 from pydantic import BaseModel, Field
+from uuid_extensions import uuid7
 
 from ..errors import DataKeyError, InvalidLinkError, StepKeyError
-from ..state import Snapshot
+from ..state import RunContext, Snapshot
 from ..state.data import BaseData, DataMap, DataValue, get_data_key
 from ..state.savers.base import BaseSaver
 from ..steps.llms.gateway import handler as llm
@@ -38,6 +39,7 @@ from .utils import Dag, get_ancestors, get_sources, is_dag
 logger = structlog.get_logger("timbal.graph.flow")
 
 RunnableLike = BaseStep | Callable[..., Any]
+
 
 class Flow(BaseStep):
     """A class representing a flow of connected steps for executing complex workflows.
@@ -418,10 +420,7 @@ class Flow(BaseStep):
         self, 
         step_id: str, 
         data: dict[str, Any],
-        run_id: str | None = None, # noqa: ARG002
-        run_parent_id: str | None = None, # noqa: ARG002
-        run_group_id: str | None = None, # noqa: ARG002
-        dump_context: dict[str, Any] | None = None, # noqa: ARG002
+        context: RunContext,
     ) -> Any:
         """Executes a single step in the flow and returns its result.
 
@@ -431,7 +430,7 @@ class Flow(BaseStep):
         Args:
             step_id: Identifier of the step to execute
             data: Dictionary containing all flow data, including inputs and previous step results
-            ...
+            context: Run context
 
 
         Returns:
@@ -452,10 +451,7 @@ class Flow(BaseStep):
         if not step.is_coroutine and not step.is_async_gen:
             loop = asyncio.get_running_loop()
             step_result = await loop.run_in_executor(None, lambda: step.run(
-                run_id=run_id,
-                run_parent_id=run_parent_id,
-                run_group_id=run_group_id,
-                dump_context=dump_context,
+                context=context,
                 **dict(step_args)
             ))
             if inspect.isgenerator(step_result):
@@ -463,10 +459,7 @@ class Flow(BaseStep):
             return step_args, step_result
         
         step_result = step.run(
-            run_id=run_id,
-            run_parent_id=run_parent_id,
-            run_group_id=run_group_id,
-            dump_context=dump_context,
+            context=context,
             **dict(step_args)
         )
 
@@ -478,28 +471,23 @@ class Flow(BaseStep):
 
     async def run(
         self, 
-        run_id: str | None = None,
-        run_parent_id: str | None = None,
-        run_group_id: str | None = None,
-        dump_context: dict[str, Any] | None = None, # noqa: ARG002
+        context: RunContext | None = None,
         **kwargs: Any
     ) -> Any:
         """Executes the step's processing logic.
         
         Args:
-            run_id: Identifier for the single run. 
-                Handled separately from kwargs to avoid passing it downstream.
-            run_parent_id: Identifier for the parent run.
-                Handled separately from kwargs to avoid passing it downstream.
-            run_group_id: Identifier for the group of runs.
-                Handled separately from kwargs to avoid passing it downstream.
-            dump_context: Context for dumping intermediate results. 
-                Handled separately from kwargs to avoid passing it downstream.
+            context: RunContext
             **kwargs: Additional keyword arguments required for step execution.
         
         Returns:
             Any: The step's processing result. Can be any object, a coroutine or an async generator.
         """
+        if context is None:
+            context = RunContext(id=uuid7(as_type="str"))
+        elif context.id is None:
+            context.id = uuid7(as_type="str")
+
         t0 = int(time.time() * 1000)
 
         # Copy the data to avoid potential bugs with data being modified by reference.
@@ -508,15 +496,12 @@ class Flow(BaseStep):
         data.update({k: DataValue(value=v) for k, v in kwargs.items()})
 
         # Load LLM memories.
+        # TODO Optimize this. There's no need to load previous snapshot if there are no memories to load.
         if self.state_saver is not None:
-            last_snapshots = self.state_saver.get_last(
-                n=1, 
-                parent_id=run_parent_id,
-                group_id=run_group_id,
-                flow_path=self.path,
-            )
-            if len(last_snapshots) > 0:
-                last_snapshot = last_snapshots[0]
+            # TODO Allow for async get_last.
+            # TODO Think error handling here. What if getting the last snapshot errors?
+            last_snapshot = self.state_saver.get_last(path=self.path, context=context)
+            if last_snapshot is not None:
                 last_snapshot_data = last_snapshot.data
                 window_sizes = {}
 
@@ -562,17 +547,14 @@ class Flow(BaseStep):
         start_times = {}
         for source_id in sources_ids:
             yield StepStartEvent(
-                run_id=run_id,
+                run_id=context.id,
                 parent_step_id=self.id,
                 step_id=source_id,
             )
             task = asyncio.create_task(self._run_step(
                 step_id=source_id, 
                 data=data,
-                run_id=run_id,
-                run_parent_id=run_parent_id,
-                run_group_id=run_group_id,
-                dump_context=dump_context,
+                context=context,
             ))
             task.step_id = source_id
             tasks.append(task)
@@ -601,7 +583,7 @@ class Flow(BaseStep):
                         step_chunk = handle_event(event=step_result, async_gen_state=async_gen_state)
                         if step_chunk is not None:
                             yield StepChunkEvent(
-                                run_id=run_id,
+                                run_id=context.id,
                                 parent_step_id=self.id,
                                 step_id=step_id,
                                 step_chunk=step_chunk,
@@ -676,17 +658,14 @@ class Flow(BaseStep):
                         # If any of the conditions is true, we start the next step.
                         if any(ancestor_link.evaluate_condition(data) for _, ancestor_link in ancestors):
                             yield StepStartEvent(
-                                run_id=run_id,
+                                run_id=context.id,
                                 parent_step_id=self.id,
                                 step_id=successor_id,
                             )
                             task = asyncio.create_task(self._run_step(
                                 step_id=successor_id, 
                                 data=data,
-                                run_id=run_id,
-                                run_parent_id=run_parent_id,
-                                run_group_id=run_group_id,
-                                dump_context=dump_context,
+                                context=context,
                             ))
                             task.step_id = successor_id
                             tasks.append(task)
@@ -699,7 +678,7 @@ class Flow(BaseStep):
                 elapsed_time = end_time - start_time
 
                 yield StepOutputEvent(
-                    run_id=run_id,
+                    run_id=context.id,
                     parent_step_id=self.id,
                     step_id=step_id,
                     step_args=step_args,
@@ -716,22 +695,22 @@ class Flow(BaseStep):
         if self.state_saver is not None:
             snapshot = Snapshot(
                 v="0.2.0",
-                id=run_id,
-                parent_id=run_parent_id,
-                group_id=run_group_id,
-                flow_path=self.path,
+                id=context.id,
+                parent_id=context.parent_id,
+                group_id=context.group_id,
+                path=self.path,
                 input=kwargs,
                 output=output,
                 t0=t0,
                 t1=t1,
-                status="success", # TODO
                 steps=[], # TODO
                 data=copy.deepcopy(data),
             )
-            self.state_saver.put(snapshot)
+            # TODO Allow for async put.
+            self.state_saver.put(snapshot=snapshot, context=context)
         
         yield FlowOutputEvent(
-            run_id=run_id,
+            run_id=context.id,
             step_id=self.id,
             outputs=output,
             elapsed_time=elapsed_time,
@@ -740,35 +719,19 @@ class Flow(BaseStep):
     
     async def complete(
         self,
-        run_id: str | None = None,
-        run_parent_id: str | None = None,
-        run_group_id: str | None = None,
-        dump_context: dict[str, Any] | None = None,
+        context: RunContext | None = None,
         **kwargs: Any
     ) -> dict[str, Any]:
         """Flow.run() wrapper method that completes the flow execution.
         
         Args: 
-            run_id: Identifier for the single run. 
-                Handled separately from kwargs to avoid passing it downstream.
-            run_parent_id: Identifier for the parent run.
-                Handled separately from kwargs to avoid passing it downstream.
-            run_group_id: Identifier for the group of runs.
-                Handled separately from kwargs to avoid passing it downstream.
-            dump_context: Context for dumping intermediate results. 
-                Handled separately from kwargs to avoid passing it downstream.
+            context: RunContext
             **kwargs: Additional keyword arguments required for step execution.
         
         Returns:
             dict[str, Any]: The flow's selected outputs.
         """
-        async for event in self.run(
-            run_id=run_id,
-            run_parent_id=run_parent_id,
-            run_group_id=run_group_id,
-            dump_context=dump_context,
-            **kwargs,
-        ):
+        async for event in self.run(context=context, **kwargs):
             if isinstance(event, FlowOutputEvent):
                 return event.outputs
 

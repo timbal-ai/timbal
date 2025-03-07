@@ -1,5 +1,4 @@
-from uuid_extensions import uuid7
-
+from ..context import RunContext
 from ..snapshot import Snapshot
 from .base import BaseSaver
 
@@ -14,92 +13,49 @@ class InMemorySaver(BaseSaver):
         For production use cases, use a persistent state saver like `PostgresSaver`.
     """
 
-    def __init__(self, snapshots: list[Snapshot] | None = None) -> None:
+    def __init__(
+        self, 
+        snapshots: list[Snapshot] | None = None,
+    ) -> None:
         """Initialize an InMemorySaver instance.
 
         Args:
             snapshots: Optional list of Snapshot objects to initialize the saver with.
-                       If None, starts with an empty list.
+                       Defaults to an empty list.
         """
-        if snapshots is not None:
-            self.snapshots = snapshots
-        else:
-            self.snapshots: list[Snapshot] = []
-    
-
-    def get(self, id: str) -> Snapshot | None:
-        """Retrieve a snapshot by its ID.
-
-        Args:
-            id: The ID of the snapshot to retrieve.
-
-        Returns:
-            The matching Snapshot object if found, None otherwise.
-            If multiple snapshots exist with the same ID, returns the most recent one.
-        """
-        for snapshot in self.snapshots[::-1]:
-            if snapshot.id == id:
-                return snapshot
-        return None
+        self.snapshots = snapshots if snapshots is not None else []
     
 
     def get_last(
         self, 
-        n: int = 1,
-        parent_id: str | None = None,
-        group_id: str | None = None,
-        flow_path: str | None = None,
-    ) -> list[Snapshot]:
-        """Retrieve the last n snapshots matching the specified criteria.
-
-        Args:
-            n: Number of snapshots to retrieve (default: 1).
-            parent_id: If provided, only returns snapshots in the ancestry chain
-                      starting from this parent ID.
-            group_id: If provided, only returns snapshots belonging to this group.
-            flow_path: If provided, only returns snapshots from this flow.
-
-        Returns:
-            A list of matching Snapshot objects in chronological order.
-            The list may contain fewer than n items if insufficient matches are found.
-        """
-        last_snapshots = []
-        current_parent_id = parent_id
+        path: str,
+        context: RunContext,
+    ) -> Snapshot | None:
+        """See base class."""
         for snapshot in self.snapshots[::-1]:
-            if len(last_snapshots) >= n:
-                break
-
-            if snapshot.group_id != group_id:
+            if snapshot.group_id != context.group_id:
                 continue
 
-            if snapshot.flow_path != flow_path:
+            if snapshot.path != path:
                 continue
 
-            if not current_parent_id:
-                last_snapshots.append(snapshot)
-            elif snapshot.id == current_parent_id:
-                last_snapshots.append(snapshot)
-                current_parent_id = snapshot.parent_id
+            if context.parent_id is None:
+                return snapshot
+            elif snapshot.id == context.parent_id:
+                return snapshot
 
-        return last_snapshots[::-1]
+        return None
     
 
-    def put(self, snapshot: Snapshot) -> None:
-        """Store a new snapshot.
-
-        Args:
-            snapshot: The Snapshot object to store.
-
-        Raises:
-            ValueError: If a snapshot with the same ID already exists.
-
-        Note:
-            If the snapshot has no ID, one will be automatically assigned.
-        """
-        if snapshot.id is None:
-            snapshot.id = uuid7(as_type="str")
-
-        if self.get(snapshot.id) is not None:
+    def put(
+        self, 
+        snapshot: Snapshot,
+        context: RunContext, # noqa: ARG002
+    ) -> None:
+        """See base class."""
+        # Since we're appending snapshots to a python list and there's no intrinsic way of ensuring
+        # unicity of ids, we need to check if the snapshot already exists.
+        if any(s.id == snapshot.id for s in self.snapshots):
             raise ValueError(f"Snapshot with id {snapshot.id} already exists.")
 
         self.snapshots.append(snapshot)

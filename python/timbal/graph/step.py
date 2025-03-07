@@ -5,10 +5,11 @@ from typing import Any
 import structlog
 from pydantic import BaseModel
 
+from ..state import RunContext
 from ..types.models import create_model_from_annotation, create_model_from_argspec
 from .base import BaseStep
 
-logger = structlog.get_logger(__name__)
+logger = structlog.get_logger("timbal.graph.step")
 
 
 class Step(BaseStep):
@@ -101,10 +102,7 @@ class Step(BaseStep):
 
     def run(
         self, 
-        run_id: str | None = None, # noqa: ARG002
-        run_parent_id: str | None = None, # noqa: ARG002
-        run_group_id: str | None = None, # noqa: ARG002
-        dump_context: dict[str, Any] | None = None, # noqa: ARG002
+        context: RunContext | None = None, # noqa: ARG002
         **kwargs: Any,
     ) -> Any:
         """Executes the step's processing logic."""

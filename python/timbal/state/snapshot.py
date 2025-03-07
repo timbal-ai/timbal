@@ -22,7 +22,7 @@ class Snapshot(BaseModel):
     """The group's identifier (in the state saver's context).
     When null, the snapshot is part of the default group (if enabled in the by the saver).
     """
-    flow_path: str
+    path: str
     """Snapshots can be stored by any Flow instance. Users can nest as many subflows as
     they want (with the same ids). We need this to uniquely identify where this snapshot comes from.
     """
@@ -34,8 +34,6 @@ class Snapshot(BaseModel):
     """Start time of the snapshot since epoch in ms."""
     t1: int
     """End time of the snapshot since epoch in ms."""
-    status: str
-    """Status of the run {success, failed, ...}"""
     steps: list[Any]
     """Run data of each step at the end of the run."""
     data: dict[str, BaseData]
