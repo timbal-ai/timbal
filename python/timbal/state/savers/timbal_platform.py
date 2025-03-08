@@ -38,9 +38,30 @@ class TimbalPlatformSaver(BaseSaver):
         if not context.timbal_platform_config:
             raise ValueError("Missing platform configuration for fetching the last snapshot.")
 
-        # TODO
+        if context.parent_id is None:
+            return None
 
-        return None
+        # No need to check for anything else, the timbal platform config will already be validated.
+
+        host = context.timbal_platform_config.host
+
+        auth_config = context.timbal_platform_config.auth_config
+        headers = {auth_config.header_key: auth_config.header_value}
+
+        app_config = context.timbal_platform_config.app_config
+        org_id = app_config.org_id
+        app_id = app_config.app_id
+        resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.parent_id}"
+
+        res = requests.get(
+            f"https://{host}/{resource_path}/snapshots", 
+            headers=headers,
+            params={"path": path},
+        )
+        res.raise_for_status()
+
+        res_body = res.json()
+        return self._load_snapshot_from_res_body(res_body)
 
 
     def put(

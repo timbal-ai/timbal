@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from .data import BaseData
 
@@ -11,7 +11,8 @@ class Snapshot(BaseModel):
     We allow for some fields to be None, so we can initialize this object without having to 
     await for the run to complete and send intermediate events with this.
     """
-    
+    model_config = ConfigDict(extra="ignore")
+
     v: str 
     """Versioning."""
     id: str

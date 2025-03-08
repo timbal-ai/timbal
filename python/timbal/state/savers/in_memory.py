@@ -32,6 +32,9 @@ class InMemorySaver(BaseSaver):
         context: RunContext,
     ) -> Snapshot | None:
         """See base class."""
+        if context.parent_id is None:
+            return None
+
         for snapshot in self.snapshots[::-1]:
             if snapshot.path != path:
                 continue

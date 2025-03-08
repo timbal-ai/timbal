@@ -496,8 +496,9 @@ class Flow(BaseStep):
         data.update({k: DataValue(value=v) for k, v in kwargs.items()})
 
         # Load LLM memories.
+        # Hence if this is a root run (no parent_id), we don't need to load any previous snapshot.
         # TODO Optimize this. There's no need to load previous snapshot if there are no memories to load.
-        if self.state_saver is not None:
+        if self.state_saver is not None and context.parent_id is not None:
             # TODO Allow for async get_last.
             # TODO Think error handling here. What if getting the last snapshot errors?
             last_snapshot = self.state_saver.get_last(path=self.path, context=context)

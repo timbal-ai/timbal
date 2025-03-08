@@ -56,6 +56,9 @@ class JSONLSaver(BaseSaver):
             This method loads the entire file into memory. For production use cases with large files,
             consider implementing a streaming approach that reads the file line by line.
         """
+        if context.parent_id is None:
+            return None 
+
         with open(self.path) as f:
             for line in reversed(list(f)):
                 snapshot = self._load_snapshot_from_line(line)
