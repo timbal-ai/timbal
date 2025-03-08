@@ -60,15 +60,10 @@ class JSONLSaver(BaseSaver):
             for line in reversed(list(f)):
                 snapshot = self._load_snapshot_from_line(line)
 
-                if snapshot.group_id != context.group_id:
-                    continue
-
                 if snapshot.path != path:
                     continue
 
-                if context.parent_id is None:
-                    return snapshot
-                elif snapshot.id == context.parent_id:
+                if context.parent_id is not None and snapshot.id == context.parent_id:
                     return snapshot
 
         return None

@@ -28,10 +28,8 @@ OpenAIEvent = ChatCompletionChunk
 
 class TimbalEvent(BaseModel):
     """Base class for all timbal events yielded during flow execution."""
-
     # Allow storing extra fields in the model.
-    # Validate dynamic assignments to the model.
-    model_config = ConfigDict(extra="allow", validate_assignment=True)
+    model_config = ConfigDict(extra="allow")
 
     type: str
     """The type of the event. This will be very useful for serializing and deserializing events."""
@@ -74,7 +72,5 @@ class FlowOutputEvent(TimbalEvent):
     """Event emitted when a flow completes with its full output."""
     type: str = "FLOW_OUTPUT"
 
-    outputs: dict[str, Any] = {}
-    """The outputs of the flow."""
-    elapsed_time: int
-    """The total amount of time it took for the flow to complete in milliseconds."""
+    output: dict[str, Any] = {}
+    """The output of the flow."""

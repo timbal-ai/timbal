@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 from timbal import Flow
+from timbal.state import RunContext
 from timbal.state.savers import JSONLSaver
 
 
@@ -58,12 +59,15 @@ async def test_jsonl():
         .compile(state_saver=jsonl_saver)
     )
 
-    await flow.complete(prompt="My name is David")
+    flow_output_event = await flow.complete(prompt="My name is David")
 
-    response = await flow.complete(prompt="What is my name?")
+    flow_output_event = await flow.complete(
+        context=RunContext(parent_id=flow_output_event.run_id),
+        prompt="What is my name?"
+    )
 
-    response_text = response["response"].content[0].text
-    assert "david" in response_text.lower(), "Response should mention that my name is David"
+    flow_output_text = flow_output_event.output["response"].content[0].text
+    assert "david" in flow_output_text.lower(), "Response should mention that my name is David"
 
     # Cleanup
     jsonl_path.unlink()

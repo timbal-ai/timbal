@@ -33,15 +33,10 @@ class InMemorySaver(BaseSaver):
     ) -> Snapshot | None:
         """See base class."""
         for snapshot in self.snapshots[::-1]:
-            if snapshot.group_id != context.group_id:
-                continue
-
             if snapshot.path != path:
                 continue
 
-            if context.parent_id is None:
-                return snapshot
-            elif snapshot.id == context.parent_id:
+            if context.parent_id is not None and snapshot.id == context.parent_id:
                 return snapshot
 
         return None

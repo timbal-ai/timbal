@@ -12,6 +12,7 @@ async def test_complete():
         .set_output("response", "llm.return")
     )
 
-    result = await flow.complete(prompt="What is the capital of France?")
+    flow_output_event = await flow.complete(prompt="What is the capital of France?")
+    flow_output = flow_output_event.output
 
-    assert "response" in result and isinstance(result["response"], Message)
+    assert "response" in flow_output and isinstance(flow_output["response"], Message)

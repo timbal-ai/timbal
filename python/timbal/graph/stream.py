@@ -234,7 +234,7 @@ def handle_timbal_event(
 
     # TODO Here probably we should inject properties and convert to StepOutputEvent, no?
     if isinstance(timbal_event, FlowOutputEvent):
-        async_gen_state.results = timbal_event.outputs
+        async_gen_state.results = timbal_event.output
         return None
 
 

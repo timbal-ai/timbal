@@ -6,7 +6,6 @@ from timbal.state.savers import InMemorySaver
 
 @pytest.mark.asyncio
 async def test_invalid_run_id():
-
     flow = (
         Flow(id="flow")
         .add_llm(id="llm", memory_id="llm")
@@ -26,8 +25,7 @@ async def test_invalid_run_id():
 
 
 @pytest.mark.asyncio
-async def test_no_parent_id_no_group_id():
-
+async def test_no_parent_id():
     flow = (
         Flow(id="flow")
         .add_llm(id="llm", memory_id="llm")
@@ -42,12 +40,11 @@ async def test_no_parent_id_no_group_id():
     prompt = "What is my name?"
     async for event in flow.run(prompt=prompt):
         if event.type == "FLOW_OUTPUT":
-            assert "david" in event.outputs["message"].content[0].text.lower()
+            assert "david" not in event.output["message"].content[0].text.lower()
 
 
 @pytest.mark.asyncio
-async def test_no_parent_id_different_group_id():
-
+async def test_parent_id():
     flow = (
         Flow(id="flow")
         .add_llm(id="llm", memory_id="llm")
@@ -57,16 +54,19 @@ async def test_no_parent_id_different_group_id():
     )
 
     prompt = "Hello my name is David"
-    await flow.complete(context=RunContext(group_id="some_other_group_id"), prompt=prompt)
+    flow_output_event = await flow.complete(prompt=prompt)
 
     prompt = "What is my name?"
-    async for event in flow.run(prompt=prompt):
+    async for event in flow.run(
+        context=RunContext(parent_id=flow_output_event.run_id),
+        prompt=prompt,
+    ):
         if event.type == "FLOW_OUTPUT":
-            assert "david" not in event.outputs["message"].content[0].text.lower()
+            assert "david" in event.output["message"].content[0].text.lower()
 
 
 @pytest.mark.asyncio
-async def test_no_parent_id_same_group_id():
+async def test_different_parent_id():
 
     flow = (
         Flow(id="flow")
@@ -80,75 +80,12 @@ async def test_no_parent_id_same_group_id():
     await flow.complete(prompt=prompt)
 
     prompt = "What is my name?"
-    async for event in flow.run(prompt=prompt):
-        if event.type == "FLOW_OUTPUT":
-            assert "david" in event.outputs["message"].content[0].text.lower()
-
-
-@pytest.mark.asyncio
-async def test_different_parent_id_same_group_id():
-
-    flow = (
-        Flow(id="flow")
-        .add_llm(id="llm", memory_id="llm")
-        .set_data_map("llm.prompt", "prompt")
-        .set_output("message", "llm.return")
-        .compile(state_saver=InMemorySaver())
-    )
-
-    prompt = "Hello my name is David"
-    await flow.complete(
-        context=RunContext(
-            id="1",
-            group_id="same_group_id",
-        ),
-        prompt=prompt,
-    )
-
-    prompt = "What is my name?"
     async for event in flow.run(
-        context=RunContext(
-            id="2",
-            parent_id="wrong_parent_id",
-            group_id="same_group_id",
-        ),
+        context=RunContext(parent_id="wrong_parent_id"),
         prompt=prompt,
     ):
         if event.type == "FLOW_OUTPUT":
-            assert "david" not in event.outputs["message"].content[0].text.lower()
-
-
-@pytest.mark.asyncio
-async def test_same_parent_id_same_group_id():
-
-    flow = (
-        Flow(id="flow")
-        .add_llm(id="llm", memory_id="llm")
-        .set_data_map("llm.prompt", "prompt")
-        .set_output("message", "llm.return")
-        .compile(state_saver=InMemorySaver())
-    )
-
-    prompt = "Hello my name is David"
-    await flow.complete(
-        context=RunContext(
-            id="1",
-            group_id="same_group_id",
-        ),
-        prompt=prompt,
-    )
-
-    prompt = "What is my name?"
-    async for event in flow.run(
-        context=RunContext(
-            id="2",
-            parent_id="1",
-            group_id="same_group_id",
-        ),
-        prompt=prompt,
-    ):
-        if event.type == "FLOW_OUTPUT":
-            assert "david" in event.outputs["message"].content[0].text.lower()
+            assert "david" not in event.output["message"].content[0].text.lower()
 
 
 @pytest.mark.asyncio
@@ -163,26 +100,25 @@ async def test_rewind():
     )
 
     prompt = "Hello"
-    await flow.complete(context=RunContext(id="1"), prompt=prompt)
+    flow_output_event_1 = await flow.complete(prompt=prompt)
 
     prompt = "My name is David"
-    await flow.complete(context=RunContext(id="2"), prompt=prompt)
+    await flow.complete(
+        context=RunContext(parent_id=flow_output_event_1.run_id),
+        prompt=prompt,
+    )
 
     prompt = "What is my name?"
     async for event in flow.run(
-        context=RunContext(
-            id="3",
-            parent_id="1",
-        ),
+        context=RunContext(parent_id=flow_output_event_1.run_id),
         prompt=prompt,
     ):
         if event.type == "FLOW_OUTPUT":
-            assert "david" not in event.outputs["message"].content[0].text.lower()
+            assert "david" not in event.output["message"].content[0].text.lower()
 
 
 @pytest.mark.asyncio
 async def test_rewind_2():
-
     flow = (
         Flow(id="flow")
         .add_llm(id="llm", memory_id="llm")
@@ -192,24 +128,30 @@ async def test_rewind_2():
     )
 
     prompt = "Hello"
-    await flow.complete(context=RunContext(id="1"), prompt=prompt)
+    flow_output_event_1 = await flow.complete(prompt=prompt)
 
     prompt = "My name is David"
-    await flow.complete(context=RunContext(id="2"), prompt=prompt)
-
-    prompt = "What is my name?"
-    response = await flow.complete(context=RunContext(id="3"), prompt=prompt)
-    assert "david" in response["message"].content[0].text.lower()
-
-    prompt = "My name is John"
-    await flow.complete(
-        context=RunContext(
-            id="4",
-            parent_id="1",
-        ),
+    flow_output_event_2 = await flow.complete(
+        context=RunContext(parent_id=flow_output_event_1.run_id),
         prompt=prompt,
     )
 
     prompt = "What is my name?"
-    response = await flow.complete(context=RunContext(id="5"), prompt=prompt)
-    assert "john" in response["message"].content[0].text.lower()
+    flow_output_event_3 = await flow.complete(
+        context=RunContext(parent_id=flow_output_event_2.run_id), 
+        prompt=prompt,
+    )
+    assert "david" in flow_output_event_3.output["message"].content[0].text.lower()
+
+    prompt = "My name is John"
+    flow_output_event_4 = await flow.complete(
+        context=RunContext(parent_id=flow_output_event_1.run_id),
+        prompt=prompt,
+    )
+
+    prompt = "What is my name?"
+    flow_output_event_5 = await flow.complete(
+        context=RunContext(parent_id=flow_output_event_4.run_id),
+        prompt=prompt,
+    )
+    assert "john" in flow_output_event_5.output["message"].content[0].text.lower()

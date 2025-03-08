@@ -697,13 +697,12 @@ class Flow(BaseStep):
                 v="0.2.0",
                 id=context.id,
                 parent_id=context.parent_id,
-                group_id=context.group_id,
                 path=self.path,
                 input=kwargs,
                 output=output,
                 t0=t0,
                 t1=t1,
-                steps=[], # TODO
+                # TODO steps
                 data=copy.deepcopy(data),
             )
             # TODO Allow for async put.
@@ -712,8 +711,7 @@ class Flow(BaseStep):
         yield FlowOutputEvent(
             run_id=context.id,
             step_id=self.id,
-            outputs=output,
-            elapsed_time=elapsed_time,
+            output=output,
         )
 
     
@@ -721,7 +719,7 @@ class Flow(BaseStep):
         self,
         context: RunContext | None = None,
         **kwargs: Any
-    ) -> dict[str, Any]:
+    ) -> FlowOutputEvent:
         """Flow.run() wrapper method that completes the flow execution.
         
         Args: 
@@ -733,7 +731,7 @@ class Flow(BaseStep):
         """
         async for event in self.run(context=context, **kwargs):
             if isinstance(event, FlowOutputEvent):
-                return event.outputs
+                return event
 
 
     def add_step(

@@ -15,8 +15,6 @@ class RunContext(BaseModel):
     """
     parent_id: str | None = None
     """Whether this run is a direct child of another run.
-    This field should be used when we want to create a new branch from a specific run.
-    Use case: rewind in chatgpt-like interfaces.
+    Can be used to recursively retrieve all runs into a single list -> chat history.
+    Can also be used to create a new branch from a specific run -> rewind.
     """
-    group_id: str | None = None
-    """Group a bunch of runs together."""

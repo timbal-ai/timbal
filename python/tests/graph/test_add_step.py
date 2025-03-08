@@ -11,6 +11,7 @@ from timbal.types import Field
 def identity_handler(x: Any = Field(default=None)) -> Any:
     return x
 
+
 def identity_handler_2(x: Any = Field(default=None)) -> Any:
     return x
 
@@ -62,7 +63,8 @@ async def test_add_step_without_id():
 
 @pytest.mark.asyncio
 async def test_automatic_link_creation():
-    flow = (Flow(id="test_automatic_link_creation")
+    flow = (
+        Flow(id="test_automatic_link_creation")
         .add_step("step_1", identity_handler, x=1)
         .add_step("step_2", identity_handler_2)
         .set_data_map("step_2.x", "step_1.return")
@@ -73,12 +75,13 @@ async def test_automatic_link_creation():
 
     assert len(flow.links) == 1 and flow.links["step_1-step_2"]
     assert "step_2" in flow.steps
-    assert result["result"] == 1
+    assert result.output["result"] == 1
 
 
 @pytest.mark.asyncio
 async def test_add_step_data_map():
-    flow = (Flow(id="test_add_step_data_map")
+    flow = (
+        Flow(id="test_add_step_data_map")
         .add_step("step_1", identity_handler, x=1)
         .add_step("step_2", identity_handler_2, x=DataMap(key="step_1.return"))
         .set_output("result", "step_2.return")
@@ -88,4 +91,4 @@ async def test_add_step_data_map():
 
     assert len(flow.links) == 1 and flow.links["step_1-step_2"]
     assert "step_2" in flow.steps
-    assert result["result"] == 1
+    assert result.output["result"] == 1

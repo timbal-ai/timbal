@@ -30,6 +30,6 @@ async def test_string_interpolation():
 
     async for event in flow.run(x1=x1, x2=x2):
         if event.type == "FLOW_OUTPUT":
-            flow_outputs = event.outputs
-            assert flow_outputs["step_3_x"] == f"{x1} {x2}"
-            assert flow_outputs["step_3_return"] == f"{x1} {x2}"
+            flow_output = event.output
+            assert flow_output["step_3_x"] == f"{x1} {x2}"
+            assert flow_output["step_3_return"] == f"{x1} {x2}"
