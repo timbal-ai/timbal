@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from .. import __version__
 from ..logs import setup_logging
+from ..state import RunContext
 from ..types.models import dump
 from .utils import ModuleSpec, is_port_in_use, load_module
 
@@ -95,7 +96,9 @@ def create_app(
     @app.post("/run")
     async def run(req: Request) -> Response:
         req_data = await req.json()
-        res_content = await app.state.flow.complete(**req_data)
+        req_context = req_data.pop("context", None)
+        req_context = RunContext.model_validate(req_context)
+        res_content = await app.state.flow.complete(context=req_context, **req_data)
         res_content = dump(res_content)
         return JSONResponse(
             status_code=200,
