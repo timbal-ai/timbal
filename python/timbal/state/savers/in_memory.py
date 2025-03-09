@@ -39,7 +39,7 @@ class InMemorySaver(BaseSaver):
             if snapshot.path != path:
                 continue
 
-            if context.parent_id is not None and snapshot.id == context.parent_id:
+            if snapshot.id == context.parent_id:
                 return snapshot
 
         return None
