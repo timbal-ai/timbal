@@ -58,9 +58,9 @@ class StepOutputEvent(TimbalEvent):
     """Event emitted when a step completes with its full output."""
     type: str = "STEP_OUTPUT"
 
-    input: Any # dict[str, Any] = {}
+    input: Any
     """The input arguments passed to the step."""
-    step_result: Any
+    output: Any
     """The result of the step."""
     usage: Any | None = None
     """The usage of the step."""
@@ -72,5 +72,5 @@ class FlowOutputEvent(TimbalEvent):
     """Event emitted when a flow completes with its full output."""
     type: str = "FLOW_OUTPUT"
 
-    output: dict[str, Any] = {}
+    output: Any | None = None
     """The output of the flow."""

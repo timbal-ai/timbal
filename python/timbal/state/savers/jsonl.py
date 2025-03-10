@@ -67,10 +67,7 @@ class JSONLSaver(BaseSaver):
             for line in reversed(list(f)):
                 snapshot = self._load_snapshot_from_line(line)
 
-                if snapshot.path != path:
-                    continue
-
-                if snapshot.id == context.parent_id:
+                if snapshot.path == path and snapshot.id == context.parent_id:
                     return snapshot
 
         return None
@@ -87,8 +84,8 @@ class JSONLSaver(BaseSaver):
         with open(self.path) as f:
             for line in reversed(list(f)):
                 snapshot_i = self._load_snapshot_from_line(line)
-                if snapshot_i.id == context.id:
-                    raise ValueError(f"Snapshot with id {snapshot.id} already exists.")
+                if snapshot_i.id == snapshot.id and snapshot_i.path == snapshot.path:
+                    raise ValueError(f"Snapshot with id {snapshot.id} and path {snapshot.path} already exists.")
 
         with open(self.path, "a") as f:
             snapshot_dump = dump(snapshot)

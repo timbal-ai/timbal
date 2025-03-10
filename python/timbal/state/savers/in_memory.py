@@ -36,10 +36,7 @@ class InMemorySaver(BaseSaver):
             return None
 
         for snapshot in self.snapshots[::-1]:
-            if snapshot.path != path:
-                continue
-
-            if snapshot.id == context.parent_id:
+            if snapshot.path == path and snapshot.id == context.parent_id:
                 return snapshot
 
         return None
@@ -53,7 +50,8 @@ class InMemorySaver(BaseSaver):
         """See base class."""
         # Since we're appending snapshots to a python list and there's no intrinsic way of ensuring
         # unicity of ids, we need to check if the snapshot already exists.
-        if any(s.id == snapshot.id for s in self.snapshots):
-            raise ValueError(f"Snapshot with id {snapshot.id} already exists.")
+        for snapshot_i in reversed(self.snapshots):
+            if snapshot_i.id == snapshot.id and snapshot_i.path == snapshot.path:
+                raise ValueError(f"Snapshot with id {snapshot.id} and path {snapshot.path} already exists.")
 
         self.snapshots.append(snapshot)

@@ -212,14 +212,12 @@ class Flow(BaseStep):
         return self.return_model().model_json_schema()
 
 
-    def _collect_outputs(self, data: dict[str, BaseData]) -> dict[str, Any]:
+    def _collect_outputs(self, data: dict[str, BaseData]) -> Any:
         """Aux method to collect the outputs from the data dictionary."""
-        outputs = {}
 
         if self.is_agent:
             _, rev_dag = self.get_dags()
             rev_sources = list(get_sources(rev_dag))
-
             assert len(rev_sources) == 1, "Tool to LLM agent mode should have a single LLM as last step"
             last_llm_output = None
             last_llm_id = rev_sources[0]
@@ -233,20 +231,19 @@ class Flow(BaseStep):
                     last_llms = list(rev_dag[last_tools[0]])
                     assert len(last_llms) == 1, "Tool to LLM agent mode should have a single LLM as last step"
                     last_llm_id = last_llms[0]
-            outputs["response"] = last_llm_output
+            return last_llm_output
 
-        else:
-            for output_name, data_key in self.outputs.items():
-                # If we don't find the key, we set the output to None.
-                # During the flow execution, a step could not be executed, thus its output will not be defined.
-                try:
-                    output_value = get_data_key(data, data_key)
-                except DataKeyError:
-                    output_value = None
-                except Exception as e:
-                    raise e
-                outputs[output_name] = output_value
-
+        outputs = {}
+        for output_name, data_key in self.outputs.items():
+            # If we don't find the key, we set the output to None.
+            # During the flow execution, a step could not be executed, thus its output will not be defined.
+            try:
+                output_value = get_data_key(data, data_key)
+            except DataKeyError:
+                output_value = None
+            except Exception as e:
+                raise e
+            outputs[output_name] = output_value
         return outputs
     
 
@@ -575,6 +572,7 @@ class Flow(BaseStep):
             for completed_task in done:
                 step_id = completed_task.step_id
                 step_path = self.steps[step_id].path
+                step_type = "flow" if isinstance(self.steps[step_id], Flow) else "step"
                 step_input = None
                 step_result = None
                 step_usage = None
@@ -685,6 +683,7 @@ class Flow(BaseStep):
                 elapsed_time = end_time - start_time
 
                 steps[step_path] = {
+                    "type": step_type,
                     "input": step_input,
                     "output": step_result,
                     "t0": start_time,
@@ -697,7 +696,7 @@ class Flow(BaseStep):
                     parent_step_id=self.id,
                     step_id=step_id,
                     input=step_input,
-                    step_result=step_result,
+                    output=step_result,
                     usage=step_usage,
                     elapsed_time=elapsed_time,
                 )

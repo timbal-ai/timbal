@@ -16,13 +16,9 @@ class Snapshot(BaseModel):
     v: str 
     """Versioning."""
     id: str
-    """The snapshot's identifier (in the state saver's context).
-    We allow for the id to be None, so we can defer the id assignment to the state saver later on.
-    """
+    """The snapshot's run identifier."""
     parent_id: str | None = None
-    """The parent snapshot's identifier (in the state saver's context).
-    When null, the snapshot is a root snapshot.
-    """
+    """The parent run's identifier. When null, the snapshot is a from a root run."""
     path: str
     """Snapshots can be stored by any Flow instance. Users can nest as many subflows as
     they want (with the same ids). We need this to uniquely identify where this snapshot comes from.

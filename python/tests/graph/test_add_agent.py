@@ -30,7 +30,7 @@ async def test_add_agent():
         Flow(id="test_add_agent")
         .add_agent(model="gpt-4o-mini", tools=[get_weather, get_traffic])
         .set_data_map("agent.prompt", "prompt")
-        .set_output("response", "agent.return.response")
+        .set_output("response", "agent.return")
         .compile(state_saver=InMemorySaver())
     )
 
@@ -57,7 +57,7 @@ async def test_add_tool_description():
             ],
         )
         .set_data_map("agent.prompt", "prompt")
-        .set_output("response", "agent.return.response")
+        .set_output("response", "agent.return")
         .compile(state_saver=InMemorySaver())
     )
 
@@ -79,7 +79,7 @@ async def test_max_iter():
             max_iter=2
         )
         .set_data_map("agent.prompt", "prompt")
-        .set_output("response", "agent.return.response")
+        .set_output("response", "agent.return")
         .compile(state_saver=InMemorySaver())
     )
 
