@@ -421,7 +421,7 @@ class Flow(BaseStep):
         step_id: str, 
         data: dict[str, Any],
         context: RunContext,
-    ) -> Any:
+    ) -> tuple[Any, Any]:
         """Executes a single step in the flow and returns its result.
 
         Resolves step arguments from the data dictionary, validates them against the step's parameter model,
@@ -434,7 +434,8 @@ class Flow(BaseStep):
 
 
         Returns:
-            The step's result (direct value, generator, or awaited coroutine)
+            The step's input arguments
+            The step's output (direct value, generator, or awaited coroutine)
 
         Note:
             While this function is async, it doesn't await generator results - those are handled by the caller.
@@ -442,9 +443,10 @@ class Flow(BaseStep):
         """
         step = self.steps[step_id]
 
-        step_args = self._resolve_step_args(step_id, data)
-        # TODO Think if we should return the actual inputs or all the validated params.
-        step_args = step.params_model().model_validate(step_args)
+        step_input = self._resolve_step_args(step_id, data)
+        # We need to copy to avoid the LLM memories being modified by reference.
+        step_input = copy.deepcopy(step_input)
+        step_input_validated = step.params_model().model_validate(step_input)
 
         # If we're dealing with a regular sync function, we need to run it in an executor to 
         # avoid blocking the event loop.
@@ -452,21 +454,21 @@ class Flow(BaseStep):
             loop = asyncio.get_running_loop()
             step_result = await loop.run_in_executor(None, lambda: step.run(
                 context=context,
-                **dict(step_args)
+                **dict(step_input_validated)
             ))
             if inspect.isgenerator(step_result):
-                return step_args, sync_to_async_gen(step_result, loop)
-            return step_args, step_result
+                return step_input, sync_to_async_gen(step_result, loop)
+            return step_input, step_result
         
         step_result = step.run(
             context=context,
-            **dict(step_args)
+            **dict(step_input_validated)
         )
 
         if step.is_coroutine:
             step_result = await step_result
         
-        return step_args, step_result
+        return step_input, step_result
 
 
     async def run(
@@ -494,6 +496,9 @@ class Flow(BaseStep):
         data = copy.deepcopy(self.data)
 
         data.update({k: DataValue(value=v) for k, v in kwargs.items()})
+
+        # Here we'll store all the steps outputs and run data.
+        steps = {}
 
         # Load LLM memories.
         # Hence if this is a root run (no parent_id), we don't need to load any previous snapshot.
@@ -569,9 +574,10 @@ class Flow(BaseStep):
             
             for completed_task in done:
                 step_id = completed_task.step_id
-                step_args = None
+                step_path = self.steps[step_id].path
+                step_input = None
                 step_result = None
-                step_usage = {}
+                step_usage = None
                 try:
                     step_result = await completed_task
 
@@ -591,12 +597,12 @@ class Flow(BaseStep):
                             )
                         continue
 
-                    step_args, step_result = step_result
+                    step_input, step_result = step_result
 
                     if inspect.isasyncgen(step_result):
                         async_gens[step_id] = AsyncGenState(
                             gen=step_result,
-                            inputs=step_args,
+                            input=step_input,
                         )
                         task = asyncio.create_task(step_result.__anext__())
                         task.step_id = step_id
@@ -605,7 +611,7 @@ class Flow(BaseStep):
                 
                 except StopAsyncIteration:
                     async_gen_state = async_gens[step_id]
-                    step_args = async_gen_state.inputs
+                    step_input = async_gen_state.input
                     step_result = async_gen_state.results
                     step_usage = async_gen_state.usage
 
@@ -678,20 +684,27 @@ class Flow(BaseStep):
                 end_time = int(time.time() * 1000)
                 elapsed_time = end_time - start_time
 
+                steps[step_path] = {
+                    "input": step_input,
+                    "output": step_result,
+                    "t0": start_time,
+                    "t1": end_time,
+                    "usage": step_usage,
+                }
+
                 yield StepOutputEvent(
                     run_id=context.id,
                     parent_step_id=self.id,
                     step_id=step_id,
-                    step_args=step_args,
+                    input=step_input,
                     step_result=step_result,
-                    step_usage=step_usage,
+                    usage=step_usage,
                     elapsed_time=elapsed_time,
                 )
 
         # Grab the properties as defined in the return_model.
         output = self._collect_outputs(data)
         t1 = int(time.time() * 1000)
-        elapsed_time = t1 - t0
 
         if self.state_saver is not None:
             snapshot = Snapshot(
@@ -703,7 +716,7 @@ class Flow(BaseStep):
                 output=output,
                 t0=t0,
                 t1=t1,
-                # TODO steps
+                steps=steps,
                 data=copy.deepcopy(data),
             )
             # TODO Allow for async put.

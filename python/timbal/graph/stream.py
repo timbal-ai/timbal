@@ -50,16 +50,16 @@ class AsyncGenState(BaseModel):
 
     Attributes:
         gen (AsyncGenerator[Any, None]): The async generator being processed
-        inputs (BaseModel): The inputs for the step (after being resolved and validated)
+        input (Any): The input for the step (before validation - as sent by the user)
         results (list[Any]): Accumulated results from generator yields (e.g. LLM message chunks)
         usage (dict[str, Any]): Resource usage stats (e.g. token counts for LLM calls)
     """
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     gen: AsyncGenerator[Any, None]
-    inputs: BaseModel
+    input: Any
     results: list[Any] = []
-    usage: dict[str, Any] = {}
+    usage: Any | None = None
 
 
 def handle_openai_event(
@@ -83,7 +83,34 @@ def handle_openai_event(
 
     # OpenAI SDKs use a message with empty choices to indicate the end of a stream and send the usage.
     if not len(openai_event.choices):
+        # ChatCompletionChunk(
+        #     id='chatcmpl-B9UwHoIGJ9SzsqLMIGKaeFl87kyn1', 
+        #     choices=[], 
+        #     created=1741603581, 
+        #     model='gpt-4o-mini-2024-07-18', 
+        #     object='chat.completion.chunk', 
+        #     service_tier='default', 
+        #     system_fingerprint='fp_06737a9306', 
+        #     usage=CompletionUsage(
+        #         completion_tokens=10, 
+        #         prompt_tokens=8, 
+        #         total_tokens=18, 
+        #         completion_tokens_details=CompletionTokensDetails(
+        #             accepted_prediction_tokens=0, 
+        #             audio_tokens=0, 
+        #             reasoning_tokens=0, 
+        #             rejected_prediction_tokens=0
+        #         ), 
+        #         prompt_tokens_details=PromptTokensDetails(
+        #             audio_tokens=0, 
+        #             cached_tokens=0
+        #         )
+        #     )
+        # )
+        # TODO Grab input cached tokens, audio tokens, etc.
         if openai_event.usage:
+            if async_gen_state.usage is None:
+                async_gen_state.usage = {}
             output_tokens = async_gen_state.usage.get("output_tokens", 0)
             output_tokens += openai_event.usage.completion_tokens
             input_tokens = async_gen_state.usage.get("input_tokens", 0)
@@ -158,6 +185,8 @@ def handle_anthropic_event(
     if isinstance(anthropic_event, RawMessageStartEvent):
         if anthropic_event.message.usage:
             input_tokens = anthropic_event.message.usage.input_tokens
+            if async_gen_state.usage is None:
+                async_gen_state.usage = {}
             async_gen_state.usage["input_tokens"] = input_tokens
         return None
 
@@ -194,6 +223,8 @@ def handle_anthropic_event(
     if isinstance(anthropic_event, RawMessageDeltaEvent):
         if anthropic_event.usage:
             output_tokens = anthropic_event.usage.output_tokens
+            if async_gen_state.usage is None:
+                async_gen_state.usage = {}
             async_gen_state.usage["output_tokens"] = output_tokens
         return None
 
@@ -227,9 +258,9 @@ def handle_timbal_event(
     if isinstance(timbal_event, StepChunkEvent):
         return None
     
+    # TODO Think how should we stream partial flow outputs results or chunks. 
+    # Perhaps we should only stream up if the step output is selected as a flow output.
     if isinstance(timbal_event, StepOutputEvent):
-        async_gen_state.usage[timbal_event.step_id] = timbal_event.step_usage
-        # Time is not aggregated here, since we might have parallel executions, so the final adding up would be wrong.
         return None
 
     # TODO Here probably we should inject properties and convert to StepOutputEvent, no?

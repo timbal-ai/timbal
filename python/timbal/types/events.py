@@ -58,11 +58,11 @@ class StepOutputEvent(TimbalEvent):
     """Event emitted when a step completes with its full output."""
     type: str = "STEP_OUTPUT"
 
-    step_args: Any # dict[str, Any] = {}
-    """The arguments passed to the step."""
+    input: Any # dict[str, Any] = {}
+    """The input arguments passed to the step."""
     step_result: Any
     """The result of the step."""
-    step_usage: dict[str, Any] = {}
+    usage: Any | None = None
     """The usage of the step."""
     elapsed_time: int 
     """The time it took for the step to complete in milliseconds."""

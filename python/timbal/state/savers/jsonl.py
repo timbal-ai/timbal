@@ -21,13 +21,17 @@ class JSONLSaver(BaseSaver):
         For production use cases, use a persistent state saver like `PostgresSaver`.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path | str) -> None:
         """Initialize a JSONLSaver instance.
 
         Args: 
             path: Path to the JSONl file that will store the snapshots. 
         """
-        self.path = path
+        if isinstance(path, str):
+            path = Path(path)
+        elif not isinstance(path, Path):
+            raise ValueError(f"'path' must be a string or a Path, got {type(path)}.")
+        self.path = path.expanduser().resolve()
         # Ensure the directory exists
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Create the file if it doesn't exist
@@ -82,8 +86,8 @@ class JSONLSaver(BaseSaver):
         # unicity of ids, we need to check if the snapshot already exists.
         with open(self.path) as f:
             for line in reversed(list(f)):
-                snapshot = self._load_snapshot_from_line(line)
-                if snapshot.id == id:
+                snapshot_i = self._load_snapshot_from_line(line)
+                if snapshot_i.id == context.id:
                     raise ValueError(f"Snapshot with id {snapshot.id} already exists.")
 
         with open(self.path, "a") as f:

@@ -35,7 +35,7 @@ class Snapshot(BaseModel):
     """Start time of the snapshot since epoch in ms."""
     t1: int | None = None
     """End time of the snapshot since epoch in ms."""
-    steps: list[Any] | None = None
+    steps: dict[str, Any] | None = None
     """Run data of each step at the end of the run."""
     data: dict[str, BaseData] | None = None
     """Data state of the flow at the end of the run."""
