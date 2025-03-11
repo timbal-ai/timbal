@@ -3,6 +3,7 @@ import copy
 import inspect
 import re
 import time
+import traceback
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
@@ -11,9 +12,21 @@ import structlog
 from pydantic import BaseModel, Field
 from uuid_extensions import uuid7
 
-from ..errors import DataKeyError, InvalidLinkError, StepKeyError
+from ..errors import (
+    DataKeyError,
+    FlowExecutionError,
+    InvalidLinkError,
+    StepExecutionError,
+    StepKeyError,
+)
 from ..state import RunContext, Snapshot
-from ..state.data import BaseData, DataMap, DataValue, get_data_key
+from ..state.data import (
+    BaseData,
+    DataError,
+    DataMap,
+    DataValue,
+    get_data_key,
+)
 from ..state.savers.base import BaseSaver
 from ..steps.llms.gateway import handler as llm
 from ..types import (
@@ -34,7 +47,7 @@ from .base import BaseStep
 from .link import Link
 from .step import Step
 from .stream import AsyncGenState, handle_event, sync_to_async_gen
-from .utils import Dag, get_ancestors, get_sources, is_dag
+from .utils import Dag, get_ancestors, get_sources, get_successors, is_dag
 
 logger = structlog.get_logger("timbal.graph.flow")
 
@@ -219,31 +232,56 @@ class Flow(BaseStep):
             _, rev_dag = self.get_dags()
             rev_sources = list(get_sources(rev_dag))
             assert len(rev_sources) == 1, "Tool to LLM agent mode should have a single LLM as last step"
+
             last_llm_output = None
             last_llm_id = rev_sources[0]
             while last_llm_output is None:
                 try: 
-                    last_llm_output = get_data_key(data, f"{last_llm_id}.return")
+                    last_llm_output_key = f"{last_llm_id}.return"
+                    last_llm_output = get_data_key(data, last_llm_output_key)
+                    if isinstance(last_llm_output, DataError):
+                        flow_execution_error_key = f"{self.path}.{last_llm_id}"
+                        raise FlowExecutionError(f"Error collecting outputs {{'{flow_execution_error_key}'}}.")
                 except DataKeyError:
                     last_llm_output = None
-                    last_tools = list(rev_dag[last_llm_id])
-                    assert len(last_tools) >= 1, "The last LLM of a tool to LLM agent must have at least one tool result."
-                    last_llms = list(rev_dag[last_tools[0]])
-                    assert len(last_llms) == 1, "Tool to LLM agent mode should have a single LLM as last step"
-                    last_llm_id = last_llms[0]
+
+                    last_tools_ids = list(rev_dag[last_llm_id])
+                    assert len(last_tools_ids) >= 1, \
+                        "The last LLM of a tool to LLM agent must have at least one tool result."
+                    last_tools_errors = set()
+                    for last_tool_id in last_tools_ids:
+                        last_tool_output_key = f"{last_tool_id}.return"
+                        try:
+                            last_tool_output = get_data_key(data, last_tool_output_key)
+                            if isinstance(last_tool_output, DataError):
+                                flow_execution_error_key = f"{self.path}.{last_tool_id}"
+                                last_tools_errors.add(flow_execution_error_key)
+                        except DataKeyError:
+                            pass
+
+                    last_llms_ids = list(rev_dag[last_tools_ids[0]])
+                    assert len(last_llms_ids) == 1, \
+                        "Tool to LLM agent mode should have a single LLM as last step"
+                    last_llm_id = last_llms_ids[0]
             return last_llm_output
 
+        errors = set()
         outputs = {}
         for output_name, data_key in self.outputs.items():
             # If we don't find the key, we set the output to None.
             # During the flow execution, a step could not be executed, thus its output will not be defined.
             try:
                 output_value = get_data_key(data, data_key)
+                if isinstance(output_value, DataError): 
+                    flow_execution_error_key = f"{self.path}.{data_key.split('.')[0]}"
+                    errors.add(flow_execution_error_key)
+                else:
+                    outputs[output_name] = output_value
             except DataKeyError:
                 output_value = None
-            except Exception as e:
-                raise e
-            outputs[output_name] = output_value
+        
+        if len(errors):
+            raise FlowExecutionError(f"Error collecting outputs {errors}.")
         return outputs
     
 
@@ -443,29 +481,33 @@ class Flow(BaseStep):
         step_input = self._resolve_step_args(step_id, data)
         # We need to copy to avoid the LLM memories being modified by reference.
         step_input = copy.deepcopy(step_input)
-        step_input_validated = step.params_model().model_validate(step_input)
 
-        # If we're dealing with a regular sync function, we need to run it in an executor to 
-        # avoid blocking the event loop.
-        if not step.is_coroutine and not step.is_async_gen:
-            loop = asyncio.get_running_loop()
-            step_result = await loop.run_in_executor(None, lambda: step.run(
+        try:
+            step_input_validated = step.params_model().model_validate(step_input)
+            # If we're dealing with a regular sync function, we need to run it in an executor to 
+            # avoid blocking the event loop.
+            if not step.is_coroutine and not step.is_async_gen:
+                loop = asyncio.get_running_loop()
+                step_result = await loop.run_in_executor(None, lambda: step.run(
+                    context=context,
+                    **dict(step_input_validated)
+                ))
+                if inspect.isgenerator(step_result):
+                    return step_input, sync_to_async_gen(step_result, loop)
+                return step_input, step_result
+            
+            step_result = step.run(
                 context=context,
                 **dict(step_input_validated)
-            ))
-            if inspect.isgenerator(step_result):
-                return step_input, sync_to_async_gen(step_result, loop)
-            return step_input, step_result
-        
-        step_result = step.run(
-            context=context,
-            **dict(step_input_validated)
-        )
+            )
 
-        if step.is_coroutine:
-            step_result = await step_result
-        
-        return step_input, step_result
+            if step.is_coroutine:
+                step_result = await step_result
+            
+            return step_input, step_result
+
+        except Exception as e:
+            raise StepExecutionError(step_input, e) from e
 
 
     async def run(
@@ -542,7 +584,9 @@ class Flow(BaseStep):
         tasks_completions = {step_id: asyncio.Event() for step_id in self.steps}
 
         # When working with agents, we'll need to keep track of the steps that don't need to be executed.
-        skipped_steps = set()
+        steps_skipped = set()
+        # When an error occurs, we'll need to keep track of the steps that need to be skipped.
+        steps_to_skip = set()
 
         # Create tasks for the flow's sources.
         sources_ids = get_sources(dag)
@@ -575,17 +619,21 @@ class Flow(BaseStep):
                 step_type = "flow" if isinstance(self.steps[step_id], Flow) else "step"
                 step_input = None
                 step_result = None
+                step_error = None
                 step_usage = None
-                try:
-                    step_result = await completed_task
 
-                    if step_id in async_gens:
-                        async_gen_state = async_gens[step_id]
+                if step_id in async_gens:
+                    # When dealing with an async generator, we need to handle any possible
+                    # exceptions that might occur while consuming the generator.
+                    async_gen_state = async_gens[step_id]
+                    step_input = async_gen_state.input
+                    step_usage = async_gen_state.usage
+                    try:
+                        step_chunk = await completed_task
                         task = asyncio.create_task(async_gen_state.gen.__anext__())
                         task.step_id = step_id
                         tasks.append(task)
-
-                        step_chunk = handle_event(event=step_result, async_gen_state=async_gen_state)
+                        step_chunk = handle_event(event=step_chunk, async_gen_state=async_gen_state)
                         if step_chunk is not None:
                             yield StepChunkEvent(
                                 run_id=context.id,
@@ -595,59 +643,93 @@ class Flow(BaseStep):
                             )
                         continue
 
-                    step_input, step_result = step_result
+                    except StopAsyncIteration:
+                        step_result = async_gen_state.results
+                        # Tool results are not marked as llm steps. These can include citations (e.g. perplexity).
+                        # We add these citations directly formatting the markdown of the text result.
+                        if hasattr(async_gen_state, "citations"):
+                            step_citations = async_gen_state.citations
+                            if isinstance(step_citations, list) and len(step_citations):
+                                for i, citation in enumerate(step_citations, start=1):
+                                    step_result[-1]["text"] = step_result[-1]["text"].replace(f"[{i}]", f"[{i}]({citation})")
+                        # If the step is an LLM, we add the result message to the corresponding memory.
+                        if self.steps[step_id].is_llm:
+                            step_result = Message.validate({
+                                "role": "assistant",
+                                "content": step_result,
+                            })
+                            # Add the message to the appropriate memory.
+                            memory_key = f"{step_id}.memory"
+                            if memory_key in data:
+                                memory = data[memory_key]
+                                # TODO We could handle an arbitrary number of nested memories here
+                                if isinstance(memory, DataMap): 
+                                    assert memory.key.endswith(".memory"), \
+                                        f"Memory data map should point to a memory key. Found '{memory.key}'."
+                                    memory_key = memory.key
+                                memory = memory.resolve(context_data=data)
+                                memory.append(step_result)
+                                data[memory_key] = DataValue(value=memory)
 
-                    if inspect.isasyncgen(step_result):
-                        async_gens[step_id] = AsyncGenState(
-                            gen=step_result,
-                            input=step_input,
+                    except Exception as e:
+                        step_error = {
+                            "type": type(e).__name__,
+                            "message": str(e),
+                            "traceback": traceback.format_exc(),
+                        }
+                        # Stop all the successors to this step, without interrupting the execution
+                        # of other possible branches in the flow.
+                        step_successors = get_successors(step_id, dag)
+                        steps_to_skip.update(step_successors)
+                        logger.error(
+                            f"Step '{step_path}' failed. Skipping successors {step_successors}.",
+                            error=step_error,
                         )
-                        task = asyncio.create_task(step_result.__anext__())
-                        task.step_id = step_id
-                        tasks.append(task)
-                        continue
                 
-                except StopAsyncIteration:
-                    async_gen_state = async_gens[step_id]
-                    step_input = async_gen_state.input
-                    step_result = async_gen_state.results
-                    step_usage = async_gen_state.usage
-
-                    # Tool results are not marked as llm steps. These can include citations (e.g. perplexity).
-                    # We add these citations directly formatting the markdown of the text result.
-                    if hasattr(async_gen_state, "citations"):
-                        step_citations = async_gen_state.citations
-                        if isinstance(step_citations, list) and len(step_citations):
-                            for i, citation in enumerate(step_citations, start=1):
-                                step_result[-1]["text"] = step_result[-1]["text"].replace(f"[{i}]", f"[{i}]({citation})")
-
-                    if self.steps[step_id].is_llm:
-                        step_result = Message.validate({
-                            "role": "assistant",
-                            "content": step_result,
-                        })
-                        # Add the message to the appropriate memory.
-                        memory_key = f"{step_id}.memory"
-                        if memory_key in data:
-                            memory = data[memory_key]
-                            # TODO We could handle an arbitrary number of nested memories here
-                            if isinstance(memory, DataMap): 
-                                assert memory.key.endswith(".memory"), \
-                                    f"Memory data map should point to a memory key. Found '{memory.key}'."
-                                memory_key = memory.key
-                            memory = memory.resolve(context_data=data)
-                            memory.append(step_result)
-                            data[memory_key] = DataValue(value=memory)
+                else:
+                    # Else the try except is handled in the _run_step method.
+                    try:
+                        step_input, step_result = await completed_task
+                        if inspect.isasyncgen(step_result):
+                            async_gens[step_id] = AsyncGenState(
+                                gen=step_result,
+                                input=step_input,
+                            )
+                            task = asyncio.create_task(step_result.__anext__())
+                            task.step_id = step_id
+                            tasks.append(task)
+                            continue
+                
+                    except StepExecutionError as e:
+                        step_input = e.input
+                        step_error = {
+                            "type": type(e).__name__,
+                            "message": str(e),
+                            "traceback": traceback.format_exc(),
+                        }
+                        # Stop all the successors to this step, without interrupting the execution
+                        # of other possible branches in the flow.
+                        step_successors = get_successors(step_id, dag)
+                        steps_to_skip.update(step_successors)
+                        logger.error(
+                            f"Step '{step_path}' failed. Skipping successors {step_successors}.",
+                            error=step_error,
+                        )
 
                 # Store the result in the data dictionary. These will be used for data maps and 
                 # collecting outputs from the overall flow execution.
-                data[f"{step_id}.return"] = DataValue(value=step_result)
+                if step_error is None:
+                    data[f"{step_id}.return"] = DataValue(value=step_result)
+                else:
+                    data[f"{step_id}.return"] = DataError(error=step_error)
                 
                 # Mark this node as completed. This will unblock the tasks waiting for this node.
                 tasks_completions[step_id].set()
                 
                 # Create tasks for the step successors.
                 for successor_id in dag[step_id]:
+                    if successor_id in steps_to_skip:
+                        continue
 
                     ancestors = [
                         (ancestor_id, self.links[f"{ancestor_id}-{successor_id}"])
@@ -657,7 +739,7 @@ class Flow(BaseStep):
                     if all(
                         tasks_completions[ancestor_id].is_set() 
                         for ancestor_id, _ in ancestors
-                        if ancestor_id not in skipped_steps
+                        if ancestor_id not in steps_skipped
                     ):
                         # Link conditions are only evaluated once all the ancestors are completed.
                         # If any of the conditions is true, we start the next step.
@@ -676,33 +758,48 @@ class Flow(BaseStep):
                             tasks.append(task)
                             start_times[successor_id] = int(time.time() * 1000)
                         else:
-                            skipped_steps.add(successor_id)
+                            steps_skipped.add(successor_id)
                 
                 start_time = start_times[step_id]
                 end_time = int(time.time() * 1000)
-                elapsed_time = end_time - start_time
 
                 steps[step_path] = {
                     "type": step_type,
                     "input": step_input,
                     "output": step_result,
+                    "error": step_error,
                     "t0": start_time,
                     "t1": end_time,
                     "usage": step_usage,
                 }
 
+                # TODO This will need to be coherent with the above.
                 yield StepOutputEvent(
                     run_id=context.id,
                     parent_step_id=self.id,
                     step_id=step_id,
                     input=step_input,
                     output=step_result,
+                    error=step_error,
+                    t0=start_time,
+                    t1=end_time,
                     usage=step_usage,
-                    elapsed_time=elapsed_time,
                 )
 
         # Grab the properties as defined in the return_model.
-        output = self._collect_outputs(data)
+        output = None
+        error = None
+        exception = None
+        try: 
+            output = self._collect_outputs(data)
+        except FlowExecutionError as e:
+            error = {
+                "type": type(e).__name__,
+                "message": str(e),
+                "traceback": traceback.format_exc(),
+            }
+            exception = e
+
         t1 = int(time.time() * 1000)
 
         if self.state_saver is not None:
@@ -713,6 +810,7 @@ class Flow(BaseStep):
                 path=self.path,
                 input=kwargs,
                 output=output,
+                error=error,
                 t0=t0,
                 t1=t1,
                 steps=steps,
@@ -720,6 +818,9 @@ class Flow(BaseStep):
             )
             # TODO Allow for async put.
             self.state_saver.put(snapshot=snapshot, context=context)
+
+        if exception is not None:
+            raise exception
         
         yield FlowOutputEvent(
             run_id=context.id,

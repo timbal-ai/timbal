@@ -161,6 +161,7 @@ class DataValue(BaseData):
     This class handles direct values and supports string interpolation using {{key}} syntax
     when the value is a string.
     """
+
     type: Literal["value"] = "value"
     value: Any
     """The actual value to be stored."""
@@ -189,12 +190,14 @@ class DataError(BaseData):
 
     This class is used to store and propagate error messages or error states.
     """
+
     type: Literal["error"] = "error"
     error: Any
     """The error value or message to be stored."""
 
     def resolve(self, context_data: dict[str, BaseData] | None = None) -> Any: # noqa: ARG002
-        return self.error
+        # We return the error as is, because we're matching on isisntance of the class.
+        return self
 
 
 class DataMap(BaseData):
@@ -203,6 +206,7 @@ class DataMap(BaseData):
     This class allows referencing values from other steps using a key path.
     The key can use dot notation to access nested values.
     """
+
     type: Literal["map"] = "map"
     key: str
     """The key path to the referenced data."""

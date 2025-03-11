@@ -60,12 +60,16 @@ class StepOutputEvent(TimbalEvent):
 
     input: Any
     """The input arguments passed to the step."""
-    output: Any
-    """The result of the step."""
+    output: Any | None = None
+    """The result of the step (if any)."""
+    error: Any | None = None
+    """The error that occurred during the step (if any)."""
+    t0: int 
+    """The start time of the step in milliseconds."""
+    t1: int 
+    """The end time of the step in milliseconds."""
     usage: Any | None = None
     """The usage of the step."""
-    elapsed_time: int 
-    """The time it took for the step to complete in milliseconds."""
 
 
 class FlowOutputEvent(TimbalEvent):

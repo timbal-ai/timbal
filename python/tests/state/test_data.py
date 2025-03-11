@@ -21,7 +21,7 @@ def test_data_error():
     })
 
     assert isinstance(data, DataError)
-    assert data.resolve() == "test"
+    assert data.resolve() == data
 
 
 def test_data_map():

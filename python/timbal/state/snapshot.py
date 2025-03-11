@@ -27,6 +27,8 @@ class Snapshot(BaseModel):
     """Kwargs passed to Flow.run()"""
     output: Any | None = None
     """Output of Flow._collect_outputs()"""
+    error: Any | None = None
+    """Error raised during the execution of the flow."""
     t0: int 
     """Start time of the snapshot since epoch in ms."""
     t1: int | None = None
