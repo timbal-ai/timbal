@@ -12,9 +12,11 @@ logger = structlog.get_logger("timbal.steps.llms.anthropic_llm")
 load_dotenv()
 
 async def handler(
-    prompt: str = Field(default=None, description="Hack to pass an input to the LLM"), # noqa: ARG001
+    # This is not actually used inside the function. It's a hack to have it as an argument
+    # so we can use it when mapping data in the flow.
+    prompt: Message = Field(default=None, description="Message to send to the LLM."), # noqa: ARG001
+    system_prompt: str = Field(default=None, description="System prompt to guide the LLM's behavior and role."),
     memory: list[Message] = Field(description="A list containing the conversation history between the user and the LLM"),
-    system_prompt: str | list[dict]= Field(default=None, description="System prompt to guide the LLM's behavior and role"),
     model: Literal["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"] | str = Field(default="claude-3-haiku-20240307", description="Name of the LLM model to use"),
     tools: list[Tool | dict] = Field(default=None, description="List of tools/functions that the LLM can call"),
     tool_choice: dict[str, Any] | str = Field(default = {"type": "auto"}, description="How the model should use the provided tools"),

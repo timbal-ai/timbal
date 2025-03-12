@@ -10,9 +10,9 @@ from .togetherai_llm import handler as togetherai_llm
 async def handler(
     # This is not actually used inside the function. It's a hack to have it as an argument
     # so we can use it when mapping data in the flow.
-    prompt: str | list[Any] | dict[str, Any] | Message = Field(default=None, description="Message to send to the LLM."), # noqa: ARG001
+    prompt: Message = Field(default=None, description="Message to send to the LLM."), # noqa: ARG001
+    system_prompt: str = Field(default=None, description="System prompt to guide the LLM's behavior and role."),
     memory: list[Message] = Field(description="Chat history containing user and LLM messages."),
-    system_prompt: str | list[dict] = Field(default=None, description="System prompt to guide the LLM's behavior and role."),
     model: str = Field(default="gpt-4o", description="Name of the LLM model to use."),
     tools: list[Tool | dict] = Field(default=None, description=" List of tools/functions the LLM can call."),
     tool_choice: dict[str, Any] | str = Field(
@@ -135,23 +135,23 @@ async def handler(
     # Route to appropriate provider based on model prefix
     if model.startswith("claude"):
         response = await anthropic_llm(
-            prompt, memory, system_prompt, model, tools, tool_choice,
+            prompt, system_prompt, memory, model, tools, tool_choice,
             max_tokens, stop, temperature, top_k, top_p, json_schema
         )
     elif model.startswith("gpt"):
         response = await openai_llm(
-            prompt, memory, system_prompt, model, tools, tool_choice,
+            prompt, system_prompt, memory, model, tools, tool_choice,
             max_tokens, frequency_penalty, logprobs, top_logprobs, presence_penalty,
             seed, stop, temperature, top_p, parallel_tool_calls, json_schema
         )
     elif model.startswith("gemini"):
         response = await gemini_llm(
-            prompt, memory, system_prompt, model, tools, tool_choice,
+            prompt, system_prompt, memory, model, tools, tool_choice,
             max_tokens, presence_penalty, seed, stop, temperature, top_p, json_schema
         )
     else:
         response = await togetherai_llm(
-            prompt, memory, system_prompt, model, tools, tool_choice,
+            prompt, system_prompt, memory, model, tools, tool_choice,
             max_tokens, frequency_penalty, top_logprobs, presence_penalty,
             seed, stop, temperature, top_p, parallel_tool_calls, json_schema
         )

@@ -12,9 +12,11 @@ logger = structlog.getLogger("timbal.steps.llms.togetherai_llm")
 load_dotenv()
 
 async def handler(
-    prompt: str = Field(default=None, description="Hack to pass an input to the LLM"), # noqa: ARG001
+    # This is not actually used inside the function. It's a hack to have it as an argument
+    # so we can use it when mapping data in the flow.
+    prompt: Message = Field(default=None, description="Message to send to the LLM."), # noqa: ARG001
+    system_prompt: str = Field(default=None, description="System prompt to guide the LLM's behavior and role."),
     memory: list[Message] = Field(description="A list containing the conversation history between the user and the LLM."),
-    system_prompt: str = Field(default=None, description="System prompt to guide the LLM's behavior and role"),
     model: Literal[
         "deepseek-ai/DeepSeek-R1",
         "deepseek-ai/DeepSeek-V3",

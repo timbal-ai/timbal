@@ -419,34 +419,20 @@ class Flow(BaseStep):
                                 step_memory.append(tool_result_message)
                                 step_memory_tool_result_inserted = True
 
-        # Hack for injecting a prompt into the LLM's memory as last message
+        # Hack for injecting a prompt into the LLM's memory as last message.
         if step.is_llm:
             step_prompt = step_args.pop("prompt", None)
             if step_prompt is not None:
-                # If the prompt comes from a previous LLM step, we need to transform it from assistant to user message
-                if isinstance(step_prompt, Message):
-                    message = Message(
-                        role="user",
-                        content=step_prompt.content
-                    )
-                # Message in dict format
-                elif isinstance(step_prompt, dict) and "role" in step_prompt and "content" in step_prompt:
-                    message = Message.validate(step_prompt)
-                # For any other format, attempt to convert it to a message as content
-                else:
-                    message = Message.validate({
-                        "role": "user",
-                        "content": step_prompt
-                    })
-
+                if not isinstance(step_prompt, Message):
+                    raise ValueError(f"Prompt must be an instance of Message. Got {type(step_prompt)} for step {f'{self.path}.{step_id}'}.")
                 if "memory" in step_args:
-                    step_args["memory"].append(message)
+                    step_args["memory"].append(step_prompt)
                     # Limit the memory size. This is individual per llm step. Hence, we can have multiple LLMs pointing
                     # to the same memory key but have different memory window sizes.
                     if step._memory_window_size is not None:
                         step_args["memory"] = self._cut_memory(step_args["memory"], step._memory_window_size)
                 else:
-                    step_args["memory"] = [message]
+                    step_args["memory"] = [step_prompt]
 
         return step_args
 
@@ -483,14 +469,19 @@ class Flow(BaseStep):
         step_input = copy.deepcopy(step_input)
 
         try:
-            step_input_validated = step.params_model().model_validate(step_input)
+            # Flow input is validated in the .run() method. That is because we want to validate
+            # the first initial call to the parent flow as well.
+            if isinstance(step, Flow):
+                step_input_validated = step_input
+            else:
+                step_input_validated = dict(step.params_model().model_validate(step_input))
             # If we're dealing with a regular sync function, we need to run it in an executor to 
             # avoid blocking the event loop.
             if not step.is_coroutine and not step.is_async_gen:
                 loop = asyncio.get_running_loop()
                 step_result = await loop.run_in_executor(None, lambda: step.run(
                     context=context,
-                    **dict(step_input_validated)
+                    **step_input_validated
                 ))
                 if inspect.isgenerator(step_result):
                     return step_input, sync_to_async_gen(step_result, loop)
@@ -498,7 +489,7 @@ class Flow(BaseStep):
             
             step_result = step.run(
                 context=context,
-                **dict(step_input_validated)
+                **step_input_validated
             )
 
             if step.is_coroutine:
@@ -531,9 +522,36 @@ class Flow(BaseStep):
 
         t0 = int(time.time() * 1000)
 
+        # Validate kwargs to store the validated inputs in the snapshot.
+        try:
+            kwargs = dict(self.params_model().model_validate(kwargs))
+        except Exception as e:
+            error = {
+                "type": type(e).__name__,
+                "message": str(e),
+                "traceback": traceback.format_exc(),
+            }
+            t1 = int(time.time() * 1000)
+            if self.state_saver is not None:
+                snapshot = Snapshot(
+                    v="0.2.0",
+                    id=context.id,
+                    parent_id=context.parent_id,
+                    path=self.path,
+                    input=kwargs,
+                    output=None,
+                    error=error,
+                    t0=t0,
+                    t1=t1,
+                    data=copy.deepcopy(self.data),
+                )
+                # TODO Allow for async put.
+                self.state_saver.put(snapshot=snapshot, context=context)
+            raise FlowExecutionError(f"Error validating kwargs for step {self.path}.") from e
+        
+
         # Copy the data to avoid potential bugs with data being modified by reference.
         data = copy.deepcopy(self.data)
-
         data.update({k: DataValue(value=v) for k, v in kwargs.items()})
 
         # Here we'll store all the steps outputs and run data.

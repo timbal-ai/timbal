@@ -92,7 +92,7 @@ class Message:
         if isinstance(value, Message):
             return value
 
-        if isinstance(value, OpenAIMessage):
+        elif isinstance(value, OpenAIMessage):
             role = value.role
             tool_calls = value.tool_calls
             # If there are tool calls in the message, for us it will be ToolUseContent
@@ -105,7 +105,7 @@ class Message:
             content = [Content.model_validate(item) for item in content]
             return cls(role=role, content=content)
  
-        if isinstance(value, AnthropicMessage):
+        elif isinstance(value, AnthropicMessage):
             role = value.role
             content = value.content
             if not isinstance(content, list):
@@ -113,7 +113,7 @@ class Message:
             content = [Content.model_validate(item) for item in content]
             return cls(role=role, content=content)
 
-        if isinstance(value, dict):
+        elif isinstance(value, dict):
             role = value.get("role", None)
             content = value.get("content", None)
             tool_calls = value.get("tool_calls", None)
@@ -136,6 +136,11 @@ class Message:
                 content = [content]
             content = [Content.model_validate(item) for item in content]
             return cls(role=role, content=content)
+        
+        return cls.validate({
+            "role": "user",
+            "content": value,
+        })
 
 
     @classmethod
@@ -159,9 +164,8 @@ class Message:
     def __get_pydantic_json_schema__(cls, _core_schema: CoreSchema, _handler: GetJsonSchemaHandler) -> dict[str, Any]:
         """Defines what this type should be in openapi.json."""
         # https://docs.pydantic.dev/2.8/errors/usage_errors/#custom-json-schema
-        # TODO
-        # ? print("TextContent schema:", TextContent.model_json_schema())
         json_schema = {
+            "title": "TimbalMessage",  # This becomes the type name in most generators
             "type": "object",
             "properties": {
                 "role": {
@@ -170,10 +174,9 @@ class Message:
                 },
                 "content": {
                     "type": "array",
-                    "items": {},
+                    "items": {}, # Keep it open/generic for now.
                 }
             },
-            "description": "A message in an LLM conversation with role and typed content",
         }
         return json_schema
 
