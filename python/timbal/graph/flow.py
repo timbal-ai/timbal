@@ -240,7 +240,7 @@ class Flow(BaseStep):
                 else:
                     outputs[output_name] = output_value
             except DataKeyError:
-                output_value = None
+                outputs[output_name] = None
         
         if len(errors):
             raise FlowExecutionError(f"Error collecting outputs {errors}.")

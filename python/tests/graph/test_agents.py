@@ -1,8 +1,13 @@
-import pytest
+from datetime import datetime
 
-from timbal import Agent, Flow
+import pytest
+from timbal import Agent
 from timbal.state.savers import InMemorySaver
 from timbal.types import Field, Message
+
+
+def get_datetime() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def get_weather(
@@ -90,3 +95,21 @@ async def test_agent_with_no_tools():
     flow_output_event = await flow.complete(prompt=prompt)
 
     assert isinstance(flow_output_event.output, Message)
+
+
+@pytest.mark.asyncio
+async def test_agent_with_custom_outputs():
+    flow = Agent(tools=[get_datetime])
+    flow.set_output("datetime", "agent_get_datetime_0.return")
+
+    assert not isinstance(flow.return_model(), Message)
+
+    prompt = "What's the current time?"
+    flow_output_event = await flow.complete(prompt=prompt)
+    assert "datetime" in flow_output_event.output
+    assert flow_output_event.output["datetime"] is not None
+
+    prompt = "What are you?"
+    flow_output_event = await flow.complete(prompt=prompt)
+    assert "datetime" in flow_output_event.output
+    assert flow_output_event.output["datetime"] is None

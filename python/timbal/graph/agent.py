@@ -127,6 +127,8 @@ class Agent(Flow):
 
     def _collect_outputs(self, data: dict[str, BaseData]) -> Any:
         """Override the method to collect the last available LLM output from the flow always."""
+        if len(self.outputs):
+            return super()._collect_outputs(data)
 
         _, rev_dag = self.get_dags()
         rev_sources = list(get_sources(rev_dag))
@@ -167,5 +169,7 @@ class Agent(Flow):
     
     def return_model(self) -> Any:
         """Override the return model to return always a Message."""
+        if len(self.outputs):
+            return super().return_model()
 
         return Message
