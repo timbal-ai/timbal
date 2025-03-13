@@ -1,5 +1,5 @@
 from . import errors, state, steps, types
-from .graph import Flow
+from .graph import Agent, Flow
 
 try:
     from ._version import __version__  # type: ignore
@@ -9,6 +9,7 @@ except ImportError:
 
 __all__ = [
     "__version__",
+    "Agent",
     "Flow",
     "errors",
     "state",

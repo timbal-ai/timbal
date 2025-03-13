@@ -39,8 +39,8 @@ class BaseStep(BaseModel, ABC):
     
 
     @abstractmethod
-    def return_model(self) -> BaseModel:
-        """Returns the Pydantic model defining the expected return type for this step."""
+    def return_model(self) -> Any:
+        """Returns the expected return type for this step."""
         pass
 
 

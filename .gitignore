@@ -18,6 +18,5 @@ zig-out
 # State savers artifacts
 *.jsonl
 
-# Quick testing during development
-playground.py
-
+# Safe testing during development
+sandbox/

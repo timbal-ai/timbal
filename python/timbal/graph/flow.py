@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 import structlog
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 from uuid_extensions import uuid7
 
 from ..errors import (
@@ -42,7 +42,7 @@ from ..types.events import (
     StepOutputEvent,
     StepStartEvent,
 )
-from ..types.models import create_model_from_fields, issubclass_safe, merge_model_fields
+from ..types.models import create_model_from_fields, merge_model_fields
 from .base import BaseStep
 from .link import Link
 from .step import Step
@@ -106,7 +106,6 @@ class Flow(BaseStep):
 
         # ? Think if a subflow could ever act as an LLM (for the moment no, because it does not return anthropic or openai events).
         self.is_llm = False
-        self.is_agent = False
         # These are used to determine if we need to run the step in an executor.
         self.is_coroutine = False
         self.is_async_gen = True
@@ -167,8 +166,8 @@ class Flow(BaseStep):
         return self.params_model().model_json_schema()
 
 
-    def return_model(self) -> BaseModel:
-        """Returns the Pydantic model defining the expected return outputs for this flow."""
+    def return_model(self) -> Any:
+        """Returns the expected return type for this step."""
         if hasattr(self, '_return_model'):
             return self._return_model
 
@@ -196,15 +195,9 @@ class Flow(BaseStep):
                 step_id = data_key_parts[0]
                 step = self.steps[step_id]
                 step_return_model = step.return_model()
-                assert issubclass_safe(step_return_model, BaseModel), "Step return model must be a Pydantic model."
-                # if step_id in auto_loops:
-                #     step_return = List[step_return]
-                if "return" in step_return_model.model_fields:
-                    fields[return_param_name] = step_return_model.model_fields["return"]
-                else:
-                    # Generate a FieldInfo with the model.
-                    fields[return_param_name] = Field(...)
-                    fields[return_param_name].annotation = step_return_model
+                # Generate a FieldInfo with the model.
+                fields[return_param_name] = Field(...)
+                fields[return_param_name].annotation = step_return_model
             # TODO If step_id.return.0 -> fetch the type of the list
             # TODO If step_id.return.abc -> fetch the type of the dict value / base model field
             # ? Perhaps we could create an analogous function to get_data_key for navigating the fields definitions
@@ -212,8 +205,14 @@ class Flow(BaseStep):
                 fields[return_param_name] = Field(...)
                 fields[return_param_name].annotation = Any
         
+        if not len(fields):
+            return None
+
         return_model_name = f"Flow_{self.id}_return"
-        return_model = create_model_from_fields(name=return_model_name, model_fields=fields)
+        return_model = create_model_from_fields(
+            name=return_model_name, 
+            model_fields=fields
+        )
         return return_model
 
 
@@ -222,48 +221,11 @@ class Flow(BaseStep):
         if hasattr(self, '_return_model_schema'):
             return self._return_model_schema
 
-        return self.return_model().model_json_schema()
+        return TypeAdapter(self.return_model()).json_schema()
 
 
     def _collect_outputs(self, data: dict[str, BaseData]) -> Any:
         """Aux method to collect the outputs from the data dictionary."""
-
-        if self.is_agent:
-            _, rev_dag = self.get_dags()
-            rev_sources = list(get_sources(rev_dag))
-            assert len(rev_sources) == 1, "Tool to LLM agent mode should have a single LLM as last step"
-
-            last_llm_output = None
-            last_llm_id = rev_sources[0]
-            while last_llm_output is None:
-                try: 
-                    last_llm_output_key = f"{last_llm_id}.return"
-                    last_llm_output = get_data_key(data, last_llm_output_key)
-                    if isinstance(last_llm_output, DataError):
-                        flow_execution_error_key = f"{self.path}.{last_llm_id}"
-                        raise FlowExecutionError(f"Error collecting outputs {{'{flow_execution_error_key}'}}.")
-                except DataKeyError:
-                    last_llm_output = None
-
-                    last_tools_ids = list(rev_dag[last_llm_id])
-                    assert len(last_tools_ids) >= 1, \
-                        "The last LLM of a tool to LLM agent must have at least one tool result."
-                    last_tools_errors = set()
-                    for last_tool_id in last_tools_ids:
-                        last_tool_output_key = f"{last_tool_id}.return"
-                        try:
-                            last_tool_output = get_data_key(data, last_tool_output_key)
-                            if isinstance(last_tool_output, DataError):
-                                flow_execution_error_key = f"{self.path}.{last_tool_id}"
-                                last_tools_errors.add(flow_execution_error_key)
-                        except DataKeyError:
-                            pass
-
-                    last_llms_ids = list(rev_dag[last_tools_ids[0]])
-                    assert len(last_llms_ids) == 1, \
-                        "Tool to LLM agent mode should have a single LLM as last step"
-                    last_llm_id = last_llms_ids[0]
-            return last_llm_output
 
         errors = set()
         outputs = {}
@@ -1415,118 +1377,4 @@ class Flow(BaseStep):
         self._is_compiled = True
 
         return self
-
-
-    def add_agent(
-        self,
-        id: str | None = None,
-        tools: list[Callable | BaseStep | dict[str, Any]] = [],
-        max_iter: int = 1,
-        state_saver: BaseSaver | None = None,
-        model: str | None = None,
-        # We don't allow to pass a memory_id here. Agents will always use the same memory.
-        # And they must have one, so they can use tool results with the corresponding tool calls.
-        memory_window_size: int | None = None,
-        **kwargs,
-        # TODO Remove kwargs. Specify all the params.
-    ) -> "Flow":
-        """Adds an agent to the flow.
-
-        An agent is an LLM-powered component that can reason about and interact with provided tools
-        to accomplish tasks. The agent will:
-        1. Receive an input prompt
-        2. Decide whether to use available tools or respond directly
-        3. If using tools, call them and incorporate their results
-        4. Continue this process until reaching a final response
-
-        Args:
-            TODO        
-
-        Returns:
-            The flow instance for method chaining.
-
-        Note:
-            The agent will maintain conversation history between iterations, allowing it to
-            build upon previous interactions with tools to reach its final response.
-        """
-        if id is None:
-            id = "agent"
-
-        kwargs_system_prompt = kwargs.pop("system_prompt", None)
-
-        # Create initial LLM step that receives the prompt
-        entrypoint_llm_id = f"{id}_llm_0"
-        memory_id = entrypoint_llm_id
-        agent = (
-            Flow()
-            .add_llm(
-                id=entrypoint_llm_id,
-                model=model,
-                memory_id=memory_id,
-                memory_window_size=memory_window_size,
-                system_prompt=kwargs_system_prompt,
-            )
-            .set_data_map(f"{entrypoint_llm_id}.prompt", "prompt")
-        )
-
-        if len(tools):
-            # Default system prompt when processing tool results. Give the ability to the user to override this from the outside.
-            tool_result_llm_system_prompt = """Please process the tool result given the call. 
-            Do not remove references or citations from text. Leave them in markdown format."""
-            if kwargs_system_prompt is not None:
-                tool_result_llm_system_prompt = kwargs_system_prompt
-
-            prev_llm_id = entrypoint_llm_id
-            # Create additional LLM steps for each iteration, allowing the agent to use tools multiple times
-            for i in range(max_iter):
-                iter_llm_id = f"{id}_llm_{i + 1}"
-                agent.add_llm(
-                    id=iter_llm_id,
-                    memory_id=memory_id,
-                    memory_window_size=memory_window_size,
-                    system_prompt=tool_result_llm_system_prompt,
-                )
-                agent.set_data_map(f"{iter_llm_id}.model", f"{entrypoint_llm_id}.model", autolink=False)
-
-                # For each tool, create a step and add links for tool use and tool result
-                for tool_item in tools:
-                    if isinstance(tool_item, dict):
-                        tool = tool_item["tool"]
-                        description = tool_item.get("description")
-                    else:
-                        tool = tool_item
-                        description = None
-
-                    if callable(tool):
-                        tool_id = tool.__name__
-                    elif isinstance(tool, BaseStep):
-                        tool_id = tool.id
-
-                    iter_tool_id = f"{id}_{tool_id}_{i}"
-
-                    if iter_tool_id not in self.steps:
-                        agent.add_step(iter_tool_id, tool)
-
-                    agent.add_link(
-                        step_id=prev_llm_id,
-                        description=description,
-                        next_step_id=iter_tool_id,
-                        is_tool=True,
-                    )
-
-                    agent.add_link(
-                        step_id=iter_tool_id,
-                        next_step_id=iter_llm_id,
-                        is_tool_result=True,
-                    )
-        
-                prev_llm_id = iter_llm_id
-
-        # Agents collect outputs differently. See _collect_outputs.
-        agent.is_agent = True
-        agent.compile(state_saver=state_saver)
-
-        # Add the subflow to the parent flow
-        self.add_step(id, agent)
-
-        return self
+    

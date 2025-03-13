@@ -213,7 +213,7 @@ def test_return_model_no_annotation():
 
 def test_return_model_none():
     def handler(a) -> None:
-        print(a) # noqa: T201
+        pass
 
     return_annotation = inspect.getfullargspec(handler).annotations.get("return", ...)
     return_model = create_model_from_annotation("TempModel", return_annotation)

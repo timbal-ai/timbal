@@ -3,10 +3,10 @@ from collections.abc import Callable
 from typing import Any
 
 import structlog
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from ..state import RunContext
-from ..types.models import create_model_from_annotation, create_model_from_argspec
+from ..types.models import create_model_from_argspec
 from .base import BaseStep
 
 logger = structlog.get_logger("timbal.graph.step")
@@ -52,6 +52,7 @@ class Step(BaseStep):
         """
         if path is None:
             path = id
+
         super().__init__(id=id, path=path, **kwargs)
         
         if not inspect.isfunction(handler_fn):
@@ -65,13 +66,8 @@ class Step(BaseStep):
         )
         self.handler_params_model_schema = self.handler_params_model.model_json_schema()
 
-        handler_return_annotation = handler_argspec.annotations.get("return", ...)
-        handler_return_model_name = f"Step_{self.id}_return"
-        self.handler_return_model = create_model_from_annotation(
-            name=handler_return_model_name, 
-            annotation=handler_return_annotation,
-        )
-        self.handler_return_model_schema = self.handler_return_model.model_json_schema()
+        self.handler_return_model = handler_argspec.annotations.get("return", Any)
+        self.handler_return_model_schema = TypeAdapter(self.handler_return_model).json_schema()
 
         # Initialize as False, it will be set to True in the Flow.add_llm method.
         self.is_llm = False
@@ -90,8 +86,8 @@ class Step(BaseStep):
         return self.handler_params_model_schema
     
 
-    def return_model(self) -> BaseModel:
-        """Returns the Pydantic model defining the expected return type for this step."""
+    def return_model(self) -> Any:
+        """Returns the expected return type for this step."""
         return self.handler_return_model
 
 
