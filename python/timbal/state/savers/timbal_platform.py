@@ -1,6 +1,7 @@
 from typing import Any
 
 import requests
+import structlog
 from pydantic import TypeAdapter
 
 from ...types.models import dump
@@ -8,6 +9,8 @@ from ..context import RunContext
 from ..data import Data
 from ..snapshot import Snapshot
 from .base import BaseSaver
+
+logger = structlog.get_logger("timbal.state.savers.timbal_platform")
 
 
 class TimbalPlatformSaver(BaseSaver):
@@ -19,6 +22,9 @@ class TimbalPlatformSaver(BaseSaver):
     Note:
         This state saver requires a `TimbalPlatformConfig` to be passed within the `RunContext`.
     """
+    _get_warning_shown = False
+    _put_warning_shown = False
+
 
     @staticmethod
     def _load_snapshot_from_res_body(res_body: dict[str, Any]) -> Snapshot:
@@ -36,7 +42,14 @@ class TimbalPlatformSaver(BaseSaver):
     ) -> Snapshot | None:
         """See base class."""
         if not context.timbal_platform_config:
-            raise ValueError("Missing platform configuration for fetching the last snapshot.")
+            if not self._get_warning_shown:
+                logger.warning(
+                    "TimbalPlatformSaver: Missing config for GET operation. " \
+                    "Pass config to the RunContext to enable fetching snapshots from the platform. " \
+                    "You can safely ignore this warning if you intend to push this app to the platform later."
+                )
+                self._get_warning_shown = True
+            return None
 
         if context.parent_id is None:
             return None
@@ -71,7 +84,14 @@ class TimbalPlatformSaver(BaseSaver):
     ) -> None:
         """See base class."""
         if not context.timbal_platform_config:
-            raise ValueError("Missing platform configuration for storing the snapshot.")
+            if not self._put_warning_shown:
+                logger.warning(
+                    "TimbalPlatformSaver: Missing config for PUT operation. " \
+                    "Pass config to the RunContext to enable storing snapshots on the platform. " \
+                    "You can safely ignore this warning if you intend to push this app to the platform later."
+                )
+                self._put_warning_shown = True
+            return None
 
         # No need to check for anything else, the timbal platform config will already be validated.
 
