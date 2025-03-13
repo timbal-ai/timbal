@@ -1452,6 +1452,8 @@ class Flow(BaseStep):
         if id is None:
             id = "agent"
 
+        kwargs_system_prompt = kwargs.pop("system_prompt", None)
+
         # Create initial LLM step that receives the prompt
         entrypoint_llm_id = f"{id}_llm_0"
         memory_id = entrypoint_llm_id
@@ -1462,16 +1464,15 @@ class Flow(BaseStep):
                 model=model,
                 memory_id=memory_id,
                 memory_window_size=memory_window_size,
+                system_prompt=kwargs_system_prompt,
             )
             .set_data_map(f"{entrypoint_llm_id}.prompt", "prompt")
-            .set_data_map(f"{entrypoint_llm_id}.system_prompt", "system_prompt")
         )
 
         if len(tools):
             # Default system prompt when processing tool results. Give the ability to the user to override this from the outside.
             tool_result_llm_system_prompt = """Please process the tool result given the call. 
             Do not remove references or citations from text. Leave them in markdown format."""
-            kwargs_system_prompt = kwargs.pop("system_prompt", None)
             if kwargs_system_prompt is not None:
                 tool_result_llm_system_prompt = kwargs_system_prompt
 
