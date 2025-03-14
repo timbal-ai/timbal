@@ -1,6 +1,6 @@
 """
 This module provides a File class that wraps various types of file sources,
-including local files, URLs, and S3 URIs, enabling uniform interaction through
+including local files, URLs, enabling uniform interaction through
 a file-like interface.
 
 It is inspired by and based on the design found in the Replicate Cog project.
@@ -23,28 +23,22 @@ Usage:
    >>> image = Image.open(file_instance)
    >>> image.show()
 
-4. Iterating over lines in an S3 file:
-   >>> file_instance = File.validate('s3://mybucket/myfile.txt')
-   >>> for line in file_instance:
-   ...     print(line)
-
-5. Opening a file-like object:
+4. Opening a file-like object:
    >>> from io import BytesIO
    >>> file_instance = File.validate(BytesIO(b'Hello, World!'))
    >>> print(file_instance.read())
 """
 
+import base64
 import io
 import mimetypes
 import os
-import pathlib
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
-from uuid import uuid4
 
-import boto3
 import requests
 from pydantic import (
     GetCoreSchemaHandler,
@@ -164,12 +158,16 @@ class File(io.IOBase):
 
 
     @classmethod
-    def validate(cls, value: ValidatorFunctionWrapHandler, info: dict | ValidationInfo | None = None) -> "File":
+    def validate(
+        cls, 
+        value: ValidatorFunctionWrapHandler, 
+        info: dict | ValidationInfo | None = None, # noqa: ARG003
+    ) -> "File":
         """Create a new Field instance validating a local path, an url, an s3 uri, a data url or a file-like object.
         Validation info can be used to pass context information to the file fetcher:
             >>> model_instance = model.model_validate(
             ...     {**model_params_dict},
-            ...     context={"s3_client": s3_client},
+            ...     context={...},
             ... )
         """
         if isinstance(value, cls):
@@ -181,14 +179,17 @@ class File(io.IOBase):
         if isinstance(value, io.IOBase):
             return File(value, source_scheme="bytes")
 
+        if isinstance(value, Path):
+            value = value.expanduser().resolve().as_posix()
+
         if not isinstance(value, str):
-            raise ValueError("File must be a string or file-like object.")
+            raise ValueError("File must be a string, path, or file-like object.")
 
         parsed_url = urlparse(value)
 
         # Check for valid local path.
         if parsed_url.scheme == "":
-            path = pathlib.Path(value).expanduser().resolve()
+            path = Path(value).expanduser().resolve()
             if not path.exists() or not path.is_file():
                 raise ValueError("Invalid file path.")
             if cls.__max_file_size__ is not None:
@@ -224,7 +225,7 @@ class File(io.IOBase):
                 # Custom mimetypes must be specified as ^timbal\/\w*$
                 if not parsed_url_mimetype.startswith("timbal/"):
                     raise ValueError("Custom mimetypes must be specified as 'timbal/<extension>'.")
-                parsed_url_extension = parsed_url_mimetype[7:]
+                parsed_url_extension = "." + parsed_url_mimetype[7:]
             return File(
                 value,
                 source_scheme="data_url",
@@ -247,57 +248,16 @@ class File(io.IOBase):
                 fetcher=lambda: cls._fetch_http_file(url=value),
             )
 
-        if parsed_url.scheme == "s3":
-            s3_client = None
-            if info is not None:
-                # Hack to enable calling File.validate outside of a pydantic model.
-                val_context = None
-                if isinstance(info, dict):
-                    val_context = info.get("context", None)
-                elif hasattr(info, "context"):
-                    val_context = info.context
-                if val_context is not None:
-                    s3_client = val_context.get("s3_client", None)
-            if s3_client is None:
-                s3_client = boto3.client("s3")
-            s3_bucket = parsed_url.netloc
-            s3_key = parsed_url.path.lstrip("/")
-            response = s3_client.head_object(Bucket=s3_bucket, Key=s3_key)
-            if cls.__max_file_size__ is not None:
-                content_length = int(response.get("ContentLength", 0))
-                if content_length > cls.__max_file_size__:
-                    raise ValueError(f"File size exceeds the maximum allowed size of {cls.__max_file_size__} bytes.")
-            parsed_url_name = s3_key.split("/")[-1]
-            parsed_url_extension = parsed_url_name.split(".")[-1] if "." in parsed_url_name else ""
-            return File(
-                value,
-                source_scheme="s3",
-                source_extension=parsed_url_extension,
-                fetcher=lambda: cls._fetch_s3_file(s3_client=s3_client, s3_bucket=s3_bucket, s3_key=s3_key),
-            )
-
-        # Else the file is invalid.
-        raise ValueError("Invalid file source. Must be a local file path, data URL, HTTP URL, or S3 URI.")
+        raise ValueError("Invalid file source. Must be a local file path, data URL, or HTTP/HTTPS url.")
 
 
     @classmethod
-    def serialize(cls, value: Any, info: dict | SerializationInfo | None = None) -> str:
-        """Serialize the file to a string. Bytes-like files are not supported.
-        Data URLs are serialized as is. The remaining file sources can be uploaded to S3
-        for delivery to the client if serialization info context is provided:
-            >>> dump_context = {
-            ...     "upload_file_config": {
-            ...         "scheme": "s3",
-            ...         "scheme_config": {
-            ...             "s3_client": s3_client,
-            ...             "s3_bucket": "mybucket",
-            ...             "s3_path": "mypath",
-            ...             "s3_base_url": "https://content.example.com",
-            ...         }
-            ...     }
-            ... }
-            >>> model_instance.model_dump(context=dump_context)
-        """
+    def serialize(
+        cls, 
+        value: Any, 
+        info: dict | SerializationInfo | None = None, # noqa: ARG003
+    ) -> str:
+        """Serialize the file to a data url string. Bytes-like files are not supported will have octet-stream as content type."""
         # When creating a model with fields with File type that are nullable,
         # pydantic will pass None as the value to File.serialize.
         if value is None:
@@ -306,83 +266,29 @@ class File(io.IOBase):
         if not isinstance(value, cls):
             raise ValueError("Cannot serialize a non-file object.")
 
+        if value.__source_scheme__ == "data_url":
+            return str(value)
+
         # We cannot safely serialize bytes-like files.
         if value.__source_scheme__ == "bytes":
-            raise NotImplementedError("Serialization of bytes-like files is not supported.")
-
-        if info is None:
-            return str(value)
-
-        # Hack to enable calling File.serialize outside of a pydantic model.
-        ser_context = None
-        if isinstance(info, dict):
-            ser_context = info.get("context", None)
-        elif hasattr(info, "context"):
-            ser_context = info.context
-        else:
-            raise ValueError(f"Invalid serialization info '{info}'.")
-
-        # If no serialization context is provided, return the original file source.
-        if ser_context is None:
-            return str(value)
-
-        # If the file was already uploaded someplace on the internet, do not re-upload.
-        # We do this to avoid filling our buckets with youtube videos.
-        # TODO Study which files are worth re-uploading and which ones should not.
-        if not isinstance(ser_context, dict):
-            raise ValueError(f"Invalid serialization context '{ser_context}'.")
-
-        upload_file_config = ser_context.get("upload_file_config", None)
-        if upload_file_config is None:
-            return str(value)
-
-        upload_file_scheme = upload_file_config.get("scheme", None)
-        if upload_file_scheme != "s3":
-            raise NotImplementedError(f"Invalid upload file scheme '{upload_file_scheme}'.")
-
-        upload_file_scheme_config = upload_file_config.get("scheme_config", None)
-        if upload_file_scheme_config is None:
-            raise ValueError("Missing S3 upload configuration.")
-
-        s3_base_url = upload_file_scheme_config.get("s3_base_url", None)
-        if s3_base_url is None:
-            raise ValueError("Missing S3 base URL for serialization.")
-
-        # Avoid re-uploading files that are already in the S3 upload configuration.
-        # e.g. when input of File.validate is the already serialized output of File.serialize
-        if value.__source__.startswith(s3_base_url):
-            return str(value)
-
-        s3_bucket = upload_file_scheme_config.get("s3_bucket", None)
-        s3_key = upload_file_scheme_config.get("s3_key", None)
-        if s3_key is None:
-            s3_path = upload_file_scheme_config.get("s3_path", "")
-            if value.__source_extension__ is not None:
-                s3_key = f"{s3_path}/{uuid4().hex}{value.__source_extension__}"
-
-        if s3_bucket is None or s3_key is None:
-            raise ValueError("Cannot resolve S3 bucket or key for upload.")
-
-        s3_client = upload_file_scheme_config.get("s3_client", None)
-        if s3_client is None:
-            s3_client = boto3.client("s3")
-
-        # Properly set the content type header so browsers can render the file correctly.
-        content_type, _ = mimetypes.guess_type(s3_key)
-        if content_type is None:
             content_type = "application/octet-stream"
+        else:
+            content_type, _ = mimetypes.guess_type(str(value))
+            if content_type is None:
+                content_type = f"timbal/{value.__source_extension__}"
 
-        # Ensure the file obj has the pointer at the start of the file. Otherwise boto3 will upload an empty file.
+        # Ensure the file obj has the pointer at the start of the file.
         current_position = value.tell()
         if current_position != 0:
             value.seek(0)
 
-        s3_client.upload_fileobj(value, s3_bucket, s3_key, ExtraArgs={"ContentType": content_type})
-        return f"{s3_base_url}/{s3_key}"
+        content = value.read()
+        bs64_content = base64.b64encode(content).decode("utf-8")
+        return f"data:{content_type};base64,{bs64_content}"
 
 
     @classmethod
-    def _fetch_local_file(cls, path: pathlib.Path) -> io.IOBase:
+    def _fetch_local_file(cls, path: Path) -> io.IOBase:
         """Fetch a local file from a valid path in the system."""
         return path.open("rb")
 
@@ -403,24 +309,13 @@ class File(io.IOBase):
 
 
     @classmethod
-    def _fetch_s3_file(cls, s3_client: boto3.client, s3_bucket: str, s3_key: str) -> io.IOBase:
-        """Fetch a file from an S3 bucket."""
-        # Pull configuration directly from the environment.
-        res = s3_client.get_object(
-            Bucket=s3_bucket,
-            Key=s3_key,
-        )
-        return io.BytesIO(res["Body"].read())
-
-
-    @classmethod
     def __get_pydantic_json_schema__(cls, _core_schema: CoreSchema, _handler: GetJsonSchemaHandler) -> dict[str, Any]:
         """Defines what this type should be in openapi.json."""
         # https://docs.pydantic.dev/2.8/errors/usage_errors/#custom-json-schema
         json_schema = {
             "type": "string",
             "format": "uri",
-            "description": "A file reference which can be a local path, a URL, an S3 URI, or a data URL.",
+            "description": "A file reference which can be a local path, a URL, or a data URL.",
         }
         return json_schema
 

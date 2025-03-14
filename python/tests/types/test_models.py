@@ -137,9 +137,14 @@ def test_file():
     argspec = inspect.getfullargspec(handler)
     model_cls = create_model_from_argspec("TestModel", argspec)
 
-    model_args = {"a": "https://content.eticko.com/assets/timbal.png"}
+    file_url = "https://content.eticko.com/assets/timbal.png"
+
+    model_args = {"a": file_url}
     model = model_cls(**model_args)
-    assert model.model_dump() == {"a": "https://content.eticko.com/assets/timbal.png"}
+
+    file = File.validate(file_url)
+    file_serialized = File.serialize(file)
+    assert model.model_dump() == {"a": file_serialized}
 
 
 # def test_message():
