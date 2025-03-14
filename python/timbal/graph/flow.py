@@ -136,7 +136,7 @@ class Flow(BaseStep):
             if not isinstance(data_value, DataMap):
                 continue
             map_key = data_value.key
-            if map_key in self.data:
+            if map_key in self.data or "." in map_key:
                 continue
             step_id, step_param_name = data_key.split(".")
             step = self.steps[step_id]
