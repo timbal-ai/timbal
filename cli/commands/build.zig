@@ -219,7 +219,7 @@ fn writeDockerfile(
         \\COPY . .
         \\
         \\RUN uv sync --python 3.12 --python-preference managed && \
-        \\    rm -rf $HOME/.cache/uv $HOME/.local/share/uv
+        \\    rm -rf $HOME/.cache/uv
         \\
         \\ENV PATH=".venv/bin:$PATH"
         \\
