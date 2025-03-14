@@ -211,15 +211,15 @@ fn writeDockerfile(
         \\    apt install -yqq --no-install-recommends \
         \\        {s} && \
         \\    apt clean && \
-        \\    rm -rf /var/lib/apt/lists/*
-        \\
-        \\RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+        \\    rm -rf /var/lib/apt/lists/* && \
+        \\    curl -LsSf https://astral.sh/uv/install.sh | sh
         \\
         \\ENV PATH="/root/.local/bin:$PATH"
         \\
         \\COPY . .
         \\
-        \\RUN uv sync --python 3.12 --python-preference managed
+        \\RUN uv sync --python 3.12 --python-preference managed && \
+        \\    rm -rf $HOME/.cache/uv $HOME/.local/share/uv
         \\
         \\ENV PATH=".venv/bin:$PATH"
         \\
