@@ -385,8 +385,19 @@ class Flow(BaseStep):
         if step.is_llm:
             step_prompt = step_args.pop("prompt", None)
             if step_prompt is not None:
+                # Ensure the prompt is a user message.
+                if isinstance(step_prompt, Message) and step_prompt.role != "user":
+                    step_prompt = Message(
+                        role="user",
+                        content=step_prompt.content
+                    )
+                # If the prompt comes from an unvalidated pydantic model field, we need to validate it.
+                else:
+                    step_prompt = Message.validate(step_prompt)
+                
                 if not isinstance(step_prompt, Message):
                     raise ValueError(f"Prompt must be an instance of Message. Got {type(step_prompt)} for step {f'{self.path}.{step_id}'}.")
+                
                 if "memory" in step_args:
                     step_args["memory"].append(step_prompt)
                     # Limit the memory size. This is individual per llm step. Hence, we can have multiple LLMs pointing
@@ -1266,6 +1277,8 @@ class Flow(BaseStep):
             template_refs = re.findall(r"\{\{([\w\.]+)\}\}", data_value)
             
             for ref in template_refs:
+                if "." not in ref:
+                    continue
                 source_step_id = ref.split(".")[0]
                 if f"{source_step_id}-{target_step_id}" not in self.links:
                     self.add_link(source_step_id, target_step_id)
