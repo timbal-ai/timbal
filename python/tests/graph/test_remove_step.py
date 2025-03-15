@@ -18,8 +18,8 @@ async def test_remove_step():
         .add_step("step_3", identity_handler)
         .set_data_map("step_1.x", "x1")
         .set_data_map("step_2.x", "x2")
-        .set_output("x1", "step_1.return")
-        .set_output("x2", "step_2.return")
+        .set_output("step_1.return", "x1")
+        .set_output("step_2.return", "x2")
         .set_data_map("step_3.x", "step_1.return")
     )
     

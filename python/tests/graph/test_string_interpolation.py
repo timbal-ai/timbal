@@ -21,8 +21,8 @@ async def test_string_interpolation():
         .set_data_map("step_1.x", "x1")
         .set_data_map("step_2.x", "x2")
         .set_data_value("step_3.x",  "{{step_1.return}} {{step_2.return}}")
-        .set_output("step_3_x", "step_3.x")
-        .set_output("step_3_return", "step_3.return")
+        .set_output("step_3.x", "step_3_x")
+        .set_output("step_3.return", "step_3_return")
     )
 
     x1 = "Hello"

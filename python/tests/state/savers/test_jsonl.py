@@ -31,7 +31,7 @@ async def test_jsonl_put():
         Flow()
         .add_llm(model="gpt-4o-mini", memory_id="llm")
         .set_data_map("llm.prompt", "prompt")
-        .set_output("response", "llm.return")
+        .set_output("llm.return", "response")
         .compile(state_saver=jsonl_saver)
     )
 
@@ -55,7 +55,7 @@ async def test_jsonl():
         Flow()
         .add_llm(model="gpt-4o-mini", memory_id="llm")
         .set_data_map("llm.prompt", "prompt")
-        .set_output("response", "llm.return")
+        .set_output("llm.return", "response")
         .compile(state_saver=jsonl_saver)
     )
 

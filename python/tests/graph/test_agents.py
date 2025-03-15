@@ -100,7 +100,7 @@ async def test_agent_with_no_tools():
 @pytest.mark.asyncio
 async def test_agent_with_custom_outputs():
     flow = Agent(tools=[get_datetime])
-    flow.set_output("datetime", "agent_get_datetime_0.return")
+    flow.set_output("agent_get_datetime_0.return", "datetime")
 
     assert not isinstance(flow.return_model(), Message)
 

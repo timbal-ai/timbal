@@ -9,7 +9,7 @@ async def test_complete():
         Flow(id="flow")
         .add_llm(id="llm")
         .set_data_map("llm.prompt", "prompt")
-        .set_output("response", "llm.return")
+        .set_output("llm.return", "response")
     )
 
     flow_output_event = await flow.complete(prompt="What is the capital of France?")

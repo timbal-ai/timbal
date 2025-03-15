@@ -68,7 +68,7 @@ async def test_automatic_link_creation():
         .add_step("step_1", identity_handler, x=1)
         .add_step("step_2", identity_handler_2)
         .set_data_map("step_2.x", "step_1.return")
-        .set_output("result", "step_2.return")
+        .set_output("step_2.return", "result")
     )
 
     result = await flow.complete()
@@ -84,7 +84,7 @@ async def test_add_step_data_map():
         Flow(id="test_add_step_data_map")
         .add_step("step_1", identity_handler, x=1)
         .add_step("step_2", identity_handler_2, x=DataMap(key="step_1.return"))
-        .set_output("result", "step_2.return")
+        .set_output("step_2.return", "result")
     )
 
     result = await flow.complete()

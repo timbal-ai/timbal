@@ -1210,8 +1210,8 @@ class Flow(BaseStep):
 
     def set_output(
         self, 
-        name: str, 
         data_key: str,
+        output_key: str, 
     ) -> "Flow":
         """Adds an output mapping to the flow.
 
@@ -1221,29 +1221,30 @@ class Flow(BaseStep):
         This overrides the previous output mapping for the same name.
 
         Args:
-            name: The name of the output to add.
-            data_key: The data key to map the output to.
+            data_key: The key in the data dict to retrieve as an output.
+            output_key: Whether to map this output value to a specific key.
         
         Returns:
             The flow instance for method chaining.
         """
-        self.outputs[name] = data_key
+        # TODO Validate this to the best of our abilities beforehand, otherwise testing loops will be a pain.
+        self.outputs[output_key] = data_key
         return self
 
 
     def remove_output(
         self, 
-        name: str,
+        output_key: str,
     ) -> "Flow":
         """Removes an output mapping from the flow.
 
         Args:
-            name: The name of the output to remove.
+            output_key: The key of the output to remove.
 
         Returns:
             The flow instance for method chaining.
         """
-        self.outputs.pop(name, None)
+        self.outputs.pop(output_key, None)
         return self
 
 

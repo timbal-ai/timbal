@@ -10,7 +10,7 @@ async def test_invalid_run_id():
         Flow(id="flow")
         .add_llm(id="llm", memory_id="llm")
         .set_data_map("llm.prompt", "prompt")
-        .set_output("message", "llm.return")
+        .set_output("llm.return", "message")
         .compile(state_saver=InMemorySaver())
     )
 
@@ -30,7 +30,7 @@ async def test_no_parent_id():
         Flow(id="flow")
         .add_llm(id="llm", memory_id="llm")
         .set_data_map("llm.prompt", "prompt")
-        .set_output("message", "llm.return")
+        .set_output("llm.return", "message")
         .compile(state_saver=InMemorySaver())
     )
 
@@ -49,7 +49,7 @@ async def test_parent_id():
         Flow(id="flow")
         .add_llm(id="llm", memory_id="llm")
         .set_data_map("llm.prompt", "prompt")
-        .set_output("message", "llm.return")
+        .set_output("llm.return", "message")
         .compile(state_saver=InMemorySaver())
     )
 
@@ -72,7 +72,7 @@ async def test_different_parent_id():
         Flow(id="flow")
         .add_llm(id="llm", memory_id="llm")
         .set_data_map("llm.prompt", "prompt")
-        .set_output("message", "llm.return")
+        .set_output("llm.return", "message")
         .compile(state_saver=InMemorySaver())
     )
 
@@ -95,7 +95,7 @@ async def test_rewind():
         Flow(id="flow")
         .add_llm(id="llm", memory_id="llm")
         .set_data_map("llm.prompt", "prompt")
-        .set_output("message", "llm.return")
+        .set_output("llm.return", "message")
         .compile(state_saver=InMemorySaver())
     )
 
@@ -123,7 +123,7 @@ async def test_rewind_2():
         Flow(id="flow")
         .add_llm(id="llm", memory_id="llm")
         .set_data_map("llm.prompt", "prompt")
-        .set_output("message", "llm.return")
+        .set_output("llm.return", "message")
         .compile(state_saver=InMemorySaver())
     )
 
