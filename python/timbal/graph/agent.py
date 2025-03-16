@@ -53,13 +53,14 @@ class Agent(Flow):
         # We don't allow to pass a memory_id here. Agents will always use the same memory.
         # And they must have one, so they can use tool results with the corresponding tool calls.
         kwargs.pop("memory_id", None)
+        memory_id = id
+
         kwargs_system_prompt = kwargs.pop("system_prompt", None)
 
         super().__init__(id=id)
 
         # Create initial LLM step that receives the prompt
         entrypoint_llm_id = f"{id}_llm_0"
-        memory_id = entrypoint_llm_id
         self.add_llm(
             id=entrypoint_llm_id,
             memory_id=memory_id,
