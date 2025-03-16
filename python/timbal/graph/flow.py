@@ -1222,6 +1222,24 @@ class Flow(BaseStep):
         return self
 
 
+    def set_input(
+        self,
+        data_key: str, 
+        input_key: str | None = None,
+    ) -> "Flow":
+        """Sets an input mapping to the flow.
+
+        Args:
+            data_key: The key in the data dict to retrieve as an input.
+            input_key: Whether to map this input value to a specific key.
+        
+        Returns:
+            The flow instance for method chaining.
+        """
+        self.set_data_map(data_key, input_key)
+        return self
+    
+
     def set_output(
         self, 
         data_key: str,

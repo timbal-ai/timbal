@@ -68,8 +68,9 @@ class Agent(Flow):
             **kwargs,
         )
 
-        # TODO Think this through. Should we expose all the params here? Should we pass them from outside in __init__?
-        self.set_data_map(f"{entrypoint_llm_id}.prompt", "prompt")
+        # This is the default input for the agent. We don't expose any other params as of yet.
+        # If the user wants to pass other inputs, they can do so by calling set_input() on the agent instance afterwards.
+        self.set_input(f"{entrypoint_llm_id}.prompt", "prompt")
 
         if not len(tools):
             return
