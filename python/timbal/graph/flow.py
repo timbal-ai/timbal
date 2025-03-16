@@ -125,6 +125,16 @@ class Flow(BaseStep):
             rev_dag[link.next_step_id].add(link.step_id)
         return dag, rev_dag
 
+
+    def get_sources(self) -> list[str]:
+        """Returns the sources of the flow (i.e. steps with no incoming edges)."""
+        if hasattr(self, '_sources'): 
+            return self._sources
+
+        dag, _ = self.get_dags()
+        sources = get_sources(dag)
+        return list(sources)
+
     
     def params_model(self) -> BaseModel:
         """Returns the Pydantic model defining the expected parameters for this step."""
@@ -516,7 +526,9 @@ class Flow(BaseStep):
                     error=error,
                     t0=t0,
                     t1=t1,
-                    data=copy.deepcopy(self.data),
+                    # We allow for a direct reference to the data dictionary, because we know for 
+                    # sure that the PUT operation will not modify the data dictionary in any way.
+                    data=self.data,
                 )
                 # TODO Allow for async put.
                 self.state_saver.put(snapshot=snapshot, context=context)
@@ -580,7 +592,7 @@ class Flow(BaseStep):
         steps_to_skip = set()
 
         # Create tasks for the flow's sources.
-        sources_ids = get_sources(dag)
+        sources_ids = self.get_sources()
         tasks = []
         start_times = {}
         for source_id in sources_ids:
@@ -805,7 +817,9 @@ class Flow(BaseStep):
                 t0=t0,
                 t1=t1,
                 steps=steps,
-                data=copy.deepcopy(data),
+                # We allow for a direct reference to the data dictionary, because we know for 
+                # sure that the PUT operation will not modify the data dictionary in any way.
+                data=data,
             )
             # TODO Allow for async put.
             self.state_saver.put(snapshot=snapshot, context=context)
@@ -1211,7 +1225,7 @@ class Flow(BaseStep):
     def set_output(
         self, 
         data_key: str,
-        output_key: str, 
+        output_key: str | None = None, # TODO
     ) -> "Flow":
         """Adds an output mapping to the flow.
 
@@ -1227,7 +1241,6 @@ class Flow(BaseStep):
         Returns:
             The flow instance for method chaining.
         """
-        # TODO Validate this to the best of our abilities beforehand, otherwise testing loops will be a pain.
         self.outputs[output_key] = data_key
         return self
 
@@ -1379,6 +1392,9 @@ class Flow(BaseStep):
         dag, rev_dag = self.get_dags()
         self._dag = dag
         self._rev_dag = rev_dag
+
+        sources = self.get_sources()
+        self._sources = sources
 
         self._params_model = self.params_model()
         self._params_model_schema = self.params_model_schema()
