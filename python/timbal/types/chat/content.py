@@ -38,6 +38,7 @@ from openai.types.chat import (
     ChatCompletionMessageToolCall as OpenAIToolCall,
 )
 from pydantic import BaseModel
+from uuid_extensions import uuid7
 
 from ..file import File
 
@@ -104,8 +105,11 @@ class Content(BaseModel):
             # Anthropic's tool use content.
             if content_type == "tool_use":
                 input_value = value.get("input") 
-                if isinstance(input_value, str): 
-                    input_value = json.loads(input_value)
+                if isinstance(input_value, str):
+                    if input_value != "":
+                        input_value = json.loads(input_value)
+                    else:
+                        input_value = {}
                 return ToolUseContent(
                     id=value.get("id"), 
                     name=value.get("name"), 
@@ -145,13 +149,11 @@ class FileContent(Content):
     def to_openai_input(self) -> dict[str, Any]:
         """Convert the file content to the input format required by OpenAI."""
         # Get mime type. 
-        # source schemes: bytes, local_path, data, url, s3
-        if self.file.__source_scheme__ == "data":
-            mime = self.file.__source__.split(";")[0].split(":")[1]
-        elif self.file.__source_scheme__ == "bytes":
+        # source schemes: bytes, local_path, data, url
+        if self.file.__source_scheme__ == "bytes":
             raise ValueError("Cannot convert bytes-source file to OpenAI message content.")
-        elif self.file.__source_scheme__ == "s3":
-            raise NotImplementedError("Converting S3 images to OpenAI message content is not supported.")
+        elif self.file.__source_scheme__ == "data":
+            mime = self.file.__source__.split(";")[0].split(":")[1]
         else:
             mime, _ = mimetypes.guess_type(str(self.file.__source__))
         
@@ -166,7 +168,23 @@ class FileContent(Content):
             else:
                 base64_data = base64.b64encode(self.file.read()).decode("utf-8")
                 url = f"data:{mime};base64,{base64_data}"
-            return {"type": "image_url", "image_url": {"url": url}}
+            return {
+                "type": "image_url", 
+                "image_url": {"url": url},
+            }
+
+        # ! OpenAI API is broken. It errors with missing_required_parameter 'file_id'.
+        elif mime == "application/pdf":
+            # We need the base64 data of the pdf.
+            data_url = File.serialize(self.file)
+            base64_data = data_url.split(",", 1)[1]
+            return {
+                "type": "file",
+                "file": {
+                    "file_name": f"{uuid7()}.pdf",
+                    "file_data": base64_data,
+                },
+            }
 
         elif mime and mime.startswith("audio/"):
             if self.file.__source_scheme__ == "data":
@@ -191,27 +209,33 @@ class FileContent(Content):
     def to_anthropic_input(self) -> dict[str, Any]:
         """Convert the file content to the input format required by Anthropic."""
         # Get mime type
-        if self.file.__source_scheme__ == "data":
+        # source schemes: bytes, local_path, data, url
+        if self.file.__source_scheme__ == "bytes":
+            raise ValueError("Cannot convert bytes-source file to OpenAI message content.")
+        elif self.file.__source_scheme__ == "data":
             mime = self.file.__source__.split(";")[0].split(":")[1]
         else:
             mime, _ = mimetypes.guess_type(str(self.file.__source__))
 
-        if mime not in ["image/png", "image/jpeg", "image/webp", "image/gif"]:
-            raise ValueError(f"Unsupported image format: {mime}. Must be one of: png, jpeg, webp, gif")
+        if mime not in ["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf"]:
+            raise ValueError(f"Unsupported file type: {mime}. Must be an image or pdf file.")
 
-        # Get base64 data
-        current_position = self.file.tell()
-        if current_position != 0:
-            self.file.seek(0)
+        data_url = File.serialize(self.file)
+        base64_data = data_url.split(",", 1)[1]
 
-        if self.file.__source_scheme__ == "data":
-            # Extract base64 data after the comma for data URLs
-            base64_data = self.file.__source__.split(",", 1)[1]
+        if mime.startswith("image/"):
+            content_type = "image"
         else:
-            # Convert file content to base64
-            base64_data = base64.b64encode(self.file.read()).decode("utf-8")
+            content_type = "document"
 
-        return {"type": "image", "source": {"type": "base64", "media_type": mime, "data": base64_data}}
+        return {
+            "type": content_type, 
+            "source": {
+                "type": "base64", 
+                "media_type": mime, 
+                "data": base64_data
+            },
+        }
 
 
 class TextContent(Content):

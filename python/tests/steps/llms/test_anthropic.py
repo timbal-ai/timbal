@@ -135,7 +135,7 @@ async def test_tools():
                 last_message["input"] = json.loads(last_message["input"])
             last_message = Content.model_validate(last_message)
             response_chunks[-1] = last_message
-    
+
     assert response_chunks, "Response should not be empty"
     assert isinstance(response_chunks, list), "Response should be a list"
     weather_tool = next(

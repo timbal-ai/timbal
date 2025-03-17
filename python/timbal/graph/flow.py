@@ -42,7 +42,7 @@ from ..types.events import (
     StepOutputEvent,
     StepStartEvent,
 )
-from ..types.models import create_model_from_fields, merge_model_fields
+from ..types.models import create_model_from_fields, dump, merge_model_fields
 from .base import BaseStep
 from .link import Link
 from .step import Step
@@ -449,22 +449,20 @@ class Flow(BaseStep):
 
         step_input = self._resolve_step_args(step_id, data)
         # We need to copy to avoid the LLM memories being modified by reference.
-        step_input = copy.deepcopy(step_input)
+        step_input_dump = dump(step_input)
 
         try:
             # Flow input is validated in the .run() method. That is because we want to validate
             # the first initial call to the parent flow as well.
-            if isinstance(step, Flow):
-                step_input_validated = step_input
-            else:
-                step_input_validated = dict(step.params_model().model_validate(step_input))
+            if not isinstance(step, Flow):
+                step_input = dict(step.params_model().model_validate(step_input))
             # If we're dealing with a regular sync function, we need to run it in an executor to 
             # avoid blocking the event loop.
             if not step.is_coroutine and not step.is_async_gen:
                 loop = asyncio.get_running_loop()
                 step_result = await loop.run_in_executor(None, lambda: step.run(
                     context=context,
-                    **step_input_validated
+                    **step_input
                 ))
                 if inspect.isgenerator(step_result):
                     return step_input, sync_to_async_gen(step_result, loop)
@@ -472,16 +470,16 @@ class Flow(BaseStep):
             
             step_result = step.run(
                 context=context,
-                **step_input_validated
+                **step_input
             )
 
             if step.is_coroutine:
                 step_result = await step_result
             
-            return step_input, step_result
+            return step_input_dump, step_result
 
         except Exception as e:
-            raise StepExecutionError(step_input, e) from e
+            raise StepExecutionError(step_input_dump, e) from e
 
 
     async def run(
