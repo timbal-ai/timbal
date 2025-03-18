@@ -286,8 +286,7 @@ class File(io.IOBase):
         app_config = context.timbal_platform_config.app_config
         org_id = app_config.org_id
         app_id = app_config.app_id
-        # resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
-        resource_path = f"orgs/{org_id}/apps/{app_id}/runs/157"
+        resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
 
         # We'll need the contents of the file to upload it, and the size to presign a url for the upload.
         self.seek(0)
