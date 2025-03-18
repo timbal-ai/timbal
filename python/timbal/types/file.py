@@ -43,11 +43,14 @@ import requests
 from pydantic import (
     GetCoreSchemaHandler,
     GetJsonSchemaHandler,
-    SerializationInfo,
+    # SerializationInfo,
     ValidationInfo,
     ValidatorFunctionWrapHandler,
 )
 from pydantic_core import CoreSchema, core_schema
+from uuid_extensions import uuid7
+
+from ..state.context import RunContext
 
 
 class File(io.IOBase):
@@ -63,9 +66,19 @@ class File(io.IOBase):
         __source_extension__: The file extension if available
         __fileobj__: The actual file object once loaded
         __fetcher__: Function to fetch/load the file content
+        __persisted__: The url of the file once persisted on the platform
+        __content_type__: The content type of the file
     """
 
-    __slots__ = ("__source__", "__source_scheme__", "__source_extension__", "__fileobj__", "__fetcher__")
+    __slots__ = (
+        "__source__",
+        "__source_scheme__",
+        "__source_extension__",
+        "__fileobj__",
+        "__fetcher__",
+        "__persisted__",
+        "__content_type__",
+    )
 
     __max_file_size__: int | None = (
         int(os.getenv("TIMBAL_MAX_FILE_SIZE")) if os.getenv("TIMBAL_MAX_FILE_SIZE") else None
@@ -84,10 +97,20 @@ class File(io.IOBase):
         object.__setattr__(self, "__source_scheme__", source_scheme)
         object.__setattr__(self, "__source_extension__", source_extension)
         object.__setattr__(self, "__fetcher__", fetcher)
+        object.__setattr__(self, "__persisted__", None)
+
         if isinstance(source, io.IOBase):
             object.__setattr__(self, "__fileobj__", source)
         else:
             object.__setattr__(self, "__fileobj__", None)
+
+        if source_scheme == "bytes":
+            content_type = "application/octet-stream"
+        else:
+            content_type, _ = mimetypes.guess_type(str(self))
+            if content_type is None:
+                content_type = f"timbal/{self.__source_extension__}"
+        object.__setattr__(self, "__content_type__", content_type)
 
 
     def __str__(self) -> str:
@@ -102,6 +125,8 @@ class File(io.IOBase):
         """Proxy attribute access through to the wrapped file object."""
         if name in ("__source__", "__source_scheme__", "__source_extension__", "__fileobj__", "__fetcher__"):
             raise AttributeError(name)
+        elif name == "persisted":
+            return object.__getattribute__(self, "__persisted__")
         else:
             return getattr(self.__wrapped__, name)
 
@@ -250,12 +275,80 @@ class File(io.IOBase):
 
         raise ValueError("Invalid file source. Must be a local file path, data URL, or HTTP/HTTPS url.")
 
+    
+    def persist(self, context: RunContext) -> None:
+        """Persist the file to the Timbal platform."""
+        host = context.timbal_platform_config.host
+
+        auth_config = context.timbal_platform_config.auth_config
+        headers = {auth_config.header_key: auth_config.header_value}
+
+        app_config = context.timbal_platform_config.app_config
+        org_id = app_config.org_id
+        app_id = app_config.app_id
+        # resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
+        resource_path = f"orgs/{org_id}/apps/{app_id}/runs/157"
+
+        # We'll need the contents of the file to upload it, and the size to presign a url for the upload.
+        self.seek(0)
+        content = self.read()
+        size = len(content)
+
+        body = {
+            "name": f"{uuid7()}{self.__source_extension__}",
+            "content_type": self.__content_type__,
+            "content_length": size,
+        }
+
+        res = requests.post(
+            f"https://{host}/{resource_path}/files", 
+            headers=headers,
+            json=body,
+        )
+        res.raise_for_status()
+
+        res_body = res.json()
+        uploader = res_body.get("uploader")
+        if uploader is None:
+            return
+
+        upload_uri = uploader.get("upload_uri")
+        upload_headers = {
+            "Content-Length": str(size),
+            "Content-Type": self.__content_type__,
+        }
+
+        upload_res = requests.put(
+            upload_uri, 
+            data=content, 
+            headers=upload_headers,
+        )
+        upload_res.raise_for_status()
+
+        content_url = uploader.get("content_url")
+        object.__setattr__(self, "__persisted__", content_url)
+
+    
+    def to_data_url(self) -> str:
+        """Serialize the file to a data url string."""
+        if self.__source_scheme__ == "data_url":
+            return str(self)
+
+        # Ensure the file obj has the pointer at the start of the file.
+        current_position = self.tell()
+        if current_position != 0:
+            self.seek(0)
+
+        content = self.read()
+        bs64_content = base64.b64encode(content).decode("utf-8")
+        return f"data:{self.__content_type__};base64,{bs64_content}"
+
 
     @classmethod
     def serialize(
         cls, 
         value: Any, 
-        info: dict | SerializationInfo | None = None, # noqa: ARG003
+        context: RunContext | None = None,
     ) -> str:
         """Serialize the file to a data url string. Bytes-like files are not supported will have octet-stream as content type."""
         # When creating a model with fields with File type that are nullable,
@@ -266,25 +359,20 @@ class File(io.IOBase):
         if not isinstance(value, cls):
             raise ValueError("Cannot serialize a non-file object.")
 
-        if value.__source_scheme__ == "data_url":
-            return str(value)
+        if value.__persisted__ is not None:
+            return value.__persisted__
 
-        # We cannot safely serialize bytes-like files.
-        if value.__source_scheme__ == "bytes":
-            content_type = "application/octet-stream"
-        else:
-            content_type, _ = mimetypes.guess_type(str(value))
-            if content_type is None:
-                content_type = f"timbal/{value.__source_extension__}"
+        if isinstance(context, RunContext) and context.timbal_platform_config is not None:
+            if value.__source_scheme__ == "url":
+                url = str(value)
+                if url.startswith(f"https://{context.timbal_platform_config.cdn}"):
+                    value.__persisted__ = url
+                    return url
+            value.persist(context)
+            if value.__persisted__ is not None:
+                return value.__persisted__
 
-        # Ensure the file obj has the pointer at the start of the file.
-        current_position = value.tell()
-        if current_position != 0:
-            value.seek(0)
-
-        content = value.read()
-        bs64_content = base64.b64encode(content).decode("utf-8")
-        return f"data:{content_type};base64,{bs64_content}"
+        return value.to_data_url()
 
 
     @classmethod

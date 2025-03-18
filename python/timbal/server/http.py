@@ -99,7 +99,7 @@ def create_app(
         req_context = req_data.pop("context", None)
         req_context = RunContext.model_validate(req_context)
         res_content = await app.state.flow.complete(context=req_context, **req_data)
-        res_content = dump(res_content)
+        res_content = dump(res_content, req_context)
         return JSONResponse(
             status_code=200,
             content=res_content,

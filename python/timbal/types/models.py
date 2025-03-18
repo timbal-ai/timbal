@@ -37,25 +37,25 @@ from pydantic import (
 )
 from pydantic.fields import FieldInfo
 
+from ..state.context import RunContext
 from . import Field, File, Message
 
 
-def dump(value: Any, context: Any | None = None) -> Any:
+def dump(value: Any, context: RunContext | None = None) -> Any:
     """Dumps all models that live within a nested structure of arbitrary depth."""
     if isinstance(value, Message): # Message is no longer a BaseModel.
         return {
             "role": value.role,
-            "content": [dump(c, context=context) for c in value.content],
+            "content": [dump(c, context) for c in value.content],
         }
-    elif isinstance(value, BaseModel):
-        # Handle BaseModel instances as we handle dictionaries.
-        return {k: dump(v, context=context) for k, v in value.__dict__.items()}
+    elif isinstance(value, BaseModel): # Handle BaseModel instances as we handle dictionaries.
+        return {k: dump(v, context) for k, v in value.__dict__.items()}
     elif isinstance(value, dict):
-        return {k: dump(v, context=context) for k, v in value.items()}
+        return {k: dump(v, context) for k, v in value.items()}
     elif isinstance(value, list):
-        return [dump(v, context=context) for v in value]
+        return [dump(v, context) for v in value]
     elif isinstance(value, File):
-        return File.serialize(value, {"context": context})
+        return File.serialize(value, context)
     elif isinstance(value, Exception):
         return {
             "error_type": type(value).__name__,

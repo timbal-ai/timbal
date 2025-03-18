@@ -449,7 +449,7 @@ class Flow(BaseStep):
 
         step_input = self._resolve_step_args(step_id, data)
         # We need to copy to avoid the LLM memories being modified by reference.
-        step_input_dump = dump(step_input)
+        step_input_dump = dump(step_input, context)
 
         try:
             # Flow input is validated in the .run() method. That is because we want to validate
@@ -513,6 +513,7 @@ class Flow(BaseStep):
                 "traceback": traceback.format_exc(),
             }
             t1 = int(time.time() * 1000)
+
             if self.state_saver is not None:
                 snapshot = Snapshot(
                     v="0.2.0",
@@ -528,8 +529,12 @@ class Flow(BaseStep):
                     # sure that the PUT operation will not modify the data dictionary in any way.
                     data=self.data,
                 )
-                # TODO Allow for async put.
-                self.state_saver.put(snapshot=snapshot, context=context)
+                
+                if self._is_state_saver_put_async:
+                    await self.state_saver.put(snapshot=snapshot, context=context)
+                else:
+                    self.state_saver.put(snapshot=snapshot, context=context)
+
             raise FlowExecutionError(f"Error validating kwargs for step {self.path}.") from e
         
 
@@ -543,10 +548,13 @@ class Flow(BaseStep):
         # Load LLM memories.
         # Hence if this is a root run (no parent_id), we don't need to load any previous snapshot.
         # TODO Optimize this. There's no need to load previous snapshot if there are no memories to load.
+        # TODO Think error handling here. What if getting the last snapshot errors?
         if self.state_saver is not None and context.parent_id is not None:
-            # TODO Allow for async get_last.
-            # TODO Think error handling here. What if getting the last snapshot errors?
-            last_snapshot = self.state_saver.get_last(path=self.path, context=context)
+            if self._is_state_saver_get_async:
+                last_snapshot = await self.state_saver.get_last(path=self.path, context=context)
+            else:
+                last_snapshot = self.state_saver.get_last(path=self.path, context=context)
+
             if last_snapshot is not None:
                 last_snapshot_data = last_snapshot.data
                 window_sizes = {}
@@ -819,8 +827,11 @@ class Flow(BaseStep):
                 # sure that the PUT operation will not modify the data dictionary in any way.
                 data=data,
             )
-            # TODO Allow for async put.
-            self.state_saver.put(snapshot=snapshot, context=context)
+
+            if self._is_state_saver_put_async:
+                await self.state_saver.put(snapshot=snapshot, context=context)
+            else:
+                self.state_saver.put(snapshot=snapshot, context=context)
 
         if exception is not None:
             raise exception
@@ -1418,6 +1429,9 @@ class Flow(BaseStep):
         self._return_model_schema = self.return_model_schema()
 
         self.state_saver = state_saver
+        if self.state_saver is not None:
+            self._is_state_saver_get_async = inspect.iscoroutinefunction(self.state_saver.get_last)
+            self._is_state_saver_put_async = inspect.iscoroutinefunction(self.state_saver.put)
 
         # Mark the flow as compiled to prevent re-compiling when importing as a subflow.
         self._is_compiled = True

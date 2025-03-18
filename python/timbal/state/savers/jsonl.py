@@ -76,7 +76,7 @@ class JSONLSaver(BaseSaver):
     def put(
         self, 
         snapshot: Snapshot,
-        context: RunContext, # noqa: ARG002
+        context: RunContext,
     ) -> None:
         """See base class."""
         # Since we're appending lines to a file and there's no intrinsic way of ensuring
@@ -87,7 +87,7 @@ class JSONLSaver(BaseSaver):
                 if snapshot_i.id == snapshot.id and snapshot_i.path == snapshot.path:
                     raise ValueError(f"Snapshot with id {snapshot.id} and path {snapshot.path} already exists.")
 
+        snapshot_dump = dump(snapshot, context)
         with open(self.path, "a") as f:
-            snapshot_dump = dump(snapshot)
             f.write(json.dumps(snapshot_dump) + "\n")
     

@@ -35,7 +35,7 @@ class TimbalPlatformSaver(BaseSaver):
         return Snapshot(**res_body)
 
 
-    def get_last(
+    async def get_last(
         self,
         path: str,
         context: RunContext,
@@ -77,7 +77,7 @@ class TimbalPlatformSaver(BaseSaver):
         return self._load_snapshot_from_res_body(res_body)
 
 
-    def put(
+    async def put(
         self, 
         snapshot: Snapshot,
         context: RunContext,
@@ -105,7 +105,7 @@ class TimbalPlatformSaver(BaseSaver):
         app_id = app_config.app_id
         resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
 
-        body = dump(snapshot)
+        body = dump(snapshot, context)
 
         res = requests.post(
             f"https://{host}/{resource_path}/snapshots", 

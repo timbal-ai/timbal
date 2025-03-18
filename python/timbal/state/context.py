@@ -61,6 +61,8 @@ class TimbalPlatformConfig(BaseModel):
 
     host: str
     """Platform host."""
+    cdn: str = "content.timbal.ai"
+    """CDN host."""
     auth_config: TimbalPlatformAuthConfig
     """Platform authentication configuration."""
     app_config: TimbalPlatformAppConfig
