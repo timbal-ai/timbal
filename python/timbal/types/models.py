@@ -18,8 +18,10 @@ Usage:
     >>> schema, metadata = get_schema_from_annotation(List[int])
     >>> print(schema)  # {'type': 'array', 'items': {'type': 'integer'}}
 """
+import math
 from collections import defaultdict
 from collections.abc import Callable
+from pathlib import Path
 from typing import (
     Any,
     Literal,
@@ -41,9 +43,33 @@ from ..state.context import RunContext
 from . import Field, File, Message
 
 
+def safe_is_nan(value: Any) -> bool:
+    """Utility function to check if a value is NaN. Even for pd.NA values (without pandas dependency)."""
+    if value is None:
+        return True
+    
+    # Catch pd.NA values.
+    if type(value).__name__ == "NAType":
+        return True
+
+    try:
+        return math.isnan(value)
+    except (TypeError, ValueError):
+        return False
+
+
 def dump(value: Any, context: RunContext | None = None) -> Any:
     """Dumps all models that live within a nested structure of arbitrary depth."""
-    if isinstance(value, Message): # Message is no longer a BaseModel.
+    # Handle float("nan"), np.nan, pd.NA, etc. (might need to handle more scenarios here)
+    if safe_is_nan(value):
+        return None
+    elif isinstance(value, float):
+        # Handle non-finite floats and limit precision to avoid JSON serialization issues
+        if not isinstance(value, float) or not value.is_integer():
+            return round(value, 10)  # 10 decimal places should be enough for most use cases
+    elif isinstance(value, Path):
+        return value.as_posix()
+    elif isinstance(value, Message): # Message is no longer a BaseModel.
         return {
             "role": value.role,
             "content": [dump(c, context) for c in value.content],
@@ -52,7 +78,7 @@ def dump(value: Any, context: RunContext | None = None) -> Any:
         return {k: dump(v, context) for k, v in value.__dict__.items()}
     elif isinstance(value, dict):
         return {k: dump(v, context) for k, v in value.items()}
-    elif isinstance(value, list):
+    elif isinstance(value, (list, tuple)):
         return [dump(v, context) for v in value]
     elif isinstance(value, File):
         return File.serialize(value, context)

@@ -288,10 +288,13 @@ class File(io.IOBase):
         app_id = app_config.app_id
         resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
 
-        # We'll need the contents of the file to upload it, and the size to presign a url for the upload.
-        self.seek(0)
+        # Ensure the file obj has the pointer at the start of the file.
+        current_position = self.tell()
+        if current_position != 0:
+            self.seek(0)
         content = self.read()
         size = len(content)
+        self.seek(0)
 
         body = {
             "name": f"{uuid7()}{self.__source_extension__}",
