@@ -1,0 +1,67 @@
+/**
+ * Any CSS included here will be global. The classic template
+ * bundles Infima by default. Infima is a CSS framework designed to
+ * work well for content-centric websites.
+ */
+
+/* You can override the default Infima variables here. */
+:root {
+  --ifm-color-primary: #5012cb;
+  --ifm-color-primary-dark: #5012cb;
+  --ifm-color-primary-darker: #c6b8ff;
+  --ifm-color-primary-darkest: #c6b8ff;
+  --ifm-color-primary-light: #c6b8ff;
+  --ifm-color-primary-lighter: #c6b8ff;
+  --ifm-color-primary-lightest: #c6b8ff;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+  --ifm-font-size-base: 1.1rem; /* Increase from default (usually 1rem) */
+  --ifm-line-height-base: 1.6;
+}
+
+/* For readability concerns, you should choose a lighter palette in dark mode. */
+[data-theme='dark'] {
+  --ifm-color-primary: #c6b8ff;
+  --ifm-color-primary-dark: #5012cb;
+  --ifm-color-primary-darker: #5012cb;
+  --ifm-color-primary-darkest: #5012cb;
+  --ifm-color-primary-light: #5012cb;
+  --ifm-color-primary-lighter: #5012cb;
+  --ifm-color-primary-lightest: #5012cb;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+.container {
+  margin-left: auto;
+  margin-right: auto;
+  max-width: 1200px; /* Slightly narrower than default */
+  padding-left: 2rem; /* Increased left padding */
+  padding-right: 0rem; /* Increased right padding */
+}
+
+
+.navbar__brand {
+  pointer-events: none; /* Prevents clicking */
+  cursor: default; /* Changes cursor to default */
+}
+
+div[class^="alert"] .admonition-heading {
+  display: none; /* Hides the default title (Tip, Info, etc.) */
+}
+
+
+.breadcrumbs__item:first-child {
+  display: none; /* Hides the home icon and link */
+}
+
+article h1 {
+  font-size: 2rem; /* Adjust the size as needed */
+  font-weight: bold;
+}
+
+article h2 {
+  font-size: 1.8rem; /* Adjust the size as needed */
+  font-weight: bold;
+}
+
+

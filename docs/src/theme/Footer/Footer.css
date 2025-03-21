@@ -1,0 +1,22 @@
+.custom-footer {
+    display: flex;
+    justify-content: center;
+    padding: 20px;
+    background: #f8f9fa;
+  }
+  
+  .social-icons {
+    display: flex;
+    gap: 20px;
+  }
+  
+  .social-icons a {
+    color: #777;
+    font-size: 24px;
+    transition: color 0.3s ease;
+  }
+  
+  .social-icons a:hover {
+    color: #000;
+  }
+  
