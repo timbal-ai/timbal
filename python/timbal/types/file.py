@@ -289,12 +289,9 @@ class File(io.IOBase):
         resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
 
         # Ensure the file obj has the pointer at the start of the file.
-        current_position = self.tell()
-        if current_position != 0:
-            self.seek(0)
+        self.seek(0)
         content = self.read()
         size = len(content)
-        self.seek(0)
 
         body = {
             "name": f"{uuid7()}{self.__source_extension__}",
@@ -337,11 +334,9 @@ class File(io.IOBase):
             return str(self)
 
         # Ensure the file obj has the pointer at the start of the file.
-        current_position = self.tell()
-        if current_position != 0:
-            self.seek(0)
-
+        self.seek(0)
         content = self.read()
+
         bs64_content = base64.b64encode(content).decode("utf-8")
         return f"data:{self.__content_type__};base64,{bs64_content}"
 

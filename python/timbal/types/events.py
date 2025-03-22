@@ -68,7 +68,7 @@ class StepOutputEvent(TimbalEvent):
     """The start time of the step in milliseconds."""
     t1: int 
     """The end time of the step in milliseconds."""
-    usage: Any | None = None
+    usage: dict[str, int] = {}
     """The usage of the step."""
 
 

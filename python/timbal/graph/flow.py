@@ -242,6 +242,7 @@ class Flow(BaseStep):
         for output_name, data_key in self.outputs.items():
             # If we don't find the key, we set the output to None.
             # During the flow execution, a step could not be executed, thus its output will not be defined.
+            # TODO Rethink this try except.
             try:
                 output_value = get_data_key(data, data_key)
                 if isinstance(output_value, DataError): 
@@ -544,6 +545,7 @@ class Flow(BaseStep):
 
         # Here we'll store all the steps outputs and run data.
         steps = {}
+        flow_usage = {}
 
         # Load LLM memories.
         # Hence if this is a root run (no parent_id), we don't need to load any previous snapshot.
@@ -629,7 +631,7 @@ class Flow(BaseStep):
                 step_input = None
                 step_result = None
                 step_error = None
-                step_usage = None
+                step_usage = {}
 
                 if step_id in async_gens:
                     # When dealing with an async generator, we need to handle any possible
@@ -782,6 +784,11 @@ class Flow(BaseStep):
                     "usage": step_usage,
                 }
 
+                if step_usage:
+                    for k, v in step_usage.items():
+                        current_key_value = flow_usage.get(k, 0)
+                        flow_usage[k] = current_key_value + v
+
                 # TODO This will need to be coherent with the above.
                 yield StepOutputEvent(
                     run_id=context.id,
@@ -826,6 +833,7 @@ class Flow(BaseStep):
                 # We allow for a direct reference to the data dictionary, because we know for 
                 # sure that the PUT operation will not modify the data dictionary in any way.
                 data=data,
+                usage=flow_usage,
             )
 
             if self._is_state_saver_put_async:

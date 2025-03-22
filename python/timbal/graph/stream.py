@@ -43,23 +43,24 @@ async def sync_to_async_gen(gen: Generator[Any, None, None], loop: asyncio.Abstr
         if value is None:
             break
         yield value
-    
+
 
 class AsyncGenState(BaseModel):
     """Tracks state for async generators during flow execution.
 
-    Attributes:
-        gen (AsyncGenerator[Any, None]): The async generator being processed
-        input (Any): The input for the step (before validation - as sent by the user)
-        results (list[Any]): Accumulated results from generator yields (e.g. LLM message chunks)
-        usage (dict[str, Any]): Resource usage stats (e.g. token counts for LLM calls)
+    Allow for arbitrary types not properly handled by Pydantic.
+    Also allow for extra fields to be added to the model.
     """
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     gen: AsyncGenerator[Any, None]
+    """The async generator being processed."""
     input: Any
+    """The input for the step."""
     results: list[Any] = []
-    usage: Any | None = None
+    """Accumulated results from generator yields (e.g. LLM message chunks)."""
+    usage: dict[str, int] = {}
+    """Resource usage stats (e.g. token counts for LLM calls)."""
 
 
 def handle_openai_event(
@@ -107,16 +108,17 @@ def handle_openai_event(
         #         )
         #     )
         # )
-        # TODO Grab input cached tokens, audio tokens, etc.
+        # TODO Handle other types of tokens.
         if openai_event.usage:
-            if async_gen_state.usage is None:
-                async_gen_state.usage = {}
-            output_tokens = async_gen_state.usage.get("output_tokens", 0)
-            output_tokens += openai_event.usage.completion_tokens
-            input_tokens = async_gen_state.usage.get("input_tokens", 0)
-            input_tokens += openai_event.usage.prompt_tokens
-            async_gen_state.usage["output_tokens"] = output_tokens
-            async_gen_state.usage["input_tokens"] = input_tokens
+            openai_model = openai_event.model
+            input_tokens_key = f"{openai_model}:input_tokens" 
+            input_tokens = openai_event.usage.prompt_tokens
+            existing_input_tokens = async_gen_state.usage.get(input_tokens_key, 0)
+            async_gen_state.usage[input_tokens_key] = existing_input_tokens + input_tokens
+            output_tokens_key = f"{openai_model}:output_tokens"
+            output_tokens = openai_event.usage.completion_tokens
+            existing_output_tokens = async_gen_state.usage.get(output_tokens_key, 0)
+            async_gen_state.usage[output_tokens_key] = existing_output_tokens + output_tokens
         return None
 
     if openai_event.choices[0].delta.tool_calls:
@@ -176,21 +178,37 @@ def handle_anthropic_event(
         Text chunk if the event contains content or tool input, None otherwise
     """
 
-    # # The raw content block stop event is sent when the LLM sends multiple blocks.
-    # # The raw message stop event is sent when the LLM is actually done.
+    # The raw content block stop event is sent when the LLM sends multiple blocks.
+    # The raw message stop event is sent when the LLM is actually done.
     # if isinstance(anthropic_event, RawContentBlockStopEvent | RawMessageStopEvent):
     #     pass
 
-    # 
+    # RawMessageStartEvent(
+    #     message=Message(
+    #         id='msg_01RMkrJWmJ5hVQWPb6cnSusm', 
+    #         content=[], 
+    #         model='claude-3-5-sonnet-20241022', 
+    #         role='assistant', 
+    #         stop_reason=None, 
+    #         stop_sequence=None, 
+    #         type='message', 
+    #         usage=Usage(cache_creation_input_tokens=0, cache_read_input_tokens=0, input_tokens=178, output_tokens=2)
+    #     ), 
+    #     type='message_start'
+    # )
+    # TODO Handle other types of tokens.
     if isinstance(anthropic_event, RawMessageStartEvent):
         if anthropic_event.message.usage:
+            # Output and delta messages do not include the model. 
+            # We store this temp attribute to create the correct usage key underneath.
+            anthropic_model = anthropic_event.message.model
+            async_gen_state.anthropic_model = anthropic_model
+            input_tokens_key = f"{anthropic_model}:input_tokens"
             input_tokens = anthropic_event.message.usage.input_tokens
-            if async_gen_state.usage is None:
-                async_gen_state.usage = {}
-            async_gen_state.usage["input_tokens"] = input_tokens
+            existing_input_tokens = async_gen_state.usage.get(input_tokens_key, 0)
+            async_gen_state.usage[input_tokens_key] = existing_input_tokens + input_tokens
         return None
 
-    #
     if isinstance(anthropic_event, RawContentBlockStartEvent):
         if isinstance(anthropic_event.content_block, ToolUseBlock):
             chunk_result = {
@@ -208,7 +226,6 @@ def handle_anthropic_event(
             async_gen_state.results.append(chunk_result)
         return None
 
-    # 
     if isinstance(anthropic_event, RawContentBlockDeltaEvent):
         if isinstance(anthropic_event.delta, InputJSONDelta):
             text_chunk = anthropic_event.delta.partial_json
@@ -219,13 +236,18 @@ def handle_anthropic_event(
             async_gen_state.results[-1]["text"] += text_chunk
             return text_chunk
 
-    # TODO Check if there is something in here (besides usage)
+    # RawMessageDeltaEvent(
+    #     delta=Delta(stop_reason='end_turn', stop_sequence=None), 
+    #     type='message_delta', 
+    #     usage=MessageDeltaUsage(output_tokens=43)
+    # )
     if isinstance(anthropic_event, RawMessageDeltaEvent):
         if anthropic_event.usage:
+            anthropic_model = async_gen_state.anthropic_model
+            output_tokens_key = f"{anthropic_model}:output_tokens"
             output_tokens = anthropic_event.usage.output_tokens
-            if async_gen_state.usage is None:
-                async_gen_state.usage = {}
-            async_gen_state.usage["output_tokens"] = output_tokens
+            existing_output_tokens = async_gen_state.usage.get(output_tokens_key, 0)
+            async_gen_state.usage[output_tokens_key] = existing_output_tokens + output_tokens
         return None
 
 
@@ -261,9 +283,13 @@ def handle_timbal_event(
     # TODO Think how should we stream partial flow outputs results or chunks. 
     # Perhaps we should only stream up if the step output is selected as a flow output.
     if isinstance(timbal_event, StepOutputEvent):
+        if timbal_event.usage:
+            for k, v in timbal_event.usage.items():
+                current_key_value = async_gen_state.usage.get(k, 0)
+                async_gen_state.usage[k] = current_key_value + v
+
         return None
 
-    # TODO Here probably we should inject properties and convert to StepOutputEvent, no?
     if isinstance(timbal_event, FlowOutputEvent):
         async_gen_state.results = timbal_event.output
         return None
