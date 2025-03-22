@@ -59,6 +59,8 @@ exclude = [
     "/dist",
     "/examples",
     "/cli",
+    "/docs", 
+    "/sandbox",
 ]
 
 [tool.hatch.envs.default]
