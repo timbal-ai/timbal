@@ -84,41 +84,43 @@ def handle_openai_event(
 
     # OpenAI SDKs use a message with empty choices to indicate the end of a stream and send the usage.
     if not len(openai_event.choices):
-        # ChatCompletionChunk(
-        #     id='chatcmpl-B9UwHoIGJ9SzsqLMIGKaeFl87kyn1', 
-        #     choices=[], 
-        #     created=1741603581, 
-        #     model='gpt-4o-mini-2024-07-18', 
-        #     object='chat.completion.chunk', 
-        #     service_tier='default', 
-        #     system_fingerprint='fp_06737a9306', 
-        #     usage=CompletionUsage(
-        #         completion_tokens=10, 
-        #         prompt_tokens=8, 
-        #         total_tokens=18, 
-        #         completion_tokens_details=CompletionTokensDetails(
-        #             accepted_prediction_tokens=0, 
-        #             audio_tokens=0, 
-        #             reasoning_tokens=0, 
-        #             rejected_prediction_tokens=0
-        #         ), 
-        #         prompt_tokens_details=PromptTokensDetails(
-        #             audio_tokens=0, 
-        #             cached_tokens=0
-        #         )
-        #     )
-        # )
-        # TODO Handle other types of tokens.
         if openai_event.usage:
             openai_model = openai_event.model
-            input_tokens_key = f"{openai_model}:input_tokens" 
-            input_tokens = openai_event.usage.prompt_tokens
-            existing_input_tokens = async_gen_state.usage.get(input_tokens_key, 0)
-            async_gen_state.usage[input_tokens_key] = existing_input_tokens + input_tokens
-            output_tokens_key = f"{openai_model}:output_tokens"
-            output_tokens = openai_event.usage.completion_tokens
-            existing_output_tokens = async_gen_state.usage.get(output_tokens_key, 0)
-            async_gen_state.usage[output_tokens_key] = existing_output_tokens + output_tokens
+            openai_usage = openai_event.usage
+
+            input_tokens = int(openai_usage.prompt_tokens)
+            input_tokens_details = openai_usage.prompt_tokens_details
+            if hasattr(input_tokens_details, "cached_tokens"):
+                input_cached_tokens = int(input_tokens_details.cached_tokens)
+                if input_cached_tokens:
+                    input_tokens -= input_cached_tokens
+                    async_gen_state.usage[f"{openai_model}:input_cached_tokens"] = input_cached_tokens
+            if hasattr(input_tokens_details, "audio_tokens"):
+                input_audio_tokens = int(input_tokens_details.audio_tokens)
+                if input_audio_tokens:
+                    input_tokens -= input_audio_tokens
+                    async_gen_state.usage[f"{openai_model}:input_audio_tokens"] = input_audio_tokens
+            # ? We've seen this in some responses. Usually they return the image tokens as regular text tokens.
+            # if hasattr(input_tokens_details, "image_tokens"):
+            #     input_image_tokens = int(input_tokens_details.image_tokens)
+            #     if input_image_tokens:
+            #         input_tokens -= input_image_tokens
+            #         async_gen_state.usage[f"{openai_model}:input_image_tokens"] = input_image_tokens
+            # Text tokens are used as the default.
+            # if hasattr(input_tokens_details, "text_tokens"):
+
+            async_gen_state.usage[f"{openai_model}:input_text_tokens"] = input_tokens
+
+            output_tokens = int(openai_usage.completion_tokens)
+            output_tokens_details = openai_usage.completion_tokens_details
+            if hasattr(output_tokens_details, "audio_tokens"):
+                output_audio_tokens = int(output_tokens_details.audio_tokens)
+                if output_audio_tokens:
+                    output_tokens -= output_audio_tokens
+                    async_gen_state.usage[f"{openai_model}:output_audio_tokens"] = output_audio_tokens
+
+            async_gen_state.usage[f"{openai_model}:output_text_tokens"] = output_tokens
+
         return None
 
     if openai_event.choices[0].delta.tool_calls:

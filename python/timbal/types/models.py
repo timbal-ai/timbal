@@ -78,7 +78,7 @@ def dump(value: Any, context: RunContext | None = None) -> Any:
         return {k: dump(v, context) for k, v in value.__dict__.items()}
     elif isinstance(value, dict):
         return {k: dump(v, context) for k, v in value.items()}
-    elif isinstance(value, (list, tuple)):
+    elif isinstance(value, (list, tuple)): # noqa: UP038
         return [dump(v, context) for v in value]
     elif isinstance(value, File):
         return File.serialize(value, context)
