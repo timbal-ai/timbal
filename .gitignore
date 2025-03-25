@@ -18,5 +18,7 @@ zig-out
 # State savers artifacts
 *.jsonl
 
+*.dump
+
 # Safe testing during development
 sandbox/
