@@ -240,9 +240,6 @@ class Flow(BaseStep):
         errors = set()
         outputs = {}
         for output_name, data_key in self.outputs.items():
-            # If we don't find the key, we set the output to None.
-            # During the flow execution, a step could not be executed, thus its output will not be defined.
-            # TODO Rethink this try except.
             try:
                 output_value = get_data_key(data, data_key)
                 if isinstance(output_value, DataError): 
@@ -251,7 +248,8 @@ class Flow(BaseStep):
                 else:
                     outputs[output_name] = output_value
             except DataKeyError:
-                outputs[output_name] = None
+                flow_execution_error_key = f"{self.path}.{data_key.split('.')[0]}"
+                errors.add(flow_execution_error_key)
         
         if len(errors):
             raise FlowExecutionError(f"Error collecting outputs {errors}.")

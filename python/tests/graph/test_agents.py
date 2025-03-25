@@ -2,6 +2,7 @@ from datetime import datetime
 
 import pytest
 from timbal import Agent
+from timbal.errors import FlowExecutionError
 from timbal.state.savers import InMemorySaver
 from timbal.types import Field, Message
 
@@ -110,6 +111,5 @@ async def test_agent_with_custom_outputs():
     assert flow_output_event.output["datetime"] is not None
 
     prompt = "What are you?"
-    flow_output_event = await flow.complete(prompt=prompt)
-    assert "datetime" in flow_output_event.output
-    assert flow_output_event.output["datetime"] is None
+    with pytest.raises(FlowExecutionError):
+        await flow.complete(prompt=prompt)
