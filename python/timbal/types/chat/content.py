@@ -23,11 +23,14 @@ Usage:
 """
 
 import base64
+import io
 import json
 import mimetypes
 from ast import literal_eval
 from typing import Any, Literal
 
+import pandas as pd
+import structlog
 from anthropic.types import (
     TextBlock as AnthropicTextBlock,
 )
@@ -38,9 +41,13 @@ from openai.types.chat import (
     ChatCompletionMessageToolCall as OpenAIToolCall,
 )
 from pydantic import BaseModel
-from uuid_extensions import uuid7
+# from uuid_extensions import uuid7
 
+from ...steps.pdfs import convert_pdf_to_images
 from ..file import File
+
+
+logger = structlog.get_logger("timbal.types.chat.content")
 
 
 class Content(BaseModel):
@@ -146,7 +153,8 @@ class FileContent(Content):
     file: File
 
 
-    def to_openai_input(self) -> dict[str, Any]:
+    # TODO Cache the openai-ready content in the File class.
+    def to_openai_input(self) -> dict[str, Any] | list[dict[str, Any]]:
         """Convert the file content to the input format required by OpenAI."""
         # Get mime type. 
         # source schemes: bytes, local_path, data, url
@@ -162,29 +170,62 @@ class FileContent(Content):
         if current_position != 0:
             self.file.seek(0)
 
-        if mime and mime.startswith("image/"):
-            if self.file.__source_scheme__ == "url": 
-                url = str(self.file)
-            else:
-                base64_data = base64.b64encode(self.file.read()).decode("utf-8")
-                url = f"data:{mime};base64,{base64_data}"
+        if (
+            (mime and mime.startswith("text/")) or 
+            # Files like .jsonl don't have a mime type.
+            (self.file.__source_extension__ in [".json", ".jsonl"])
+        ):
+            content = self.file.read().decode("utf-8")
+            return {
+                "type": "text",
+                "text": content,
+            }
+        
+        elif self.file.__source_extension__ == ".xlsx":
+            df = pd.read_excel(io.BytesIO(self.file.read()))
+            return {
+                "type": "text",
+                "text": df.to_csv(index=False, header=True, sep=","),
+            }
+
+        elif mime and mime.startswith("image/"):
+            url = File.serialize(self.file)
             return {
                 "type": "image_url", 
                 "image_url": {"url": url},
             }
 
-        # ! OpenAI API is broken. It errors with missing_required_parameter 'file_id'.
         elif mime == "application/pdf":
-            # We need the base64 data of the pdf.
-            data_url = File.serialize(self.file)
-            base64_data = data_url.split(",", 1)[1]
-            return {
-                "type": "file",
-                "file": {
-                    "file_name": f"{uuid7()}.pdf",
-                    "file_data": base64_data,
-                },
-            }
+            # ! OpenAI API is broken. They state you can upload pdfs as base64 encoded data, however 
+            # it errors with missing_required_parameter 'file_id'. We don't want to upload the files to 
+            # the openai platform (as of yet), since we don't want to control org limits and storage.
+            # # We need the base64 data of the pdf.
+            # data_url = File.serialize(self.file)
+            # base64_data = data_url.split(",", 1)[1]
+            # return {
+            #     "type": "file",
+            #     "file": {
+            #         "file_name": f"{uuid7()}.pdf",
+            #         "file_data": base64_data,
+            #     },
+            # }
+            # OpenAI internally gets an image of each page and complements it with the extracted text.
+            # ? For all the use cases we've used, extracting just the images has worked well.
+            pages = convert_pdf_to_images(self.file)
+            logger.info(
+                "convert_pdf_to_images", 
+                n_pages=len(pages), 
+                description=".to_openai_input() implicitly converting input pdf to images...",
+            )
+            pages_input = []
+            for page in pages:
+                url = File.serialize(page)
+                pages_input.append({
+                    "type": "image_url", 
+                    "image_url": {"url": url},
+                })
+
+            return pages_input
 
         elif mime and mime.startswith("audio/"):
             if self.file.__source_scheme__ == "data":
@@ -203,10 +244,11 @@ class FileContent(Content):
                 },
             }
 
-        raise ValueError(f"Unsupported file type: {mime}. Must be an image or audio (wav/mp3) file.")
+        raise ValueError(f"Unsupported file {self.file}.")
 
 
-    def to_anthropic_input(self) -> dict[str, Any]:
+    # TODO Cache the anthropic-ready content in the File class.
+    def to_anthropic_input(self) -> dict[str, Any] | list[dict[str, Any]]:
         """Convert the file content to the input format required by Anthropic."""
         # Get mime type
         # source schemes: bytes, local_path, data, url
@@ -217,25 +259,74 @@ class FileContent(Content):
         else:
             mime, _ = mimetypes.guess_type(str(self.file.__source__))
 
-        if mime not in ["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf"]:
-            raise ValueError(f"Unsupported file type: {mime}. Must be an image or pdf file.")
+        # Ensure the file pointer is at the start of the file if we need to read it.
+        current_position = self.file.tell()
+        if current_position != 0:
+            self.file.seek(0)
 
-        data_url = File.serialize(self.file)
-        base64_data = data_url.split(",", 1)[1]
+        if (
+            (mime and mime.startswith("text/")) or 
+            # Files like .jsonl don't have a mime type.
+            (self.file.__source_extension__ in [".json", ".jsonl"])
+        ):
+            content = self.file.read().decode("utf-8")
+            return {
+                "type": "text",
+                "text": content,
+            }
+        
+        elif self.file.__source_extension__ == ".xlsx":
+            df = pd.read_excel(io.BytesIO(self.file.read()))
+            return {
+                "type": "text",
+                "text": df.to_csv(index=False, header=True, sep=","),
+            }
 
-        if mime.startswith("image/"):
-            content_type = "image"
-        else:
-            content_type = "document"
+        elif mime and mime.startswith("image/"):
+            url = File.serialize(self.file)
+            if url.startswith("data:"):
+                base64_data = url.split(",", 1)[1]
+                return {
+                    "type": "image", 
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime,
+                        "data": base64_data,
+                    }
+                }
+            else:
+                return {
+                    "type": "image", 
+                    "source": {
+                        "type": "url",
+                        "url": url,
+                    }
+                }
 
-        return {
-            "type": content_type, 
-            "source": {
-                "type": "base64", 
-                "media_type": mime, 
-                "data": base64_data
-            },
-        }
+        elif mime == "application/pdf":
+            url = File.serialize(self.file)
+            if url.startswith("data:"):
+                base64_data = url.split(",", 1)[1]
+                return {
+                    "type": "document", 
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime,
+                        "data": base64_data,
+                    }
+                }
+            else:
+                return {
+                    "type": "document", 
+                    "source": {
+                        "type": "url",
+                        "url": url,
+                    }
+                }
+        
+        # ! For the moment, anthropic doesn't support audio input.
+            
+        raise ValueError(f"Unsupported file {self.file}.")
 
 
 class TextContent(Content):

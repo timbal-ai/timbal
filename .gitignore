@@ -17,6 +17,7 @@ zig-out
 
 # State savers artifacts
 *.jsonl
+!python/tests/types/files/examples/test.jsonl
 
 *.dump
 

@@ -1,3 +1,11 @@
+import warnings
+
+# Filter SWIG-related deprecation warnings.
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*builtin type SwigPyPacked.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*builtin type SwigPyObject.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*builtin type swigvarlink.*")
+
+
 from . import errors, state, steps, types
 from .graph import Agent, Flow
 

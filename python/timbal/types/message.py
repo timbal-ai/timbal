@@ -57,8 +57,9 @@ class Message:
 
     def to_openai_input(self) -> dict[str, Any]:
         """Convert the message to OpenAI's expected input format."""
-        # OpenAI expects tool calls to be in a separate field in the message
         role = self.role
+        
+        # OpenAI expects tool calls to be in a separate field in the message
         content = []
         tool_calls = []
         for content_item in self.content:
@@ -67,7 +68,13 @@ class Message:
             elif isinstance(content_item, ToolResultContent):
                 return content_item.to_openai_input()
             else:
-                content.append(content_item.to_openai_input())
+                openai_input = content_item.to_openai_input() 
+                # Enabling splitting files into multiple pages or chunks.
+                if isinstance(openai_input, list):
+                    content.extend(openai_input)
+                else:
+                    content.append(openai_input)
+
         openai_input = {"role": role,}
         if len(content):
             openai_input["content"] = content 
@@ -79,9 +86,19 @@ class Message:
 
     def to_anthropic_input(self) -> dict[str, Any]:
         """Convert the message to Anthropic's expected input format."""
+
+        content = []
+        for content_item in self.content:
+            anthropic_input = content_item.to_anthropic_input()
+            # Enabling splitting files into multiple pages or chunks.
+            if isinstance(anthropic_input, list):
+                content.extend(anthropic_input)
+            else:
+                content.append(anthropic_input)
+
         return {
             "role": self.role,
-            "content": [item.to_anthropic_input() for item in self.content],
+            "content": content,
         }
 
 
