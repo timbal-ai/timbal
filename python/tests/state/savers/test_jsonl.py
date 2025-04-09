@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from timbal import Flow
+from timbal import Agent, Flow
 from timbal.state import RunContext
 from timbal.state.savers import JSONLSaver
 
@@ -46,7 +46,7 @@ async def test_jsonl_put():
 
 
 @pytest.mark.asyncio
-async def test_jsonl():
+async def test_jsonl_flow():
     test_file_dir = Path(__file__).parent
     jsonl_path = test_file_dir / "test_jsonl.jsonl"
     jsonl_saver = JSONLSaver(jsonl_path)
@@ -67,6 +67,28 @@ async def test_jsonl():
     )
 
     flow_output_text = flow_output_event.output["response"].content[0].text
+    assert "david" in flow_output_text.lower(), "Response should mention that my name is David"
+
+    # Cleanup
+    jsonl_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_jsonl_agent():
+    test_file_dir = Path(__file__).parent
+    jsonl_path = test_file_dir / "test_jsonl.jsonl"
+    jsonl_saver = JSONLSaver(jsonl_path)
+
+    agent = Agent(state_saver=jsonl_saver)
+
+    flow_output_event = await agent.complete(prompt="My name is David")
+
+    flow_output_event = await agent.complete(
+        context=RunContext(parent_id=flow_output_event.run_id),
+        prompt="What is my name?"
+    )
+
+    flow_output_text = flow_output_event.output.content[0].text
     assert "david" in flow_output_text.lower(), "Response should mention that my name is David"
 
     # Cleanup

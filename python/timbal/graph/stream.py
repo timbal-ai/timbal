@@ -53,14 +53,17 @@ class AsyncGenState(BaseModel):
     """
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
-    gen: AsyncGenerator[Any, None]
+    gen: AsyncGenerator[Any, None] | None = None
     """The async generator being processed."""
-    input: Any
+    input: Any | None = None
     """The input for the step."""
-    results: list[Any] = []
+    collections: Any = []
     """Accumulated results from generator yields (e.g. LLM message chunks)."""
     usage: dict[str, int] = {}
     """Resource usage stats (e.g. token counts for LLM calls)."""
+
+    def collect(self) -> Any:
+        return self.collections
 
 
 def handle_openai_event(
@@ -133,13 +136,13 @@ def handle_openai_event(
                 "name": tool_call.function.name,
                 "input": ""
             }
-            if len(async_gen_state.results):
+            if async_gen_state.collections:
                 text_chunk = ".\n"
             text_chunk += f"Using tool '{tool_call.function.name}' with input: "
-            async_gen_state.results.append(chunk_result)
+            async_gen_state.collections.append(chunk_result)
         else:
             text_chunk += tool_call.function.arguments
-            async_gen_state.results[-1]["input"] += tool_call.function.arguments
+            async_gen_state.collections[-1]["input"] += tool_call.function.arguments
         return text_chunk
 
     if openai_event.choices[0].delta.content:
@@ -153,10 +156,10 @@ def handle_openai_event(
         if hasattr(openai_event, "citations"):
             async_gen_state.citations = openai_event.citations
 
-        if len(async_gen_state.results):
-            async_gen_state.results[-1]["text"] += text_chunk
+        if async_gen_state.collections:
+            async_gen_state.collections[-1]["text"] += text_chunk
         else:
-            async_gen_state.results.append(chunk_result)
+            async_gen_state.collections.append(chunk_result)
         return text_chunk
 
 
@@ -219,23 +222,23 @@ def handle_anthropic_event(
                 "name": anthropic_event.content_block.name,
                 "input": ""
             }
-            async_gen_state.results.append(chunk_result)
+            async_gen_state.collections.append(chunk_result)
         else:
             chunk_result = {
                 "type": "text",
                 "text": anthropic_event.content_block.text
             }
-            async_gen_state.results.append(chunk_result)
+            async_gen_state.collections.append(chunk_result)
         return None
 
     if isinstance(anthropic_event, RawContentBlockDeltaEvent):
         if isinstance(anthropic_event.delta, InputJSONDelta):
             text_chunk = anthropic_event.delta.partial_json
-            async_gen_state.results[-1]["input"] += text_chunk
+            async_gen_state.collections[-1]["input"] += text_chunk
             return text_chunk
         elif isinstance(anthropic_event.delta, TextDelta):
             text_chunk = anthropic_event.delta.text
-            async_gen_state.results[-1]["text"] += text_chunk
+            async_gen_state.collections[-1]["text"] += text_chunk
             return text_chunk
 
     # RawMessageDeltaEvent(
@@ -293,7 +296,7 @@ def handle_timbal_event(
         return None
 
     if isinstance(timbal_event, FlowOutputEvent):
-        async_gen_state.results = timbal_event.output
+        async_gen_state.collections = timbal_event.output
         return None
 
 
@@ -323,11 +326,14 @@ def handle_event(
         return handle_timbal_event(event, async_gen_state)
 
     if isinstance(event, str):
-        async_gen_state.results += event
+        if async_gen_state.collections:
+            async_gen_state.collections += event
+        else: 
+            async_gen_state.collections = event
         return event
 
     # ? Implement custom behavior for other event types.
 
     # Default behavior for any other event type.
-    async_gen_state.results.append(event)
+    async_gen_state.collections.append(event)
     return event

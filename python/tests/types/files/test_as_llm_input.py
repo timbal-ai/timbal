@@ -25,7 +25,7 @@ def pdf(request):
 
 @pytest.mark.asyncio
 async def test_pdf(model, pdf) -> None:
-    agent = Agent(model=model).compile()
+    agent = Agent(model=model)
 
     prompt = [File.validate(pdf), "What's Bob's score?"]
 

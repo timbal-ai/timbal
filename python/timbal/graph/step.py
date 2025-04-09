@@ -75,6 +75,11 @@ class Step(BaseStep):
         self.is_coroutine = inspect.iscoroutinefunction(handler_fn)
         self.is_async_gen = inspect.isasyncgenfunction(handler_fn)
 
+    
+    def prefix_path(self, prefix: str) -> None:
+        """Prefix the step's path with a given path."""
+        self.path = f"{prefix}.{self.id}"
+
 
     def params_model(self) -> BaseModel:
         """Returns the Pydantic model defining the expected parameters for this step."""

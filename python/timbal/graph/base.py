@@ -27,6 +27,12 @@ class BaseStep(BaseModel, ABC):
 
 
     @abstractmethod
+    def prefix_path(self, prefix: str) -> None:
+        """Prefix the step's path with a given path."""
+        pass
+
+
+    @abstractmethod
     def params_model(self) -> BaseModel:
         """Returns the Pydantic model defining the expected parameters for this step."""
         pass
@@ -50,9 +56,38 @@ class BaseStep(BaseModel, ABC):
         pass
 
 
+    def to_openai_tool(self) -> dict[str, Any]:
+        """Convert the step to OpenAI's expected tool format."""
+        tool_description = ""
+        if hasattr(self, "tool_description"):
+            tool_description = self.tool_description or ""
+
+        return {
+            "type": "function",
+            "function": {
+                "name": self.id,
+                "description": tool_description,
+                "parameters": self.params_model_schema(),
+            }
+        }
+
+
+    def to_anthropic_tool(self) -> dict[str, Any]:
+        """Convert the step to Anthropic's expected tool format."""
+        tool_description = ""
+        if hasattr(self, "tool_description"):
+            tool_description = self.tool_description or ""
+
+        return {
+            "name": self.id,
+            "description": tool_description,
+            "input_schema": self.params_model_schema(),
+        }
+
+
     # TODO Better method definition. Then we can use "See base class" in the child classes.
     @abstractmethod
-    def run(
+    async def run(
         self, 
         context: RunContext | None = None, # noqa: ARG002
         **kwargs: Any,

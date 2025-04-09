@@ -113,6 +113,13 @@ class Flow(BaseStep):
         self._is_compiled = False
 
     
+    def prefix_path(self, prefix: str) -> None:
+        """Prefix the flow's path with a given path."""
+        self.path = f"{prefix}.{self.id}"
+        for step in self.steps.values():
+            step.prefix_path(self.path)
+
+    
     def get_dags(self) -> tuple[Dag, Dag]:
         """Returns the DAG representing the flow's execution order and the reverse DAG for the flow."""
         if hasattr(self, '_dag') and hasattr(self, '_rev_dag'):
@@ -653,7 +660,7 @@ class Flow(BaseStep):
                         continue
 
                     except StopAsyncIteration:
-                        step_result = async_gen_state.results
+                        step_result = async_gen_state.collect()
                         # Tool results are not marked as llm steps. These can include citations (e.g. perplexity).
                         # We add these citations directly formatting the markdown of the text result.
                         if hasattr(async_gen_state, "citations"):
@@ -912,23 +919,12 @@ class Flow(BaseStep):
         if id in self.steps:
             raise ValueError(f"Step {id} already exists in the flow.")
 
-        def _update_path(step: BaseStep, path: str) -> None:
-            if isinstance(step, Step):
-                step.path = f"{path}.{step.id}"
-                return
-            elif isinstance(step, Flow):
-                step.path = f"{path}.{step.id}"
-                for sub_step in step.steps.values():
-                    _update_path(sub_step, step.path)
-            else:
-                raise NotImplementedError(f"Invalid step type {type(step)}.")
-
         if isinstance(step, BaseStep):
             step = copy.deepcopy(step)
             step.id = id
             # This recursively updates recursively the steps paths so that we can uniquely 
             # identify each step, and subflow within the parent flow.
-            _update_path(step, self.path)
+            step.prefix_path(self.path) # TODO Add tests of how this works with nested subflows and nested agents.
             # When adding a subflow, ensure it is compiled with all the possible optimizations.
             if isinstance(step, Flow) and not step._is_compiled:
                 step.compile()

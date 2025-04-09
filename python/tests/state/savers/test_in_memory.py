@@ -7,18 +7,17 @@ from timbal.state.savers import InMemorySaver
 @pytest.mark.asyncio
 async def test_in_memory():
 
-    agent_id = "custom_name"
 
     flow = Agent(
-        id=agent_id,
         model="gpt-4o-mini",
-    ).compile(state_saver=InMemorySaver())
+        state_saver=InMemorySaver(),
+    )
 
     flow_output_event = await flow.complete(prompt="My name is David")
 
     assert len(flow.state_saver.snapshots) == 1
     for i, snapshot in enumerate(flow.state_saver.snapshots):
-        agent_memory = snapshot.data[f"{agent_id}.memory"].resolve()
+        agent_memory = snapshot.data["memory"].resolve()
         assert len(agent_memory) == (i + 1) * 2
 
     flow_output_event = await flow.complete(
@@ -28,7 +27,7 @@ async def test_in_memory():
 
     assert len(flow.state_saver.snapshots) == 2
     for i, snapshot in enumerate(flow.state_saver.snapshots):
-        agent_memory = snapshot.data[f"{agent_id}.memory"].resolve()
+        agent_memory = snapshot.data["memory"].resolve()
         assert len(agent_memory) == (i + 1) * 2
 
     await flow.complete(
@@ -38,5 +37,5 @@ async def test_in_memory():
 
     assert len(flow.state_saver.snapshots) == 3
     for i, snapshot in enumerate(flow.state_saver.snapshots):
-        agent_memory = snapshot.data[f"{agent_id}.memory"].resolve()
+        agent_memory = snapshot.data["memory"].resolve()
         assert len(agent_memory) == (i + 1) * 2
