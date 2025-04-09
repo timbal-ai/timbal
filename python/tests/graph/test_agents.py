@@ -3,6 +3,7 @@ import pytest
 from datetime import datetime
 
 from timbal import Agent
+from timbal.errors import AgentError
 from timbal.state.context import RunContext
 from timbal.state.savers import InMemorySaver
 from timbal.steps.perplexity import search
@@ -174,3 +175,16 @@ async def test_run_with_parallel_internet_search():
     async for event in agent.run(prompt="What is the weather in Tokyo and in London?"):
         print()
         print("Event: ", event)
+
+
+@pytest.mark.asyncio
+async def test_run_llm_error():
+    agent = Agent(model="this-model-does-not-exist")
+    with pytest.raises(AgentError):
+        async for event in agent.run(prompt="What is the weather in Tokyo and in London?"):
+            print()
+            print("Event: ", event)
+
+
+# TODO Test initial kwargs validation error.
+# TODO Test data is being saved properly after any type of error.

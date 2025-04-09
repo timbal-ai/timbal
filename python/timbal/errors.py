@@ -27,3 +27,20 @@ class StepExecutionError(TimbalError):
 
 class FlowExecutionError(TimbalError):
     """Error raised when a step of the flow fails for some reason."""
+
+
+class AgentError(TimbalError):
+    """Error raised when an agent fails (non-recoverable)."""
+
+    def __init__(self, error_info: dict[str, Any]) -> None:
+        self.type = error_info.get("type", "UnknownError")
+        self.message = error_info.get("message", "")
+        self.traceback = error_info.get("traceback", "")
+        super().__init__()
+
+    def __str__(self) -> str:
+        return (
+            f"Type: {self.type}\n"
+            f"Message: {self.message}\n"
+            f"Traceback: {self.traceback}"
+        )

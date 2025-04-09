@@ -61,4 +61,4 @@ async def llm_router(
         async for res_chunk in res:
             yield res_chunk
     else:
-        raise NotImplementedError(f"Model {model} not implemented yet.")
+        raise NotImplementedError(f"Model '{model}' is not implemented yet.")
