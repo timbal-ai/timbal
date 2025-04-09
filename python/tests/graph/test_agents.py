@@ -188,3 +188,15 @@ async def test_run_llm_error():
 
 # TODO Test initial kwargs validation error.
 # TODO Test data is being saved properly after any type of error.
+
+
+# @pytest.mark.asyncio
+# async def test_run_steps():
+#     agent = Agent(
+#         tools=[get_current_time],
+#         state_saver=InMemorySaver(),
+#     )
+#     res = await agent.complete(prompt="What is the time?")
+#     print(res)
+
+#     print(agent.state_saver.snapshots)

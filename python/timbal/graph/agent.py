@@ -202,6 +202,7 @@ class Agent(BaseStep):
 
         llm_output = None
         llm_error = None
+        tools_dump = []
         try:
             async_gen_state = AsyncGenState()
 
@@ -217,6 +218,14 @@ class Agent(BaseStep):
                 "content": async_gen_state.collect(),
             })
 
+            # Properly format/dump the tools for tracing and debugging (this is what we sent to the LLM).
+            if async_gen_state.events_source == "openai":
+                tools_dump = [tool.to_openai_tool() for tool in tools]
+            elif async_gen_state.events_source == "anthropic":
+                tools_dump = [tool.to_anthropic_tool() for tool in tools]
+            else:
+                raise ValueError(f"Unsupported LLM events source: {async_gen_state.events_source}")
+
         except Exception as err:
             # We don't raise an error here. We want the agent to be able to recover from this.
             # e.g. the LLM is passing a badly formatted parameter to the tool.
@@ -230,7 +239,7 @@ class Agent(BaseStep):
 
         llm_input = {
             "messages": messages,
-            "tools": tools, # TODO We might need to dump this (as openai or anthropic).
+            "tools": tools_dump,
             **kwargs,
         }
 
@@ -258,6 +267,7 @@ class Agent(BaseStep):
 
         tool_output = None
         tool_error = None
+        tool_usage = {}
         try:
             # Flow and Agent inputs are validated within their own .run() method. 
             # That is because we want to validate the first initial call to the parent flow as well.
@@ -291,6 +301,8 @@ class Agent(BaseStep):
                 async for event in tool_output:
                     event = handle_event(event, async_gen_state)
                 tool_output = async_gen_state.collect()
+                tool_usage = async_gen_state.usage
+                # TODO Collect usage when it's not a generator.
 
             tool_output = str(tool_output)
             
@@ -314,6 +326,7 @@ class Agent(BaseStep):
             output=tool_output,
             # We pass the error so that we're able to properly identify errors in the traces.
             error=tool_error,
+            usage=tool_usage,
         )
 
 
@@ -331,10 +344,17 @@ class Agent(BaseStep):
 
         # This one is global to the agent.
         t0 = int(time.time() * 1000)
-        yield StartEvent(
+
+        agent_start_event = StartEvent(
             run_id=context.id,
             path=self.path,
         )
+        yield agent_start_event
+        logger.info("start_event", start_event=agent_start_event)
+
+        # Aggregated traces and usage for the entire run.
+        run_steps = {}
+        run_usage = {}
 
         # Load the memory.
         # The data stored in the state saver is just the passed messages.
@@ -436,6 +456,14 @@ class Agent(BaseStep):
         yield llm_output_event
         logger.info("output_event", output_event=llm_output_event)
 
+        # Store the trace of the LLM step.
+        run_steps[llm_i_path] = dump(llm_output_event)
+
+        # Aggregate the usage of the LLM step.
+        for k, v in llm_result.usage.items():
+            current_kv = run_usage.get(k, 0)
+            run_usage[k] = current_kv + v
+
         # An LLM error is non-recoverable for the agent (after retries and all).
         # We raise the error upwards so others can catch it if this is a subagent.
         if llm_result.error is not None:
@@ -453,8 +481,8 @@ class Agent(BaseStep):
                     t0=t0,
                     t1=t1,
                     data=data,
-                    # TODO steps
-                    # TODO usage
+                    steps=run_steps,
+                    usage=run_usage,
                 )
                 
                 # We don't want to cancel the execution if this errors. 
@@ -533,6 +561,14 @@ class Agent(BaseStep):
                 yield tool_output_event
                 logger.info("output_event", output_event=tool_output_event)
 
+                # Store the trace of the LLM step.
+                run_steps[f"{tool.path}-{tool_call.id}"] = dump(tool_output_event)
+
+                # Aggregate the usage of the tool step.
+                for k, v in tool_result.usage.items():
+                    current_kv = run_usage.get(k, 0)
+                    run_usage[k] = current_kv + v
+
             # Run the llm again.
             llm_i_path = f"{self.path}.llm-{i}"
 
@@ -566,6 +602,14 @@ class Agent(BaseStep):
             yield llm_output_event
             logger.info("output_event", output_event=llm_output_event)
 
+            # Store the trace of the LLM step.
+            run_steps[llm_i_path] = dump(llm_output_event)
+
+            # Aggregate the usage of the LLM step.
+            for k, v in llm_result.usage.items():
+                current_kv = run_usage.get(k, 0)
+                run_usage[k] = current_kv + v
+
             # An LLM error is non-recoverable for the agent (after retries and all).
             # We raise the error upwards so others can catch it if this is a subagent.
             if llm_result.error is not None:
@@ -583,8 +627,8 @@ class Agent(BaseStep):
                         t0=t0,
                         t1=t1,
                         data=data,
-                        # TODO steps
-                        # TODO usage
+                        steps=run_steps,
+                        usage=run_usage,
                     )
                     
                     # We don't want to cancel the execution if this errors. 
@@ -618,12 +662,12 @@ class Agent(BaseStep):
                 path=self.path,
                 input=agent_input,
                 output=last_message,
-                error=None, # TODO
+                error=None,
                 t0=t0,
                 t1=t1,
                 data=data,
-                # TODO steps
-                # TODO usage
+                steps=run_steps,
+                usage=run_usage,
             )
 
             # We don't want to cancel the execution if this errors. 
@@ -640,10 +684,10 @@ class Agent(BaseStep):
             path=self.path,
             input=agent_input,
             output=last_message,
-            error=None, # TODO We should try catch the LLM call.
+            error=None, # If it reaches this point, the agent has completed successfully.
             t0=t0,
             t1=t1,
-            usage={}, # TODO Aggregate the usage from all the steps.
+            usage=run_usage,
         )
 
     
@@ -652,7 +696,7 @@ class Agent(BaseStep):
         context: RunContext | None = None,
         **kwargs: Any,
     ) -> OutputEvent:
-        """Flow.run() wrapper method that completes the flow execution.
+        """run() wrapper method that completes the flow execution.
         
         Args: 
             context: RunContext

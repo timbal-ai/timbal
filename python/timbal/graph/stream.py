@@ -61,6 +61,8 @@ class AsyncGenState(BaseModel):
     """Accumulated results from generator yields (e.g. LLM message chunks)."""
     usage: dict[str, int] = {}
     """Resource usage stats (e.g. token counts for LLM calls)."""
+    events_source: str | None = None # Allow None for late initializations.
+    """The source of the events (e.g. 'openai', 'anthropic', 'timbal', 'str', ...)."""
 
     def collect(self) -> Any:
         return self.collections
@@ -317,15 +319,31 @@ def handle_event(
         Processed event content if available, None otherwise
     """
     if isinstance(event, OpenAIEvent):
+        if async_gen_state.events_source is None:
+            async_gen_state.events_source = "openai"
+        if async_gen_state.events_source != "openai":
+            raise ValueError(f"We cannot handle mixed events sources.")
         return handle_openai_event(event, async_gen_state)
 
     if isinstance(event, AnthropicEvent):
+        if async_gen_state.events_source is None:
+            async_gen_state.events_source = "anthropic"
+        if async_gen_state.events_source != "anthropic":
+            raise ValueError(f"We cannot handle mixed events sources.")
         return handle_anthropic_event(event, async_gen_state)
 
     if isinstance(event, TimbalEvent):
+        if async_gen_state.events_source is None:
+            async_gen_state.events_source = "timbal"
+        if async_gen_state.events_source != "timbal":
+            raise ValueError(f"We cannot handle mixed events sources.")
         return handle_timbal_event(event, async_gen_state)
 
     if isinstance(event, str):
+        if async_gen_state.events_source is None:
+            async_gen_state.events_source = "str"
+        if async_gen_state.events_source != "str":
+            raise ValueError(f"We cannot handle mixed events sources.")
         if async_gen_state.collections:
             async_gen_state.collections += event
         else: 
@@ -335,5 +353,6 @@ def handle_event(
     # ? Implement custom behavior for other event types.
 
     # Default behavior for any other event type.
+    async_gen_state.events_source = "any"
     async_gen_state.collections.append(event)
     return event
