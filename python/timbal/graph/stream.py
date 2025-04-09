@@ -144,6 +144,7 @@ def handle_openai_event(
             async_gen_state.collections.append(chunk_result)
         else:
             text_chunk += tool_call.function.arguments
+            # TODO Add Gemini id thing (apparently they don't return)
             async_gen_state.collections[-1]["input"] += tool_call.function.arguments
         return text_chunk
 
