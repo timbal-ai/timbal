@@ -2,7 +2,7 @@
 
 A strongly opinionated framework for building and orchestrating agentic AI applications.
 
-> ⚠️ **Early Preview**: This project is in very early development and APIs are subject to change. Use at your own risk.
+> 🚧 **Early Preview**: This project is in early development and APIs are subject to change. 
 
 ## Overview
 
