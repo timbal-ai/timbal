@@ -8,7 +8,8 @@ from timbal import Agent
 
 @pytest.fixture(params=[
     "gpt-4o-mini",
-    "claude-3-5-sonnet-20241022",
+    "gemini-2.0-flash-lite",
+    # "claude-3-5-sonnet-20241022",
     # TODO Add more tests for other models.
 ])
 def model(request):

@@ -6,41 +6,80 @@ A strongly opinionated framework for building and orchestrating agentic AI appli
 
 ## Overview
 
-Timbal provides a flexible framework for building complex AI applications with:
+## Overview
 
-- Flow-based orchestration of LLM calls and tools
-- First-class support for agentic behaviors
-- Built-in memory management and state persistence
-- Streaming responses and real-time updates
-- Support for multiple LLM providers (OpenAI, Anthropic, Gemini, TogetherAI)
+Timbal provides two main patterns for building AI applications:
 
-## Quick Example
+### 1. Agentic (Agent-based)
+LLMs autonomously decide execution paths and tool usage based on goals. Best for:
+- Complex reasoning tasks
+- Dynamic tool selection
+- Open-ended problem solving
+
+### 2. Workflow (Flow-based) 
+You explicitly define the execution steps and tool usage. Ideal for:
+- Predictable processes
+- Strict control requirements
+- Performance-critical applications
+
+## Quick Examples
+
+### Agents 
+
+In the following example we can see how Timbal makes it easy to build agents. You can use pre-built tools like `search`, or define your own tools using regular Python functions. No need to worry about complex schemas or interfaces - just write normal functions. Timbal supports any LLM provider (OpenAI, Anthropic, Gemini, local models) - just specify the model you want to use:
+
 ```python
-from timbal import Flow
+from datetime import datetime
 
-# Create a flow
-flow = Flow()
+from timbal import Agent
+from timbal.state.savers import InMemorySaver
+from timbal.steps.perplexity import search
 
-# Add an agent that can use tools
-flow.add_agent(
-    model="gpt-4",
+def get_datetime():
+    return datetime.now().isoformat()
+
+agent = Agent(
+    model="meta-llama/Llama-4-Scout-17B-16E-Instruct",
     tools=[
+        get_datetime,
         {
-            "tool": search_web,
-            "description": "Search the web for information"
-        },
-        {
-            "tool": calculate,
-            "description": "Perform calculations" 
+            "tool": search,
+            "description": "Search the internet."
         }
     ],
-    max_iter=3  # Allow up to 3 tool use iterations
+    state_saver=InMemorySaver(),
 )
 
-# Run the flow
-async for chunk in flow.run(prompt="What is 235 * 18 and what year was that number first used in history?"):
-    print(chunk, end="", flush=True)
+response = await agent.complete(prompt="What time is it?")
 ```
+
+The agent will automatically understand how to use these tools based on their signatures and any optional metadata you provide.
+
+### Workflows
+
+Workflows provide fine-grained control over your AI pipeline. Unlike agents that make autonomous decisions, flows let you explicitly define each step and how data moves between them. Here's a simple RAG pipeline:
+
+```python
+from timbal import Flow
+from timbal.state.savers import InMemorySaver
+
+def retriever(query: str):
+    return "..."
+
+flow = (Flow()
+    .add_step(retriever)
+    .add_llm(model="gpt-4o-mini")
+    .set_data_map("llm.prompt", "retriever.return")
+    .set_input("retriever.query", "query")
+    .set_output("response", "llm.return")
+).compile(state_saver=InMemorySaver())
+
+query = "..."
+
+response = await flow.complete(prompt=query)
+```
+
+This pattern is ideal for applications requiring predictable execution paths, strict control over tool usage, or performance-critical processing.
 
 ## Installation
 
@@ -50,7 +89,7 @@ pip install timbal
 
 ## Documentation
 
-[Documentation coming soon]
+The full documentation can be found [here](https://timbal-ai.github.io/timbal/).
 
 ## Contributing
 

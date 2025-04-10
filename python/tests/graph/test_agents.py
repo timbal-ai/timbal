@@ -190,13 +190,30 @@ async def test_run_llm_error():
 # TODO Test data is being saved properly after any type of error.
 
 
-# @pytest.mark.asyncio
-# async def test_run_steps():
-#     agent = Agent(
-#         tools=[get_current_time],
-#         state_saver=InMemorySaver(),
-#     )
-#     res = await agent.complete(prompt="What is the time?")
-#     print(res)
+@pytest.mark.asyncio
+async def test_other_models():
+    agent = Agent(
+        # model="gpt-4o-mini",
+        model="gemini-2.0-flash-lite",
+        # model="o3-mini",
+        # model="Qwen/Qwen2.5-7B-Instruct-Turbo",
+        # model="meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        # model="claude-3-5-sonnet-20241022",
+        # model="o1",
+        tools=[get_current_time],
+        state_saver=InMemorySaver(),
+        max_tokens=2048,
+    )
+    res = await agent.complete(prompt="What is the time?")
+    print(res)
 
-#     print(agent.state_saver.snapshots)
+
+@pytest.mark.asyncio
+async def test_parallel_search():
+    agent = Agent(
+        # model="gemini-2.0-flash-lite", # TODO Simplify search arguments and all. Gemini errors for some reason.
+        model="gpt-4o-mini",
+        tools=[search],
+    )
+    res = await agent.complete(prompt="What is the weather in Tokyo and in London?")
+    print(res)

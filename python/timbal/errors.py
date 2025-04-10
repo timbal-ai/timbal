@@ -44,3 +44,7 @@ class AgentError(TimbalError):
             f"Message: {self.message}\n"
             f"Traceback: {self.traceback}"
         )
+
+
+class APIKeyNotFoundError(TimbalError):
+    """Error raised when an API key is not found."""

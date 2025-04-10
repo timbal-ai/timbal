@@ -14,6 +14,7 @@ from anthropic.types import (
     ToolUseBlock,
 )
 from pydantic import BaseModel, ConfigDict
+from uuid_extensions import uuid7
 
 from ..types.events import (
     AnthropicEvent,
@@ -87,45 +88,46 @@ def handle_openai_event(
         Text chunk if the event contains content or tool call info, None otherwise
     """
 
-    # OpenAI SDKs use a message with empty choices to indicate the end of a stream and send the usage.
+    # TODO Review. Gemini sends usage stats in every chunk. It doesn't send a separate chunk with the total usage.
+    # ? We guess they send the revised number in the last chunk.
+    if openai_event.usage:
+        openai_model = openai_event.model
+        openai_usage = openai_event.usage
+
+        input_tokens = int(openai_usage.prompt_tokens)
+        input_tokens_details = openai_usage.prompt_tokens_details
+        if hasattr(input_tokens_details, "cached_tokens"):
+            input_cached_tokens = int(input_tokens_details.cached_tokens)
+            if input_cached_tokens:
+                input_tokens -= input_cached_tokens
+                async_gen_state.usage[f"{openai_model}:input_cached_tokens"] = input_cached_tokens
+        if hasattr(input_tokens_details, "audio_tokens"):
+            input_audio_tokens = int(input_tokens_details.audio_tokens)
+            if input_audio_tokens:
+                input_tokens -= input_audio_tokens
+                async_gen_state.usage[f"{openai_model}:input_audio_tokens"] = input_audio_tokens
+        # ? We've seen this in some responses. Usually they return the image tokens as regular text tokens.
+        # if hasattr(input_tokens_details, "image_tokens"):
+        #     input_image_tokens = int(input_tokens_details.image_tokens)
+        #     if input_image_tokens:
+        #         input_tokens -= input_image_tokens
+        #         async_gen_state.usage[f"{openai_model}:input_image_tokens"] = input_image_tokens
+        # Text tokens are used as the default.
+        # if hasattr(input_tokens_details, "text_tokens"):
+
+        async_gen_state.usage[f"{openai_model}:input_text_tokens"] = input_tokens
+
+        output_tokens = int(openai_usage.completion_tokens)
+        output_tokens_details = openai_usage.completion_tokens_details
+        if hasattr(output_tokens_details, "audio_tokens"):
+            output_audio_tokens = int(output_tokens_details.audio_tokens)
+            if output_audio_tokens:
+                output_tokens -= output_audio_tokens
+                async_gen_state.usage[f"{openai_model}:output_audio_tokens"] = output_audio_tokens
+
+        async_gen_state.usage[f"{openai_model}:output_text_tokens"] = output_tokens
+
     if not len(openai_event.choices):
-        if openai_event.usage:
-            openai_model = openai_event.model
-            openai_usage = openai_event.usage
-
-            input_tokens = int(openai_usage.prompt_tokens)
-            input_tokens_details = openai_usage.prompt_tokens_details
-            if hasattr(input_tokens_details, "cached_tokens"):
-                input_cached_tokens = int(input_tokens_details.cached_tokens)
-                if input_cached_tokens:
-                    input_tokens -= input_cached_tokens
-                    async_gen_state.usage[f"{openai_model}:input_cached_tokens"] = input_cached_tokens
-            if hasattr(input_tokens_details, "audio_tokens"):
-                input_audio_tokens = int(input_tokens_details.audio_tokens)
-                if input_audio_tokens:
-                    input_tokens -= input_audio_tokens
-                    async_gen_state.usage[f"{openai_model}:input_audio_tokens"] = input_audio_tokens
-            # ? We've seen this in some responses. Usually they return the image tokens as regular text tokens.
-            # if hasattr(input_tokens_details, "image_tokens"):
-            #     input_image_tokens = int(input_tokens_details.image_tokens)
-            #     if input_image_tokens:
-            #         input_tokens -= input_image_tokens
-            #         async_gen_state.usage[f"{openai_model}:input_image_tokens"] = input_image_tokens
-            # Text tokens are used as the default.
-            # if hasattr(input_tokens_details, "text_tokens"):
-
-            async_gen_state.usage[f"{openai_model}:input_text_tokens"] = input_tokens
-
-            output_tokens = int(openai_usage.completion_tokens)
-            output_tokens_details = openai_usage.completion_tokens_details
-            if hasattr(output_tokens_details, "audio_tokens"):
-                output_audio_tokens = int(output_tokens_details.audio_tokens)
-                if output_audio_tokens:
-                    output_tokens -= output_audio_tokens
-                    async_gen_state.usage[f"{openai_model}:output_audio_tokens"] = output_audio_tokens
-
-            async_gen_state.usage[f"{openai_model}:output_text_tokens"] = output_tokens
-
         return None
 
     if openai_event.choices[0].delta.tool_calls:
@@ -143,8 +145,16 @@ def handle_openai_event(
             text_chunk += f"Using tool '{tool_call.function.name}' with input: "
             async_gen_state.collections.append(chunk_result)
         else:
+            # ? Gemini doesn't add an id to the tool call.
+            if not async_gen_state.collections:
+                tool_use_id = f"call_{uuid7(as_type='str').replace('-', '')}"
+                async_gen_state.collections.append({
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": tool_call.function.name,
+                    "input": ""
+                })
             text_chunk += tool_call.function.arguments
-            # TODO Add Gemini id thing (apparently they don't return)
             async_gen_state.collections[-1]["input"] += tool_call.function.arguments
         return text_chunk
 

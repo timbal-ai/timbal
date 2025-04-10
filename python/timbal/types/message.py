@@ -4,6 +4,7 @@ from anthropic.types import (
     Message as AnthropicMessage,
 )
 from openai.types.chat import (
+    ChatCompletion as OpenAICompletion,
     ChatCompletionMessage as OpenAIMessage,
 )
 from pydantic import (
@@ -108,6 +109,10 @@ class Message:
         # Don't recurse if we're already dealing with a Message instance
         if isinstance(value, Message):
             return value
+
+        elif isinstance(value, OpenAICompletion):
+            message = value.choices[0].message
+            return cls.validate(message)
 
         elif isinstance(value, OpenAIMessage):
             role = value.role

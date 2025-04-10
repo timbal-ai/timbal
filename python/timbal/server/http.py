@@ -68,14 +68,17 @@ def create_app(
     """
     app = FastAPI(lifespan=lambda app: lifespan(app, module_spec))
 
+
     @app.get("/healthcheck")
     async def healthcheck() -> Response:
         return Response(status_code=204)
+
 
     @app.post("/shutdown")
     async def shutdown() -> Response:
         shutdown_event.set()
         return Response(status_code=204)
+
 
     @app.get("/params_model_schema")
     async def params_model_schema() -> Response:
@@ -85,6 +88,7 @@ def create_app(
             content=params_model_schema,
         )
 
+
     @app.get("/return_model_schema")
     async def return_model_schema() -> Response:
         return_model_schema = app.state.flow.return_model_schema()
@@ -93,13 +97,19 @@ def create_app(
             content=return_model_schema,
         )
 
+
     @app.post("/run")
     async def run(req: Request) -> Response:
         req_data = await req.json()
         req_context = req_data.pop("context", None)
-        req_context = RunContext.model_validate(req_context)
+        if req_context is not None:
+            req_context = RunContext.model_validate(req_context)
+        else:
+            req_context = RunContext()
+
         res_content = await app.state.flow.complete(context=req_context, **req_data)
         res_content = dump(res_content, req_context)
+
         return JSONResponse(
             status_code=200,
             content=res_content,
@@ -130,6 +140,11 @@ async def main(
     shutdown_event = asyncio.Event()
 
     app = create_app(module_spec, shutdown_event)
+
+    if os.getenv("TIMBAL_ENABLE_NGROK", "false").lower() == "true":
+        from pyngrok import ngrok
+        public_url = ngrok.connect(port, "http")
+        logger.info("ngrok_public_url", public_url=public_url)
 
     config = uvicorn.Config(
         app, 

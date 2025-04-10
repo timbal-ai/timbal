@@ -6,6 +6,13 @@ from collections.abc import Callable
 from typing import Any
 
 import structlog
+from anthropic.types import (
+    Message as AnthropicMessage,
+)
+from openai.types.chat import (
+    ChatCompletion as OpenAICompletion,
+    ChatCompletionMessage as OpenAIMessage,
+)
 from pydantic import BaseModel, TypeAdapter
 from uuid_extensions import uuid7
 
@@ -21,6 +28,7 @@ from ..steps.llms.router import llm_router
 from ..types.chat.content import TextContent, ToolResultContent, ToolUseContent
 from ..types.events import OutputEvent, StartEvent
 from ..types.field import Field
+from ..types.llms.usage import acc_usage
 from ..types.message import Message
 from ..types.models import dump
 from .base import BaseStep
@@ -29,24 +37,42 @@ logger = structlog.get_logger("timbal.graph.agent")
 
 
 class LLMResult(BaseModel):
+    """Helper class to wrap LLM results."""
+
     input: dict[str, Any]
+    """The input kwargs to the LLM router."""
     output: Message | None = None
+    """The output message of the LLM. Will be None if the LLM returned an error."""
     error: dict[str, Any] | None = None
+    """Store if any error occurred while running the LLM."""
     t0: int 
+    """The start time of the LLM in milliseconds."""
     t1: int
+    """The end time of the LLM in milliseconds."""
     usage: dict[str, int] = {}
+    """The usage of the LLM."""
 
 
 class ToolResult(BaseModel):
-    id: str # This will be used to create the ToolResultContent (with matching ToolUseContent).
-    input: dict[str, Any] # This will be used for tracing and debugging.
-    output: str # ! We always stringify any result. Even errors. We want the agents to be able to correct their actions.
+    """Helper class to wrap general tool results."""
+
+    id: str
+    """The id of the tool use that will be matched in the generated ToolResultContent."""
+    input: dict[str, Any]
+    """The input to the tool. This is stored for tracing and debugging."""
+    output: str # TODO Change this to Any. Let the conversion happen in .to_content() method.
+    """The output of the tool. Always as a string, so it can be easily converted to an LLM message."""
     error: dict[str, Any] | None = None
+    """Store if any error occurred while running the tool."""
     t0: int
+    """The start time of the tool in milliseconds."""
     t1: int
+    """The end time of the tool in milliseconds."""
     usage: dict[str, int] = {}
+    """The usage of the tool."""
 
     def to_content(self) -> ToolResultContent:
+        """Converts the tool result helper class into a ToolResultContent instance."""
         return ToolResultContent(
             id=self.id,
             content=[TextContent(text=self.output)],
@@ -54,6 +80,8 @@ class ToolResult(BaseModel):
 
 
 class AgentParamsModel(BaseModel):
+    """Fixed parameter model for Agents."""
+
     prompt: Message = Field(description="The prompt to use for the agent.")
     system_prompt: str | None = Field(
         default=None,
@@ -63,31 +91,60 @@ class AgentParamsModel(BaseModel):
         default="gpt-4o-mini",
         description="The model to use for the agent."
     )
+    max_tokens: int | None = Field(
+        default=None,
+        description="The maximum number of tokens to generate."
+    )
 
 
+# These are costly to generate. Pre-compute them and store them.
 agent_params_model_schema = AgentParamsModel.model_json_schema()
 message_model_schema = TypeAdapter(Message).json_schema()
 
 
 class Agent(BaseStep):
-    """Subclass of Flow that implements an LLM agent with tool-use capabilities.
+    """A powerful LLM-powered agent that can execute complex tasks using tools.
     
-    An Agent is a specialized Flow that creates a chain of LLM steps and tools, allowing
-    the LLM to use tools multiple times in a conversation. Each LLM step can call any
-    available tool, and the results are fed back to the next LLM step.
+    The Agent class implements an autonomous system that combines Large Language Models (LLMs) 
+    with a set of tools to solve complex tasks. It operates in an iterative loop where:
+
+    1. The LLM receives a prompt/query and available tools
+    2. The LLM decides which tools to use and how to use them
+    3. The tools are executed and their results are fed back to the LLM
+    4. This continues until the task is complete or max iterations reached
+
+    Key Features:
+        - Multi-turn conversations with memory.
+        - Parallel tool execution.
+        - Support for both sync and async tools.
+        - Automatic state persistence (optional).
+        - Usage tracking and detailed execution traces.
+        - Compatible with multiple LLM providers (OpenAI, Anthropic).
 
     Attributes:
-        id (str): Unique identifier for the agent, defaults to "agent"
-        tools (list): List of callable functions, BaseSteps, or dicts with tool configs
-        max_iter (int): Maximum number of tool use iterations allowed, defaults to 1
-        **kwargs: Additional keyword arguments for the LLMs
+        id (str): Unique identifier for the agent, defaults to "agent".
+                  This is useful when adding the agent as a substep of a flow or as a tool of another agent.
+        path (str): Hierarchical path identifier for nested flows/agents.
+        metadata (dict): Custom metadata for the agent instance.
+        tools (list): Available tools, which can be:
+            - Callable functions (automatically wrapped).
+            - BaseStep instances (direct tool implementations).
+            - Dicts with {"tool": callable, "description": str} for custom tool configs.
+        max_iter (int): Maximum number of tool-use iterations, defaults to 10.
+        state_saver (BaseSaver): Optional component for persisting conversation state.
+        **kwargs (dict): Configuration for the underlying LLM (model, system_prompt, temperature, etc.).
 
     Example:
         ```python
         agent = Agent(
-            tools=[search_tool, calculator],
-            max_iter=3,
-            system_prompt="You are a helpful assistant"
+            model="meta-llama/Llama-4-Scout-17B-16E-Instruct",
+            tools=[
+                get_datetime,
+                {
+                    "tool": search,
+                    "description": "Search the internet."
+                }
+            ]
         )
         ```
     """
@@ -134,7 +191,9 @@ class Agent(BaseStep):
         self, 
         tools: list[Callable | BaseStep | dict[str, Any]]
     ) -> None:
-        """"""
+        """Store the tools as BaseStep instances.
+        This enables us to automatically generate params models and schemas for the tools using pydantic.
+        """
         self.tools = []
         self.tools_lookup = {}
         for i, tool_config in enumerate(tools):
@@ -190,41 +249,77 @@ class Agent(BaseStep):
         return message_model_schema
 
 
-    # TODO Implement retries?
     async def _run_llm(
         self,
         messages: list[Message],
         tools: list[BaseStep],
         **kwargs: Any,
     ) -> Message:
-        """"""
+        """Agent LLM execution wrapper.
+
+        This method handles the core LLM interaction, including:
+            - Model routing
+            - Message formatting according to the LLM sdk being used.
+            - Tool preparation according to the LLM sdk being used.
+            - Handles both streaming and non-streaming calls.
+            - Accumulates token usage for billing/monitoring.
+            - Preserves full request/response context for tracing and debugging.
+            - Non-recoverable errors are propagated up for agent error handling.
+
+        Args:
+            messages (list[Message]): The list of messages to send to the LLM.
+            tools (list[BaseStep]): The list of tools to use.
+            **kwargs: Additional keyword arguments for the LLM.
+
+        Returns:
+            LLMResult
+        """
         t0 = int(time.time() * 1000)
 
-        llm_output = None
         llm_error = None
+        llm_message = None
+        llm_usage = {}
         tools_dump = []
         try:
             async_gen_state = AsyncGenState()
 
-            async for chunk in llm_router(
+            llm_sdk = None
+            llm_output = await llm_router(
                 messages=messages,
                 tools=tools,
                 **kwargs,
-            ):
-                chunk = handle_event(chunk, async_gen_state)
+            )
 
-            llm_output = Message.validate({
-                "role": "assistant",
-                "content": async_gen_state.collect(),
-            })
+            # If tool_output is an async generator, collect it.
+            if inspect.isasyncgen(llm_output):
+                async_gen_state = AsyncGenState()
+                async for llm_output_chunk in llm_output:
+                    llm_output_chunk = handle_event(llm_output_chunk, async_gen_state)
+                llm_usage = async_gen_state.usage
+                llm_message = Message.validate({
+                    "role": "assistant",
+                    "content": async_gen_state.collect(),
+                })
+                llm_sdk = async_gen_state.events_source
+            else:
+                llm_usage = acc_usage(
+                    acc={},
+                    model=kwargs.get("model"),
+                    llm_output=llm_output,
+                )
+                if isinstance(llm_output, (OpenAICompletion, OpenAIMessage)):
+                    llm_sdk = "openai"
+                elif isinstance(llm_output, AnthropicMessage):
+                    llm_sdk = "anthropic"
+                llm_message = Message.validate(llm_output)
 
             # Properly format/dump the tools for tracing and debugging (this is what we sent to the LLM).
-            if async_gen_state.events_source == "openai":
+            if llm_sdk == "openai":
                 tools_dump = [tool.to_openai_tool() for tool in tools]
-            elif async_gen_state.events_source == "anthropic":
+            elif llm_sdk == "anthropic":
                 tools_dump = [tool.to_anthropic_tool() for tool in tools]
             else:
-                raise ValueError(f"Unsupported LLM events source: {async_gen_state.events_source}")
+                raise ValueError(f"Unsupported LLM sdk!")
 
         except Exception as err:
             # We don't raise an error here. We want the agent to be able to recover from this.
@@ -245,11 +340,11 @@ class Agent(BaseStep):
 
         return LLMResult(
             input=llm_input,
-            output=llm_output,
+            output=llm_message,
             error=llm_error,
             t0=t0,
             t1=t1,
-            usage=async_gen_state.usage,
+            usage=llm_usage,
         )
 
 
@@ -260,7 +355,24 @@ class Agent(BaseStep):
         tool_use_id: str,
         context: RunContext,
     ) -> ToolResult:
-        """"""
+        """Agent tool execution wrapper.
+        
+        This method handles:
+            - Input validation against the tool's params model.
+            - Sync and async tools.
+            - Collects and formats generator outputs (both sync and async).
+            - All outputs are prepared for LLM consumption.
+            - Tool execution is traced and can be monitored/logged.
+
+        Args:
+            tool (BaseStep): The tool to execute.
+            tool_input (dict[str, Any]): The input to the tool.
+            tool_use_id (str): The id of the tool use.
+            context (RunContext): The run context. Needed when tools are nested agents or flows.
+
+        Returns:
+            ToolResult
+        """
         t0 = int(time.time() * 1000)
 
         # There's no need to dump the tool input here. It will be generated by an LLM. No existing references to any objects in place.
@@ -335,7 +447,61 @@ class Agent(BaseStep):
         context: RunContext | None = None, # noqa: ARG002
         **kwargs: Any,
     ) -> Any:
-        """Executes the step's processing logic."""
+        """Execute the agent's main processing loop with tool usage, state management, and event streaming.
+        
+        This method implements the core agent execution cycle, including:
+            - State loading and conversation history retrieval
+            - Initial LLM execution with provided prompt
+            - Tool execution based on LLM decisions
+            - Result feeding back to LLM for next decisions
+            - State persistence and usage tracking
+            - Event streaming for monitoring/logging
+
+        Args:
+            context (RunContext | None): Execution context containing:
+                - Run identifiers (auto-generated if None)
+                - Parent context for nested executions
+                - Session tracking for state persistence
+                - Additional execution metadata
+            **kwargs: Agent input parameters.
+
+        Yields:
+            Event objects in sequence:
+                StartEvent:
+                    - Marks beginning of agent/tool executions
+                    - Contains run identifiers and paths
+                OutputEvent:
+                    - Contains execution results or errors
+                    - Includes usage statistics
+                    - Marks completion of execution steps
+
+        State Management:
+            - Loads previous conversation if state_saver configured
+            - Maintains message history across iterations
+            - Persists state after each significant step
+            - Handles state loading/saving errors gracefully
+
+        Error Handling:
+            - Non-recoverable LLM errors propagate up
+            - Tool errors are captured and fed back to LLM
+            - State persistence errors are logged but non-fatal
+            - Input validation errors raise AgentError
+
+        Usage Tracking:
+            - Accumulates token usage across all LLM calls
+            - Tracks tool-specific resource usage
+            - Maintains execution timing information
+            - Preserves full execution traces
+
+        Notes:
+            - Implements parallel tool execution when possible
+            - Respects max_iter limit for tool usage
+            - Automatically formats all messages for LLM consumption
+            - Provides detailed tracing for debugging/monitoring
+            - Can be used as both standalone agent or subagent
+            - Supports continuation of previous conversations
+            - Handles both streaming and non-streaming LLMs
+        """
         # ? Find a way to encapsulate all this logic. I am imagining a class that implements the collect method, wraps the run method, etc. 
         if context is None:
             context = RunContext(id=uuid7(as_type="str"))
