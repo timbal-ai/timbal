@@ -549,10 +549,22 @@ class Agent(BaseStep):
         # Copy the input as is, so we save the traces without validated data and defaults.
         agent_input = dump(kwargs)
 
-        # Validate kwargs to store the validated inputs in the snapshot.
         try:
+            # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
+            # ? Ideally the client should be able to automatically handle this, but we do it ourselves to simplify the in/out interface.
+            if "prompt" not in kwargs:
+                raise AgentError("The 'prompt' parameter is required when calling an Agent.")
+            
+            kwargs["prompt"] = Message.validate(kwargs["prompt"])
+
+            agent_input = dump(kwargs)
+
             kwargs = {**self.llm_kwargs, **kwargs}
             kwargs = dict(self.params_model().model_validate(kwargs))
+
+            # Add the prompt to the messages. The LLM router expects everything inside the messages list.
+            prompt = kwargs.pop("prompt")
+            messages.append(prompt)
         except Exception as err:
             error = {
                 "type": type(err).__name__,
@@ -586,10 +598,6 @@ class Agent(BaseStep):
                     logger.error("put_memory_error", err=err)
 
             raise AgentError(error) from None
-
-        # 'prompt' will be already validated against the AgentParamsModel.
-        prompt = kwargs.pop("prompt")
-        messages.append(prompt)
 
         # Run an llm first (that is, the handler_fn for the llm gateway step).
         llm_i_path = f"{self.path}.llm-0"
