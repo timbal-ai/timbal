@@ -13,7 +13,8 @@ def get_datetime() -> str:
 flow = Agent(
     model="gpt-4o-mini",
     tools=[get_datetime],
-).compile(state_saver=TimbalPlatformSaver())
+    state_saver=TimbalPlatformSaver(),
+)
 
 
 async def main():

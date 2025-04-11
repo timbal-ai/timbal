@@ -7,7 +7,7 @@ from pathlib import Path
 import structlog
 from dotenv import load_dotenv
 
-from .. import Flow, __version__
+from .. import Agent, Flow, __version__
 from ..logs import setup_logging
 from .utils import ModuleSpec, load_module
 
@@ -64,8 +64,8 @@ if __name__ == "__main__":
 
     flow = load_module(module_spec)
 
-    if not isinstance(flow, Flow):
-        raise ValueError("The loaded module is not a valid Flow instance.")
+    if not isinstance(flow, (Agent, Flow)):
+        raise ValueError("The loaded module is not a valid Agent or Flow instance.")
 
     params_model_schema = flow.params_model_schema()
     return_model_schema = flow.return_model_schema()
