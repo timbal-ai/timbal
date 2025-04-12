@@ -19,7 +19,7 @@ def convert_pdf_to_images(
     for page_num in range(len(doc)):
         page = doc[page_num]
         pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
-        # TODO: Enable File() class to accept a file-like object and specifying extension, name, etc. so that it can serialize.
+        # TODO Use File.validate(bytes, {"extension": ".png"})
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp_path = Path(f.name)
         pix.save(tmp_path)

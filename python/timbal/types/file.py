@@ -105,7 +105,12 @@ class File(io.IOBase):
             object.__setattr__(self, "__fileobj__", None)
 
         if source_scheme == "bytes":
-            content_type = "application/octet-stream"
+            if self.__source_extension__:
+                content_type, _ = mimetypes.guess_type(f"tmp{self.__source_extension__}")
+                if content_type is None:
+                    content_type = f"timbal/{self.__source_extension__}"
+            else:
+                content_type = "application/octet-stream"
         else:
             content_type, _ = mimetypes.guess_type(str(self))
             if content_type is None:
@@ -114,6 +119,9 @@ class File(io.IOBase):
 
 
     def __str__(self) -> str:
+        if self.__source_scheme__ == "bytes":
+            ext_info = f"{self.__source_extension__}" if self.__source_extension__ else ""
+            return f"io.IOBase({ext_info})"
         return self.__source__
 
 
@@ -199,10 +207,16 @@ class File(io.IOBase):
             return value
 
         if isinstance(value, bytes | bytearray):
-            return File(io.BytesIO(value), source_scheme="bytes")
+            source_extension = None
+            if isinstance(info, dict):
+                source_extension = info.get("extension")
+            return File(io.BytesIO(value), source_scheme="bytes", source_extension=source_extension)
 
         if isinstance(value, io.IOBase):
-            return File(value, source_scheme="bytes")
+            source_extension = None
+            if isinstance(info, dict):
+                source_extension = info.get("extension")
+            return File(value, source_scheme="bytes", source_extension=source_extension)
 
         if isinstance(value, Path):
             value = value.expanduser().resolve().as_posix()
