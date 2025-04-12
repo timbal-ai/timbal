@@ -25,7 +25,7 @@ from ..state.data import DataValue
 from ..state.savers.base import BaseSaver
 from ..state.snapshot import Snapshot
 from ..steps.llms.router import llm_router
-from ..types.chat.content import TextContent, ToolResultContent, ToolUseContent
+from ..types.chat.content import Content, ToolResultContent, ToolUseContent
 from ..types.events import OutputEvent, StartEvent
 from ..types.field import Field
 from ..types.llms.usage import acc_usage
@@ -60,8 +60,8 @@ class ToolResult(BaseModel):
     """The id of the tool use that will be matched in the generated ToolResultContent."""
     input: dict[str, Any]
     """The input to the tool. This is stored for tracing and debugging."""
-    output: str # TODO Change this to Any. Let the conversion happen in .to_content() method.
-    """The output of the tool. Always as a string, so it can be easily converted to an LLM message."""
+    output: Message 
+    """The output of the tool. Always as an LLM ready message so we can pass it to the LLMs."""
     error: dict[str, Any] | None = None
     """Store if any error occurred while running the tool."""
     t0: int
@@ -71,12 +71,7 @@ class ToolResult(BaseModel):
     usage: dict[str, int] = {}
     """The usage of the tool."""
 
-    def to_content(self) -> ToolResultContent:
-        """Converts the tool result helper class into a ToolResultContent instance."""
-        return ToolResultContent(
-            id=self.id,
-            content=[TextContent(text=self.output)],
-        )
+
 
 
 class AgentParamsModel(BaseModel):
@@ -416,7 +411,23 @@ class Agent(BaseStep):
                 tool_usage = async_gen_state.usage
                 # TODO Collect usage when it's not a generator.
 
-            tool_output = str(tool_output)
+            # Handle the case where the tool already returns an LLM message. We need to modify it so it represents the result of a tool call.
+            if isinstance(tool_output, Message):
+                tool_output = Message.validate({
+                    "role": "user",
+                    "content": ToolResultContent(
+                        id=tool_use_id,
+                        content=tool_output.content,
+                    ) 
+                })
+            else:
+                tool_output = Message.validate({
+                    "role": "user",
+                    "content": ToolResultContent(
+                        id=tool_use_id,
+                        content=[Content.model_validate(tool_output)],
+                    )
+                })
             
         except Exception as err:
             # We don't raise an error here. We want the agent to be able to recover from this.
@@ -715,10 +726,7 @@ class Agent(BaseStep):
             # Await for tool completions.
             for tool_task in asyncio.as_completed(tool_tasks): # ? We could use this for timeouts.
                 tool_result = await tool_task
-                tool_result_message = Message.validate({
-                    "role": "user",
-                    "content": tool_result.to_content(),
-                })
+                tool_result_message = tool_result.output
                 messages.append(tool_result_message)
                 
                 tool_output_event = OutputEvent(

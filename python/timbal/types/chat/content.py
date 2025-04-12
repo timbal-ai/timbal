@@ -141,7 +141,8 @@ class Content(BaseModel):
                     content=[cls.model_validate(item) for item in tool_result_content],
                 )
         
-        raise ValueError(f"Invalid content: {value}")
+        # By default try to convert whatever python object we have into a string. 
+        return TextContent(text=str(value))
 
 
 class FileContent(Content):

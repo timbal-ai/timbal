@@ -80,8 +80,7 @@ async def test_run():
 @pytest.mark.asyncio
 async def test_run_with_sync_tool():
     agent = Agent(tools=[get_current_time])
-    async for event in agent.run(prompt="What time is it?"):
-        print(event)
+    await agent.complete(prompt="What time is it?")
 
 
 @pytest.mark.asyncio
