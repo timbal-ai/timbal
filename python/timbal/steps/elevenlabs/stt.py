@@ -26,6 +26,9 @@ async def stt(
     audio_file = audio_file.default if hasattr(audio_file, "default") else audio_file
     model_id = model_id.default if hasattr(model_id, "default") else model_id
 
+    if not audio_file.__content_type__.startswith("audio"):
+        raise ValueError(f"STT expected an audio file content type. Got {audio_file.__content_type__}")
+
     api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:
         raise APIKeyNotFoundError("ELEVENLABS_API_KEY not found")
@@ -34,7 +37,11 @@ async def stt(
         headers = {"xi-api-key": api_key}
 
         files = {
-            "file": ("audio.wav", audio_file.read(), "audio/wav"),
+            "file": (
+                f"audio{audio_file.__source_extension__}", 
+                audio_file.read(), 
+                audio_file.__content_type__
+            ),
             "model_id": (None, model_id),
         }
 

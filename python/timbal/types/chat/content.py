@@ -164,14 +164,7 @@ class FileContent(Content):
         if self._cached_openai_input is not None:
             return self._cached_openai_input
 
-        # Get mime type. 
-        # source schemes: bytes, local_path, data, url
-        if self.file.__source_scheme__ == "bytes":
-            raise ValueError("Cannot convert bytes-source file to OpenAI message content.")
-        elif self.file.__source_scheme__ == "data":
-            mime = self.file.__source__.split(";")[0].split(":")[1]
-        else:
-            mime, _ = mimetypes.guess_type(str(self.file.__source__))
+        mime = self.file.__content_type__
         
         # Ensure the file pointer is at the start of the file if we need to read it.
         current_position = self.file.tell()
@@ -257,6 +250,7 @@ class FileContent(Content):
                     },
                 }
             else:
+                # TODO Add the cost of this operation.
                 transcription = await stt(audio_file=self.file)
                 logger.info(
                     "stt", 
@@ -279,14 +273,7 @@ class FileContent(Content):
         if self._cached_anthropic_input is not None:
             return self._cached_anthropic_input
 
-        # Get mime type
-        # source schemes: bytes, local_path, data, url
-        if self.file.__source_scheme__ == "bytes":
-            raise ValueError("Cannot convert bytes-source file to OpenAI message content.")
-        elif self.file.__source_scheme__ == "data":
-            mime = self.file.__source__.split(";")[0].split(":")[1]
-        else:
-            mime, _ = mimetypes.guess_type(str(self.file.__source__))
+        mime = self.file.__content_type__
 
         # Ensure the file pointer is at the start of the file if we need to read it.
         current_position = self.file.tell()
@@ -354,6 +341,7 @@ class FileContent(Content):
                 }
         
         elif mime and mime.startswith("audio/"):
+            # TODO Add the cost of this operation.
             transcription = await stt(audio_file=self.file)
             logger.info(
                 "stt", 

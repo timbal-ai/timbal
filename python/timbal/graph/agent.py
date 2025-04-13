@@ -25,12 +25,7 @@ from ..state.data import DataValue
 from ..state.savers.base import BaseSaver
 from ..state.snapshot import Snapshot
 from ..steps.llms.router import llm_router
-from ..types.chat.content import (
-    Content, 
-    TextContent, 
-    ToolResultContent, 
-    ToolUseContent
-)
+from ..types.chat.content import ToolResultContent, ToolUseContent
 from ..types.events import OutputEvent, StartEvent
 from ..types.field import Field
 from ..types.llms.usage import acc_usage
@@ -75,8 +70,8 @@ class ToolResult(BaseModel):
     """The end time of the tool in milliseconds."""
     usage: dict[str, int] = {}
     """The usage of the tool."""
-
-
+    force_exit: bool
+    """Whether the tool should force the agent to exit."""
 
 
 class AgentParamsModel(BaseModel):
@@ -149,6 +144,7 @@ class Agent(BaseStep):
         ```
     """
 
+    # TODO before agent callback. after agent callback. before tools callbacks. after tools callbacks.
     def __init__(
         self,
         id: str = "agent",
@@ -199,13 +195,15 @@ class Agent(BaseStep):
         for i, tool_config in enumerate(tools):
             if isinstance(tool_config, dict):
                 if "tool" not in tool_config:
-                    raise ValueError("You must specify a 'tool' key when passinga tool as a dict.")
+                    raise ValueError("You must specify a 'tool' key when passing a tool as a dict.")
                 tool = tool_config["tool"]
                 tool_description = tool_config.get("description", None)
+                tool_force_exit = tool_config.get("force_exit", False)
                 # TODO Enable passing 'fixed' values for some params (or perhaps which params to expose).
             else: 
                 tool = tool_config
                 tool_description = None
+                tool_force_exit = False
                 
             if callable(tool):
                 tool = Step(
@@ -222,6 +220,8 @@ class Agent(BaseStep):
             # TODO Think. We could enable passing multiple tool descriptions. Depending on the agent that's calling the tool.
             if tool_description is not None:
                 tool.tool_description = tool_description
+            
+            tool.tool_force_exit = tool_force_exit
 
             tool.prefix_path(self.path)
 
@@ -417,21 +417,10 @@ class Agent(BaseStep):
                 # TODO Collect usage when it's not a generator.
 
             # Handle the case where the tool already returns an LLM message. We need to modify it so it represents the result of a tool call.
-            if isinstance(tool_output, Message):
+            if not isinstance(tool_output, Message):
                 tool_output = Message.validate({
                     "role": "user",
-                    "content": ToolResultContent(
-                        id=tool_use_id,
-                        content=tool_output.content,
-                    ) 
-                })
-            else:
-                tool_output = Message.validate({
-                    "role": "user",
-                    "content": ToolResultContent(
-                        id=tool_use_id,
-                        content=[Content.model_validate(tool_output)],
-                    )
+                    "content": tool_output,
                 })
             
         except Exception as err:
@@ -444,10 +433,7 @@ class Agent(BaseStep):
             }
             tool_output = Message.validate({
                 "role": "user",
-                "content": ToolResultContent(
-                    id=tool_use_id,
-                    content=[TextContent(text=f"There was an error while running the tool. Error: {tool_error}")],
-                )
+                "content": f"There was an error while running the tool. Error: {tool_error}",
             })
 
         t1 = int(time.time() * 1000)
@@ -461,6 +447,7 @@ class Agent(BaseStep):
             # We pass the error so that we're able to properly identify errors in the traces.
             error=tool_error,
             usage=tool_usage,
+            force_exit=tool.tool_force_exit,
         )
 
 
@@ -569,7 +556,7 @@ class Agent(BaseStep):
                 ]
 
         # Copy the input as is, so we save the traces without validated data and defaults.
-        agent_input = dump(kwargs)
+        agent_input = dump(kwargs, context=context)
 
         try:
             # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
@@ -579,7 +566,7 @@ class Agent(BaseStep):
             
             kwargs["prompt"] = Message.validate(kwargs["prompt"])
 
-            agent_input = dump(kwargs)
+            agent_input = dump(kwargs, context=context)
 
             kwargs = {**self.llm_kwargs, **kwargs}
             kwargs = dict(self.params_model().model_validate(kwargs))
@@ -653,7 +640,7 @@ class Agent(BaseStep):
         logger.info("output_event", output_event=llm_output_event)
 
         # Store the trace of the LLM step.
-        run_steps[llm_i_path] = dump(llm_output_event)
+        run_steps[llm_i_path] = dump(llm_output_event, context=context)
 
         # Aggregate the usage of the LLM step.
         for k, v in llm_result.usage.items():
@@ -734,10 +721,18 @@ class Agent(BaseStep):
                 )
                 tool_tasks.append(tool_task)
 
+            tool_exit = False
+
             # Await for tool completions.
             for tool_task in asyncio.as_completed(tool_tasks): # ? We could use this for timeouts.
                 tool_result = await tool_task
-                tool_result_message = tool_result.output
+                tool_result_message = Message.validate({
+                    "role": "user",
+                    "content": ToolResultContent(
+                        id=tool_result.id,
+                        content=tool_result.output.content,
+                    ) 
+                })
                 messages.append(tool_result_message)
                 
                 tool_output_event = OutputEvent(
@@ -755,12 +750,19 @@ class Agent(BaseStep):
                 logger.info("output_event", output_event=tool_output_event)
 
                 # Store the trace of the LLM step.
-                run_steps[f"{tool.path}-{tool_call.id}"] = dump(tool_output_event)
+                run_steps[f"{tool.path}-{tool_call.id}"] = dump(tool_output_event, context=context)
 
                 # Aggregate the usage of the tool step.
                 for k, v in tool_result.usage.items():
                     current_kv = run_usage.get(k, 0)
                     run_usage[k] = current_kv + v
+
+                if tool_result.force_exit:
+                    last_message = tool_result.output
+                    tool_exit = True
+
+            if tool_exit:
+                break
 
             # Run the llm again.
             llm_i_path = f"{self.path}.llm-{i}"
@@ -796,7 +798,7 @@ class Agent(BaseStep):
             logger.info("output_event", output_event=llm_output_event)
 
             # Store the trace of the LLM step.
-            run_steps[llm_i_path] = dump(llm_output_event)
+            run_steps[llm_i_path] = dump(llm_output_event, context=context)
 
             # Aggregate the usage of the LLM step.
             for k, v in llm_result.usage.items():
