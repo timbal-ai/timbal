@@ -63,7 +63,7 @@ async def handler(
 
     messages = []
     for msg in memory:
-        anthropic_msg = msg.to_anthropic_input()
+        anthropic_msg = await msg.to_anthropic_input(model=model)
         messages.append(anthropic_msg)
 
     kwargs = {

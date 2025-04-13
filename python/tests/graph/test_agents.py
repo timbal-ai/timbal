@@ -5,7 +5,7 @@ from datetime import datetime
 from timbal import Agent
 from timbal.errors import AgentError
 from timbal.state.context import RunContext
-from timbal.state.savers import InMemorySaver
+from timbal.state.savers import InMemorySaver, JSONLSaver
 from timbal.steps.perplexity import search
 
 
@@ -120,9 +120,7 @@ def get_customer(customer_id):
 @pytest.mark.asyncio
 async def test_run_incomplete_type_annotations():
     agent = Agent(tools=[get_customer])
-    async for event in agent.run(prompt="Give me the info of the customer 123"):
-        print()
-        print("Event: ", event)
+    await agent.complete(prompt="Give me the info of the customer 123")
 
 
 @pytest.mark.asyncio
@@ -191,16 +189,17 @@ async def test_run_llm_error():
 
 @pytest.mark.asyncio
 async def test_other_models():
+    state_saver = JSONLSaver("test_jsonl.jsonl")
     agent = Agent(
-        # model="gpt-4o-mini",
-        model="gemini-2.0-flash-lite",
+        model="gpt-4o-mini",
+        # model="gemini-2.0-flash-lite",
         # model="o3-mini",
         # model="Qwen/Qwen2.5-7B-Instruct-Turbo",
         # model="meta-llama/Llama-4-Scout-17B-16E-Instruct",
         # model="claude-3-5-sonnet-20241022",
         # model="o1",
         tools=[get_current_time],
-        state_saver=InMemorySaver(),
+        state_saver=state_saver,
         max_tokens=2048,
     )
     res = await agent.complete(prompt="What is the time?")

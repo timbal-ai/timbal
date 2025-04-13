@@ -71,7 +71,7 @@ async def handler(
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     for msg in memory:
-        openai_msg = msg.to_openai_input()
+        openai_msg = await msg.to_openai_input(model=model)
         messages.append(openai_msg)
 
     kwargs = {

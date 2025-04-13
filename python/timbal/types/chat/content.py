@@ -43,6 +43,7 @@ from openai.types.chat import (
 from pydantic import BaseModel
 # from uuid_extensions import uuid7
 
+from ...steps.elevenlabs import stt
 from ...steps.pdfs import convert_pdf_to_images
 from ..file import File
 
@@ -152,11 +153,17 @@ class FileContent(Content):
     """
     type: Literal["file"] = "file"
     file: File
+    # Cached openai and anthropic inputs (some conversions are costly, e.g. audio transcriptions).
+    _cached_openai_input: Any | None = None
+    _cached_anthropic_input: Any | None = None
 
 
     # TODO Cache the openai-ready content in the File class.
-    def to_openai_input(self) -> dict[str, Any] | list[dict[str, Any]]:
+    async def to_openai_input(self, model: str | None = None) -> dict[str, Any] | list[dict[str, Any]]:
         """Convert the file content to the input format required by OpenAI."""
+        if self._cached_openai_input is not None:
+            return self._cached_openai_input
+
         # Get mime type. 
         # source schemes: bytes, local_path, data, url
         if self.file.__source_scheme__ == "bytes":
@@ -229,28 +236,49 @@ class FileContent(Content):
             return pages_input
 
         elif mime and mime.startswith("audio/"):
-            if self.file.__source_scheme__ == "data":
-                base64_data = self.file.__source__.split(",", 1)[1]
+            gpt_audio_models = [
+                "gpt-4o-audio-preview", "gpt-4o-mini-audio-preview", 
+                "gpt-4o-realtime-preview", "gpt-4o-mini-realtime-preview",
+            ]
+            if model in gpt_audio_models or model.startswith("gemini"):
+                if self.file.__source_scheme__ == "data":
+                    base64_data = self.file.__source__.split(",", 1)[1]
+                else:
+                    base64_data = base64.b64encode(self.file.read()).decode("utf-8")
+
+                if "mp3" not in mime and "wav" not in mime:
+                    raise ValueError(f"Unsupported audio format: {mime}. Must be one of: mp3, wav")
+
+                return {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": base64_data, 
+                        "format": "wav" if "wav" in mime else "mp3",
+                    },
+                }
             else:
-                base64_data = base64.b64encode(self.file.read()).decode("utf-8")
-
-            if "mp3" not in mime and "wav" not in mime:
-                raise ValueError(f"Unsupported audio format: {mime}. Must be one of: mp3, wav")
-
-            return {
-                "type": "input_audio",
-                "input_audio": {
-                    "data": base64_data, 
-                    "format": "wav" if "wav" in mime else "mp3",
-                },
-            }
+                transcription = await stt(audio_file=self.file)
+                logger.info(
+                    "stt", 
+                    transcription=transcription,
+                    description=".to_openai_input() implicitly transcribed audio to text..."
+                )
+                openai_input = {
+                    "type": "text",
+                    "text": transcription
+                }
+                self._cached_openai_input = openai_input
+                return openai_input
 
         raise ValueError(f"Unsupported file {self.file}.")
 
 
     # TODO Cache the anthropic-ready content in the File class.
-    def to_anthropic_input(self) -> dict[str, Any] | list[dict[str, Any]]:
+    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any] | list[dict[str, Any]]:
         """Convert the file content to the input format required by Anthropic."""
+        if self._cached_anthropic_input is not None:
+            return self._cached_anthropic_input
+
         # Get mime type
         # source schemes: bytes, local_path, data, url
         if self.file.__source_scheme__ == "bytes":
@@ -325,7 +353,19 @@ class FileContent(Content):
                     }
                 }
         
-        # ! For the moment, anthropic doesn't support audio input.
+        elif mime and mime.startswith("audio/"):
+            transcription = await stt(audio_file=self.file)
+            logger.info(
+                "stt", 
+                transcription=transcription,
+                description=".to_anthropic_input() implicitly transcribed audio to text..."
+            )
+            anthropic_input = {
+                "type": "text",
+                "text": transcription
+            }
+            self._cached_anthropic_input = anthropic_input
+            return anthropic_input
             
         raise ValueError(f"Unsupported file {self.file}.")
 
@@ -340,7 +380,7 @@ class TextContent(Content):
     text: str 
 
 
-    def to_openai_input(self) -> dict[str, Any]:
+    async def to_openai_input(self, model: str | None = None) -> dict[str, Any]:
         """Convert the text content to the input format required by OpenAI."""
         return {
             "type": "text", 
@@ -348,7 +388,7 @@ class TextContent(Content):
         }
 
 
-    def to_anthropic_input(self) -> dict[str, Any]:
+    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any]:
         """Convert the text content to the input format required by Anthropic."""
         return {
             "type": "text", 
@@ -368,7 +408,7 @@ class ToolUseContent(Content):
     input: dict[str, Any]
 
 
-    def to_openai_input(self) -> dict[str, Any]:
+    async def to_openai_input(self, model: str | None = None) -> dict[str, Any]:
         """Convert the tool use content to the input format required by OpenAI."""
         return {
             "id": self.id,
@@ -380,7 +420,7 @@ class ToolUseContent(Content):
         }
 
 
-    def to_anthropic_input(self) -> dict[str, Any]:
+    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any]:
         """Convert the tool use content to the input format required by Anthropic."""
         return {
             "type": "tool_use",
@@ -401,18 +441,18 @@ class ToolResultContent(Content):
     content: list[TextContent | FileContent]
 
 
-    def to_openai_input(self) -> dict[str, Any]:
+    async def to_openai_input(self, model: str | None = None) -> dict[str, Any]:
         """Convert the tool result content to the input format required by OpenAI."""
         return {
             "role": "tool",
-            "content": [item.to_openai_input() for item in self.content],
+            "content": [await item.to_openai_input(model=model) for item in self.content],
             "tool_call_id": self.id
         }
 
-    def to_anthropic_input(self) -> dict[str, Any]:
+    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any]:
         """Convert the tool result content to the input format required by Anthropic."""
         return {
             "type": "tool_result",
             "tool_use_id": self.id,
-            "content": [item.to_anthropic_input() for item in self.content],
+            "content": [await item.to_anthropic_input(model=model) for item in self.content],
         }

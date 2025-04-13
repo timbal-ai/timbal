@@ -25,7 +25,12 @@ from ..state.data import DataValue
 from ..state.savers.base import BaseSaver
 from ..state.snapshot import Snapshot
 from ..steps.llms.router import llm_router
-from ..types.chat.content import Content, ToolResultContent, ToolUseContent
+from ..types.chat.content import (
+    Content, 
+    TextContent, 
+    ToolResultContent, 
+    ToolUseContent
+)
 from ..types.events import OutputEvent, StartEvent
 from ..types.field import Field
 from ..types.llms.usage import acc_usage
@@ -437,7 +442,13 @@ class Agent(BaseStep):
                 "message": str(err),
                 "traceback": traceback.format_exc(),
             }
-            tool_output = f"There was an error while running the tool. Error: {tool_error}"
+            tool_output = Message.validate({
+                "role": "user",
+                "content": ToolResultContent(
+                    id=tool_use_id,
+                    content=[TextContent(text=f"There was an error while running the tool. Error: {tool_error}")],
+                )
+            })
 
         t1 = int(time.time() * 1000)
 

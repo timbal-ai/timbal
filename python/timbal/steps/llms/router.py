@@ -56,7 +56,7 @@ async def llm_router(
 
         anthropic_messages = []
         for message in messages:
-            anthropic_message = message.to_anthropic_input()
+            anthropic_message = await message.to_anthropic_input(model=model)
             anthropic_messages.append(anthropic_message)
 
         anthropic_kwargs = {}
@@ -115,7 +115,7 @@ async def llm_router(
         if system_prompt:
             openai_messages.append({"role": "system", "content": system_prompt})
         for message in messages:
-            openai_message = message.to_openai_input()
+            openai_message = await message.to_openai_input(model=model)
             openai_messages.append(openai_message)
 
         # Collect all non required params as kwargs.

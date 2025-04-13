@@ -56,7 +56,7 @@ class Message:
         return f"Message(role={self.role}, content={self.content})"
 
 
-    def to_openai_input(self) -> dict[str, Any]:
+    async def to_openai_input(self, model: str | None = None) -> dict[str, Any]:
         """Convert the message to OpenAI's expected input format."""
         role = self.role
         
@@ -65,11 +65,11 @@ class Message:
         tool_calls = []
         for content_item in self.content:
             if isinstance(content_item, ToolUseContent):
-                tool_calls.append(content_item.to_openai_input())
+                tool_calls.append(await content_item.to_openai_input(model=model))
             elif isinstance(content_item, ToolResultContent):
-                return content_item.to_openai_input()
+                return await content_item.to_openai_input(model=model)
             else:
-                openai_input = content_item.to_openai_input() 
+                openai_input = await content_item.to_openai_input(model=model) 
                 # Enabling splitting files into multiple pages or chunks.
                 if isinstance(openai_input, list):
                     content.extend(openai_input)
@@ -85,12 +85,12 @@ class Message:
         return openai_input
     
 
-    def to_anthropic_input(self) -> dict[str, Any]:
+    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any]:
         """Convert the message to Anthropic's expected input format."""
 
         content = []
         for content_item in self.content:
-            anthropic_input = content_item.to_anthropic_input()
+            anthropic_input = await content_item.to_anthropic_input(model=model)
             # Enabling splitting files into multiple pages or chunks.
             if isinstance(anthropic_input, list):
                 content.extend(anthropic_input)
