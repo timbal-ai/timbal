@@ -9,8 +9,8 @@ from timbal import Agent
 @pytest.fixture(params=[
     "gpt-4o-mini",
     "gemini-2.0-flash-lite",
-    # "claude-3-5-sonnet-20241022",
-    # TODO Add more tests for other models.
+    "claude-3-5-sonnet-20241022",
+    # ? Add more tests for other models.
 ])
 def model(request):
     return request.param
@@ -26,7 +26,7 @@ def pdf(request):
 
 @pytest.mark.asyncio
 async def test_pdf(model, pdf) -> None:
-    agent = Agent(model=model)
+    agent = Agent(model=model, max_tokens=2048)
 
     prompt = [File.validate(pdf), "What's Bob's score?"]
 
@@ -44,7 +44,7 @@ def md(request):
 
 @pytest.mark.asyncio
 async def test_md(model, md) -> None:
-    agent = Agent(model=model)
+    agent = Agent(model=model, max_tokens=2048)
 
     prompt = [File.validate(md), "What's Alice's age?"]
 
@@ -61,7 +61,7 @@ def csv(request):
 
 @pytest.mark.asyncio
 async def test_csv(model, csv) -> None:
-    agent = Agent(model=model)
+    agent = Agent(model=model, max_tokens=2048)
 
     prompt = [File.validate(csv), "What's Bob's full name?"]
 
@@ -78,7 +78,7 @@ def tsv(request):
 
 @pytest.mark.asyncio
 async def test_tsv(model, tsv) -> None:
-    agent = Agent(model=model)
+    agent = Agent(model=model, max_tokens=2048)
 
     prompt = [File.validate(tsv), "What's Bob's full name?"]
 
@@ -96,7 +96,7 @@ def jsonl(request):
 
 @pytest.mark.asyncio
 async def test_jsonl(model, jsonl) -> None:
-    agent = Agent(model=model)
+    agent = Agent(model=model, max_tokens=2048)
 
     prompt = [File.validate(jsonl), "What's Alice's score?"]
 
@@ -114,7 +114,7 @@ def json(request):
 
 @pytest.mark.asyncio
 async def test_json(model, json) -> None:
-    agent = Agent(model=model)
+    agent = Agent(model=model, max_tokens=2048)
 
     prompt = [File.validate(json), "Is Bob still active?"]
 
@@ -132,9 +132,27 @@ def xlsx(request):
 
 @pytest.mark.asyncio
 async def test_xlsx(model, xlsx) -> None:
-    agent = Agent(model=model)
+    agent = Agent(model=model, max_tokens=2048)
 
     prompt = [File.validate(xlsx), "What's Alice's score?"]
 
     res = await agent.complete(prompt=prompt)
     assert "95.5" in res.output.content[0].text
+
+
+@pytest.fixture(params=[
+    Path(__file__).parent / "examples" / "test.docx",
+    "https://content.timbal.ai/tests/test.docx",
+])
+def docx(request):
+    return request.param
+
+
+@pytest.mark.asyncio
+async def test_docx(model, docx) -> None:
+    agent = Agent(model=model, max_tokens=2048)
+
+    prompt = [File.validate(docx), "What's Bob's full name?"]
+
+    res = await agent.complete(prompt=prompt)
+    assert "bob johnson" in res.output.content[0].text.lower()

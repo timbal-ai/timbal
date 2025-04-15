@@ -35,6 +35,7 @@ dependencies = [
     "pandas>=2.2.3",
     "pydantic>=2.10.6",
     "pymupdf>=1.25.5",
+    "python-docx>=1.1.2",
     "python-dotenv>=1.0.1",
     "python-multipart>=0.0.20",
     "requests>=2.32.3",

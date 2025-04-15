@@ -72,7 +72,12 @@ class ToolResult(BaseModel):
     """The usage of the tool."""
     force_exit: bool
     """Whether the tool should force the agent to exit."""
-
+    # skip_summarization: bool = False
+    # """If set to True, instructs the ADK to bypass the LLM call that typically summarizes the tool's output. This is useful if your tool's return value is already a user-ready message."""
+    # transfer_to_agent: str | None = None
+    # """Set this to the name of another agent. The framework will halt the current agent's execution and transfer control of the conversation to the specified agent. This allows tools to dynamically hand off tasks to more specialized agents."""
+    # escalate: bool = False
+    # """Setting this to True signals that the current agent cannot handle the request and should pass control up to its parent agent (if in a hierarchy). In a LoopAgent, setting escalate=True in a sub-agent's tool will terminate the loop."""
 
 class AgentParamsModel(BaseModel):
     """Fixed parameter model for Agents."""

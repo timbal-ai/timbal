@@ -37,6 +37,7 @@ from anthropic.types import (
 from anthropic.types import (
     ToolUseBlock as AnthropicToolUseBlock,
 )
+from docx import Document
 from openai.types.chat import (
     ChatCompletionMessageToolCall as OpenAIToolCall,
 )
@@ -189,6 +190,34 @@ class FileContent(Content):
                 "text": df.to_csv(index=False, header=True, sep=","),
             }
 
+        elif self.file.__source_extension__ == ".docx":
+            doc = Document(io.BytesIO(self.file.read()))
+            text_content = []
+            
+            # Process document elements in order to maintain structure
+            for element in doc.element.body:
+
+                if element.tag.endswith("p"):
+                    paragraph = doc.paragraphs[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith("p")])]
+                    if paragraph.text.strip():
+                        text_content.append(paragraph.text.strip())
+
+                elif element.tag.endswith("tbl"):
+                    table = doc.tables[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('tbl')])]
+                    table_content = []
+                    for row in table.rows:
+                        row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                        if row_text:
+                            table_content.append(",".join(row_text))
+                    text_content.append("\n".join(table_content))
+
+            text_content = "\n".join(text_content)
+            
+            return {
+                "type": "text",
+                "text": text_content,
+            }
+
         elif mime and mime.startswith("image/"):
             url = File.serialize(self.file)
             return {
@@ -296,6 +325,34 @@ class FileContent(Content):
             return {
                 "type": "text",
                 "text": df.to_csv(index=False, header=True, sep=","),
+            }
+
+        elif self.file.__source_extension__ == ".docx":
+            doc = Document(io.BytesIO(self.file.read()))
+            text_content = []
+            
+            # Process document elements in order to maintain structure
+            for element in doc.element.body:
+
+                if element.tag.endswith("p"):
+                    paragraph = doc.paragraphs[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('p')])]
+                    if paragraph.text.strip():
+                        text_content.append(paragraph.text.strip())
+
+                elif element.tag.endswith("tbl"):
+                    table = doc.tables[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('tbl')])]
+                    table_content = []
+                    for row in table.rows:
+                        row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                        if row_text:
+                            table_content.append(",".join(row_text))
+                    text_content.append("\n".join(table_content))
+
+            text_content = "\n".join(text_content)
+            
+            return {
+                "type": "text",
+                "text": text_content,
             }
 
         elif mime and mime.startswith("image/"):
