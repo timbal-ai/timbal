@@ -37,10 +37,9 @@ from ..types import (
     ToolUseContent,
 )
 from ..types.events import (
-    FlowOutputEvent,
-    StepChunkEvent,
-    StepOutputEvent,
-    StepStartEvent,
+    ChunkEvent, 
+    OutputEvent, 
+    StartEvent,
 )
 from ..types.models import create_model_from_fields, dump, merge_model_fields
 from .base import BaseStep
@@ -509,40 +508,12 @@ class Flow(BaseStep):
 
         t0 = int(time.time() * 1000)
 
-        # Validate kwargs to store the validated inputs in the snapshot.
-        try:
-            kwargs = dict(self.params_model().model_validate(kwargs))
-        except Exception as e:
-            error = {
-                "type": type(e).__name__,
-                "message": str(e),
-                "traceback": traceback.format_exc(),
-            }
-            t1 = int(time.time() * 1000)
-
-            if self.state_saver is not None:
-                snapshot = Snapshot(
-                    v="0.2.0",
-                    id=context.id,
-                    parent_id=context.parent_id,
-                    path=self.path,
-                    input=kwargs,
-                    output=None,
-                    error=error,
-                    t0=t0,
-                    t1=t1,
-                    # We allow for a direct reference to the data dictionary, because we know for 
-                    # sure that the PUT operation will not modify the data dictionary in any way.
-                    data=self.data,
-                )
-                
-                if self._is_state_saver_put_async:
-                    await self.state_saver.put(snapshot=snapshot, context=context)
-                else:
-                    self.state_saver.put(snapshot=snapshot, context=context)
-
-            raise FlowExecutionError(f"Error validating kwargs for step {self.path}.") from e
-        
+        flow_start_event = StartEvent(
+            run_id=context.id,
+            path=self.path,
+        )
+        yield flow_start_event
+        logger.info("start_event", start_event=flow_start_event)
 
         # Copy the data to avoid potential bugs with data being modified by reference.
         data = copy.deepcopy(self.data)
@@ -554,13 +525,18 @@ class Flow(BaseStep):
 
         # Load LLM memories.
         # Hence if this is a root run (no parent_id), we don't need to load any previous snapshot.
+        # We do this now so if the validation fails or anything happens we store the last snapshot
+        # with the last available information always.
         # TODO Optimize this. There's no need to load previous snapshot if there are no memories to load.
-        # TODO Think error handling here. What if getting the last snapshot errors?
         if self.state_saver is not None and context.parent_id is not None:
-            if self._is_state_saver_get_async:
-                last_snapshot = await self.state_saver.get_last(path=self.path, context=context)
-            else:
-                last_snapshot = self.state_saver.get_last(path=self.path, context=context)
+            try:
+                if self._is_state_saver_get_async:
+                    last_snapshot = await self.state_saver.get_last(path=self.path, context=context)
+                else:
+                    last_snapshot = self.state_saver.get_last(path=self.path, context=context)
+            except Exception as err:
+                logger.error("get_memory_error", err=err)
+                last_snapshot = None
 
             if last_snapshot is not None:
                 last_snapshot_data = last_snapshot.data
@@ -592,7 +568,47 @@ class Flow(BaseStep):
                             if len(memory) > max_window_size:
                                 memory = self._cut_memory(memory, max_window_size)
                                 data[memory_key] = DataValue(value=memory)
+        
+        # Copy the input as is, so we have the traces without validated data and defaults.
+        flow_input = dump(kwargs, context=context)
 
+        # Validate kwargs to store the validated inputs in the snapshot.
+        try:
+            kwargs = dict(self.params_model().model_validate(kwargs))
+        except Exception as e:
+            error = {
+                "type": type(e).__name__,
+                "message": str(e),
+                "traceback": traceback.format_exc(),
+            }
+
+            if self.state_saver is not None:
+                t1 = int(time.time() * 1000)
+                snapshot = Snapshot(
+                    v="0.2.0",
+                    id=context.id,
+                    parent_id=context.parent_id,
+                    path=self.path,
+                    input=flow_input,
+                    output=None,
+                    error=error,
+                    t0=t0,
+                    t1=t1,
+                    data=data,
+                )
+
+                # We don't want to cancel the execution if this errors. 
+                try:
+                    if self._is_state_saver_put_async:
+                        await self.state_saver.put(snapshot=snapshot, context=context)
+                    else:
+                        self.state_saver.put(snapshot=snapshot, context=context)
+                except Exception as err:
+                    logger.error("put_memory_error", err=err)
+
+            # TODO Change this error.
+            raise FlowExecutionError(f"Error validating kwargs for step {self.path}.") from e
+        
         # Compute (or retrieve the pre-computed) DAGs that determine the flow's execution order.
         dag, rev_dag = self.get_dags()
 
@@ -609,11 +625,14 @@ class Flow(BaseStep):
         tasks = []
         start_times = {}
         for source_id in sources_ids:
-            yield StepStartEvent(
+            step_start_event = StartEvent(
                 run_id=context.id,
-                parent_step_id=self.id,
-                step_id=source_id,
+                path=self.steps[source_id].path,
             )
+
+            yield step_start_event
+            logger.info("start_event", start_event=step_start_event)
+            
             task = asyncio.create_task(self._run_step(
                 step_id=source_id, 
                 data=data,
@@ -632,7 +651,6 @@ class Flow(BaseStep):
             for completed_task in done:
                 step_id = completed_task.step_id
                 step_path = self.steps[step_id].path
-                step_type = "flow" if isinstance(self.steps[step_id], Flow) else "step"
                 step_input = None
                 step_result = None
                 step_error = None
@@ -650,13 +668,17 @@ class Flow(BaseStep):
                         task.step_id = step_id
                         tasks.append(task)
                         step_chunk = handle_event(event=step_chunk, async_gen_state=async_gen_state)
+
                         if step_chunk is not None:
-                            yield StepChunkEvent(
+                            step_chunk_event = ChunkEvent(
                                 run_id=context.id,
-                                parent_step_id=self.id,
-                                step_id=step_id,
-                                step_chunk=step_chunk,
+                                path=step_path,
+                                chunk=step_chunk,
                             )
+
+                            yield step_chunk_event
+                            logger.info("chunk_event", chunk_event=step_chunk_event)
+
                         continue
 
                     except StopAsyncIteration:
@@ -760,11 +782,14 @@ class Flow(BaseStep):
                         # Link conditions are only evaluated once all the ancestors are completed.
                         # If any of the conditions is true, we start the next step.
                         if any(ancestor_link.evaluate_condition(data) for _, ancestor_link in ancestors):
-                            yield StepStartEvent(
+                            step_start_event = StartEvent(
                                 run_id=context.id,
-                                parent_step_id=self.id,
-                                step_id=successor_id,
+                                path=self.steps[successor_id].path,
                             )
+
+                            yield step_start_event
+                            logger.info("start_event", start_event=step_start_event)
+
                             task = asyncio.create_task(self._run_step(
                                 step_id=successor_id, 
                                 data=data,
@@ -779,26 +804,9 @@ class Flow(BaseStep):
                 start_time = start_times[step_id]
                 end_time = int(time.time() * 1000)
 
-                steps[step_path] = {
-                    "type": step_type,
-                    "input": step_input,
-                    "output": step_result,
-                    "error": step_error,
-                    "t0": start_time,
-                    "t1": end_time,
-                    "usage": step_usage,
-                }
-
-                if step_usage:
-                    for k, v in step_usage.items():
-                        current_key_value = flow_usage.get(k, 0)
-                        flow_usage[k] = current_key_value + v
-
-                # TODO This will need to be coherent with the above.
-                yield StepOutputEvent(
+                step_output_event = OutputEvent(
                     run_id=context.id,
-                    parent_step_id=self.id,
-                    step_id=step_id,
+                    path=step_path,
                     input=step_input,
                     output=step_result,
                     error=step_error,
@@ -806,6 +814,15 @@ class Flow(BaseStep):
                     t1=end_time,
                     usage=step_usage,
                 )
+
+                yield step_output_event
+                logger.info("output_event", output_event=step_output_event)
+
+                steps[step_path] = dump(step_output_event, context=context)
+
+                for k, v in step_usage.items():
+                    current_key_value = flow_usage.get(k, 0)
+                    flow_usage[k] = current_key_value + v
 
         # Grab the properties as defined in the return_model.
         output = None
@@ -834,25 +851,32 @@ class Flow(BaseStep):
                 error=error,
                 t0=t0,
                 t1=t1,
-                steps=steps,
-                # We allow for a direct reference to the data dictionary, because we know for 
-                # sure that the PUT operation will not modify the data dictionary in any way.
                 data=data,
+                steps=steps,
                 usage=flow_usage,
             )
 
-            if self._is_state_saver_put_async:
-                await self.state_saver.put(snapshot=snapshot, context=context)
-            else:
-                self.state_saver.put(snapshot=snapshot, context=context)
+            # We don't want to cancel the execution if this errors. 
+            try:
+                if self._is_state_saver_put_async:
+                    await self.state_saver.put(snapshot=snapshot, context=context)
+                else:
+                    self.state_saver.put(snapshot=snapshot, context=context)
+            except Exception as err:
+                logger.error("put_memory_error", err=err)
 
         if exception is not None:
             raise exception
         
-        yield FlowOutputEvent(
+        yield OutputEvent(
             run_id=context.id,
-            step_id=self.id,
+            path=self.path,
+            input=flow_input,
             output=output,
+            error=None, # If it reaches this point, the flow has completed successfully.
+            t0=t0,
+            t1=t1,
+            usage=flow_usage,
         )
 
     
@@ -860,7 +884,7 @@ class Flow(BaseStep):
         self,
         context: RunContext | None = None,
         **kwargs: Any
-    ) -> FlowOutputEvent:
+    ) -> OutputEvent:
         """Flow.run() wrapper method that completes the flow execution.
         
         Args: 
@@ -868,10 +892,10 @@ class Flow(BaseStep):
             **kwargs: Additional keyword arguments required for step execution.
         
         Returns:
-            dict[str, Any]: The flow's selected outputs.
+            OutputEvent: The flow's selected outputs.
         """
         async for event in self.run(context=context, **kwargs):
-            if isinstance(event, FlowOutputEvent):
+            if isinstance(event, OutputEvent) and event.path == self.path:
                 return event
 
 

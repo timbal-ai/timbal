@@ -16,15 +16,11 @@ from anthropic.types import (
 from pydantic import BaseModel, ConfigDict
 from uuid_extensions import uuid7
 
-from ..types.events import (
-    AnthropicEvent,
-    FlowOutputEvent,
-    OpenAIEvent,
-    StepChunkEvent,
-    StepOutputEvent,
-    StepStartEvent,
-    TimbalEvent,
-)
+from ..types.events import AnthropicEvent, OpenAIEvent
+from ..types.events.base import BaseEvent as TimbalBaseEvent
+from ..types.events.chunk import ChunkEvent as TimbalChunkEvent
+from ..types.events.output import OutputEvent as TimbalOutputEvent
+from ..types.events.start import StartEvent as TimbalStartEvent
 
 logger = structlog.get_logger("timbal.graph.stream")
 
@@ -270,7 +266,7 @@ def handle_anthropic_event(
 
 
 def handle_timbal_event(
-    timbal_event: TimbalEvent,
+    timbal_event: TimbalBaseEvent,
     async_gen_state: AsyncGenState,
 ) -> dict[str, Any] | None:
     """Process Timbal flow events and update the async generator state.
@@ -290,27 +286,26 @@ def handle_timbal_event(
     """
 
     # For a parent flow, we don't need to stream the subflow step start events.
-    if isinstance(timbal_event, StepStartEvent):
+    if isinstance(timbal_event, TimbalStartEvent):
         return None
 
     # TODO Think how should we stream partial flow outputs results or chunks. 
     # Perhaps we should only stream up if the step output is selected as a flow output.
-    if isinstance(timbal_event, StepChunkEvent):
+    if isinstance(timbal_event, TimbalChunkEvent):
         return None
     
     # TODO Think how should we stream partial flow outputs results or chunks. 
     # Perhaps we should only stream up if the step output is selected as a flow output.
-    if isinstance(timbal_event, StepOutputEvent):
+    if isinstance(timbal_event, TimbalOutputEvent):
         if timbal_event.usage:
             for k, v in timbal_event.usage.items():
                 current_key_value = async_gen_state.usage.get(k, 0)
                 async_gen_state.usage[k] = current_key_value + v
 
-        return None
-
-    if isinstance(timbal_event, FlowOutputEvent):
         async_gen_state.collections = timbal_event.output
         return None
+
+    return None
 
 
 def handle_event(
@@ -343,7 +338,7 @@ def handle_event(
             raise ValueError(f"We cannot handle mixed events sources.")
         return handle_anthropic_event(event, async_gen_state)
 
-    if isinstance(event, TimbalEvent):
+    if isinstance(event, TimbalBaseEvent):
         if async_gen_state.events_source is None:
             async_gen_state.events_source = "timbal"
         if async_gen_state.events_source != "timbal":

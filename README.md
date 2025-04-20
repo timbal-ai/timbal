@@ -6,8 +6,6 @@ A strongly opinionated framework for building and orchestrating agentic AI appli
 
 ## Overview
 
-## Overview
-
 Timbal provides two main patterns for building AI applications:
 
 ### 1. Agentic (Agent-based)

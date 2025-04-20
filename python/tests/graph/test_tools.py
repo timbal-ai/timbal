@@ -31,28 +31,28 @@ async def test_tool_use():
     prompt = "What's the weather and traffic like in New York?"
     executed_steps = set()
     async for event in flow.run(prompt=prompt):
-        if event.type == "STEP_START":
-            executed_steps.add(event.step_id)
-    assert "get_weather" in executed_steps
-    assert "get_traffic" in executed_steps
+        if event.type == "START":
+            executed_steps.add(event.path)
+    assert "test_parallel_tools.get_weather" in executed_steps
+    assert "test_parallel_tools.get_traffic" in executed_steps
     
     # Use only the tool that is relevant to the prompt
     prompt = "What's the weather like in New York?"
     executed_steps.clear()
     async for event in flow.run(prompt=prompt):
-        if event.type == "STEP_START":
-            executed_steps.add(event.step_id)
-    assert "get_weather" in executed_steps
-    assert "get_traffic" not in executed_steps
+        if event.type == "START":
+            executed_steps.add(event.path)
+    assert "test_parallel_tools.get_weather" in executed_steps
+    assert "test_parallel_tools.get_traffic" not in executed_steps
 
     # No tools should be used
     prompt = "What's 2 + 2?"
     executed_steps.clear()
     async for event in flow.run(prompt=prompt):
-        if event.type == "STEP_START":
-            executed_steps.add(event.step_id)
-    assert "get_weather" not in executed_steps
-    assert "get_traffic" not in executed_steps
+        if event.type == "START":
+            executed_steps.add(event.path)
+    assert "test_parallel_tools.get_weather" not in executed_steps
+    assert "test_parallel_tools.get_traffic" not in executed_steps
 
 
 @pytest.mark.asyncio
@@ -73,8 +73,8 @@ async def test_tool_result():
     prompt = "What's the weather and traffic like in New York?"
     executed_steps = set()
     async for event in flow.run(prompt=prompt):
-        if event.type == "STEP_START":
-            executed_steps.add(event.step_id)
-    assert "get_weather" in executed_steps
-    assert "get_traffic" in executed_steps
-    assert "ask_llm_2" in executed_steps
+        if event.type == "START":
+            executed_steps.add(event.path)
+    assert "test_tool_result.get_weather" in executed_steps
+    assert "test_tool_result.get_traffic" in executed_steps
+    assert "test_tool_result.ask_llm_2" in executed_steps

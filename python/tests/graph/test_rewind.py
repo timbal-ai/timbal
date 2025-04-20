@@ -19,9 +19,10 @@ async def test_invalid_run_id():
     prompt = "Hello my name is David"
     await flow.complete(context=context, prompt=prompt)
 
-    with pytest.raises(ValueError):
-        prompt = "What is my name?"
-        await flow.complete(context=context, prompt=prompt)
+    # This doesn't raise an error, but the final length of the snapshots will be 1.
+    prompt = "What is my name?"
+    await flow.complete(context=context, prompt=prompt)
+    assert len(flow.state_saver.snapshots) == 1
 
 
 @pytest.mark.asyncio

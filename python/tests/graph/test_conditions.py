@@ -21,15 +21,15 @@ async def test_flow_conditions():
 
     executed_steps = set()
     async for event in flow.run(x=1):
-        if event.type == "STEP_START": 
-            executed_steps.add(event.step_id)
-    assert "step_2" not in executed_steps
+        if event.type == "START": 
+            executed_steps.add(event.path)
+    assert "test_flow_conditions.step_2" not in executed_steps
 
     executed_steps.clear()
     async for event in flow.run(x=3):
-        if event.type == "STEP_START":
-            executed_steps.add(event.step_id)
-    assert "step_2" in executed_steps
+        if event.type == "START":
+            executed_steps.add(event.path)
+    assert "test_flow_conditions.step_2" in executed_steps
 
 
 @pytest.mark.asyncio
@@ -47,18 +47,18 @@ async def test_flow_positive_negative_conditions():
     # Test positive path
     steps_executed = set()
     async for event in flow.run(x=1):
-        if event.type == "STEP_START":
-            steps_executed.add(event.step_id)
-    assert "step_2" in steps_executed
-    assert "step_3" not in steps_executed
+        if event.type == "START":
+            steps_executed.add(event.path)
+    assert "test_flow_positive_negative_conditions.step_2" in steps_executed
+    assert "test_flow_positive_negative_conditions.step_3" not in steps_executed
 
     # Test negative path
     steps_executed.clear()
     async for event in flow.run(x=-1):
-        if event.type == "STEP_START":
-            steps_executed.add(event.step_id)
-    assert "step_2" not in steps_executed
-    assert "step_3" in steps_executed
+        if event.type == "START":
+            steps_executed.add(event.path)
+    assert "test_flow_positive_negative_conditions.step_2" not in steps_executed
+    assert "test_flow_positive_negative_conditions.step_3" in steps_executed
 
 
 @pytest.mark.asyncio
@@ -75,10 +75,10 @@ async def test_flow_string_conditions():
 
     executed_steps = set()
     async for event in flow.run(input_str="test"):
-        if event.type == "STEP_START":
-            executed_steps.add(event.step_id)
-    assert "path_a" in executed_steps
-    assert "path_b" not in executed_steps
+        if event.type == "START":
+            executed_steps.add(event.path)
+    assert "test_flow_string_conditions.path_a" in executed_steps
+    assert "test_flow_string_conditions.path_b" not in executed_steps
 
 
 @pytest.mark.asyncio
@@ -93,9 +93,9 @@ async def test_flow_list_conditions():
 
     executed_steps = set()
     async for event in flow.run(input_list=["TEST"]):
-        if event.type == "STEP_START":
-            executed_steps.add(event.step_id)
-    assert "int_step" in executed_steps
+        if event.type == "START":
+            executed_steps.add(event.path)
+    assert "test_flow_list_conditions.int_step" in executed_steps
 
 
 @pytest.mark.asyncio
@@ -111,6 +111,6 @@ async def test_many_to_one():
 
     executed_steps = set()
     async for event in flow.run():
-        if event.type == "STEP_START":
-            executed_steps.add(event.step_id)
-    assert "step_3" in executed_steps
+        if event.type == "START":
+            executed_steps.add(event.path)
+    assert "test_many_to_one.step_3" in executed_steps

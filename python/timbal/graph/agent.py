@@ -538,7 +538,7 @@ class Agent(BaseStep):
 
         # Load the memory.
         # The data stored in the state saver is just the passed messages.
-        # We do this now wo if the validation fails or anything happens we store the last snapshot
+        # We do this now so if the validation fails or anything happens we store the last snapshot
         # with the last available information always.
         messages = []
         if self.state_saver is not None and context.parent_id is not None:
@@ -903,7 +903,7 @@ class Agent(BaseStep):
             **kwargs: Additional keyword arguments required for step execution.
         
         Returns:
-            dict[str, Any]: The flow's selected outputs.
+            OutputEvent: The agent's selected outputs.
         """
         async for event in self.run(context=context, **kwargs):
             if isinstance(event, OutputEvent) and event.path == self.path:
