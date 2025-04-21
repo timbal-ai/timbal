@@ -104,7 +104,7 @@ class Agent(BaseStep):
                 get_datetime,
                 {
                     "runnable": search,
-                    "description": "Search the internet."
+                    "description": "Search the internet.",
                 }
             ]
         )
@@ -117,7 +117,7 @@ class Agent(BaseStep):
         id: str = "agent",
         path: str | None = None,
         metadata: dict[str, Any] = {},
-        tools: list[Callable | BaseStep | dict[str, Any]] = [],
+        tools: list[Callable | BaseStep | dict[str, Any] | Tool] = [],
         max_iter: int = 10,
         state_saver: BaseSaver | None = None,
         **kwargs: Any, # These are the LLM specific kwargs.
@@ -152,7 +152,7 @@ class Agent(BaseStep):
 
     def _load_tools(
         self, 
-        tools: list[Callable | BaseStep | dict[str, Any] | Tool]
+        tools: list[Callable | BaseStep | dict[str, Any] | Tool],
     ) -> None:
         """Store the tools as BaseStep instances.
         This enables us to automatically generate params models and schemas for the tools using pydantic.
@@ -202,6 +202,53 @@ class Agent(BaseStep):
     def params_model_schema(self) -> dict[str, Any]:
         """Returns the JSON schema for the step's parameter model."""
         return agent_params_model_schema
+
+
+    def to_openai_tool(self) -> dict[str, Any]:
+        """Overwrite the BaseStep.to_openai_tool method.
+        For the moment we just expose the input message.
+        """
+        tool_description = ""
+        if hasattr(self, "tool_description"):
+            tool_description = self.tool_description or ""
+
+        return {
+            "type": "function",
+            "function": {
+                "name": self.id,
+                "description": tool_description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"prompt": {
+                        "type": "string",
+                        "description": "The input message to send to the agent.",
+                    }},
+                    "required": ["prompt"],
+                }
+            }
+        }
+
+    
+    def to_anthropic_tool(self) -> dict[str, Any]:
+        """Overwrite the BaseStep.to_anthropic_tool method.
+        For the moment we just expose the input message.
+        """
+        tool_description = ""
+        if hasattr(self, "tool_description"):
+            tool_description = self.tool_description or ""
+
+        return {
+            "name": self.id,
+            "description": tool_description,
+            "input_schema": {
+                "type": "object",
+                "properties": {"prompt": {
+                    "type": "string",
+                    "description": "The input message to send to the agent.",
+                }},
+                "required": ["prompt"],
+            }
+        }
     
 
     def return_model(self) -> Any:
@@ -489,8 +536,9 @@ class Agent(BaseStep):
             run_id=context.id,
             path=self.path,
         )
-        yield agent_start_event
+
         logger.info("start_event", start_event=agent_start_event)
+        yield agent_start_event
 
         # Aggregated traces and usage for the entire run.
         run_steps = {}
@@ -581,8 +629,8 @@ class Agent(BaseStep):
             # ? This one could grab properties from the tool to customize a little bit more the event.
         )
 
-        yield llm_start_event
         logger.info("start_event", start_event=llm_start_event)
+        yield llm_start_event
 
         llm_result = await self._run_llm(
             messages=messages,
@@ -601,8 +649,8 @@ class Agent(BaseStep):
             usage=llm_result.usage,
         )
 
-        yield llm_output_event
         logger.info("output_event", output_event=llm_output_event)
+        yield llm_output_event
 
         # Store the trace of the LLM step.
         run_steps[llm_i_path] = dump(llm_output_event, context=context)
@@ -672,8 +720,8 @@ class Agent(BaseStep):
                     # ? This one could grab properties from the tool to customize a little bit more the event.
                 )
 
-                yield tool_start_event
                 logger.info("start_event", start_event=tool_start_event)
+                yield tool_start_event
 
                 tool_task = asyncio.create_task(
                     self._run_tool(
@@ -711,8 +759,8 @@ class Agent(BaseStep):
                     usage=tool_result.usage,
                 )
 
-                yield tool_output_event
                 logger.info("output_event", output_event=tool_output_event)
+                yield tool_output_event
 
                 # Store the trace of the LLM step.
                 run_steps[f"{tool.path}-{tool_call.id}"] = dump(tool_output_event, context=context)
@@ -738,8 +786,8 @@ class Agent(BaseStep):
                 # ? This one could grab properties from the tool to customize a little bit more the event.
             )
 
-            yield llm_start_event
             logger.info("start_event", start_event=llm_start_event)
+            yield llm_start_event
 
             llm_result = await self._run_llm(
                 messages=messages,
@@ -759,8 +807,8 @@ class Agent(BaseStep):
                 usage=llm_result.usage,
             )
 
-            yield llm_output_event
             logger.info("output_event", output_event=llm_output_event)
+            yield llm_output_event
 
             # Store the trace of the LLM step.
             run_steps[llm_i_path] = dump(llm_output_event, context=context)
@@ -839,7 +887,7 @@ class Agent(BaseStep):
             except Exception as err:
                 logger.error("put_memory_error", err=err)
 
-        yield OutputEvent(
+        agent_output_event = OutputEvent(
             run_id=context.id,
             path=self.path,
             input=agent_input,
@@ -849,6 +897,9 @@ class Agent(BaseStep):
             t1=t1,
             usage=run_usage,
         )
+
+        logger.info("output_event", output_event=agent_output_event)
+        yield agent_output_event
 
     
     async def complete(

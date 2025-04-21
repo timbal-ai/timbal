@@ -511,8 +511,9 @@ class Flow(BaseStep):
             run_id=context.id,
             path=self.path,
         )
-        yield flow_start_event
+
         logger.info("start_event", start_event=flow_start_event)
+        yield flow_start_event
 
         # Copy the data to avoid potential bugs with data being modified by reference.
         data = copy.deepcopy(self.data)
@@ -629,8 +630,8 @@ class Flow(BaseStep):
                 path=self.steps[source_id].path,
             )
 
-            yield step_start_event
             logger.info("start_event", start_event=step_start_event)
+            yield step_start_event
             
             task = asyncio.create_task(self._run_step(
                 step_id=source_id, 
@@ -675,8 +676,8 @@ class Flow(BaseStep):
                                 chunk=step_chunk,
                             )
 
-                            yield step_chunk_event
                             logger.info("chunk_event", chunk_event=step_chunk_event)
+                            yield step_chunk_event
 
                         continue
 
@@ -786,8 +787,8 @@ class Flow(BaseStep):
                                 path=self.steps[successor_id].path,
                             )
 
-                            yield step_start_event
                             logger.info("start_event", start_event=step_start_event)
+                            yield step_start_event
 
                             task = asyncio.create_task(self._run_step(
                                 step_id=successor_id, 
@@ -814,8 +815,8 @@ class Flow(BaseStep):
                     usage=step_usage,
                 )
 
-                yield step_output_event
                 logger.info("output_event", output_event=step_output_event)
+                yield step_output_event
 
                 steps[step_path] = dump(step_output_event, context=context)
 
@@ -867,7 +868,7 @@ class Flow(BaseStep):
         if exception is not None:
             raise exception
         
-        yield OutputEvent(
+        flow_output_event = OutputEvent(
             run_id=context.id,
             path=self.path,
             input=flow_input,
@@ -878,7 +879,10 @@ class Flow(BaseStep):
             usage=flow_usage,
         )
 
+        logger.info("output_event", output_event=flow_output_event)
+        yield flow_output_event
     
+
     async def complete(
         self,
         context: RunContext | None = None,
