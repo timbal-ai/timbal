@@ -61,7 +61,7 @@ async def test_agent_stt_tts():
     agent = Agent(
         model="gpt-4o-mini",
         tools=[{
-            "tool": tts,
+            "runnable": tts,
             "force_exit": True
         }],
         system_prompt=(

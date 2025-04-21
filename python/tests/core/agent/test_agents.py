@@ -208,10 +208,14 @@ async def test_other_models():
 
 @pytest.mark.asyncio
 async def test_parallel_search():
+    # TODO Since gemini does not return an id the paths look like this:  path='agent.search-'
     agent = Agent(
-        # model="gemini-2.0-flash-lite", # TODO Simplify search arguments and all. Gemini errors for some reason.
-        model="gpt-4o-mini",
-        tools=[search],
+        model="gemini-2.0-flash-lite",
+        tools=[{
+            "runnable": search,
+            "description": "Search the weather on the internet.",
+            "params_mode": "required",
+        }],
     )
     res = await agent.complete(prompt="What is the weather in Tokyo and in London?")
     print(res)

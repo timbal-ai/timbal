@@ -43,14 +43,13 @@ from ...types.events import (
 )
 from ...types.models import create_model_from_fields, dump, merge_model_fields
 from ..base import BaseStep
+from ..shared import RunnableLike
 from ..step import Step
 from ..stream import AsyncGenState, handle_event, sync_to_async_gen
 from .link import Link
 from .utils import Dag, get_ancestors, get_sources, get_successors, is_dag
 
 logger = structlog.get_logger("timbal.core.flow.engine")
-
-RunnableLike = BaseStep | Callable[..., Any]
 
 
 class Flow(BaseStep):

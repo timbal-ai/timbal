@@ -56,18 +56,49 @@ class BaseStep(BaseModel, ABC):
         pass
 
 
+    def _get_tool_input_schema(self) -> dict[str, Any]:
+        """Aux function to get, filter and format the input schema for a tool."""
+        input_schema = self.params_model_schema()
+
+        tool_params_mode = "all"
+        if hasattr(self, "tool_params_mode"):
+            tool_params_mode = self.tool_params_mode
+
+        selected_params = set()
+        if tool_params_mode == "required":
+            selected_params = set(input_schema.get("required", []))
+        else:
+            selected_params = set(input_schema["properties"].keys())
+        
+        if hasattr(self, "tool_include_params") and self.tool_include_params is not None:
+            selected_params.update(self.tool_include_params)
+
+        if hasattr(self, "tool_exclude_params") and self.tool_exclude_params is not None:
+            selected_params.difference_update(self.tool_exclude_params)
+
+        input_schema["properties"] = {
+            k: v 
+            for k, v in input_schema["properties"].items()
+            if k in selected_params
+        }
+
+        return input_schema
+
+
     def to_openai_tool(self) -> dict[str, Any]:
         """Convert the step to OpenAI's expected tool format."""
         tool_description = ""
         if hasattr(self, "tool_description"):
             tool_description = self.tool_description or ""
 
+        input_schema = self._get_tool_input_schema()
+
         return {
             "type": "function",
             "function": {
                 "name": self.id,
                 "description": tool_description,
-                "parameters": self.params_model_schema(),
+                "parameters": input_schema,
             }
         }
 
@@ -78,10 +109,12 @@ class BaseStep(BaseModel, ABC):
         if hasattr(self, "tool_description"):
             tool_description = self.tool_description or ""
 
+        input_schema = self._get_tool_input_schema()
+
         return {
             "name": self.id,
             "description": tool_description,
-            "input_schema": self.params_model_schema(),
+            "input_schema": input_schema,
         }
 
 

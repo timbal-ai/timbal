@@ -34,52 +34,12 @@ from ..base import BaseStep
 from ..flow.engine import Flow
 from ..step import Step
 from ..stream import AsyncGenState, handle_event, sync_to_async_gen
+from .types.llm_result import LLMResult
+from .types.tool_result import ToolResult
+from .types.tool import Tool
 
 logger = structlog.get_logger("timbal.core.agent.engine")
 
-
-class LLMResult(BaseModel):
-    """Helper class to wrap LLM results."""
-
-    input: dict[str, Any]
-    """The input kwargs to the LLM router."""
-    output: Message | None = None
-    """The output message of the LLM. Will be None if the LLM returned an error."""
-    error: dict[str, Any] | None = None
-    """Store if any error occurred while running the LLM."""
-    t0: int 
-    """The start time of the LLM in milliseconds."""
-    t1: int
-    """The end time of the LLM in milliseconds."""
-    usage: dict[str, int] = {}
-    """The usage of the LLM."""
-
-
-class ToolResult(BaseModel):
-    """Helper class to wrap general tool results."""
-
-    id: str
-    """The id of the tool use that will be matched in the generated ToolResultContent."""
-    input: dict[str, Any]
-    """The input to the tool. This is stored for tracing and debugging."""
-    output: Message 
-    """The output of the tool. Always as an LLM ready message so we can pass it to the LLMs."""
-    error: dict[str, Any] | None = None
-    """Store if any error occurred while running the tool."""
-    t0: int
-    """The start time of the tool in milliseconds."""
-    t1: int
-    """The end time of the tool in milliseconds."""
-    usage: dict[str, int] = {}
-    """The usage of the tool."""
-    force_exit: bool
-    """Whether the tool should force the agent to exit."""
-    # skip_summarization: bool = False
-    # """If set to True, instructs the ADK to bypass the LLM call that typically summarizes the tool's output. This is useful if your tool's return value is already a user-ready message."""
-    # transfer_to_agent: str | None = None
-    # """Set this to the name of another agent. The framework will halt the current agent's execution and transfer control of the conversation to the specified agent. This allows tools to dynamically hand off tasks to more specialized agents."""
-    # escalate: bool = False
-    # """Setting this to True signals that the current agent cannot handle the request and should pass control up to its parent agent (if in a hierarchy). In a LoopAgent, setting escalate=True in a sub-agent's tool will terminate the loop."""
 
 class AgentParamsModel(BaseModel):
     """Fixed parameter model for Agents."""
@@ -143,7 +103,7 @@ class Agent(BaseStep):
             tools=[
                 get_datetime,
                 {
-                    "tool": search,
+                    "runnable": search,
                     "description": "Search the internet."
                 }
             ]
@@ -192,48 +152,46 @@ class Agent(BaseStep):
 
     def _load_tools(
         self, 
-        tools: list[Callable | BaseStep | dict[str, Any]]
+        tools: list[Callable | BaseStep | dict[str, Any] | Tool]
     ) -> None:
         """Store the tools as BaseStep instances.
         This enables us to automatically generate params models and schemas for the tools using pydantic.
         """
         self.tools = []
         self.tools_lookup = {}
+
         for i, tool_config in enumerate(tools):
-            if isinstance(tool_config, dict):
-                if "tool" not in tool_config:
-                    raise ValueError("You must specify a 'tool' key when passing a tool as a dict.")
-                tool = tool_config["tool"]
-                tool_description = tool_config.get("description", None)
-                tool_force_exit = tool_config.get("force_exit", False)
-                # TODO Enable passing 'fixed' values for some params (or perhaps which params to expose).
-            else: 
+            # Ensure we have a Tool instance. It's better to rely on pydantic for validation.
+            if isinstance(tool_config, Tool):
                 tool = tool_config
-                tool_description = None
-                tool_force_exit = False
+            else:
+                if not isinstance(tool_config, dict):
+                    tool = Tool(runnable=tool_config)
+                else:
+                    tool = Tool(**tool_config)
                 
-            if callable(tool):
-                tool = Step(
-                    id=tool.__name__,
-                    handler_fn=tool,
+            tool_step = tool.runnable
+            if callable(tool_step):
+                tool_step = Step(
+                    id=tool_step.__name__,
+                    handler_fn=tool_step,
                 )
 
-            if not isinstance(tool, BaseStep):
-                raise ValueError("Tool needs to be an instance of BaseStep or a callable.")
+            if tool_step.id in self.tools_lookup:
+                raise ValueError(f"Cannot add tool {tool_step.id} twice.")
 
-            if tool.id in self.tools_lookup:
-                raise ValueError(f"Cannot add tool {tool.id} twice.")
+            # We can use the step instance to store any additional properties we need.
+            if tool.description is not None:
+                tool_step.tool_description = tool.description
+            tool_step.tool_force_exit = tool.force_exit
+            tool_step.tool_params_mode = tool.params_mode
+            tool_step.tool_include_params = tool.include_params
+            tool_step.tool_exclude_params = tool.exclude_params
 
-            # TODO Think. We could enable passing multiple tool descriptions. Depending on the agent that's calling the tool.
-            if tool_description is not None:
-                tool.tool_description = tool_description
-            
-            tool.tool_force_exit = tool_force_exit
+            tool_step.prefix_path(self.path)
 
-            tool.prefix_path(self.path)
-
-            self.tools.append(tool)
-            self.tools_lookup[tool.id] = i
+            self.tools.append(tool_step)
+            self.tools_lookup[tool_step.id] = i
 
 
     def params_model(self) -> BaseModel:
