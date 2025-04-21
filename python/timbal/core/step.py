@@ -9,7 +9,7 @@ from ..state import RunContext
 from ..types.models import create_model_from_argspec
 from .base import BaseStep
 
-logger = structlog.get_logger("timbal.graph.step")
+logger = structlog.get_logger("timbal.core.step")
 
 
 class Step(BaseStep):

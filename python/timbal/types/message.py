@@ -5,6 +5,8 @@ from anthropic.types import (
 )
 from openai.types.chat import (
     ChatCompletion as OpenAICompletion,
+)
+from openai.types.chat import (
     ChatCompletionMessage as OpenAIMessage,
 )
 from pydantic import (

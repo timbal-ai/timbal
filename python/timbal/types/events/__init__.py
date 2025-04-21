@@ -9,7 +9,6 @@ from anthropic.types import (
 )
 from openai.types.chat import ChatCompletionChunk
 
-
 # Create a type alias for Anthropic events
 AnthropicEvent = (
     RawContentBlockStartEvent |

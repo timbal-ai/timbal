@@ -4,7 +4,7 @@ from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from ...errors import APIKeyNotFoundError
-from ...graph.base import BaseStep
+from ...core.base import BaseStep
 from ...types import Field, Message
 
 

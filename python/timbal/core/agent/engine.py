@@ -11,29 +11,31 @@ from anthropic.types import (
 )
 from openai.types.chat import (
     ChatCompletion as OpenAICompletion,
+)
+from openai.types.chat import (
     ChatCompletionMessage as OpenAIMessage,
 )
 from pydantic import BaseModel, TypeAdapter
 from uuid_extensions import uuid7
 
-from ..errors import AgentError
-from ..graph.flow import Flow
-from ..graph.step import Step
-from ..graph.stream import AsyncGenState, handle_event, sync_to_async_gen
-from ..state.context import RunContext
-from ..state.data import DataValue
-from ..state.savers.base import BaseSaver
-from ..state.snapshot import Snapshot
-from ..steps.llms.router import llm_router
-from ..types.chat.content import ToolResultContent, ToolUseContent
-from ..types.events import OutputEvent, StartEvent
-from ..types.field import Field
-from ..types.llms.usage import acc_usage
-from ..types.message import Message
-from ..types.models import dump
-from .base import BaseStep
+from ...errors import AgentError
+from ...state.context import RunContext
+from ...state.data import DataValue
+from ...state.savers.base import BaseSaver
+from ...state.snapshot import Snapshot
+from ...steps.llms.router import llm_router
+from ...types.chat.content import ToolResultContent, ToolUseContent
+from ...types.events import OutputEvent, StartEvent
+from ...types.field import Field
+from ...types.llms.usage import acc_usage
+from ...types.message import Message
+from ...types.models import dump
+from ..base import BaseStep
+from ..flow.engine import Flow
+from ..step import Step
+from ..stream import AsyncGenState, handle_event, sync_to_async_gen
 
-logger = structlog.get_logger("timbal.graph.agent")
+logger = structlog.get_logger("timbal.core.agent.engine")
 
 
 class LLMResult(BaseModel):
@@ -324,7 +326,7 @@ class Agent(BaseStep):
             elif llm_sdk == "anthropic":
                 tools_dump = [tool.to_anthropic_tool() for tool in tools]
             else:
-                raise ValueError(f"Unsupported LLM sdk!")
+                raise ValueError("Unsupported LLM sdk!")
 
         except Exception as err:
             # We don't raise an error here. We want the agent to be able to recover from this.

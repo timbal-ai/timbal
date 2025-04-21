@@ -1,7 +1,8 @@
-import httpx
 import json
 import os
 from typing import Any
+
+import httpx
 
 from ...types.field import Field
 

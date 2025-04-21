@@ -10,7 +10,7 @@ class BaseStep(BaseModel, ABC):
     """Abstract base class for defining processing steps in a workflow.
 
     BaseStep combines Pydantic's data validation with abstract methods to create a
-    standardized interface for workflow steps. Each step must define its parameter
+    standardized interface for workflow steps and agent tools. Each step must define its parameter
     and return value schemas, as well as the actual processing logic.
     """
     # Allow storing extra fields in the model.

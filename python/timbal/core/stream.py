@@ -22,7 +22,7 @@ from ..types.events.chunk import ChunkEvent as TimbalChunkEvent
 from ..types.events.output import OutputEvent as TimbalOutputEvent
 from ..types.events.start import StartEvent as TimbalStartEvent
 
-logger = structlog.get_logger("timbal.graph.stream")
+logger = structlog.get_logger("timbal.core.stream")
 
 
 async def sync_to_async_gen(gen: Generator[Any, None, None], loop: asyncio.AbstractEventLoop) -> AsyncGenerator[Any, None]:
@@ -328,28 +328,28 @@ def handle_event(
         if async_gen_state.events_source is None:
             async_gen_state.events_source = "openai"
         if async_gen_state.events_source != "openai":
-            raise ValueError(f"We cannot handle mixed events sources.")
+            raise ValueError("We cannot handle mixed events sources.")
         return handle_openai_event(event, async_gen_state)
 
     if isinstance(event, AnthropicEvent):
         if async_gen_state.events_source is None:
             async_gen_state.events_source = "anthropic"
         if async_gen_state.events_source != "anthropic":
-            raise ValueError(f"We cannot handle mixed events sources.")
+            raise ValueError("We cannot handle mixed events sources.")
         return handle_anthropic_event(event, async_gen_state)
 
     if isinstance(event, TimbalBaseEvent):
         if async_gen_state.events_source is None:
             async_gen_state.events_source = "timbal"
         if async_gen_state.events_source != "timbal":
-            raise ValueError(f"We cannot handle mixed events sources.")
+            raise ValueError("We cannot handle mixed events sources.")
         return handle_timbal_event(event, async_gen_state)
 
     if isinstance(event, str):
         if async_gen_state.events_source is None:
             async_gen_state.events_source = "str"
         if async_gen_state.events_source != "str":
-            raise ValueError(f"We cannot handle mixed events sources.")
+            raise ValueError("We cannot handle mixed events sources.")
         if async_gen_state.collections:
             async_gen_state.collections += event
         else: 

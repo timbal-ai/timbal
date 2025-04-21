@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 from timbal import Flow
 from timbal.errors import StepKeyError
-from timbal.graph import Step
+from timbal.core.step import Step
 from timbal.state.data import DataMap
 from timbal.types import Field
 

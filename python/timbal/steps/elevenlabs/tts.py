@@ -1,5 +1,6 @@
-import httpx
 import os
+
+import httpx
 
 from ...errors import APIKeyNotFoundError
 from ...types.field import Field

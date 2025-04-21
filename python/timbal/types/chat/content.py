@@ -25,7 +25,6 @@ Usage:
 import base64
 import io
 import json
-import mimetypes
 from ast import literal_eval
 from typing import Any, Literal
 
@@ -42,12 +41,11 @@ from openai.types.chat import (
     ChatCompletionMessageToolCall as OpenAIToolCall,
 )
 from pydantic import BaseModel
-# from uuid_extensions import uuid7
 
+# from uuid_extensions import uuid7
 from ...steps.elevenlabs import stt
 from ...steps.pdfs import convert_pdf_to_images
 from ..file import File
-
 
 logger = structlog.get_logger("timbal.types.chat.content")
 

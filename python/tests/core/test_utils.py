@@ -1,5 +1,5 @@
 import pytest
-from timbal.graph.utils import (
+from timbal.core.flow.utils import (
     get_ancestors,
     get_sources,
     get_successors,

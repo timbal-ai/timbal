@@ -7,7 +7,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*builti
 
 
 from . import errors, state, steps, types
-from .graph import Agent, Flow
+from .core import Agent, Flow
 
 try:
     from ._version import __version__  # type: ignore

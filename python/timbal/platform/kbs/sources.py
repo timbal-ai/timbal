@@ -21,7 +21,6 @@ import pandas as pd
 import requests
 from tqdm import tqdm
 
-
 ALLOWED_EXTENSIONS = [".pdf", ".md", ".json"]
 
 
