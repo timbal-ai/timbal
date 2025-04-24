@@ -2,7 +2,7 @@ import asyncio
 import inspect
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 import structlog
@@ -16,6 +16,7 @@ from openai.types.chat import (
     ChatCompletionMessage as OpenAIMessage,
 )
 from pydantic import BaseModel, TypeAdapter
+from timbal.types.events.chunk import ChunkEvent
 from uuid_extensions import uuid7
 
 from ...errors import AgentError
@@ -34,6 +35,7 @@ from ..base import BaseStep
 from ..flow.engine import Flow
 from ..step import Step
 from ..stream import AsyncGenState, handle_event, sync_to_async_gen
+from .types.llm_chunk import LLMChunk
 from .types.llm_result import LLMResult
 from .types.tool_result import ToolResult
 from .types.tool import Tool
@@ -56,6 +58,10 @@ class AgentParamsModel(BaseModel):
     max_tokens: int | None = Field(
         default=None,
         description="The maximum number of tokens to generate."
+    )
+    stream: bool = Field(
+        default=False,
+        description="Whether to stream the output."
     )
 
 
@@ -266,7 +272,7 @@ class Agent(BaseStep):
         messages: list[Message],
         tools: list[BaseStep],
         **kwargs: Any,
-    ) -> Message:
+    ) -> AsyncGenerator[Any, None]:
         """Agent LLM execution wrapper.
 
         This method handles the core LLM interaction, including:
@@ -307,6 +313,8 @@ class Agent(BaseStep):
                 async_gen_state = AsyncGenState()
                 async for llm_output_chunk in llm_output:
                     llm_output_chunk = handle_event(llm_output_chunk, async_gen_state)
+                    if llm_output_chunk:
+                        yield LLMChunk(output=llm_output_chunk)
                 llm_usage = async_gen_state.usage
                 llm_message = Message.validate({
                     "role": "assistant",
@@ -325,7 +333,7 @@ class Agent(BaseStep):
                     llm_sdk = "anthropic"
                 llm_message = Message.validate(llm_output)
 
-            # Properly format/dump the tools for tracing and debugging (this is what we sent to the LLM).
+            # Properly format/dump the tools for tracing and debugging (this is what we send to the LLM).
             if llm_sdk == "openai":
                 tools_dump = [tool.to_openai_tool() for tool in tools]
             elif llm_sdk == "anthropic":
@@ -350,7 +358,7 @@ class Agent(BaseStep):
             **kwargs,
         }
 
-        return LLMResult(
+        yield LLMResult(
             input=llm_input,
             output=llm_message,
             error=llm_error,
@@ -632,11 +640,35 @@ class Agent(BaseStep):
         logger.info("start_event", start_event=llm_start_event)
         yield llm_start_event
 
-        llm_result = await self._run_llm(
+        async for llm_output in self._run_llm(
             messages=messages,
             tools=self.tools,
             **kwargs,
-        ) 
+        ):
+            if isinstance(llm_output, LLMResult):
+                llm_result = llm_output
+            else:
+                llm_chunk = llm_output
+
+                llm_chunk_event = ChunkEvent(
+                    run_id=context.id,
+                    path=llm_i_path,
+                    chunk=llm_chunk.output,
+                )
+
+                logger.info("chunk_event", chunk_event=llm_chunk_event)
+                yield llm_chunk_event
+
+                # If the LLM is returning a stream, that indicates it's not going to use a tool.
+                # We're safe streaming the chunks as the final agent response.
+                agent_chunk_event = ChunkEvent(
+                    run_id=context.id,
+                    path=self.path,
+                    chunk=llm_chunk.output,
+                )
+
+                logger.info("chunk_event", chunk_event=agent_chunk_event)
+                yield agent_chunk_event
 
         llm_output_event = OutputEvent(
             run_id=context.id,
@@ -789,12 +821,36 @@ class Agent(BaseStep):
             logger.info("start_event", start_event=llm_start_event)
             yield llm_start_event
 
-            llm_result = await self._run_llm(
+            async for llm_output in self._run_llm(
                 messages=messages,
                 # We don't pass tools to the LLM so it can't choose to call them and perform another iteration.
                 tools=self.tools if i < self.max_iter else [],
                 **kwargs,
-            ) 
+            ):
+                if isinstance(llm_output, LLMResult):
+                    llm_result = llm_output
+                else:
+                    llm_chunk = llm_output
+
+                    llm_chunk_event = ChunkEvent(
+                        run_id=context.id,
+                        path=llm_i_path,
+                        chunk=llm_chunk.output,
+                    )
+
+                    logger.info("chunk_event", chunk_event=llm_chunk_event)
+                    yield llm_chunk_event
+
+                    # If the LLM is returning a stream, that indicates it's not going to use a tool.
+                    # We're safe streaming the chunks as the final agent response.
+                    agent_chunk_event = ChunkEvent(
+                        run_id=context.id,
+                        path=self.path,
+                        chunk=llm_chunk.output,
+                    )
+
+                    logger.info("chunk_event", chunk_event=agent_chunk_event)
+                    yield agent_chunk_event
 
             llm_output_event = OutputEvent(
                 run_id=context.id,

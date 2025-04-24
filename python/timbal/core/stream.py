@@ -128,7 +128,6 @@ def handle_openai_event(
 
     if openai_event.choices[0].delta.tool_calls:
         tool_call = copy.deepcopy(openai_event.choices[0].delta.tool_calls[0])
-        text_chunk = ""
         if tool_call.id:
             chunk_result = {
                 "type": "tool_use",
@@ -136,9 +135,6 @@ def handle_openai_event(
                 "name": tool_call.function.name,
                 "input": ""
             }
-            if async_gen_state.collections:
-                text_chunk = ".\n"
-            text_chunk += f"Using tool '{tool_call.function.name}' with input: "
             async_gen_state.collections.append(chunk_result)
         else:
             # ? Gemini doesn't add an id to the tool call.
@@ -150,9 +146,8 @@ def handle_openai_event(
                     "name": tool_call.function.name,
                     "input": ""
                 })
-            text_chunk += tool_call.function.arguments
             async_gen_state.collections[-1]["input"] += tool_call.function.arguments
-        return text_chunk
+        return None
 
     if openai_event.choices[0].delta.content:
         text_chunk = openai_event.choices[0].delta.content
@@ -197,19 +192,6 @@ def handle_anthropic_event(
     # if isinstance(anthropic_event, RawContentBlockStopEvent | RawMessageStopEvent):
     #     pass
 
-    # RawMessageStartEvent(
-    #     message=Message(
-    #         id='msg_01RMkrJWmJ5hVQWPb6cnSusm', 
-    #         content=[], 
-    #         model='claude-3-5-sonnet-20241022', 
-    #         role='assistant', 
-    #         stop_reason=None, 
-    #         stop_sequence=None, 
-    #         type='message', 
-    #         usage=Usage(cache_creation_input_tokens=0, cache_read_input_tokens=0, input_tokens=178, output_tokens=2)
-    #     ), 
-    #     type='message_start'
-    # )
     # TODO Handle other types of tokens.
     if isinstance(anthropic_event, RawMessageStartEvent):
         if anthropic_event.message.usage:
@@ -244,17 +226,12 @@ def handle_anthropic_event(
         if isinstance(anthropic_event.delta, InputJSONDelta):
             text_chunk = anthropic_event.delta.partial_json
             async_gen_state.collections[-1]["input"] += text_chunk
-            return text_chunk
+            return None
         elif isinstance(anthropic_event.delta, TextDelta):
             text_chunk = anthropic_event.delta.text
             async_gen_state.collections[-1]["text"] += text_chunk
             return text_chunk
 
-    # RawMessageDeltaEvent(
-    #     delta=Delta(stop_reason='end_turn', stop_sequence=None), 
-    #     type='message_delta', 
-    #     usage=MessageDeltaUsage(output_tokens=43)
-    # )
     if isinstance(anthropic_event, RawMessageDeltaEvent):
         if anthropic_event.usage:
             anthropic_model = async_gen_state.anthropic_model
