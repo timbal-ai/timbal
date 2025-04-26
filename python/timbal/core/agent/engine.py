@@ -543,6 +543,7 @@ class Agent(BaseStep):
         agent_start_event = StartEvent(
             run_id=context.id,
             path=self.path,
+            status_text="Starting...",
         )
 
         logger.info("start_event", start_event=agent_start_event)
@@ -634,7 +635,7 @@ class Agent(BaseStep):
         llm_start_event = StartEvent(
             run_id=context.id,
             path=llm_i_path,
-            # ? This one could grab properties from the tool to customize a little bit more the event.
+            status_text="Thinking...",
         )
 
         logger.info("start_event", start_event=llm_start_event)
@@ -659,16 +660,16 @@ class Agent(BaseStep):
                 logger.info("chunk_event", chunk_event=llm_chunk_event)
                 yield llm_chunk_event
 
-                # If the LLM is returning a stream, that indicates it's not going to use a tool.
-                # We're safe streaming the chunks as the final agent response.
-                agent_chunk_event = ChunkEvent(
-                    run_id=context.id,
-                    path=self.path,
-                    chunk=llm_chunk.output,
-                )
+                # # If the LLM is returning a stream, that indicates it's not going to use a tool.
+                # # We're safe streaming the chunks as the final agent response.
+                # agent_chunk_event = ChunkEvent(
+                #     run_id=context.id,
+                #     path=self.path,
+                #     chunk=llm_chunk.output,
+                # )
 
-                logger.info("chunk_event", chunk_event=agent_chunk_event)
-                yield agent_chunk_event
+                # logger.info("chunk_event", chunk_event=agent_chunk_event)
+                # yield agent_chunk_event
 
         llm_output_event = OutputEvent(
             run_id=context.id,
@@ -749,7 +750,8 @@ class Agent(BaseStep):
                 tool_start_event = StartEvent(
                     run_id=context.id,
                     path=f"{tool.path}-{tool_call.id}",
-                    # ? This one could grab properties from the tool to customize a little bit more the event.
+                    # TODO Review this one.
+                    status_text=f"Running tool: {tool.path}...",
                 )
 
                 logger.info("start_event", start_event=tool_start_event)
@@ -815,7 +817,7 @@ class Agent(BaseStep):
             llm_start_event = StartEvent(
                 run_id=context.id,
                 path=llm_i_path,
-                # ? This one could grab properties from the tool to customize a little bit more the event.
+                status_text="Thinking...",
             )
 
             logger.info("start_event", start_event=llm_start_event)
@@ -841,16 +843,16 @@ class Agent(BaseStep):
                     logger.info("chunk_event", chunk_event=llm_chunk_event)
                     yield llm_chunk_event
 
-                    # If the LLM is returning a stream, that indicates it's not going to use a tool.
-                    # We're safe streaming the chunks as the final agent response.
-                    agent_chunk_event = ChunkEvent(
-                        run_id=context.id,
-                        path=self.path,
-                        chunk=llm_chunk.output,
-                    )
+                    # # If the LLM is returning a stream, that indicates it's not going to use a tool.
+                    # # We're safe streaming the chunks as the final agent response.
+                    # agent_chunk_event = ChunkEvent(
+                    #     run_id=context.id,
+                    #     path=self.path,
+                    #     chunk=llm_chunk.output,
+                    # )
 
-                    logger.info("chunk_event", chunk_event=agent_chunk_event)
-                    yield agent_chunk_event
+                    # logger.info("chunk_event", chunk_event=agent_chunk_event)
+                    # yield agent_chunk_event
 
             llm_output_event = OutputEvent(
                 run_id=context.id,
