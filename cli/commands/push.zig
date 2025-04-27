@@ -1,18 +1,15 @@
 const std = @import("std");
 const fs = std.fs;
 
-
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.print("{s}\n\n", .{err});
     try printUsage();
 }
 
-
 fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
-    try stderr.writeAll(
-        "Push a container image to an existing Timbal Platform app.\n" ++
+    try stderr.writeAll("Push a container image to an existing Timbal Platform app.\n" ++
         "You must first create an app on the platform if you don't have one yet.\n" ++
         "\n" ++
         "\x1b[1;32mUsage: \x1b[1;36mtimbal push \x1b[0;36m[OPTIONS] IMAGE APP\n" ++
@@ -29,10 +26,8 @@ fn printUsage() !void {
         "    \x1b[1;36m-v\x1b[0m, \x1b[1;36m--verbose\x1b[0;36m... \x1b[0mUse verbose output\n" ++
         "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help       \x1b[0mDisplay the concise help for this command\n" ++
         "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version    \x1b[0mDisplay the timbal version\n" ++
-        "\n"
-    );
+        "\n");
 }
-
 
 const AppParts = struct {
     domain: []const u8,
@@ -40,9 +35,8 @@ const AppParts = struct {
     app_id: usize,
 };
 
-
 fn validateApp(app: []const u8) !AppParts {
-    var app_parts = std.mem.split(u8, app, "/");
+    var app_parts = std.mem.splitScalar(u8, app, '/');
 
     const domain = app_parts.next().?;
 
@@ -69,7 +63,6 @@ fn validateApp(app: []const u8) !AppParts {
     };
 }
 
-
 const TimbalPushArgs = struct {
     quiet: bool,
     verbose: bool,
@@ -77,7 +70,6 @@ const TimbalPushArgs = struct {
     app_parts: AppParts,
     version_name: ?[]const u8,
 };
-
 
 fn parseArgs(args: []const []const u8) !TimbalPushArgs {
     var quiet: bool = false;
@@ -146,7 +138,6 @@ fn parseArgs(args: []const []const u8) !TimbalPushArgs {
     };
 }
 
-
 const ImageDigestInfo = struct {
     hash: []const u8,
     size: usize,
@@ -155,7 +146,6 @@ const ImageDigestInfo = struct {
         allocator.free(self.hash);
     }
 };
-
 
 fn inspectImage(
     allocator: std.mem.Allocator,
@@ -179,9 +169,8 @@ fn inspectImage(
     allocator.free(ls_result.stderr);
 
     const docker_inspect_args = [_][]const u8{
-        "docker", "image", "inspect",
-        "--format={{.Id}}\t{{.Size}}",
-        image,
+        "docker",                      "image", "inspect",
+        "--format={{.Id}}\t{{.Size}}", image,
     };
 
     const result = try std.process.Child.run(.{
@@ -197,7 +186,7 @@ fn inspectImage(
         std.process.exit(1);
     }
 
-    var parts = std.mem.split(u8, std.mem.trim(u8, result.stdout, "\n\r"), "\t");
+    var parts = std.mem.splitScalar(u8, std.mem.trim(u8, result.stdout, "\n\r"), '\t');
     const hash = parts.next().?;
     const size_str = parts.next().?;
     const size = try std.fmt.parseInt(usize, size_str, 10);
@@ -213,7 +202,6 @@ fn inspectImage(
     };
 }
 
-
 const ProbeResJson = struct {
     params_model_schema: std.json.Value,
     return_model_schema: std.json.Value,
@@ -223,7 +211,6 @@ const ProbeResJson = struct {
         self.return_model_schema.deinit(allocator);
     }
 };
-
 
 const ProbeRes = struct {
     params_model_schema: []const u8,
@@ -235,7 +222,6 @@ const ProbeRes = struct {
     }
 };
 
-
 fn probeImage(
     allocator: std.mem.Allocator,
     image: []const u8,
@@ -243,14 +229,14 @@ fn probeImage(
     verbose: bool,
 ) !ProbeRes {
     _ = verbose;
-    
+
     if (!quiet) {
         std.debug.print("Probing image...\n", .{});
     }
 
     const docker_run_args = [_][]const u8{
         "docker", "run", "--rm", image,
-        "uv", "run", "-m", "timbal.server.probe",
+        "uv",     "run", "-m",   "timbal.server.probe",
     };
 
     const result = try std.process.Child.run(.{
@@ -286,7 +272,6 @@ fn probeImage(
     };
 }
 
-
 const DockerLoginInfo = struct {
     user: []const u8,
     password: []const u8,
@@ -299,7 +284,6 @@ const DockerLoginInfo = struct {
     }
 };
 
-
 const AuthRes = struct {
     docker_login: DockerLoginInfo,
     uri: []const u8,
@@ -310,9 +294,8 @@ const AuthRes = struct {
     }
 };
 
-
 fn authenticate(
-    allocator: std.mem.Allocator, 
+    allocator: std.mem.Allocator,
     timbal_api_token: []const u8,
     image_digest_info: ImageDigestInfo,
     probe_res: ProbeRes,
@@ -325,11 +308,7 @@ fn authenticate(
         std.debug.print("Authenticating with Timbal Platform...\n", .{});
     }
 
-    const auth_url = try std.fmt.allocPrint(
-        allocator,
-        "https://{s}/orgs/{d}/apps/{d}/versions",
-        .{ app_parts.domain, app_parts.org_id, app_parts.app_id }
-    );
+    const auth_url = try std.fmt.allocPrint(allocator, "https://{s}/orgs/{d}/apps/{d}/versions", .{ app_parts.domain, app_parts.org_id, app_parts.app_id });
     defer allocator.free(auth_url);
 
     var client = std.http.Client{ .allocator = allocator };
@@ -364,11 +343,11 @@ fn authenticate(
     if (res.status != .ok) {
         const stderr = std.io.getStdErr().writer();
         try stderr.print("Error: API request failed with status code {d}\n", .{@intFromEnum(res.status)});
-        
+
         if (res_buffer.items.len > 0) {
             try stderr.print("Response: {s}\n", .{res_buffer.items});
         }
-        
+
         std.process.exit(1);
     }
 
@@ -396,7 +375,6 @@ fn authenticate(
     return auth_res;
 }
 
-
 fn loginToCR(
     allocator: std.mem.Allocator,
     docker_login: DockerLoginInfo,
@@ -410,9 +388,9 @@ fn loginToCR(
     }
 
     const docker_login_args = [_][]const u8{
-        "docker", "login",
-        "-u", docker_login.user,
-        "-p", docker_login.password,
+        "docker",            "login",
+        "-u",                docker_login.user,
+        "-p",                docker_login.password,
         docker_login.server,
     };
 
@@ -429,7 +407,6 @@ fn loginToCR(
         std.process.exit(1);
     }
 }
-
 
 fn tagImage(
     allocator: std.mem.Allocator,
@@ -462,7 +439,6 @@ fn tagImage(
     }
 }
 
-
 fn untagImage(
     allocator: std.mem.Allocator,
     tag: []const u8,
@@ -493,7 +469,6 @@ fn untagImage(
     }
 }
 
-
 fn pushImage(
     allocator: std.mem.Allocator,
     tag: []const u8,
@@ -520,7 +495,6 @@ fn pushImage(
     _ = try child.wait();
 }
 
-
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Ensure TIMBAL_API_TOKEN is set.
     const timbal_api_token = std.process.getEnvVarOwned(allocator, "TIMBAL_API_TOKEN") catch |err| {
@@ -538,12 +512,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const parsed_args = try parseArgs(args);
 
     // Ensure the image exists and fetch some specs, like the hash and size.
-    var image_digest_info = try inspectImage(
-        allocator, 
-        parsed_args.image, 
-        parsed_args.quiet, 
-        parsed_args.verbose
-    );
+    var image_digest_info = try inspectImage(allocator, parsed_args.image, parsed_args.quiet, parsed_args.verbose);
     defer image_digest_info.deinit(allocator);
 
     var probe_res = try probeImage(
@@ -557,7 +526,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Authenticate with the Timbal Platform.
     // Retrieve login user and pwd for the container registry.
     var auth_res = try authenticate(
-        allocator, 
+        allocator,
         timbal_api_token,
         image_digest_info,
         probe_res,
@@ -569,23 +538,23 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer auth_res.deinit(allocator);
 
     try loginToCR(
-        allocator, 
-        auth_res.docker_login, 
+        allocator,
+        auth_res.docker_login,
         parsed_args.quiet,
         parsed_args.verbose,
     );
 
     try tagImage(
-        allocator, 
-        parsed_args.image, 
+        allocator,
+        parsed_args.image,
         auth_res.uri,
         parsed_args.quiet,
         parsed_args.verbose,
     );
 
     try pushImage(
-        allocator, 
-        auth_res.uri, 
+        allocator,
+        auth_res.uri,
         parsed_args.quiet,
         parsed_args.verbose,
     );
