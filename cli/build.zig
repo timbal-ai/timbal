@@ -12,16 +12,48 @@ const targets = [_]std.Target.Query{
     .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu },
 };
 
+fn formatExecutableName(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    version: []const u8,
+    target_query: std.Target.Query,
+) ![]u8 {
+    var name_buf = std.ArrayList(u8).init(allocator);
+
+    try name_buf.appendSlice(name);
+
+    try name_buf.append('-');
+    try name_buf.appendSlice(version);
+
+    try name_buf.append('-');
+    try name_buf.appendSlice(@tagName(target_query.os_tag orelse return error.Null));
+
+    try name_buf.append('-');
+    try name_buf.appendSlice(@tagName(target_query.cpu_arch orelse return error.Null));
+
+    if (target_query.abi) |abi| {
+        try name_buf.append('-');
+        try name_buf.appendSlice(@tagName(abi));
+    }
+
+    return name_buf.toOwnedSlice();
+}
+
 pub fn build(b: *std.Build) !void {
-    // Get the optimization mode from command line arguments.
     const optimize = b.standardOptimizeOption(.{});
+
+    const version_opt = b.option([]const u8, "version", "The CLI version being built.");
+    const version = version_opt orelse "dev";
 
     // const target = b.standardTargetOptions(.{});
     for (targets) |target_query| {
         const target = b.resolveTargetQuery(target_query);
 
+        const name = try formatExecutableName(b.allocator, "timbal", version, target_query);
+        defer b.allocator.free(name);
+
         const exe = b.addExecutable(.{
-            .name = "timbal",
+            .name = name,
             .root_source_file = b.path("main.zig"),
             .target = target,
             .optimize = optimize,
@@ -29,7 +61,7 @@ pub fn build(b: *std.Build) !void {
 
         // Create an install step that places the artifact in a subdirectory named after the target triple.
         const target_install = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{
-            .custom = try target_query.zigTriple(b.allocator),
+            .custom = version,
         } } });
 
         // Make the main install step depend on this target-specific install step.
