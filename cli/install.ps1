@@ -13,9 +13,9 @@ Installer for the Timbal CLI.
 This script installs the Timbal Command Line Interface (CLI).
 It detects the host architecture (Windows x86_64 or aarch64), downloads the appropriate
 Timbal executable from the latest GitHub release, and installs it to:
-    $env:LOCALAPPDATA\Programs\timbal\timbal.exe
+    $env:USERPROFILE\.local\bin\timbal.exe
 
-The script then adds the installation directory ($env:LOCALAPPDATA\Programs\timbal)
+The script then adds the installation directory ($env:USERPROFILE\.local\bin)
 to the user's PATH environment variable, making the 'timbal' command available
 in the terminal.
 
@@ -68,6 +68,32 @@ Please download and install it first:
     https://www.microsoft.com/net/download
 
 "@
+    }
+}
+
+
+function Test-UvInstallation() {
+    Write-Information "Checking for 'uv' command in PATH..."
+    try {
+        Get-Command uv -ErrorAction Stop | Out-Null
+        Write-Information "'uv' command found successfully."
+    } catch [System.Management.Automation.CommandNotFoundException] {
+        # Specific catch for command not found
+        $errorMessage = @"
+'uv' command not found in PATH. Timbal requires 'uv' (from Astral) for Python project management.
+
+Possible Solutions:
+1. Install 'uv' using the official installer:
+   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+2. If 'uv' is already installed, ensure its installation directory 
+   is correctly added to your User or System PATH environment variable and restart your terminal.
+"@
+        Write-Error $errorMessage
+        Exit 1
+    } catch {
+        # Catch any other unexpected errors during the check
+        Write-Error "An unexpected error occurred while checking for 'uv': $($_.Exception.Message)"
+        Exit 1
     }
 }
 
@@ -164,10 +190,11 @@ function Install-Binary($install_args) {
 
     Initialize-Environment
 
-    # TODO Ensure docker and uv are installed and in the path
+    Test-UvInstallation
 
-    $InstallBaseDir = Join-Path -Path $env:LOCALAPPDATA -ChildPath "Programs"
-    $InstallDir = Join-Path -Path $InstallBaseDir -ChildPath "timbal"
+    # TODO Ensure docker is installed and in the path
+
+    $InstallDir = Join-Path -Path $env:USERPROFILE -ChildPath ".local\bin"
 
     if (-not (Test-Path -Path $InstallDir -PathType Container)) {
         Write-Information "Creating installation directory: '$InstallDir'"
