@@ -74,6 +74,7 @@ Please download and install it first:
 
 function Test-UvInstallation() {
     Write-Information "Checking for 'uv' command in PATH..."
+
     try {
         Get-Command uv -ErrorAction Stop | Out-Null
         Write-Information "'uv' command found successfully."
@@ -85,7 +86,7 @@ function Test-UvInstallation() {
 Possible Solutions:
 1. Install 'uv' using the official installer:
    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-2. If 'uv' is already installed, ensure its installation directory 
+2. If 'uv' is already installed, ensure its installation directory
    is correctly added to your User or System PATH environment variable and restart your terminal.
 "@
         Write-Error $errorMessage
@@ -94,6 +95,49 @@ Possible Solutions:
         # Catch any other unexpected errors during the check
         Write-Error "An unexpected error occurred while checking for 'uv': $($_.Exception.Message)"
         Exit 1
+    }
+}
+
+
+function Test-DockerInstallation() {
+    Write-Information "Checking Docker installation..."
+
+    try {
+        Get-Command docker -ErrorAction Stop | Out-Null
+        Write-Information "Docker command found successfully."
+    } catch [System.Management.Automation.CommandNotFoundException] {
+        # Specific catch for command not found
+        $errorMessage = @"
+Docker command not found in PATH. Timbal requires Docker for container management.
+
+Please follow the instructions in: https://docs.docker.com/desktop/setup/install/windows-install/
+"@
+        Write-Error $errorMessage
+        Exit 1
+    } catch {
+        # Catch any other unexpected errors during the check
+        Write-Error "An unexpected error occurred while checking for 'docker': $($_.Exception.Message)"
+        Exit 1
+    }
+
+    # Check if docker command is usable by running hello-world
+    Write-Information "Checking Docker connectivity by running 'hello-world' container..."
+    # Attempt to run hello-world, suppress output, and check exit status
+    # *> $null redirects both stdout (1) and stderr (2) streams to null
+    docker run --rm hello-world *> $null
+    if ($LASTEXITCODE -ne 0) {
+        # Use Write-Warning for non-critical issues
+        $errorMessage = @"
+Docker engine appears to be not running, or the current user lacks permissions.
+Failed to run the 'hello-world' container (Exit Code: $LASTEXITCODE).
+You might need to start Docker Desktop or configure user permissions.
+For Windows, ensure Docker Desktop is running. For Linux/WSL, you might need to add your user to the 'docker' group.
+See relevant documentation: https://docs.docker.com/desktop/setup/install/windows-install/
+"@
+        Write-Error $errorMessage
+        Exit 1
+    } else {
+        Write-Information "Docker connection successful ('hello-world' container ran successfully)."
     }
 }
 
@@ -191,8 +235,9 @@ function Install-Binary($install_args) {
     Initialize-Environment
 
     Test-UvInstallation
-
-    # TODO Ensure docker is installed and in the path
+    # TODO Make this step optional. This will only be required if you want to use timbal build or timbal push.
+    # TODO Also issue a warning that for authenticating to the registry, one might check the .docker/config.json file and update key "credsStore": "".
+    Test-DockerInstallation
 
     $InstallDir = Join-Path -Path $env:USERPROFILE -ChildPath ".local\bin"
 
@@ -207,12 +252,15 @@ function Install-Binary($install_args) {
         Write-Information "Installation directory already exists: '$InstallDir'"
     }
 
-    $CliExecutableName = "timbal.exe" 
+    $CliExecutableName = "timbal.exe"
     $CliExecutablePath = Join-Path -Path $InstallDir -ChildPath $CliExecutableName
 
     Get-Executable -DestinationPath $CliExecutablePath
 
     # TODO Add timbal to the path
+    # To add C:\Users\Casa\.local\bin to your PATH, either restart your shell or run:
+    # set Path=C:\Users\Casa\.local\bin;%Path%   (cmd)
+    # $env:Path = "C:\Users\Casa\.local\bin;$env:Path"   (powershell)
 }
 
 

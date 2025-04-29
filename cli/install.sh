@@ -260,6 +260,7 @@ main() {
     fi
 
     check_uv
+    # TODO Make this step optional. This will only be required if you want to use timbal build or timbal push.
     check_docker
 
     setup_timbal
