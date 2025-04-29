@@ -93,9 +93,29 @@ command_exists() {
 }
 
 
+check_uv() {
+    if ! command_exists uv; then
+        error_exit "uv is not installed or not in PATH.
+Please install it using the following command:
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+
+If the command doesn't work, please refer to the documentation:
+    https://docs.astral.sh/uv/"
+    fi
+}
+
+
 check_docker() {
     if ! command_exists docker; then
-        error_exit "Docker is not installed. Please install Docker before proceeding."
+        error_exit "Docker is not installed.
+
+If you're on macOS, follow the instructions here:
+    https://docs.docker.com/desktop/setup/install/mac-install/
+
+If you're on Linux, follow the instructions here:
+    https://docs.docker.com/engine/install/
+
+Please install Docker before proceeding."
     fi
 
     # Attempt to run hello-world, but don't fail script if it errors out
@@ -128,10 +148,14 @@ setup_timbal() {
         # Ask if user wants to overwrite. Default to No.
         read -p "Overwrite? (y/N): " choice
         case "$choice" in
-            y|Y ) echo "Overwriting existing file..."; rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH";;
-            * ) echo "Skipping installation because file exists."; return;; # Use 'return' to potentially continue with PATH setup
-            # Alternatively, use 'exit 1' if you want to stop completely:
-            # * ) echo "Exiting installation."; exit 1;;
+            y|Y ) 
+                echo "Overwriting existing file..." 
+                rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH"
+                ;;
+            * ) 
+                echo "Skipping installation because file exists." 
+                return
+                ;;
         esac
     fi
 
@@ -235,6 +259,7 @@ main() {
         esac
     fi
 
+    check_uv
     check_docker
 
     setup_timbal
