@@ -141,9 +141,11 @@ fn parseArgs(args: []const []const u8) !TimbalPushArgs {
 const ImageDigestInfo = struct {
     hash: []const u8,
     size: usize,
+    platform: []const u8,
 
     pub fn deinit(self: *ImageDigestInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.hash);
+        allocator.free(self.platform);
     }
 };
 
@@ -159,18 +161,29 @@ fn inspectImage(
 
     // Force docker to refresh image metadata cache.
     const docker_ls_args = [_][]const u8{
-        "docker", "image", "ls", image,
+        "docker", "image", "ls", "-q", image,
     };
     const ls_result = try std.process.Child.run(.{
         .allocator = allocator,
         .argv = &docker_ls_args,
     });
-    allocator.free(ls_result.stdout);
-    allocator.free(ls_result.stderr);
+    defer allocator.free(ls_result.stderr);
+    defer allocator.free(ls_result.stdout);
+
+    if (ls_result.term.Exited != 0) {
+        const stderr = std.io.getStdErr().writer();
+        try stderr.print("Error: {s}\n", .{ls_result.stderr});
+        std.process.exit(1);
+    }
+
+    const image_id = std.mem.trim(u8, ls_result.stdout, "\n\r");
 
     const docker_inspect_args = [_][]const u8{
-        "docker",                      "image", "inspect",
-        "--format={{.Id}}\t{{.Size}}", image,
+        "docker",
+        "image",
+        "inspect",
+        "--format={{.Id}}\t{{.Size}}\t{{.Os}}/{{.Architecture}}",
+        image_id,
     };
 
     const result = try std.process.Child.run(.{
@@ -190,15 +203,18 @@ fn inspectImage(
     const hash = parts.next().?;
     const size_str = parts.next().?;
     const size = try std.fmt.parseInt(usize, size_str, 10);
+    const platform = parts.next().?;
 
     if (verbose) {
         std.debug.print("Image hash: {s}\n", .{hash});
         std.debug.print("Image size: {d}\n", .{size});
+        std.debug.print("Image platform: {s}\n", .{platform});
     }
 
     return ImageDigestInfo{
         .hash = try allocator.dupe(u8, hash),
         .size = size,
+        .platform = try allocator.dupe(u8, platform),
     };
 }
 
@@ -323,6 +339,7 @@ fn authenticate(
     const payload = try std.json.stringifyAlloc(allocator, .{
         .hash = image_digest_info.hash,
         .size = image_digest_info.size,
+        .platform = image_digest_info.platform,
         .name = version_name,
         .params_model_schema = probe_res.params_model_schema,
         .return_model_schema = probe_res.return_model_schema,
