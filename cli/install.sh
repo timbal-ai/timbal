@@ -131,15 +131,57 @@ Please install Docker before proceeding."
 }
 
 
+download_file() {
+    URL="$1"
+    DESTINATION="$2"
+
+    echo "Downloading $URL to $DESTINATION..."
+
+    if command_exists curl; then
+        curl --fail --location --output "$DESTINATION" "$URL" || error_exit "curl download failed"
+    elif command_exists wget; then
+        wget --quiet --output-document="$DESTINATION" "$URL" || error_exit "wget download failed"
+    elif command_exists fetch; then
+        fetch --quiet --output="$DESTINATION" "$URL" || error_exit "fetch download failed"
+    else
+        error_exit "Cannot download: curl, wget, or fetch is required."
+    fi
+
+    # Basic check if download seems successful (e.g., didn't download a "Not Found" HTML page)
+    # A more robust check would involve checking file size or type if possible
+    if grep -q "Not Found" "$DESTINATION" && [ "$(wc -c < "$DESTINATION")" -lt 1024 ]; then
+        error_exit "File not found or download failed at $URL. Check if url $URL is correct."
+        # Clean up the invalid file
+        rm -f "$DESTINATION"
+        # The error_exit above already stops the script, but keep rm for clarity
+    fi
+}
+
+
 setup_timbal() {
     # Real paths are:
     # <name>-<version>-<os>-<arch>(-<abi/toolchain>...).<ext>
-    # We've simplified the naming schema to download the binaries as:
-    OS=$(uname -s)
-    ARCH=$(uname -m)
-    BINARY_URI="https://github.com/timbal-ai/timbal/releases/latest/download/timbal-${OS}-${ARCH}"
+    # We will fetch the manifest to get the exact release url for our os and arch.
+    MANIFEST_URI="https://github.com/timbal-ai/timbal/releases/latest/download/manifest.json"
+    MANIFEST_PATH=$(mktemp)
+    trap 'rm -f "$MANIFEST_PATH"' EXIT TERM INT
 
-    echo "Binary download URI: $BINARY_URI"
+    download_file "$MANIFEST_URI" "$MANIFEST_PATH"
+
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m | tr '[:upper:]' '[:lower:]')
+
+    if ! command_exists jq; then 
+        error_exit "jq is required to parse the manifest. Please install it using your package manager."
+    fi
+
+    DOWNLOAD_URL=$(jq -r ".binaries.${OS}.${ARCH}.url" "$MANIFEST_PATH")
+
+    if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+        error_exit "No download URL found for OS: $OS, ARCH: $ARCH"
+    fi
+
+    echo "Binary download URL: $DOWNLOAD_URL"
     echo "Target executable path: $CLI_EXECUTABLE_PATH"
 
     # Check if the file already exists
@@ -159,28 +201,8 @@ setup_timbal() {
         esac
     fi
 
-    echo "Downloading $CLI_NAME binary..."
-    # Download using preferred command - NO SUDO needed
-    if command_exists curl; then
-        curl --fail --location --output "$CLI_EXECUTABLE_PATH" "$BINARY_URI" || error_exit "curl download failed from $BINARY_URI"
-    elif command_exists wget; then
-        wget --quiet --output-document="$CLI_EXECUTABLE_PATH" "$BINARY_URI" || error_exit "wget download failed from $BINARY_URI"
-    elif command_exists fetch; then
-        fetch --quiet --output="$CLI_EXECUTABLE_PATH" "$BINARY_URI" || error_exit "fetch download failed from $BINARY_URI"
-    else
-        error_exit "Cannot download: curl, wget, or fetch is required."
-    fi
+    download_file "$DOWNLOAD_URL" "$CLI_EXECUTABLE_PATH"
 
-    # Basic check if download seems successful (e.g., didn't download a "Not Found" HTML page)
-    # A more robust check would involve checking file size or type if possible
-    if grep -q "Not Found" "$CLI_EXECUTABLE_PATH" && [ "$(wc -c < "$CLI_EXECUTABLE_PATH")" -lt 1024 ]; then
-        error_exit "$CLI_NAME binary not found or download failed at ${BINARY_URI}. Check if a release exists for your OS (${OS}) and architecture (${ARCH})."
-        # Clean up the invalid file
-        rm -f "$CLI_EXECUTABLE_PATH"
-        # The error_exit above already stops the script, but keep rm for clarity
-    fi
-
-    echo "Setting execute permissions..."
     chmod +x "$CLI_EXECUTABLE_PATH" || error_exit "Failed to set execute permission on $CLI_EXECUTABLE_PATH"
 
     # macOS Gatekeeper Fix (if needed)

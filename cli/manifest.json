@@ -1,0 +1,33 @@
+{
+    "name": "timbal",
+    "description": "Framework for building and orchestrating agentic AI applications—fast, scalable, and enterprise-ready. With flow-based execution, built-in memory and state management, it enables resilient, tool-using agents that think, plan, and act in dynamic environments.",
+    "version": "0.52.0",
+    "binaries": {
+        "linux": {
+            "aarch64": {
+                "url": "https://github.com/timbal-ai/timbal/releases/download/v0.52.0/timbal-0.52.0-linux-aarch64-gnu",
+                "sha256": "51c9020b8060d3c35cea71ed6e46cdf1bb38ccff7fed9d4870d8aa33d98ac60f"
+            },
+            "x86_64": {
+                "url": "https://github.com/timbal-ai/timbal/releases/download/v0.52.0/timbal-0.52.0-linux-x86_64-gnu",
+                "sha256": "9639312918afe13a809828d28fb050b2dc40f51bbfe0ca73422c112e26b3cce9"
+            }
+        },
+        "darwin": {
+            "arm64": {
+                "url": "https://github.com/timbal-ai/timbal/releases/download/v0.52.0/timbal-0.52.0-macos-aarch64",
+                "sha256": "6a412fe5e50cc1ca0273ef6f96c1dc81a8dab701d794800f60a315e66228f2f5"
+            },
+            "x86_64": {
+                "url": "https://github.com/timbal-ai/timbal/releases/download/v0.52.0/timbal-0.52.0-macos-x86_64",
+                "sha256": "adbab7f66c399ea6bf804dd09b2cf50946074d645bf2f5c3f6c8773d467a08f8"
+            }
+        },
+        "windows": {
+            "x86_64": {
+                "url": "https://github.com/timbal-ai/timbal/releases/download/v0.52.0/timbal-0.52.0-windows-x86_64-gnu.exe",
+                "sha256": "f3e06f9c3aa7100706e3f3b337eb44e7531370033ea3b7bb5d752dee7f7d9fd8"
+            }
+        }
+    }
+}
