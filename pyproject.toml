@@ -44,6 +44,11 @@ dependencies = [
     "uvicorn>=0.34.0",
 ]
 
+[project.optional-dependencies]
+steps-slack = [
+    "slack-sdk>=3.35.0",
+]
+
 [dependency-groups]
 dev = [
     "pyngrok>=7.2.3",
