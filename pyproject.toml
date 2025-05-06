@@ -48,6 +48,9 @@ dependencies = [
 steps-slack = [
     "slack-sdk>=3.35.0",
 ]
+steps-sharepoint = [
+    "o365>=2.1.2",
+]
 
 [dependency-groups]
 dev = [
