@@ -157,7 +157,6 @@ class FileContent(Content):
     _cached_anthropic_input: Any | None = None
 
 
-    # TODO Cache the openai-ready content in the File class.
     async def to_openai_input(self, model: str | None = None) -> dict[str, Any] | list[dict[str, Any]]:
         """Convert the file content to the input format required by OpenAI."""
         if self._cached_openai_input is not None:
@@ -176,17 +175,25 @@ class FileContent(Content):
             (self.file.__source_extension__ in [".json", ".jsonl"])
         ):
             content = self.file.read().decode("utf-8")
-            return {
+
+            openai_input = {
                 "type": "text",
                 "text": content,
             }
+
+            self._cached_openai_input = openai_input
+            return openai_input
         
         elif self.file.__source_extension__ == ".xlsx":
             df = pd.read_excel(io.BytesIO(self.file.read()))
-            return {
+
+            openai_input = {
                 "type": "text",
                 "text": df.to_csv(index=False, header=True, sep=","),
             }
+
+            self._cached_openai_input = openai_input
+            return openai_input
 
         elif self.file.__source_extension__ == ".docx":
             doc = Document(io.BytesIO(self.file.read()))
@@ -210,11 +217,14 @@ class FileContent(Content):
                     text_content.append("\n".join(table_content))
 
             text_content = "\n".join(text_content)
-            
-            return {
+
+            openai_input = {
                 "type": "text",
                 "text": text_content,
             }
+            
+            self._cached_openai_input = openai_input
+            return openai_input
 
         elif mime and mime.startswith("image/"):
             url = File.serialize(self.file)
@@ -253,6 +263,7 @@ class FileContent(Content):
                     "image_url": {"url": url},
                 })
 
+            self._cached_openai_input = pages_input
             return pages_input
 
         elif mime and mime.startswith("audio/"):
@@ -294,7 +305,6 @@ class FileContent(Content):
         raise ValueError(f"Unsupported file {self.file}.")
 
 
-    # TODO Cache the anthropic-ready content in the File class.
     async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any] | list[dict[str, Any]]:
         """Convert the file content to the input format required by Anthropic."""
         if self._cached_anthropic_input is not None:
@@ -313,17 +323,23 @@ class FileContent(Content):
             (self.file.__source_extension__ in [".json", ".jsonl"])
         ):
             content = self.file.read().decode("utf-8")
-            return {
+            anthropic_input = {
                 "type": "text",
                 "text": content,
             }
+            self._cached_anthropic_input = anthropic_input
+            return anthropic_input
         
         elif self.file.__source_extension__ == ".xlsx":
             df = pd.read_excel(io.BytesIO(self.file.read()))
-            return {
+
+            anthropic_input = {
                 "type": "text",
                 "text": df.to_csv(index=False, header=True, sep=","),
             }
+
+            self._cached_anthropic_input = anthropic_input
+            return anthropic_input
 
         elif self.file.__source_extension__ == ".docx":
             doc = Document(io.BytesIO(self.file.read()))
@@ -347,11 +363,14 @@ class FileContent(Content):
                     text_content.append("\n".join(table_content))
 
             text_content = "\n".join(text_content)
-            
-            return {
+
+            anthropic_input = {
                 "type": "text",
                 "text": text_content,
             }
+
+            self._cached_anthropic_input = anthropic_input
+            return anthropic_input
 
         elif mime and mime.startswith("image/"):
             url = File.serialize(self.file)
@@ -403,10 +422,12 @@ class FileContent(Content):
                 transcription=transcription,
                 description=".to_anthropic_input() implicitly transcribed audio to text..."
             )
+
             anthropic_input = {
                 "type": "text",
                 "text": transcription
             }
+
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
             

@@ -19,7 +19,7 @@ async def test_basic_response():
     model = create_model_from_argspec("TestModel", argspec)
     model_args = {
         "memory": [memory],
-        "model": "meta-llama/Meta-Llama-3-8B-Instruct-Turbo"
+        "model": "deepseek-ai/DeepSeek-V3",
     }
     model_args = model.model_validate(model_args)
         
@@ -46,7 +46,7 @@ async def test_image_upload():
     model = create_model_from_argspec("TestModel", argspec)
     model_args = {
         "memory": [memory],
-        "model": "meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo"
+        "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
     }
     model_args = model.model_validate(model_args)
 
@@ -178,7 +178,7 @@ async def test_multiple_tools():
     model_args = {
         "memory": [memory],
         "system_prompt": "You are a helpful assistant. When a user asks multiple questions that require different tools, make sure to use all necessary tools to provide complete information.",
-        "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+        "model": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
         "tools": tools,
         "tool_choice": {"type":"auto"},
     }
