@@ -55,6 +55,10 @@ steps-gdrive = [
     "google-api-python-client>=2.169.0",
     "google-auth-oauthlib>=1.2.2",
 ]
+steps-gmail = [
+    "google-api-python-client>=2.169.0",
+    "google-auth-oauthlib>=1.2.2",
+]
 
 [dependency-groups]
 dev = [
