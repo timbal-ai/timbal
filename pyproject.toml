@@ -45,17 +45,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-steps-slack = [
+all = [
     "slack-sdk>=3.35.0",
-]
-steps-sharepoint = [
     "o365>=2.1.2",
-]
-steps-gdrive = [
     "google-api-python-client>=2.169.0",
     "google-auth-oauthlib>=1.2.2",
 ]
-steps-gmail = [
+slack = [
+    "slack-sdk>=3.35.0",
+]
+sharepoint = [
+    "o365>=2.1.2",
+]
+gdrive = [
+    "google-api-python-client>=2.169.0",
+    "google-auth-oauthlib>=1.2.2",
+]
+gmail = [
     "google-api-python-client>=2.169.0",
     "google-auth-oauthlib>=1.2.2",
 ]

@@ -190,6 +190,7 @@ function Get-Executable($DestinationPath) {
         Write-ErrorAndExit "ERROR: Timbal installation currently only supports the 'x86_64-pc-windows' (amd64) architecture. Detected: $arch"
     }
 
+    # TODO Make this dynamic. Resolve from https://github.com/timbal-ai/timbal/releases/latest/download/manifest.json 
     $url = "https://github.com/timbal-ai/timbal/releases/latest/download/timbal-Windows-x86_64.exe"
     Write-Information "Downloading $url to $DestinationPath"
 
