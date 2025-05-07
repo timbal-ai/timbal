@@ -37,6 +37,9 @@ param (
 )
 
 
+$InformationPreference = 'Continue'
+
+
 function Initialize-Environment() {
     If (($PSVersionTable.PSVersion.Major) -lt 5) {
         throw @"
@@ -190,8 +193,28 @@ function Get-Executable($DestinationPath) {
         Write-ErrorAndExit "ERROR: Timbal installation currently only supports the 'x86_64-pc-windows' (amd64) architecture. Detected: $arch"
     }
 
-    # TODO Make this dynamic. Resolve from https://github.com/timbal-ai/timbal/releases/latest/download/manifest.json 
-    $url = "https://github.com/timbal-ai/timbal/releases/latest/download/timbal-Windows-x86_64.exe"
+    $manifestUrl = "https://github.com/timbal-ai/timbal/releases/latest/download/manifest.json"
+    $manifestPath = [System.IO.Path]::GetTempFileName()
+    try {
+        Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestPath -UseBasicParsing -ErrorAction Stop
+    } catch {
+        Write-ErrorAndExit "Failed to download manifest.json from $manifestUrl. Error $($_.Exception.Message)"
+    }
+
+    try {
+        $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+        $url = $manifest.binaries.windows.x86_64.url
+        if (-not $url) {
+            Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
+            Write-ErrorAndExit "No download URL found in manifest for windows and x86_64"
+        }
+    } catch {
+        Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
+        Write-ErrorAndExit "Failed to parse manifest.json. Error $($_.Exception.Message)"
+    } finally {
+        Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
+    }
+
     Write-Information "Downloading $url to $DestinationPath"
 
     try {
@@ -214,7 +237,6 @@ function Get-Executable($DestinationPath) {
              Write-ErrorAndExit "Downloaded file is missing or empty. Check if the release asset exists at $url"
         }
 
-        Write-Information "Download and save successful to '$DestinationPath'."
         # No return value needed
     } catch {
         # Attempt cleanup of potentially partial download at the destination
@@ -236,7 +258,6 @@ function Install-Binary($install_args) {
     Initialize-Environment
 
     Test-UvInstallation
-    # TODO Make this step optional. This will only be required if you want to use timbal build or timbal push.
     # TODO Also issue a warning that for authenticating to the registry, one might check the .docker/config.json file and update key "credsStore": "".
     Test-DockerInstallation
 
@@ -258,10 +279,15 @@ function Install-Binary($install_args) {
 
     Get-Executable -DestinationPath $CliExecutablePath
 
-    # TODO Add timbal to the path
-    # To add C:\Users\Casa\.local\bin to your PATH, either restart your shell or run:
-    # set Path=C:\Users\Casa\.local\bin;%Path%   (cmd)
-    # $env:Path = "C:\Users\Casa\.local\bin;$env:Path"   (powershell)
+    # Add installation directory to the user PATH persistently if not already present
+    $CurrentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not ($CurrentUserPath -split ";" | Where-Object { $_ -eq $InstallDir })) {
+        $NewUserPath = "$InstallDir;$CurrentUserPath"
+        [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
+        Write-Information "Added '$InstallDir' to your user PATH. Restart your terminal for changes to take effect."
+    } else {
+        Write-Information "'$InstallDir' is already in your user PATH."
+    }
 }
 
 
