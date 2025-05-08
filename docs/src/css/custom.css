@@ -17,10 +17,12 @@
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
   --ifm-font-size-base: 1.1rem; /* Increase from default (usually 1rem) */
   --ifm-line-height-base: 1.6;
+  --timbal-purple: #5012cb ; /* Light mode */
+  --icon-check-green: #4cd964; /* dark green for light mode */
 }
 
 /* For readability concerns, you should choose a lighter palette in dark mode. */
-[data-theme='dark'] {
+html[data-theme='dark'] {
   --ifm-color-primary: #c6b8ff;
   --ifm-color-primary-dark: #5012cb;
   --ifm-color-primary-darker: #5012cb;
@@ -28,7 +30,12 @@
   --ifm-color-primary-light: #5012cb;
   --ifm-color-primary-lighter: #5012cb;
   --ifm-color-primary-lightest: #5012cb;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+  --docusaurus-highlighted-code-line-bg: rgba(1, 1, 1, 0.3);
+  --ifm-color-emphasis-900: #ffffff;
+  --ifm-font-color-base: #ffffff;
+  --ifm-heading-color: #ffffff;
+  --timbal-purple: #c6b8ff; /* Dark mode */
+  --icon-check-green: #00ff00; /* bright green for dark mode */
 }
 
 .container {
@@ -64,4 +71,380 @@ article h2 {
   font-weight: bold;
 }
 
+article h3 {
+  font-size: 1.3rem; /* Adjust the size as needed */
+  font-weight: bold;
+  color: black;
+}
 
+/* Ensure all text is white in dark mode */
+/* [data-theme='dark'] article p,
+[data-theme='dark'] article li,
+[data-theme='dark'] article strong,
+[data-theme='dark'] article em, */
+/* [data-theme='dark'] article span {
+  color: #ffffff !important;
+} */
+
+/* Change h3 headers color in dark mode */
+[data-theme='dark'] article h3 {
+  color: white;
+}
+
+/* Make the sidebar stay fixed */
+/* Make the sidebar sticky */
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh; /* Make it take the full height of the viewport */
+  overflow-y: auto; /* Allow scrolling if content overflows */
+  z-index: 10; /* Ensure it's on top */
+  background-color: white; /* Make it stand out */
+}
+
+/* Add some space on the right to prevent the sidebar from overlapping with content */
+.docMainContainer {
+  margin-left: 280px; /* Adjust according to the sidebar's width */
+}
+
+.sidebar {
+  width: 280px;
+}
+
+
+
+/* .language-python .token.keyword {
+  color: #a626a4 !important;
+}
+[data-theme='dark']  */
+/* .language-python .token.keyword {
+  color: #ff79c6 !important;
+} */
+
+/* .language-python .token.string {
+  color: #c18401 !important;
+}
+[data-theme='dark']  */
+/* .language-python .token.string {
+  color: #f1fa8c !important;
+} */
+
+/* .language-python .token.function {
+  color: #4078f2 !important;
+}
+[data-theme='dark']  */
+/* .language-python .token.function {
+  color: #8be9fd !important;
+} */
+
+/* .language-python .token.plain:not(.linenumber) {
+  color: rgb(1, 130, 1) !important;
+}
+[data-theme='dark']  */
+/* .language-python .token.plain:not(.linenumber) {
+  color: greenyellow !important;
+} */
+
+/* .language-python .token.property {
+  color: #986801 !important;
+}
+[data-theme='dark']  */
+/* .language-python .token.property {
+  color: #bd93f9 !important;
+} */
+
+/* .language-python .token.number {
+  color: #b76b2c !important;
+} */
+/* [data-theme='dark']  */
+/* .language-python .token.number {
+  color: #ffb86c !important;
+} */
+
+
+.alert [class*="admonitionHeading"] {
+  font-size: 0.8em !important;
+}
+.alert [class*="admonitionContent"] {
+  font-size: 0.8em !important;
+}
+.alert [class*="admonitionIcon"] {
+  font-size: 0.8em !important;
+}
+
+/* Force all code blocks to have a black background */
+.codeBlock_node_modules-\@docusaurus-theme-classic-lib-theme-CodeBlock-Content-styles-module,
+pre code,
+pre {
+  background: #000 !important;
+  color: #fff !important;
+}
+
+/* For both light and dark mode: force black background and white text in block code */
+.theme-code-block,
+.theme-code-block pre,
+.theme-code-block code,
+.codeBlock_node_modules-\@docusaurus-theme-classic-lib-theme-CodeBlock-Content-styles-module,
+pre,
+pre code {
+  background: #1a1a1a !important;
+  color: #fff !important;
+  border: 1px solid #333 !important;      /* Subtle border */
+  border-radius: 12px !important;           /* Rounded corners */
+  box-shadow: 0 2px 12px 0 #0003 !important; /* Soft shadow */
+}
+
+/* Optional: In light mode, you can use a lighter border */
+html[data-theme='light'] .theme-code-block,
+html[data-theme='light'] .theme-code-block pre,
+html[data-theme='light'] .theme-code-block code,
+html[data-theme='light'] .codeBlock_node_modules-\@docusaurus-theme-classic-lib-theme-CodeBlock-Content-styles-module,
+html[data-theme='light'] pre,
+html[data-theme='light'] pre code {
+  border: 1px solid #e0e0e0 !important;
+  box-shadow: 0 2px 12px 0 #0001 !important;
+}
+
+/* Inline code: keep default theme */
+:not(pre) > code {
+  background: var(--ifm-code-background) !important;
+  color: var(--ifm-code-color) !important;
+}
+
+/* Extra: In light mode, some themes set color via span inside code blocks. Force those to white unless overridden by syntax highlighting */
+html[data-theme='light'] .theme-code-block code span {
+  color: #fff !important;
+}
+
+
+.vertical-stepper {
+  display: flex;
+  flex-direction: column;
+  margin: 2rem 0;
+  position: relative;
+}
+.step {
+  display: flex;
+  align-items: flex-start;
+  position: relative;
+  margin-bottom: 2.5rem;
+}
+.circle {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #222;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 1.3em;
+  z-index: 1;
+  margin-right: 16px;
+  position: relative;
+  border: 3px solid #333;
+  box-shadow: 0 2px 8px 0 #0002;
+}
+.step:not(:last-child) .circle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  transform: translateX(-50%);
+  width: 2px;
+  height: 670px;
+  background: #333;
+  z-index: 0;
+  border-radius: 2px;
+}
+.step-content {
+  flex: 1;
+}
+.step-title {
+  font-weight: bold;
+  font-size: 1.25em;
+  margin-bottom: 0.2em;
+}
+.step-desc {
+  color: #bbb;
+  font-size: 1em;
+}
+[data-theme='dark'] .step-title {
+  color: #fff;
+}
+[data-theme='dark'] .step-desc {
+  color: #bbb;
+}
+[data-theme='light'] .step-title {
+  color: #222;
+}
+[data-theme='light'] .step-desc {
+  color: #444;
+}
+
+
+/* Provider column styling */
+.provider {
+  color: var(--timbal-purple);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.model-badge {
+  background-color: #f4f4f4;
+  display: inline-block;
+  border-radius: 12px;
+  padding: 0.15em 0.7em;
+  font-size: 1em;
+  font-family: inherit;
+  font-weight: 500;
+  margin: 0 0.1em;
+  letter-spacing: 0.01em;
+  color: #222; /* Default for light mode */
+}
+
+[data-theme='dark'] .model-badge {
+  color: #fff;
+  background-color: #171717;
+}
+
+/* Center table icons */
+td, th {
+  text-align: left;
+  vertical-align: middle;
+}
+
+/* Remove zebra striping and set a uniform background for all table rows and headers */
+table,
+thead,
+tbody,
+tr,
+th,
+td {
+  background: transparent !important;
+}
+
+/* Optional: Remove table borders if you want a cleaner look */
+table,
+th,
+td {
+  border: none !important;
+}
+
+/* If you want to keep borders, but just want a single color: */
+/*
+table,
+th,
+td {
+  border: 1px solid #333 !important; // or your preferred color
+}
+*/
+
+table,
+th,
+td {
+  font-size: 0.9em !important;
+}
+
+.centered-cell {
+  display: inline-block;
+  text-align: center;
+  width: 100%;
+}
+
+/* Increase horizontal padding for all table cells */
+table th,
+table td {
+  padding-left: 1.2em !important;
+  padding-right: 1.2em !important;
+}
+
+/* OR: Only increase padding for the first two columns */
+table td:first-child,
+table th:first-child {
+  padding-left: 1.5em !important;
+  padding-right: 1em !important;
+}
+table td:nth-child(2),
+table th:nth-child(2) {
+  padding-left: 1em !important;
+  padding-right: 1.5em !important;
+}
+
+table td:first-child,
+table th:first-child {
+  min-width: 120px;
+}
+
+.icon-x svg,
+.icon-check svg {
+  vertical-align: middle;
+  display: inline-block;
+}
+
+/* Reduce vertical (top/bottom) padding for all table cells */
+table th,
+table td {
+  padding-top: 0.5em !important;
+  padding-bottom: 0.5em !important;
+  /* You can keep your horizontal padding rules here if you want */
+}
+
+/* Reduce space below admonitions (info/note/success boxes) */
+.tight-admonition,
+div[class^="admonition"] {
+  margin-bottom: 0em !important; /* or even 0.2em for less space */
+}
+
+/* Reduce vertical space between paragraphs */
+article p {
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
+}
+
+/* Optionally, reduce space after headings too */
+article h1,
+article h2,
+article h3,
+article h4,
+article h5,
+article h6 {
+  margin-bottom: 0.4em;
+  margin-top: 0.7em;
+}
+
+.theme-code-block-title,
+div[class*="codeBlock"] .theme-code-block-title,
+div[class*="codeBlock"] [class*="codeBlockTitle"] {
+  font-size: 0.8em !important;
+  padding-top: 0.5em !important;
+  padding-bottom: 0.5em !important;
+}
+
+/* Make the sidebar narrower */
+.theme-doc-sidebar-container,
+.theme-doc-sidebar-menu,
+.theme-doc-sidebar {
+  width: 290px !important;
+  font-size: 0.92em !important;
+}
+
+.theme-doc-sidebar-container {
+  margin-left: 4em !important;  /* or your preferred value */
+  padding-top: 0.5em !important;
+}
+
+.menu__link--sublist-caret::after {
+  font-size: 1.2em !important;
+  width: 1.2em !important;
+  height: 1.2em !important;
+  min-width: 1.2em !important;
+  min-height: 1.2em !important;
+  background-size: 1.2em 1.2em !important;
+}
+
+/* Make sidebar category titles bold */
+.theme-doc-sidebar-container .menu__list-item-collapsible > .menu__link {
+  font-weight: bold !important;
+}

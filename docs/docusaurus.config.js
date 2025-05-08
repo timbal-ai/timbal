@@ -79,7 +79,9 @@ const config = {
         },
         items: [
           { to: '/docs/get-started', label: 'Docs', position: 'left' },
-          //{ to: '/docs/examples', label: 'Examples', position: 'left' },
+          { to: '/docs/platform', label: 'Platform', position: 'left' },
+          { to: '/docs/examples', label: 'Examples', position: 'left' },
+          { to: '/docs/releases', label: 'Releases', position: 'left' },
           {
             href: 'https://github.com/timbal-ai/timbal',
             label: 'GitHub',
@@ -103,7 +105,7 @@ const config = {
               },
               {
                 label: 'LinkedIn',
-                href: 'https://www.linkedin.com/company/timbal-ai/',
+                href: 'https://www.linkedin.com/company/timbal-ai',
               },
             ],
           },

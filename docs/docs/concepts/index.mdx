@@ -1,0 +1,397 @@
+---
+title: Overview
+sidebar: 'docsSidebar'
+---
+import DocCardList from '@theme/DocCardList';
+import { useCurrentSidebarCategory } from '@docusaurus/theme-common';
+
+
+Welcome to Timbal! This guide will help you understand the core concepts and start building amazing AI applications!
+
+## Core Concept: Flows and Agents as DAGs
+
+In Timbal, everything is built around <span style={{color: 'var(--timbal-purple)'}}><strong>flows</strong></span> and <span style={{color: 'var(--timbal-purple)'}}><strong>agents</strong></span> represented as **directed acyclic graphs (DAGs)**. Think of them as flowcharts for your AI applications!
+
+## What is a DAG?
+
+A DAG is a special type of graph that:
+- Has directed connections (arrows) between nodes
+- Never loops back on itself (no cycles)
+- Has a clear start and end
+
+In Timbal:
+- Each **node** is a `step` in your flow
+- Each **edge** is a `link` between steps
+- The **direction** shows the execution order
+
+<div align="center">
+<img src="/timbal/img/dag_example.png" alt="DAG Example" style={{ width: '70%'}}/>
+</div>
+
+## Creating a Flow
+
+Let's start by importing the `Flow` class:
+
+```python
+from timbal import Flow
+```
+
+Create a new flow with an optional identifier:
+
+```python
+flow_1 = Flow(id="my-flow")  # Custom ID
+flow_2 = Flow()              # Default ID: "flow"
+```
+
+:::tip[Why Use IDs?]
+IDs are super useful when:
+- Creating multiple flows
+- Composing flows together
+- Debugging complex applications
+:::
+
+### Builder Pattern
+
+Timbal uses the builder pattern for clean, readable flows. Here are three ways to build:
+
+```python
+# Method 1: Traditional
+flow = Flow()
+flow.add_step()
+flow.add_step()
+
+# Method 2: Reassignment
+flow = Flow()
+flow = flow.add_step()
+flow = flow.add_step()
+
+# Method 3: Method Chaining (Recommended) ⭐
+flow = (
+    Flow()
+    .add_step()
+    .add_step()
+)
+```
+
+:::tip[Why Method Chaining?]
+The method chaining approach:
+- Makes flow structure more visible
+- Reduces repetition
+- Keeps configuration in one block
+:::
+
+Choose whichever style matches your preferences and coding standards!
+
+Now that we have initialized our flow, we can start by adding methods.
+
+## Adding Steps to Flow
+
+Let's explore how to add steps to your flow!
+
+```python
+flow.add_step(handler)
+```
+
+:::success[Simple, right?]
+You've just added your first step!
+:::
+
+### Multiple Steps
+
+But what about adding more steps?
+
+If you try this:
+
+```python
+flow.add_step(handler)
+flow.add_step(handler) # ⚠️ This will raise an error!
+```
+
+:::warning[Why Did This Fail? ]
+This will raise an error because the step `handler` already exists.
+:::
+
+But if we want two nodes to have the same function? 
+
+:::tip[Solution: Named Steps]
+
+Want to add the same function multiple times? Use named steps:
+
+
+```python
+flow.add_step("step_1", handler) # ✅ Works!
+flow.add_step("step_2", handler) # ✅ Works too!
+```
+:::
+
+Now we have two steps with the same function.
+### Step Functions
+
+Fantastic! You know how to put a handler in the step. Let's go a little deeper.
+
+**What can be in a step?**
+Any Python function can be a step! Here's how to set it up:
+
+
+```python
+def handler(x: int = Field(description="The input to the handler")):
+    print(x)
+```
+
+:::tip[Pro Tip]
+Use `Field` for:
+- Automatic validation
+- Clear documentation
+- Better tool integration
+:::
+
+Now that you have seen how to set up the function. Imagine if you have 10 inputs and you want to pass them to the step.
+Tired of setting data maps for multiple inputs? We've got you covered! 
+
+:::tip[Easy Input Setting]
+Pass multiple inputs easily:
+
+```python
+flow.add_step("step_1", handler, x=1, y=2)  # 🎯 All inputs in one line!
+```
+:::
+
+Now that you can add as many steps as you want, let's try to connect them.
+
+## Connecting  Steps
+
+### Basic Linking
+
+Connect steps like this:
+
+```python
+flow = (
+    Flow()
+    .add_step("step_1", handler)
+    .add_step("step_2", handler)
+    .add_link("step_1", "step_2") # Creates connection
+)
+```
+
+You did it! Now we have a flow with two steps and a link between them.
+
+<div align="center">
+<img src="/timbal/img/dag_link.png" alt="Linked Steps" style={{ width: '50%'}}/>
+</div>
+
+*See more properties in the [advanced](docs/concepts/advanced.md) section.*
+
+But what about the data?... How we can set the input for each step? 
+## Data Management
+
+That's easy! Let's take a look at it:
+
+## Setting Data
+
+Our function *handler* has an input *x* that is an integer. We can set the input of the step like this:
+
+### Setting Input Data
+
+```python
+flow = (
+    Flow()
+    .add_step("step_1", handler)
+    .set_input("step_1.x", "1")
+)
+```
+
+But when this is not the input you can set the data like this:
+
+```python {4}
+flow = (
+    Flow()
+    .add_step("step_1", handler)
+    .set_data_value("step_1.x", 1) # Sets input x=1
+)
+```
+
+And the outputs?
+
+Each output will be the `return` of the step. But we can map the output to the specific name we want to use.
+
+### Handling Outputs
+
+```python
+flow.set_output("result", "step_1.return")
+```
+
+And if we have two steps, how can we set the input of the second step as the output of the first step?
+
+We only have to apply the 2 things explained before:
+
+```python {6}
+flow = (
+    Flow()
+    .add_step("step_1", handler, x=1)
+    .add_step("step_2", handler)
+    .add_link("step_1", "step_2") # Link the steps
+    .set_data_map("step_2.x", "step_1.return") # Set input of step 2 as the output of step 1
+)
+```
+
+And if we want each step return to be the input of the next step? We have to link all the steps...
+It is redudant!
+
+:::tip[Smart Linking!]
+`set_data_map` and `set_data_value` are smart! They automatically create links between steps when needed. This means you can write:
+:::
+
+### Smart Data Flow
+
+```python
+flow = (
+    Flow()
+    .add_step("step_1", handler, x=1)
+    .add_step("step_2", handler)
+    .set_data_map("step_2.x", "step_1.return")  # Link created automatically!
+)
+```
+
+## State Management
+
+Save your flow's state with `InMemorySaver`:
+
+```python
+from timbal.state.savers import InMemorySaver
+
+flow.compile(state_saver=InMemorySaver())
+```
+
+## Key Features
+
+<div className="timeline">
+<div className="timeline-item">
+<div className="timeline-content">
+
+### 1. Flexible Steps
+- Any Python function can be a step
+- Custom step classes supported
+- Built-in specialized steps
+
+</div>
+</div>
+
+<div className="timeline-connector">→</div>
+
+<div className="timeline-item">
+<div className="timeline-content">
+
+### 2. Smart Data Flow
+- Automatic validation
+- Type checking
+- Flexible data mapping
+
+</div>
+</div>
+
+<div className="timeline-connector">→</div>
+
+<div className="timeline-item">
+<div className="timeline-content">
+
+### 3. State Management
+- Memory persistence
+- State saving
+- Flow history
+
+</div>
+</div>
+
+<div className="timeline-connector">→</div>
+
+<div className="timeline-item">
+<div className="timeline-content">
+
+### 4. Error Handling
+* Built-in validation
+- Clear error messages
+- Debugging support
+
+</div>
+</div>
+</div>
+
+<style>{`
+.timeline {
+  display: flex;
+  align-items: left;
+  justify-content: space-between;
+  margin: 0rem 0;
+  overflow-x: auto;
+  padding: 1rem;
+  margin-left: -1.5rem;
+  margin-right: -1.5rem;
+}
+
+.timeline-item {
+  flex: 1;
+  min-width: 217px;
+  text-align: left;
+  padding: 1rem;
+  background: var(--ifm-background-color);
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.timeline-connector {
+  display: none;
+}
+
+.timeline-content {
+  padding: 0.5rem;
+}
+
+.timeline-content h3 {
+  margin-bottom: 0.5rem;
+  font-size: 1rem;
+  color: var(--timbal-purple);
+}
+
+.timeline-content ul {
+  list-style: disc;
+  padding-left: 1.2em;
+  margin: 0;
+}
+
+.timeline-content li {
+  margin: 0.15rem 0;
+  font-size: 0.9rem;
+}
+
+html[data-theme='dark'] .timeline-content h3 {
+  color: var(--timbal-purple) !important;
+}
+
+html[data-theme='dark'] .timeline-item {
+  box-shadow: 0 2px 8px 0 #000a; 
+}
+`}</style>
+
+## Running
+
+To run the flow, we can use the `run()` method.
+
+Get detailed execution events:
+
+```python
+async for event in flow.run():
+    print(event) 
+```
+
+:::note[Running the Flow]
+The `run()` method returns an async iterator that yields events as the flow executes.
+
+:::
+
+Or if it does not matter the specific event. Get the final result directly:
+
+```python
+result = await flow.complete()
+```
+
+Now you now the basics of Timbal :)

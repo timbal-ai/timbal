@@ -3,36 +3,35 @@ title: 'CLI'
 sidebar: 'docsSidebar'
 ---
 
-# Timbal CLI Documentation
+# Timbal CLI Guide
 
-The Timbal CLI provides a set of commands to interact with Timbal, allowing you to create, run and build flows.
+Welcome to the Timbal Command Line Interface! This is your gateway to building, running, and deploying AI applications with ease!
 
 ## Installation
 
-To use the Timbal CLI, make sure you have Timbal installed:
+Getting started is super simple! Just install Timbal using pip:
 
 ```shell
 pip install timbal
 ```
 
-## Usage
+## Basic Usage
 
-The basic structure of a Timbal CLI command is:
+The Timbal CLI follows this simple pattern:
 
 ```shell
 timbal [COMMAND] [OPTIONS] [ARGUMENTS]
 ```
 
-# Available Commands
+## Available Commands
 
-### `init`
+### `init` - Start a New Project
 
-Initialize a new Timbal project in the specified directory.
+Create a fresh Timbal project in your chosen directory:
 
 ```shell
 timbal init [PATH]
 ```
-
 
 **Options:**
 - `-q, --quiet` - Do not print any output
@@ -40,25 +39,23 @@ timbal init [PATH]
 - `-h, --help` - Display help information
 - `-V, --version` - Display version information
 
-Creates a new project with the following structure:
+This creates a new project with this structure:
 
 ```
 my-project/
-├── flow.py
-├── .dockerignore
-├── pyproject.toml
-└── timbal.yaml
+├── flow.py        # Your AI flow code
+├── .dockerignore  # Docker ignore rules
+├── pyproject.toml # Python project config
+└── timbal.yaml    # Timbal configuration
 ```
 
+### `build` - Package Your App
 
-### `build`
-
-Build a container for the application ready for deployment.
+Build a container for deployment:
 
 ```shell
 timbal build [OPTIONS] [PATH]
 ```
-
 
 **Options:**
 - `-t, --tag` - The tag to use for the container
@@ -68,14 +65,13 @@ timbal build [OPTIONS] [PATH]
 - `-v, --verbose` - Use verbose output
 - `-h, --help` - Display help information
 
-## `run`
+### `run` - Execute Your App
 
-Run a command inside the built container.
+Run your application in a container:
 
 ```shell
 timbal run [OPTIONS] IMAGE [COMMAND]
 ```
-
 
 **Options:**
 - `-d, --detach` - Run container in the background and print container ID
@@ -84,26 +80,25 @@ timbal run [OPTIONS] IMAGE [COMMAND]
 - `-v, --verbose` - Use verbose output
 - `-h, --help` - Display help information
 
-### `push`
+### `push` - Deploy to Platform
 
-Push an application to the Timbal Platform.
+Push your app to the Timbal Platform:
 
 ```shell
 timbal push [OPTIONS] IMAGE
 ```
-
 
 **Options:**
 - `-q, --quiet` - Do not print any output
 - `-v, --verbose` - Use verbose output
 - `-h, --help` - Display help information
 
-**Environment Variables:**
-- `TIMBAL_API_TOKEN` - Required for authentication with the Timbal Platform
+**Required Environment:**
+- `TIMBAL_API_TOKEN` - Your platform authentication token
 
-### Global Options
+## Global Options
 
-These options are available for all commands:
+These options work with all commands:
 
 - `-q, --quiet` - Do not print any output
 - `-v, --verbose` - Use verbose output
@@ -112,35 +107,61 @@ These options are available for all commands:
 
 ## Configuration
 
-Timbal uses a `timbal.yaml` file for project configuration. Here's an example:
+Customize your project using `timbal.yaml`:
 
 ```yaml
 build:
-
-  # A list of ubuntu apt packages to install.
+  # Install system packages
   # system_packages:
   #   - "libgl1-mesa-glx"
   #   - "libglib2.0-0"
 
-  # Commands run after the environment is setup.
+  # Run setup commands
   # run:
   #   - "echo env is ready!"
   #   - "echo another command if needed"
 
-
-# Path to the flow to be run in the application.
+# Your flow entry point
 flow: "flow.py:flow"
-
 ```
 
+### Configuration Features:
 
-The configuration file allows you to:
-- Specify system packages to be installed in the container
-- Define the flow file and entry point
-- Configure build-time settings
+1. **System Setup**
+   - Install required packages
+   - Run setup commands
+   - Configure environment
 
-For more detailed information about each command, use the `--help` flag:
+2. **Flow Configuration**
+   - Specify flow file
+   - Set entry point
+   - Configure runtime
 
-```shell
-timbal [COMMAND] --help
-```
+3. **Build Settings**
+   - Customize container
+   - Set build options
+   - Configure deployment
+
+## Pro Tips
+
+1. **Get Help Anywhere**
+   ```shell
+   timbal [COMMAND] --help
+   ```
+
+2. **Debug Like a Pro**
+   ```shell
+   timbal -v [COMMAND]  # Verbose mode
+   ```
+
+3. **Silent Mode**
+   ```shell
+   timbal -q [COMMAND]  # Quiet mode
+   ```
+
+## Want to Learn More?
+
+Check out these related concepts:
+- Flows: Learn how to create AI workflows
+- Servers: Deploy your applications
+- Enterprise: Advanced deployment features
