@@ -42,12 +42,19 @@ from openai.types.chat import (
 )
 from pydantic import BaseModel
 
-# from uuid_extensions import uuid7
 from ...steps.elevenlabs import stt
 from ...steps.pdfs import convert_pdf_to_images
 from ..file import File
 
 logger = structlog.get_logger("timbal.types.chat.content")
+
+
+AVAILABLE_ENCODINGS = [
+    "utf-8",
+    "cp1252",
+    "iso-8859-1",
+    "utf-16",
+]
 
 
 class Content(BaseModel):
@@ -174,7 +181,19 @@ class FileContent(Content):
             # Files like .jsonl don't have a mime type.
             (self.file.__source_extension__ in [".json", ".jsonl"])
         ):
-            content = self.file.read().decode("utf-8")
+            # Attempt to decode the binary content into a string guessing the encoding.
+            raw_bytes = self.file.read()
+
+            content = None
+            for encoding in AVAILABLE_ENCODINGS:
+                try:
+                    content = raw_bytes.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if content is None:
+                raise ValueError(f"Could not decode file {self.file} with any of: {AVAILABLE_ENCODINGS}")
 
             openai_input = {
                 "type": "text",
@@ -322,11 +341,25 @@ class FileContent(Content):
             # Files like .jsonl don't have a mime type.
             (self.file.__source_extension__ in [".json", ".jsonl"])
         ):
-            content = self.file.read().decode("utf-8")
+            # Attempt to decode the binary content into a string guessing the encoding.
+            raw_bytes = self.file.read()
+
+            content = None
+            for encoding in AVAILABLE_ENCODINGS:
+                try:
+                    content = raw_bytes.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if content is None:
+                raise ValueError(f"Could not decode file {self.file} with any of: {AVAILABLE_ENCODINGS}")
+
             anthropic_input = {
                 "type": "text",
                 "text": content,
             }
+
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
         
