@@ -42,7 +42,9 @@ from openai.types.chat import (
 )
 from pydantic import BaseModel
 
-from ...steps.elevenlabs import stt
+# TODO Add a param in the Agent.__init__() where we can customize this.
+from ...steps.openai import stt
+# from ...steps.elevenlabs import stt
 from ...steps.pdfs import convert_pdf_to_images
 from ..file import File
 
