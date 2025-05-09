@@ -1,5 +1,6 @@
 import pytest
 import os
+from pathlib import Path
 
 from timbal import Agent
 from timbal.state.savers.jsonl import JSONLSaver
@@ -43,17 +44,26 @@ from timbal.state.context import RunContext
 #     print(res_ser)
 
 
-# TODO Test this with multiple models.
-@pytest.mark.asyncio
-async def test_agent_stt():
-    audio_file = File.validate("https://cdn.openai.com/API/docs/audio/alloy.wav")
-    # audio_file = File.validate("~/Downloads/Nova-gravació-46.wav")
+@pytest.fixture(params=[
+    Path(__file__).parent / "fixtures" / "alloy.wav",
+    "https://cdn.openai.com/API/docs/audio/alloy.wav",
+])
+def audio(request):
+    return request.param
 
-    agent = Agent(model="gpt-4o-mini")
+
+# TODO Test all of this with multiple models.
+@pytest.mark.asyncio
+async def test_agent_stt(audio):
+    audio_file = File.validate(audio)
+
+    agent = Agent(model="gpt-4.1-nano")
 
     res = await agent.complete(prompt=audio_file)
+    print(res)
 
 
+# TODO Change this.
 @pytest.mark.asyncio
 async def test_agent_stt_tts():
     # audio_file = File.validate("https://cdn.openai.com/API/docs/audio/alloy.wav")

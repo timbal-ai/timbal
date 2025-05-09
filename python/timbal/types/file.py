@@ -169,6 +169,11 @@ class File(io.IOBase):
             if fetcher is None:
                 raise ValueError("File object is not properly initialized.")
             fileobj = fetcher()
+            # Some libraries (e.g. openai) require file-like objects to have the name property defined.
+            if not hasattr(fileobj, "name"):
+                fileext = object.__getattribute__(self, "__source_extension__")
+                if fileext:
+                    fileobj.name = f"{uuid7()}{fileext}"
             object.__setattr__(self, "__fileobj__", fileobj)
         return fileobj
 
@@ -208,15 +213,33 @@ class File(io.IOBase):
 
         if isinstance(value, bytes | bytearray):
             source_extension = None
+            source_name = None
             if isinstance(info, dict):
                 source_extension = info.get("extension")
-            return File(io.BytesIO(value), source_scheme="bytes", source_extension=source_extension)
+                source_name = info.get("name")
+            source = io.BytesIO(value)
+            if source_name is not None:
+                source.name = source_name
+            return File(
+                source, 
+                source_scheme="bytes", 
+                source_extension=source_extension,
+            )
 
         if isinstance(value, io.IOBase):
             source_extension = None
+            source_name = None
             if isinstance(info, dict):
                 source_extension = info.get("extension")
-            return File(value, source_scheme="bytes", source_extension=source_extension)
+                source_name = info.get("name")
+            source = value
+            if source_name is not None:
+                source.name = source_name
+            return File(
+                source, 
+                source_scheme="bytes", 
+                source_extension=source_extension,
+            )
 
         if isinstance(value, Path):
             value = value.expanduser().resolve().as_posix()
