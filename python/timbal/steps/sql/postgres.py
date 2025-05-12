@@ -72,7 +72,7 @@ def postgres_connection(db_config: PGConfig, ssh_config: SSHConfig | None = None
             tunnel.stop()
 
 
-def query(
+def postgres_query(
     query: str,
     params: tuple | None = None,
     db_config: PGConfig | None = None,
