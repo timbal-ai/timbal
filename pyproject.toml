@@ -50,6 +50,9 @@ all = [
     "o365>=2.1.2",
     "google-api-python-client>=2.169.0",
     "google-auth-oauthlib>=1.2.2",
+    "psycopg2>=2.9.10",
+    "mysql-connector-python>=9.3.0",
+    "sshtunnel>=0.4.0",
 ]
 slack = [
     "slack-sdk>=3.35.0",
@@ -64,6 +67,14 @@ gdrive = [
 gmail = [
     "google-api-python-client>=2.169.0",
     "google-auth-oauthlib>=1.2.2",
+]
+pg = [
+    "psycopg2>=2.9.10",
+    "sshtunnel>=0.4.0",
+]
+mysql = [
+    "mysql-connector-python>=9.3.0",
+    "sshtunnel>=0.4.0",
 ]
 
 [dependency-groups]

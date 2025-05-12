@@ -1,5 +1,5 @@
 import pytest
-from timbal import Flow
+from timbal import Agent, Flow
 from timbal.state.context import RunContext
 from timbal.state.savers import InMemorySaver
 
@@ -19,7 +19,8 @@ async def test_invalid_run_id():
     prompt = "Hello my name is David"
     await flow.complete(context=context, prompt=prompt)
 
-    # This doesn't raise an error, but the final length of the snapshots will be 1.
+    # This doesn't raise an error. 
+    # It'll print an error and the final length of the snapshots will be 1.
     prompt = "What is my name?"
     await flow.complete(context=context, prompt=prompt)
     assert len(flow.state_saver.snapshots) == 1
@@ -40,7 +41,7 @@ async def test_no_parent_id():
 
     prompt = "What is my name?"
     async for event in flow.run(prompt=prompt):
-        if event.type == "FLOW_OUTPUT":
+        if event.type == "OUTPUT" and event.path == "flow":
             assert "david" not in event.output["message"].content[0].text.lower()
 
 
@@ -62,7 +63,7 @@ async def test_parent_id():
         context=RunContext(parent_id=flow_output_event.run_id),
         prompt=prompt,
     ):
-        if event.type == "FLOW_OUTPUT":
+        if event.type == "OUTPUT" and event.path == "flow":
             assert "david" in event.output["message"].content[0].text.lower()
 
 
@@ -85,7 +86,7 @@ async def test_different_parent_id():
         context=RunContext(parent_id="wrong_parent_id"),
         prompt=prompt,
     ):
-        if event.type == "FLOW_OUTPUT":
+        if event.type == "OUTPUT" and event.path == "flow":
             assert "david" not in event.output["message"].content[0].text.lower()
 
 
@@ -114,8 +115,31 @@ async def test_rewind():
         context=RunContext(parent_id=flow_output_event_1.run_id),
         prompt=prompt,
     ):
-        if event.type == "FLOW_OUTPUT":
+        if event.type == "OUTPUT" and event.path == "flow":
             assert "david" not in event.output["message"].content[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_rewind_agent():
+
+    flow = Agent(state_saver=InMemorySaver())
+
+    prompt = "Hello"
+    flow_output_event_1 = await flow.complete(prompt=prompt)
+
+    prompt = "My name is David"
+    await flow.complete(
+        context=RunContext(parent_id=flow_output_event_1.run_id),
+        prompt=prompt,
+    )
+
+    prompt = "What is my name?"
+    async for event in flow.run(
+        context=RunContext(parent_id=flow_output_event_1.run_id),
+        prompt=prompt,
+    ):
+        if event.type == "OUTPUT" and event.path == "agent":
+            assert "david" not in event.output.content[0].text.lower()
 
 
 @pytest.mark.asyncio
