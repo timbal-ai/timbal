@@ -1,31 +1,31 @@
 import asyncio
-from datetime import datetime
 
-from timbal import Agent
-from timbal.state import RunContext
+from timbal import Flow
 from timbal.state.savers import TimbalPlatformSaver
 
 
-def get_datetime() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def get_email() -> str:
+    return """Subject: Meeting Reminder
+
+Hi,
+
+I just wanted to remind you about the meeting tomorrow at 10am.
+
+Best,
+John Doe"""
 
 
-flow = Agent(
-    model="gpt-4o-mini",
-    tools=[get_datetime],
-    state_saver=TimbalPlatformSaver(),
-)
+flow = (Flow()
+    .add_step(get_email)
+    .add_llm(model="gpt-4.1-nano")
+    .set_data_value("llm.prompt", "Please summarize this email: {{get_email.return}}")
+    .set_output("llm.return", "email_summary")
+).compile(state_saver=TimbalPlatformSaver())
 
 
 async def main():
-    run_context = RunContext()
-    while True:
-        prompt = input("User: ")
-        if prompt == "q":
-            break
-        flow_output_event = await flow.complete(context=run_context, prompt=prompt)
-        print(f"Agent: {flow_output_event.output}")
-        run_context = RunContext(parent_id=flow_output_event.run_id)
+    flow_output_event = await flow.complete()
+    print("Email summary: ", flow_output_event.output["email_summary"].content[0].text)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,8 @@
 const std = @import("std");
 const fs = std.fs;
 
-
 // Embedded version.
 const timbal_version = @import("../version.zig").timbal_version;
-
 
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
@@ -12,11 +10,9 @@ fn printUsageWithError(err: []const u8) !void {
     try printUsage();
 }
 
-
 fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
-    try stderr.writeAll(
-        "Build a container for the application ready for deployment.\n" ++
+    try stderr.writeAll("Build a container for the application ready for deployment.\n" ++
         "\n" ++
         "\x1b[1;32mUsage: \x1b[1;36mtimbal build \x1b[0;36m[OPTIONS] [PATH]\n" ++
         "\n" ++
@@ -34,10 +30,8 @@ fn printUsage() !void {
         "    \x1b[1;36m-v\x1b[0m, \x1b[1;36m--verbose\x1b[0;36m... \x1b[0mUse verbose output\n" ++
         "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help       \x1b[0mDisplay the concise help for this command\n" ++
         "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version    \x1b[0mDisplay the timbal version\n" ++
-        "\n"
-    );
+        "\n");
 }
-
 
 const TimbalBuildArgs = struct {
     quiet: bool,
@@ -47,7 +41,6 @@ const TimbalBuildArgs = struct {
     progress: ?[]const u8,
     path: ?[]const u8,
 };
-
 
 fn parseArgs(args: []const []const u8) !TimbalBuildArgs {
     var path: ?[]const u8 = null;
@@ -116,20 +109,18 @@ fn parseArgs(args: []const []const u8) !TimbalBuildArgs {
     };
 }
 
-
 const TimbalYaml = struct {
     system_packages: []const []const u8,
-    flow: []const u8,
+    fqn: []const u8,
 
     pub fn deinit(self: *TimbalYaml, allocator: std.mem.Allocator) void {
         for (self.system_packages) |pkg| {
             allocator.free(pkg);
         }
         allocator.free(self.system_packages);
-        allocator.free(self.flow);
+        allocator.free(self.fqn);
     }
 };
-
 
 // Note on custom YAML parser:
 // We're using a simple custom YAML parser here because:
@@ -145,7 +136,7 @@ fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !Tim
     var buf: [4096]u8 = undefined;
 
     var timbal_yaml_system_packages: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(allocator);
-    var timbal_yaml_flow: ?[]const u8 = null;
+    var timbal_yaml_fqn: ?[]const u8 = null;
 
     // Track the current section of the file we're parsing.
     var current_section: enum {
@@ -170,18 +161,21 @@ fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !Tim
 
         if (std.mem.startsWith(u8, trimmed, "system_packages:")) {
             current_section = .SystemPackages;
-        } else if (std.mem.startsWith(u8, trimmed, "flow:")) {
+        } else if (std.mem.startsWith(u8, trimmed, "fqn:") or
+            std.mem.startsWith(u8, trimmed, "agent: ") or
+            std.mem.startsWith(u8, trimmed, "flow: "))
+        {
             current_section = .None;
-            var flow = std.mem.trim(u8, trimmed[5..], &std.ascii.whitespace);
-            flow = std.mem.trim(u8, flow, "\"");
-            timbal_yaml_flow = flow;
+            var fqn = std.mem.trim(u8, trimmed[5..], &std.ascii.whitespace);
+            fqn = std.mem.trim(u8, fqn, "\"");
+            timbal_yaml_fqn = fqn;
         } else {
             current_section = .None;
         }
     }
 
-    if (timbal_yaml_flow == null) {
-        try printUsageWithError("Error: flow spec not found in timbal.yaml");
+    if (timbal_yaml_fqn == null) {
+        try printUsageWithError("Error: Fully Qualified Name (FQN) not found in timbal.yaml");
         std.process.exit(1);
     }
 
@@ -190,13 +184,12 @@ fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !Tim
 
     return TimbalYaml{
         .system_packages = try timbal_yaml_system_packages.toOwnedSlice(),
-        .flow = try allocator.dupe(u8, timbal_yaml_flow.?),
+        .fqn = try allocator.dupe(u8, timbal_yaml_fqn.?),
     };
 }
 
-
 fn writeDockerfile(
-    allocator: std.mem.Allocator, 
+    allocator: std.mem.Allocator,
     timbal_yaml: TimbalYaml,
     app_dir: fs.Dir,
 ) !void {
@@ -246,15 +239,11 @@ fn writeDockerfile(
         try system_packages_buffer.appendSlice(pkg);
     }
 
-    try dockerfile.writer().print(dockerfile_template, .{
-        system_packages_buffer.items, 
-        timbal_yaml.flow
-    });
+    try dockerfile.writer().print(dockerfile_template, .{ system_packages_buffer.items, timbal_yaml.fqn });
 }
 
-
 fn buildContainer(
-    allocator: std.mem.Allocator, 
+    allocator: std.mem.Allocator,
     tag: ?[]const u8,
     progress: ?[]const u8,
     quiet: bool,
@@ -275,8 +264,8 @@ fn buildContainer(
     defer docker_build_args.deinit();
 
     try docker_build_args.appendSlice(&[_][]const u8{
-        "docker", "build",
-        "-t", docker_tag,
+        "docker",     "build",
+        "-t",         docker_tag,
         "--progress", docker_progress,
     });
 
@@ -301,7 +290,6 @@ fn buildContainer(
     _ = try child.wait();
 }
 
-
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const parsed_args = try parseArgs(args);
 
@@ -321,7 +309,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 return err;
             }
         };
-        
+
         // Ensure it is a directory
         if (target_stat.kind != .directory) {
             try printUsageWithError("Error: target path is not a directory");
@@ -360,10 +348,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     try writeDockerfile(allocator, timbal_yaml, app_dir);
 
     try buildContainer(
-        allocator, 
-        parsed_args.tag, 
-        parsed_args.progress, 
-        parsed_args.quiet, 
+        allocator,
+        parsed_args.tag,
+        parsed_args.progress,
+        parsed_args.quiet,
         parsed_args.no_cache,
         path,
     );

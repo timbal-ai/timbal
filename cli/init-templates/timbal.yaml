@@ -1,5 +1,5 @@
 # Configuration for timbal.️
-# TODO Add reference to the timbal docs.
+# Check the docs for more info: https://docs.timbal.ai/deployments
 
 
 build:
@@ -15,5 +15,5 @@ build:
   #   - "echo another command if needed"
 
 
-# Path to the flow to be run in the application.
-flow: "flow.py:flow"
+# Fully Qualified Name (FQN) to the timbal app to run.
+fqn: "{{fully_qualified_name}}"
