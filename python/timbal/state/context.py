@@ -1,6 +1,10 @@
+import contextvars
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
+
+
+run_context_var = contextvars.ContextVar("run_context")
 
 
 class TimbalPlatformAuthType(str, Enum):
@@ -8,14 +12,14 @@ class TimbalPlatformAuthType(str, Enum):
     CUSTOM = "custom"
 
 
-class TimbalPlatformAuthConfig(BaseModel):
+class TimbalPlatformAuth(BaseModel):
     """Configuration for platform authentication.
     At the moment, supports bearer tokens and custom headers.
     """
 
     type: TimbalPlatformAuthType
     """Type of authentication to use."""
-    token: str
+    token: SecretStr
     """Token included in the authentication header."""
     header_name: str | None = None
     """If type is CUSTOM, this will be the name of the header to use."""
@@ -34,23 +38,21 @@ class TimbalPlatformAuthConfig(BaseModel):
     def header_value(self) -> str:
         """Format header value for requests authenticating with the platform."""
         if self.type == TimbalPlatformAuthType.BEARER:
-            return f"Bearer {self.token}"
+            return f"Bearer {self.token.get_secret_value()}"
         elif self.type == TimbalPlatformAuthType.CUSTOM:
-            return self.token
+            return self.token.get_secret_value()
         else:
             raise NotImplementedError(f"Unknown auth type: {self.type}")
 
 
-class TimbalPlatformAppConfig(BaseModel):
-    """Application-specific platform configuration.
-    Contains identifiers to the platform resource the run context applies to.
-    """
+class TimbalPlatformScope(BaseModel):
+    """Contains identifiers to the platform resource the run context applies to."""
 
-    org_id: str 
+    org_id: str | None = None
     """Organization identifier."""
-    app_id: str
+    app_id: str | None = None
     """Application identifier."""
-    version_id: str
+    version_id: str | None = None
     """Application version identifier."""
 
 
@@ -63,10 +65,25 @@ class TimbalPlatformConfig(BaseModel):
     """Platform host."""
     cdn: str = "content.timbal.ai"
     """CDN host."""
-    auth_config: TimbalPlatformAuthConfig
+    auth: TimbalPlatformAuth
     """Platform authentication configuration."""
-    app_config: TimbalPlatformAppConfig
+    scope: TimbalPlatformScope
     """Platform application configuration."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def handle_aliases(cls, values):
+        # Pydantic does not natively support multiple aliases for single fields.
+        # We keep the other names for backwards compatibility.
+        if "auth_config" in values:
+            values["auth"] = values.pop("auth_config")
+
+        if "app_config" in values:
+            values["scope"] = values.pop("app_config")
+        elif "app" in values:
+            values["scope"] = values.pop("app")
+
+        return values
 
 
 class RunContext(BaseModel):

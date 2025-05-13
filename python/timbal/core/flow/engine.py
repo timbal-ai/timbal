@@ -19,7 +19,7 @@ from ...errors import (
     StepExecutionError,
     StepKeyError,
 )
-from ...state import RunContext, Snapshot
+from ...state.context import RunContext, run_context_var
 from ...state.data import (
     BaseData,
     DataError,
@@ -28,6 +28,7 @@ from ...state.data import (
     get_data_key,
 )
 from ...state.savers.base import BaseSaver
+from ...state.snapshot import Snapshot
 from ...steps.llms.gateway import handler as llm
 from ...types import (
     Message,
@@ -504,6 +505,9 @@ class Flow(BaseStep):
             context = RunContext(id=uuid7(as_type="str"))
         elif context.id is None:
             context.id = uuid7(as_type="str")
+
+        # Set the run context for the duration of the agent run.
+        run_context_var.set(context)
 
         t0 = int(time.time() * 1000)
 

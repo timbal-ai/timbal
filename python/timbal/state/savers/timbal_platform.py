@@ -58,12 +58,12 @@ class TimbalPlatformSaver(BaseSaver):
 
         host = context.timbal_platform_config.host
 
-        auth_config = context.timbal_platform_config.auth_config
-        headers = {auth_config.header_key: auth_config.header_value}
+        auth = context.timbal_platform_config.auth
+        headers = {auth.header_key: auth.header_value}
 
-        app_config = context.timbal_platform_config.app_config
-        org_id = app_config.org_id
-        app_id = app_config.app_id
+        scope = context.timbal_platform_config.scope
+        org_id = scope.org_id
+        app_id = scope.app_id
         resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.parent_id}"
 
         res = requests.get(
@@ -97,12 +97,12 @@ class TimbalPlatformSaver(BaseSaver):
 
         host = context.timbal_platform_config.host
 
-        auth_config = context.timbal_platform_config.auth_config
-        headers = {auth_config.header_key: auth_config.header_value}
+        auth = context.timbal_platform_config.auth
+        headers = {auth.header_key: auth.header_value}
 
-        app_config = context.timbal_platform_config.app_config
-        org_id = app_config.org_id
-        app_id = app_config.app_id
+        scope = context.timbal_platform_config.scope
+        org_id = scope.org_id
+        app_id = scope.app_id
         resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
 
         body = dump(snapshot, context)
