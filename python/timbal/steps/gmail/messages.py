@@ -43,10 +43,6 @@ def create_draft_message(
     body: str | None = Field(
         default=None,
         description="The body of the email"
-    ),   
-    from_email: str | None = Field(
-        default=None,
-        description="The email address of the sender"
     ),
     cc: list[str] | None = Field(
         default=None,
@@ -67,7 +63,6 @@ def create_draft_message(
     subject = subject.default if hasattr(subject, 'default') else subject
     body = body.default if hasattr(body, 'default') else body
     to = to.default if hasattr(to, 'default') else to
-    from_email = from_email.default if hasattr(from_email, 'default') else from_email
     cc = cc.default if hasattr(cc, 'default') else cc
     bcc = bcc.default if hasattr(bcc, 'default') else bcc
     attachment = attachment.default if hasattr(attachment, 'default') else attachment
@@ -79,8 +74,6 @@ def create_draft_message(
         draft_message.set_content(body)
         draft_message["To"] = ", ".join(to)
         draft_message["Subject"] = subject
-        if from_email is not None:
-            draft_message["From"] = from_email
         if cc is not None:
             draft_message["Cc"] = ", ".join(cc)
 
@@ -110,7 +103,6 @@ def create_draft_message(
             'subject': subject,
             'body': body,
             'to': ", ".join(to),
-            'from': from_email,
             'cc': ", ".join(cc) if cc else None,
             'bcc': ", ".join(bcc) if bcc else None,
             'attachment': os.path.basename(attachment) if attachment else None
