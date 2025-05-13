@@ -15,10 +15,10 @@ const config = {
   favicon: 'img/favicon.png',
 
   // Set the production url of your site here
-  url: 'https://timbal-ai.github.io',
+  url: 'https://docs.timbal.ai',
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
-  baseUrl: '/timbal/',
+  baseUrl: '/',
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
@@ -45,6 +45,7 @@ const config = {
       ({
         docs: {
           sidebarPath: './sidebars.js',
+          routeBasePath: '/',
         },
         blog: {
           showReadingTime: true,
@@ -72,16 +73,16 @@ const config = {
       navbar: {
         logo: {
           alt: 'Timbal Logo',
-          src: 'img/LogoBlack.svg',
-          srcDark: 'img/LogoWhite.svg',
+          src: '/img/LogoBlack.svg',
+          srcDark: '/img/LogoWhite.svg',
           width: '100px',  
           height: 'auto',
         },
         items: [
-          { to: '/docs/get-started', label: 'Docs', position: 'left' },
-          { to: '/docs/platform', label: 'Platform', position: 'left' },
-          { to: '/docs/examples', label: 'Examples', position: 'left' },
-          { to: '/docs/releases', label: 'Releases', position: 'left' },
+          { to: '/introduction', label: 'Docs', position: 'left' },
+          { to: '/platform', label: 'Platform', position: 'left' },
+          { to: '/examples', label: 'Examples', position: 'left' },
+          { to: '/releases', label: 'Releases', position: 'left' },
           {
             href: 'https://github.com/timbal-ai/timbal',
             label: 'GitHub',
@@ -112,11 +113,16 @@ const config = {
         ],
         copyright: `Copyright © ${new Date().getFullYear()} Timbal AI. Built with Docusaurus.`,
       },
-      prism: {
-        theme: prismThemes.github,
-        darkTheme: prismThemes.dracula,
-      },
      }),
+
+  // Add MDX configuration at the root level
+  markdown: {
+    mdx1Compat: {
+      comments: true,
+      admonitions: true,
+      headingIds: true,
+    },
+  },
 };
 
 export default config;

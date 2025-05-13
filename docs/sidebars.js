@@ -14,46 +14,59 @@
 
  @type {import('@docusaurus/plugin-content-docs').SidebarsConfig}
  */
-const sidebars = {
+ const sidebars = {
   docsSidebar: [
+    'introduction/index',
     {
       type: 'category',
       collapsed: false,
-      label: 'Get Started',
-      items: ['get-started/index', 'get-started/installation', 'get-started/quickstart', 'get-started/model_capabilities'],
+      label: 'Getting Started',
+      items: ['getting-started/installation', 'getting-started/quickstart', 'getting-started/cursor', 'getting-started/model_capabilities'],
     },
     {
       type: 'category',
-      label: 'Concepts',
+      label: 'Agents',
       collapsed: false,
       items: [
-        'concepts/index',
-        'concepts/agents',
-        'concepts/flows',
-        //'concepts/knowledge_bases',
-        //'concepts/memories',
-        'concepts/cli',
-        'concepts/tools',
-        //'concepts/servers',
-        'concepts/advanced',
+        'agents/index',
+        'agents/memory',
+        'agents/rewind',
+        'agents/tools',
+        'agents/voice',
+        'agents/evals',
+    ],
+    },
+    {
+      type: 'category',
+      label: 'Flows',
+      collapsed: false,
+      items: [
+        'flows/index',
+        'flows/memory',
+    ],
+    },
+    {
+      type: 'category',
+      label: 'State',
+      collapsed: false,
+      items: [
+        'state/index',
     ],
     },
     {
       type: 'category',
       collapsed: false,
-      label: 'Tools',
-      items: ['tools/elevenlabs']//['tools/perplexity', 'tools/elevenlabs', 'tools/twilio', 'tools/gmail', 'tools/office', 'tools/fal'],
-    },
-    // {
-    //   type: 'category',
-    //   label: 'How to Guides',
-    //   items: ['guides/memory', 'guides/tools', 'guides/subflow', 'guides/streaming', 'guides/saver'],
-    // },
-    // {
-    //   type: 'category',
-    //   label: 'Advanced Features',
-    //   items: ['advanced/index', 'advanced/link', 'advanced/data_value'],
-    // }
+      label: 'Integrations',
+      items: ['integrations/index', 'integrations/elevenlabs', 'integrations/perplexity', 'integrations/twilio', 'integrations/gmail', 'integrations/sharepoint', 'integrations/fal'],
+    }
+  ],
+  examplesSidebar: [
+    {
+      type: 'category',
+      collapsed: false,
+      label: 'Timbal Examples',
+      items: ['examples/index', 'examples/healthcare', 'examples/automotive', 'examples/design', 'examples/tourism', 'examples/financials', 'examples/ecommerce', 'examples/industry', 'examples/real-estate', 'examples/education', 'examples/legal', 'examples/transport', 'examples/media'],
+    }
   ],
 };
 

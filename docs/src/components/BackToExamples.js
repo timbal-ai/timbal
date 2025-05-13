@@ -5,7 +5,7 @@ export default function BackToExamples() {
   return (
     <div style={{ marginBottom: '1.5rem', marginLeft: 0, paddingLeft: 0 }}>
       <Link
-        to="/docs/examples/"
+        to="/examples/"
         style={{
           display: 'inline-block',
           padding: '4px 12px',

@@ -17,8 +17,14 @@
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
   --ifm-font-size-base: 1.1rem; /* Increase from default (usually 1rem) */
   --ifm-line-height-base: 1.6;
-  --timbal-purple: #5012cb ; /* Light mode */
+  --timbal-purple: #5012cb;
   --icon-check-green: #4cd964; /* dark green for light mode */
+  --release-badge-bg: var(--ifm-color-primary-light);
+  --release-badge-color: var(--timbal-purple);
+  --release-version-color: #888;
+  --release-highlight-gradient: linear-gradient(120deg, var(--timbal-purple) 0%, var(--ifm-color-primary-light) 100%);
+  --release-highlight-text: #fff;
+  --release-link: #2563eb;
 }
 
 /* For readability concerns, you should choose a lighter palette in dark mode. */
@@ -36,6 +42,12 @@ html[data-theme='dark'] {
   --ifm-heading-color: #ffffff;
   --timbal-purple: #c6b8ff; /* Dark mode */
   --icon-check-green: #00ff00; /* bright green for dark mode */
+  --release-badge-bg: var(--timbal-purple);
+  --release-badge-color: var(--ifm-color-primary-light);
+  --release-version-color: #bbb;
+  --release-highlight-gradient: linear-gradient(120deg, var(--timbal-purple) 0%, var(--ifm-color-primary-light) 100%);
+  --release-highlight-text: #fff;
+  --release-link: #b5aaff;
 }
 
 .container {
@@ -102,66 +114,6 @@ article h3 {
   background-color: white; /* Make it stand out */
 }
 
-/* Add some space on the right to prevent the sidebar from overlapping with content */
-.docMainContainer {
-  margin-left: 280px; /* Adjust according to the sidebar's width */
-}
-
-.sidebar {
-  width: 280px;
-}
-
-
-
-/* .language-python .token.keyword {
-  color: #a626a4 !important;
-}
-[data-theme='dark']  */
-/* .language-python .token.keyword {
-  color: #ff79c6 !important;
-} */
-
-/* .language-python .token.string {
-  color: #c18401 !important;
-}
-[data-theme='dark']  */
-/* .language-python .token.string {
-  color: #f1fa8c !important;
-} */
-
-/* .language-python .token.function {
-  color: #4078f2 !important;
-}
-[data-theme='dark']  */
-/* .language-python .token.function {
-  color: #8be9fd !important;
-} */
-
-/* .language-python .token.plain:not(.linenumber) {
-  color: rgb(1, 130, 1) !important;
-}
-[data-theme='dark']  */
-/* .language-python .token.plain:not(.linenumber) {
-  color: greenyellow !important;
-} */
-
-/* .language-python .token.property {
-  color: #986801 !important;
-}
-[data-theme='dark']  */
-/* .language-python .token.property {
-  color: #bd93f9 !important;
-} */
-
-/* .language-python .token.number {
-  color: #b76b2c !important;
-} */
-/* [data-theme='dark']  */
-/* .language-python .token.number {
-  color: #ffb86c !important;
-} */
-
-
 .alert [class*="admonitionHeading"] {
   font-size: 0.8em !important;
 }
@@ -172,48 +124,10 @@ article h3 {
   font-size: 0.8em !important;
 }
 
-/* Force all code blocks to have a black background */
-.codeBlock_node_modules-\@docusaurus-theme-classic-lib-theme-CodeBlock-Content-styles-module,
-pre code,
-pre {
-  background: #000 !important;
-  color: #fff !important;
-}
-
-/* For both light and dark mode: force black background and white text in block code */
-.theme-code-block,
-.theme-code-block pre,
-.theme-code-block code,
-.codeBlock_node_modules-\@docusaurus-theme-classic-lib-theme-CodeBlock-Content-styles-module,
-pre,
-pre code {
-  background: #1a1a1a !important;
-  color: #fff !important;
-  border: 1px solid #333 !important;      /* Subtle border */
-  border-radius: 12px !important;           /* Rounded corners */
-  box-shadow: 0 2px 12px 0 #0003 !important; /* Soft shadow */
-}
-
-/* Optional: In light mode, you can use a lighter border */
-html[data-theme='light'] .theme-code-block,
-html[data-theme='light'] .theme-code-block pre,
-html[data-theme='light'] .theme-code-block code,
-html[data-theme='light'] .codeBlock_node_modules-\@docusaurus-theme-classic-lib-theme-CodeBlock-Content-styles-module,
-html[data-theme='light'] pre,
-html[data-theme='light'] pre code {
-  border: 1px solid #e0e0e0 !important;
-  box-shadow: 0 2px 12px 0 #0001 !important;
-}
-
 /* Inline code: keep default theme */
 :not(pre) > code {
   background: var(--ifm-code-background) !important;
   color: var(--ifm-code-color) !important;
-}
-
-/* Extra: In light mode, some themes set color via span inside code blocks. Force those to white unless overridden by syntax highlighting */
-html[data-theme='light'] .theme-code-block code span {
-  color: #fff !important;
 }
 
 
@@ -253,7 +167,7 @@ html[data-theme='light'] .theme-code-block code span {
   top: 100%;
   transform: translateX(-50%);
   width: 2px;
-  height: 670px;
+  height: 690px;
   background: #333;
   z-index: 0;
   border-radius: 2px;
@@ -331,15 +245,6 @@ th,
 td {
   border: none !important;
 }
-
-/* If you want to keep borders, but just want a single color: */
-/*
-table,
-th,
-td {
-  border: 1px solid #333 !important; // or your preferred color
-}
-*/
 
 table,
 th,
@@ -448,3 +353,272 @@ div[class*="codeBlock"] [class*="codeBlockTitle"] {
 .theme-doc-sidebar-container .menu__list-item-collapsible > .menu__link {
   font-weight: bold !important;
 }
+
+
+.custom-highlight-pink {
+  color: #F92672!important;
+}
+
+.custom-highlight-orange {
+  color: orange !important;
+  font-style: italic;
+}
+
+.custom-highlight-green {
+  color: #A6E22E !important;
+  text-decoration: underline;
+}
+
+.custom-highlight-yellow {
+  color: #E6DB74 !important;
+}
+
+.custom-highlight-purple-pink {
+  color: #D291FF !important;
+}
+
+.token.number,
+.custom-highlight-purple {
+  color: #B48EFC !important;
+}
+
+.custom-highlight-yellow-dark {
+  color: #FFD600 !important;
+}
+
+
+.custom-highlight-comment {
+  color: #75715e !important;
+  font-style: italic;
+}
+
+.custom-highlight-blue {
+  color: #66D9EF !important;
+  font-style: italic;
+}
+
+.custom-highlight-green-fn {
+  color: #A6E22E !important;
+}
+
+
+.menu__link[href$="/introduction"] {
+  font-weight: bold;
+}
+
+.wider-table, .wider-table th, .wider-table td {
+  font-size: 0.9em !important;
+}
+
+
+/* Adjust heading sizes proportionally */
+article h1 {
+  font-size: 1.9rem; /* Reduced from 2rem */
+}
+
+article h2 {
+  font-size: 1.65rem; /* Reduced from 1.8rem */
+}
+
+article h3 {
+  font-size: 1.25rem; /* Reduced from 1.3rem */
+}
+
+/* Adjust table text size */
+table,
+th,
+td {
+  font-size: 0.9em !important; /* Reduced from 0.9em */
+}
+
+/* Adjust code block text size */
+.theme-code-block,
+pre,
+code {
+  font-size: 0.9em !important;
+}
+
+/* Keep original sidebar size */
+.theme-doc-sidebar-container,
+.theme-doc-sidebar-menu,
+.theme-doc-sidebar {
+  font-size: 0.92em !important; /* Keep original size */
+}
+
+[data-docs-sidebar="examplesSidebar"] h1:first-child {
+  display: none;
+}
+
+[data-theme='dark'] h4 {
+  color: var(--timbal-purple) !important;
+}
+
+/* Utility class for SVG icons to be light purple in dark mode */
+[data-theme='dark'] .timbal-category-icon svg {
+  fill: var(--timbal-purple) !important;
+}
+
+/* Make the Docusaurus pagination box smaller */
+.pagination-nav__link {
+  padding: 0.5rem 0.7rem !important;
+}
+
+.pagination-nav__label,
+.pagination-nav__sublabel {
+  font-size: 0.95em !important;
+}
+
+.pagination-nav__label {
+  font-weight: 600 !important;
+}
+
+.release-badge {
+  display: inline-block;
+  background: var(--release-badge-bg);
+  color: var(--release-badge-color);
+  border-radius: 8px;
+  padding: 0.3em 1em;
+  font-weight: 600;
+  font-size: 1.1em;
+  margin-right: 1em;
+}
+
+.release-version {
+  font-size: 1.1em;
+  color: var(--release-version-color);
+}
+
+.release-highlight-card {
+  background: var(--release-highlight-gradient);
+  border-radius: 18px;
+  width:670px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0.3rem;
+  box-shadow: 0 4px 24px 0 #0001;
+}
+
+.release-highlight-card span {
+  color: var(--release-highlight-text);
+  font-size: 3rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.release-link {
+  color: var(--release-link);
+  font-weight: 500;
+  text-decoration: underline;
+  font-size: 0.95em;
+}
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop {
+  width: 800px !important;
+  margin-top: 5rem !important;
+}
+
+
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop,
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop ul,
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop li,
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop a {
+  font-size: 1rem !important; /* or your preferred size */
+}
+
+/* Make release date headings look like badges, only on releases page */
+html.docs-doc-id-releases\2F index .theme-doc-markdown .release-date-heading {
+  display: inline-block;
+  background: var(--release-badge-bg);
+  color: var(--release-badge-color);
+  border-radius: 8px;
+  padding: 0.3em 1em;
+  font-weight: 600;
+  font-size: 1.1em;
+  margin-bottom: 1em;
+  margin-top: 2em;
+}
+
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop .release-date-heading {
+  background: none !important;
+  color: inherit !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  font-weight: inherit !important;
+  font-size: inherit !important;
+  margin: 0 !important;
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
+  display: inline;
+}
+
+html.docs-doc-id-releases\2F index article h3 {
+  font-size: 0.9rem !important; /* or your preferred size */
+  font-weight: 600; /* optional: adjust weight */
+}
+
+/* Only on releases page, pull the first .release-highlight-card up */
+html.docs-doc-id-releases\2F index .release-date-heading {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* Only affect h3 inside the left column of the releases flex row */
+.release-date-heading {
+  margin-top: 0.2em !important;
+  margin-bottom: 0.2em !important;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* Make sure Release Highlights is vertically aligned */
+.release-highlights-title {
+  margin-top: 0.8em !important;
+  margin-bottom: 0.2em !important;
+  vertical-align: middle;
+}
+
+.release-highlight-card > span {
+  font-size: 1.6rem !important;
+  font-weight: 600 !important;
+}
+
+html.docs-doc-id-releases\2F index ul.table-of-contents {
+  margin-left: 7em !important; /* or your preferred value */
+}
+
+
+html[data-theme='dark'] footer {
+  background: #262626 !important; /* or your preferred dark color */
+  color: #fff !important;         /* optional: ensure text/icons are visible */
+}
+
+.file-tree-box {
+  border: 1px solid var(--ifm-toc-border-color, #333);
+  border-radius: 6px;
+  padding: 1rem;
+  background: var(--ifm-background-surface-color, #fafbfc);
+  display: inline-block;
+  margin-top: 1rem;
+  transition: background 0.2s, border 0.2s;
+}
+
+.file-tree-icon {
+  width: 16px;
+  vertical-align: middle;
+  /* Default: dark icon for light mode */
+  filter: invert(0%);
+  transition: filter 0.2s;
+}
+
+/* Dark mode styles */
+html[data-theme='dark'] .file-tree-box {
+  background: #23272f;
+  border-color: #444950;
+}
+
+html[data-theme='dark'] .file-tree-icon {
+  /* Invert icon color to white for dark mode */
+  filter: invert(100%);
+}
+
