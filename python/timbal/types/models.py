@@ -158,6 +158,10 @@ def create_model_from_argspec(name: str, argspec: NamedTuple) -> BaseModel:
         if not isinstance(field_default, FieldInfo):
             field_default = Field(default=field_default)
 
+        json_schema_extra = getattr(field_default, "json_schema_extra", {})
+        if json_schema_extra.get("private", False):
+            continue
+
         field_type = argspec.annotations.get(field_name, Any)
 
         # If base type is a generic, we need to make sure that all values passed as this generic are of the same type.
@@ -165,8 +169,7 @@ def create_model_from_argspec(name: str, argspec: NamedTuple) -> BaseModel:
         if isinstance(field_base_type, TypeVar):
             generics[field_base_type].append(field_name)
 
-        json_schema_extra = getattr(field_default, "json_schema_extra", None)
-        if isinstance(json_schema_extra, dict) and "choices" in json_schema_extra:
+        if "choices" in json_schema_extra:
             choices = json_schema_extra.pop("choices")
             field_type = Literal.__getitem__(tuple(choices))
             # choices_validator = create_choices_validator(choices)

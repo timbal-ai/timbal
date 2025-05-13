@@ -21,6 +21,7 @@ def Field(
     max_length: int = None,
     regex: str = None,
     choices: list[str | int | float] = None,
+    private: bool = False,
 ) -> Any:
     """Create a field definition with validation rules for Timbal models.
 
@@ -33,6 +34,7 @@ def Field(
         max_length: Maximum length for strings/sequences.
         regex: Regular expression pattern for string validation.
         choices: List of valid values for this field.
+        private: Whether this field should be private, i.e. not included in the JSON schema and not validated.
 
     Returns:
         A Pydantic Field instance with the specified validation rules.
@@ -49,7 +51,7 @@ def Field(
         "min_length": min_length,
         "max_length": max_length,
         "pattern": regex,
-        "json_schema_extra": {},
+        "json_schema_extra": {"private": private},
     }
 
     # The `choices` parameter is deprecated in Pydantic v2.
