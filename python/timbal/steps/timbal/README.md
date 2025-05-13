@@ -1,4 +1,4 @@
-# Timbal Agent Tool Functions
+# Timbal Platform Tools
 
 This directory contains all functions that can be used as tools by agents to interact with the Timbal platform.
 
