@@ -50,11 +50,16 @@ html[data-theme='dark'] {
   --release-link: #b5aaff;
 }
 
+html, body {
+  overflow-x: hidden !important;
+  max-width: 100vw !important;
+}
+
 .container {
   margin-left: auto;
   margin-right: auto;
-  max-width: 1200px; /* Slightly narrower than default */
-  padding-left: 2rem; /* Increased left padding */
+  max-width: 1100px; /* Slightly narrower than default */
+  padding-left: 1rem; /* Increased left padding */
   padding-right: 0rem; /* Increased right padding */
 }
 
@@ -141,7 +146,7 @@ article h3 {
   display: flex;
   align-items: flex-start;
   position: relative;
-  margin-bottom: 2.5rem;
+  margin-bottom: 1rem;
 }
 .circle {
   width: 36px;
@@ -167,7 +172,7 @@ article h3 {
   top: 100%;
   transform: translateX(-50%);
   width: 2px;
-  height: 690px;
+  height: 645px;
   background: #333;
   z-index: 0;
   border-radius: 2px;
@@ -583,10 +588,6 @@ html.docs-doc-id-releases\2F index .release-date-heading {
   font-weight: 600 !important;
 }
 
-html.docs-doc-id-releases\2F index ul.table-of-contents {
-  margin-left: 7em !important; /* or your preferred value */
-}
-
 
 html[data-theme='dark'] footer {
   background: #262626 !important; /* or your preferred dark color */
@@ -620,5 +621,72 @@ html[data-theme='dark'] .file-tree-box {
 html[data-theme='dark'] .file-tree-icon {
   /* Invert icon color to white for dark mode */
   filter: invert(100%);
+}
+
+.file-tree-box .file-list {
+  color: #000000 !important; /* or your preferred gray */
+}
+
+html[data-theme='dark'] .file-tree-box .file-list {
+  color:  #ffffff  !important; /* or your preferred gray */
+}
+
+.custom-codeblock-container {
+  position: relative;
+}
+.copy-icon-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: rgba(30,30,30,0.7);
+  border: none;
+  border-radius: 6px;
+  padding: 4px;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.2s, background 0.2s;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.custom-codeblock-container:hover .copy-icon-btn {
+  opacity: 1;
+}
+.copy-icon-btn svg {
+  display: block;
+}
+.copy-icon-btn.copied {
+  background: transparent;
+  animation: copied-pop 0.2s;
+}
+@keyframes copied-pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+  100% { transform: scale(1); }
+}
+
+.theme-doc-toc-desktop {
+  margin-right: 0.3em !important; /* or 0, or whatever looks best */
+  margin-left: -0em !important; /* or 0, or whatever looks best */
+}
+
+.timeline {
+  display: flex;
+  align-items: stretch;
+  gap: 1rem;
+  overflow-x: auto;
+  padding: 0.5rem;
+}
+
+
+.timeline-content {
+  font-size: 0.9rem;      /* or try 0.95rem or 0.9rem for even smaller */
+  line-height: 1.4;        /* tighter line spacing */
+}
+
+.timeline-content h4 {
+  font-size: 1.08rem;      /* slightly smaller heading */
+  margin-bottom: 0.4em;
 }
 

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Highlight, themes, Prism } from 'prism-react-renderer';
 
 // Make Prism available globally (needed for language extension)
@@ -9,7 +9,7 @@ const customTheme = {
   ...themes.github,
   plain: {
     ...themes.github.plain,
-    backgroundColor: '#181818',
+    backgroundColor: '#2d2d2d',
     color: '#ffffff',
   },
   styles: themes.github.styles.map(style => ({
@@ -57,6 +57,7 @@ const highlightMap = {
   text: 'custom-highlight-orange',
   voice_id: 'custom-highlight-orange',
   memory_id: 'custom-highlight-orange',
+  location: 'custom-highlight-orange',
   memory_window_size: 'custom-highlight-orange',
   '(': 'custom-highlight-yellow-dark',
   ')': 'custom-highlight-yellow-dark',
@@ -81,6 +82,8 @@ const highlightMap = {
   gen_images: 'custom-highlight-green-fn',
   download_file: 'custom-highlight-green-fn',
   TimbalPlatformSaver: 'custom-highlight-green',
+  sql: 'custom-highlight-green',
+  postgres: 'custom-highlight-green',
   return: 'custom-highlight-pink',
   for: 'custom-highlight-pink',
   in: 'custom-highlight-pink',
@@ -92,10 +95,13 @@ const highlightMap = {
   messages: 'custom-highlight-green',
   types: 'custom-highlight-green',
   File: 'custom-highlight-green',
+  postgres_query: 'custom-highlight-green-fn',
+  PGConfig: 'custom-highlight-green',
   get_message: 'custom-highlight-green-fn',
   get_thread: 'custom-highlight-green-fn',
   get_datetime: 'custom-highlight-green-fn',
   send_message: 'custom-highlight-green-fn',
+  run_sql_query: 'custom-highlight-green-fn',
   create_draft_message: 'custom-highlight-green-fn',
   send_whatsapp_message: 'custom-highlight-green-fn',
   send_whatsapp_template: 'custom-highlight-green-fn',
@@ -145,29 +151,35 @@ const quoteRegex = /"([^"]*)"/g;
 const numberRegex = /\\b\\d+(?:\\.\\d+)?\\b/g;
 
 export default function CodeBlock(props) {
-  const { title } = props;
+  const { title, children } = props;
+  const [copied, setCopied] = useState(false);
 
   return (
     <div
+      className="custom-codeblock-container"
       style={{
-        borderRadius: '20px',
+        borderRadius: '12px',
         overflow: 'hidden',
         border: '1px solid #333',
         marginBottom: '1.5em',
+        position: 'relative',
       }}
     >
       {title && (
         <div
           style={{
-            background: '#181818',
+            background: '#2d2d2d',
             color: '#fff',
             padding: '0.3em 1em',
             fontSize: '0.85em',
-            borderBottom: '1px solid #333',
+            borderBottom: '1.5px solid #444',
             letterSpacing: '0.01em',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
           }}
         >
-          {title}
+          <span>{title}</span>
         </div>
       )}
       <Highlight 
@@ -175,9 +187,22 @@ export default function CodeBlock(props) {
         {...props}
       >
         {({ className, style, tokens, getLineProps, getTokenProps }) => {
+          // Extract the code string from tokens
+          const codeString = tokens.map(
+            line => line.map(token => token.content).join('')
+          ).join('\n');
+
+          const handleCopy = () => {
+            navigator.clipboard.writeText(codeString);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          };
+
           let promptCount = 0;
           let stateSaverTotal = 0;
           let audioFileTotal = 0;
+          let dbConfigTotal = 0;
+          let sqlTotal = 0;
           tokens.forEach(line => {
             line.forEach(token => {
               const content = getTokenProps({ token }).children;
@@ -187,10 +212,18 @@ export default function CodeBlock(props) {
               if (typeof content === 'string' && content.trim() === 'audio_file') {
                 audioFileTotal++;
               }
+              if (typeof content === 'string' && content.trim() === 'db_config') {
+                dbConfigTotal++;
+              }
+              if (typeof content === 'string' && content.trim() === 'sql') {
+                sqlTotal++;
+              }
             });
           });
           let stateSaverCount = 0;
           let audioFileCount = 0;
+          let dbConfigCount = 0;
+          let sqlCount = 0;
           // At the top of your render function:
           let bracketStack = [];
           const getBracketColor = (depth) => {
@@ -207,7 +240,20 @@ export default function CodeBlock(props) {
               borderRadius: 0,
               color: props.language === 'bash' ? '#ffffff' : style.color,
               margin: 0,
+              position: 'relative',
             }}>
+              <button
+                className={`copy-icon-btn${copied ? ' copied' : ''}`}
+                onClick={handleCopy}
+                aria-label="Copy code"
+                type="button"
+              >
+                {copied ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24"><path fill="#fff" d="m9.55 15.15l8.475-8.475q.3-.3.7-.3t.7.3t.3.713t-.3.712l-9.175 9.2q-.3.3-.7.3t-.7-.3L4.55 13q-.3-.3-.288-.712t.313-.713t.713-.3t.712.3z"/></svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24"><g fill="none" stroke="#fff" strokeWidth="1.5"><path d="M6 11c0-2.828 0-4.243.879-5.121C7.757 5 9.172 5 12 5h3c2.828 0 4.243 0 5.121.879C21 6.757 21 8.172 21 11v5c0 2.828 0 4.243-.879 5.121C19.243 22 17.828 22 15 22h-3c-2.828 0-4.243 0-5.121-.879C6 20.243 6 18.828 6 16z"/><path d="M6 19a3 3 0 0 1-3-3v-6c0-3.771 0-5.657 1.172-6.828S7.229 2 11 2h4a3 3 0 0 1 3 3"/></g></svg>
+                )}
+              </button>
               {tokens.map((line, i) => {
                 // Join the line's tokens into a string to check for comment
                 const lineContent = line.map(token => getTokenProps({ token }).children).join('');
@@ -330,6 +376,44 @@ export default function CodeBlock(props) {
                         }
                         // If there are 3, highlight the second
                         if (stateSaverTotal === 3 && stateSaverCount === 2) {
+                          return <span key={key} className="custom-highlight-orange">{content}</span>;
+                        }
+                        // Otherwise, default
+                        return <span key={key} {...tokenProps} />;
+                      }
+                      // --- db_config logic ---
+                      if (
+                        typeof content === 'string' &&
+                        content.trim() === 'db_config'
+                      ) {
+                        dbConfigCount++;
+                        // If there is only one, highlight it
+                        if (dbConfigTotal === 1 && dbConfigCount === 1) {
+                          return <span key={key} className="custom-highlight-orange">{content}</span>;
+                        }
+                        // If there are 2, highlight the first
+                        if (dbConfigTotal === 2 && dbConfigCount === 1) {
+                          return <span key={key} className="custom-highlight-orange">{content}</span>;
+                        }
+                        // If there are 3, highlight the second
+                        if (dbConfigTotal === 3 && dbConfigCount === 2) {
+                          return <span key={key} className="custom-highlight-orange">{content}</span>;
+                        }
+                        // Otherwise, default
+                        return <span key={key} {...tokenProps} />;
+                      }
+                      // --- sql logic ---
+                      if (
+                        typeof content === 'string' &&
+                        content.trim() === 'sql'
+                      ) {
+                        sqlCount++;
+                        // First occurrence is green
+                        if (sqlCount === 1) {
+                          return <span key={key} className="custom-highlight-green">{content}</span>;
+                        }
+                        // Next two occurrences are orange
+                        if (sqlCount === 2 || sqlCount === 3) {
                           return <span key={key} className="custom-highlight-orange">{content}</span>;
                         }
                         // Otherwise, default

@@ -12,15 +12,60 @@ Master proven strategies for designing advanced, specialized AI agents that work
 
 ## What is an Agent?
 
-An Agent is like having a super-smart assistant powered by an LLM (Large Language Model). Think of it as your AI teammate that can think, reason, and take actions!
+An Agent is like having your own AI-powered teammate—one that can understand your goals, reason about the best way to achieve them, and take actions on your behalf. Powered by advanced Large Language Models (LLMs), Agents go far beyond simple chatbots or assistants.
+
+Think of an Agent as:
+
+- A digital coworker that can read, write, and analyze information.
+- A problem-solver that can break down complex tasks into steps and execute them.
+- A connector that can use tools, access APIs, search the web, or interact with other software to get things done.
 
 <CodeBlock language="python" code ={`Agent()  # That's it! You've created your first agent!`}/>
 
-**Note:** Make sure to define all required environment variables—such as your OpenAI API key—in your `.env` file.
+**Note:** Make sure to define all required environment variables—such as your OpenAI API key, your Gemini API key, the API key model that you need—in your `.env` file.
 
 <CodeBlock language="bash" title=".env" code ={`OPENAI_API_KEY=your_api_key_here`}/>
 
-## How Agents Work
+## Quick Example
+
+Here's an example of an agent that uses a tool to get weather information:
+
+<CodeBlock language="python" code ={`from timbal import Agent, Tool
+
+# Define a weather tool
+def get_weather(location: str) -> str:
+    # This is a simplified example - in practice, you'd use a real weather API
+    return "The weather is sunny"
+
+# Create an agent with the weather tool
+agent = Agent(
+    model="gpt-4",
+    tools=[
+        Tool(
+            runnable=get_weather,
+            description="Get the weather for a specific location",
+        )
+    ]
+)
+
+# Use the agent to get weather information
+response = await agent.complete(
+    prompt="What's the weather like in New York?"
+)`}/>
+
+<CodeBlock language="bash" title="Complete Agent Execution Logs" code={`StartEvent(type='START', run_id=..., path='agent', status_text=...)
+StartEvent(type='START', run_id=..., path='agent.llm-0', status_text=...)
+OutputEvent(type='OUTPUT', run_id=..., path='agent.llm-0', input={'messages': [Message(role=user, content=[TextContent(type='text', text="What's the weather like in New York?")])], 'tools': [{'type': 'function', 'function': {'name': 'get_weather', 'description': 'Get the weather for a specific location', 'parameters': {'properties': {'location': {'title': 'Location', 'type': 'string'}}, 'required': ['location'], 'title': 'Step_get_weather_params', 'type': 'object'}}}], 'system_prompt': None, 'model': 'gpt-4', 'max_tokens': None, 'stream': False}, output=Message(role=assistant, content=[ToolUseContent(type='tool_use', id='...', name='get_weather', input={'location': 'New York'})]), error=..., t0=..., t1=..., usage=...)
+StartEvent(type='START', run_id=..., path='agent.get_weather-call_...', status_text=...)
+OutputEvent(type='OUTPUT', run_id=..., path='agent.get_weather-...', input={'location': 'New York'}, output=Message(role=user, content=[TextContent(type='text', text='The weather is sunny')]), error=..., t0=..., t1=..., usage=...)
+StartEvent(type='START', run_id=..., path='agent.llm-1', status_text=...)
+OutputEvent(type='OUTPUT', run_id=..., path='agent.llm-1', input={'messages': [Message(role=user, content=[TextContent(type='text', text="What's the weather like in New York?")]), Message(role=assistant, content=[ToolUseContent(type='tool_use', id='...', name='get_weather', input={'location': 'New York'})]), Message(role=user, content=[ToolResultContent(type='tool_result', id='call_...', content=[TextContent(type='text', text='The weather is sunny')])])], 'tools': [{'type': 'function', 'function': {'name': 'get_weather', 'description': 'Get the weather for a specific location', 'parameters': {'properties': {'location': {'title': 'Location', 'type': 'string'}}, 'required': ['location'], 'title': 'Step_get_weather_params', 'type': 'object'}}}], 'system_prompt': None, 'model': 'gpt-4', 'max_tokens': None, 'stream': False}, output=Message(role=assistant, content=[TextContent(type='text', text='The weather in New York is sunny.')]), error=..., t0=..., t1=..., usage=...)
+OutputEvent(type='OUTPUT', run_id=..., path='agent', input={'prompt': {'role': 'user', 'content': [{'type': 'text', 'text': "What's the weather like in New York?"}]}}, output=Message(role=assistant, content=[TextContent(type='text', text='The weather in New York is sunny.')]), error=..., t0=..., t1=..., usage=...)
+`}/>
+
+This example shows how to create an agent with a custom tool. The agent can now use the weather tool to fetch real-time weather data when needed. You can add multiple tools to make your agent even more powerful!
+
+## Key Capabilities of an Agent
 
 Let's break down how an Agent thinks and works:
 
@@ -28,45 +73,35 @@ Let's break down how an Agent thinks and works:
 <div className="timeline-item">
 <div className="timeline-content">
 
-<h4>Receives Your Request</h4>
-- You give the **Agent** a **task** or **question**.
-- It carefully considers **what needs to be done**.
+<h4>Autonomous Reasoning</h4>
+Agents can decide what to do next based on your instructions and the current situation.
 
 </div>
 </div>
-
-<div className="timeline-connector">→</div>
 
 <div className="timeline-item">
 <div className="timeline-content">
 
-<h4>Makes Smart Decisions</h4>
-* Decides if it can **answer directly**
-* Or if it needs to **use special tools** to help
+<h4>Tool Use</h4>
+They can use built-in or custom tools (like searching the internet, fetching data, or running code) to accomplish tasks.
 
 </div>
 </div>
-
-<div className="timeline-connector">→</div>
 
 <div className="timeline-item">
 <div className="timeline-content">
 
-<h4>Uses Tools When Needed</h4>
-- If tools are needed, it **knows** exactly which ones to use
-- Gets the information it needs
+<h4>Memory</h4>
+Agents can remember previous interactions, decisions, or data, allowing them to work on long-term or multi-step projects.
 
 </div>
 </div>
-
-<div className="timeline-connector">→</div>
 
 <div className="timeline-item">
 <div className="timeline-content">
 
-<h4>Gives You the Perfect Answer</h4>
-- Combines all the information
-- Gives you a complete, thoughtful **response**
+<h4>Adaptability</h4>
+They can handle a wide range of tasks, from answering questions to automating workflows.
 
 </div>
 </div>
@@ -136,7 +171,7 @@ Let's break down how an Agent thinks and works:
 
 To execute an Agent, there are 2 possibilities depending on the synchronisation.
 
-### Synchronous Output Mode
+### Asynchronous Output Mode
 
 For when the agent returns a complete response after processing. We will use the `complete()` function:
 
