@@ -2,6 +2,10 @@ const std = @import("std");
 const fs = std.fs;
 
 
+// Embedded version.
+const timbal_version = @import("../version.zig").timbal_version;
+
+
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.print("{s}\n\n", .{err});
@@ -61,8 +65,7 @@ fn parseArgs(args: []const []const u8) !TimbalRunArgs {
             try printUsage();
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            // TODO Real versioning
-            std.debug.print("timbal version 0.1.0\n", .{});
+            std.debug.print("Timbal {s}\n", .{timbal_version});
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;

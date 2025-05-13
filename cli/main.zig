@@ -6,6 +6,10 @@ const run_cmd = @import("commands/run.zig");
 const push_cmd = @import("commands/push.zig");
 
 
+// Embedded version.
+const timbal_version = @import("version.zig").timbal_version;
+
+
 fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.writeAll(
@@ -64,6 +68,9 @@ pub fn main() !void {
         try push_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "help")) {
         try printUsage();
+    } else if (std.mem.eql(u8, action, "-V") or std.mem.eql(u8, action, "--version")) {
+        std.debug.print("Timbal {s}\n", .{timbal_version});
+        std.process.exit(0);
     } else {
         try printUsageWithError("Error: unknown command");
     }

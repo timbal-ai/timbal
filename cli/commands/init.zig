@@ -9,6 +9,10 @@ const timbal_yaml = @embedFile("../init-templates/timbal.yaml");
 const flow_py = @embedFile("../init-templates/flow.py");
 
 
+// Embedded version.
+const timbal_version = @import("../version.zig").timbal_version;
+
+
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.print("{s}\n\n", .{err});
@@ -50,8 +54,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try printUsage();
             return;
         } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            // TODO Real versioning
-            std.debug.print("timbal version 0.1.0\n", .{});
+            std.debug.print("Timbal {s}\n", .{timbal_version});
             return;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
