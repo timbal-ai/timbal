@@ -344,6 +344,7 @@ fn authenticate(
         .hash = image_digest_info.hash,
         .size = image_digest_info.size,
         .platform = image_digest_info.platform,
+        .version = timbal_version,
         .name = version_name,
         .params_model_schema = probe_res.params_model_schema,
         .return_model_schema = probe_res.return_model_schema,
