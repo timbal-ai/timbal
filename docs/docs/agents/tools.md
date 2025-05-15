@@ -6,90 +6,166 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Understanding Tools
 
-Welcome to the world of Tools! These are like the Swiss Army knives for your Agents - they give them superpowers to interact with the world!
+Tools are the way to give your Agents superpowers: they allow your agent to interact with the outside world, call APIs, perform calculations, and much more.
 
-## What are Tools?
+---
 
-Tools are special functions that your Agents can use to:
-- Search the interne
-- Get weather information
-- Check the time
-- And much more!
+## What is a Tool?
 
-Think of them as the hands and eyes of your Agent - they help it interact with the world beyond just thinking!
+A **Tool** is a function (or callable) that your agent can invoke. You can use:
+- Your own Python functions
+- Pre-built tools provided by Timbal
+- Tools defined as objects or dictionaries
 
-## How Tools Work
+## How to Create a Tool
 
-Let's break down how Tools make your Agents more powerful:
+### 1. Define a Python Function
 
-1. **Agent Requests a Tool**
-   - Your Agent decides it needs information
-   - It chooses the right tool for the job
+You can start with a simple function:
 
-2. **Tool Gets to Work**
-   - The tool runs its specific function
-   - It gathers the needed information
+<CodeBlock language="python" code ={`def get_weather(location: str) -> str:
+    return "The weather is sunny!"`}/>
 
-3. **Results Come Back**
-   - The tool returns its findings
-   - Your Agent uses this information to help you
+### 2. Wrap it as a Tool
 
-## Creating Your Own Tools 
+You can wrap your function as a Tool object, or just pass the function directly:
 
-Ready to create your first tool? Let's do it step by step!
+<CodeBlock language="python" code ={`from timbal.core.agent.types.tool import Tool
 
-<CodeBlock language="python" code ={`# 1. Define your tool function
-def get_weather(location: str) -> str:
-    # Your weather-fetching code here
-    return f"The weather in {location} is sunny!"
-
-# 2. Create a Tool object
 weather_tool = Tool(
     runnable=get_weather,
     description="Get the weather for a location",
-    exclude_params=["query"]
-)
+)`}/>
 
-# 3. Add it to your Agent
+Or, you can use a dictionary:
+
+<CodeBlock language="python" code ={`weather_tool = {
+    "runnable": get_weather,
+    "description": "Get the weather for a location",
+    # Only required params are exposed to the LLM
+    "params_mode": "required",
+}`}/>
+
+### 3. Add the Tool to Your Agent
+
+<CodeBlock language="python" code ={`from timbal import Agent
+
 agent = Agent(
     tools=[weather_tool]
 )`}/>
 
-## Different Types of Tools 
+## Using Built-in Tools
 
-You can create tools in several ways:
+Timbal comes with many built-in tools, such as `search_internet` using Perplexity or `send_message` using Slack.  
+You can add them directly:
 
-1. **Simple Function Tools**
+<CodeBlock language="python" code ={`from timbal.steps.perplexity import search_internet
+
+agent = Agent(
+    tools=[search_internet]
+)`}/>
+
+Find more in the [Integrations](/integrations) section.
+
+## Customizing Tool Parameters
+
+You can control which parameters are visible to the LLM and how they are described.
+
+### Field Descriptions and Choices
+
+Use `Field` to add descriptions and choices to your function parameters:
+
+<CodeBlock language="python" code ={`from timbal.types import Field
+
+def get_weather(
+    location: str = Field(description="The location to get the weather for"),
+    unit: str = Field(choices=["celsius", "fahrenheit"], description="Temperature unit")
+) -> str:
+    ...`}/>
+
+### Controlling Parameter Visibility
+
+- **params_mode**: `"all"` (default) exposes all params, `"required"` exposes only required ones.
+- **include_params**: List of param names to always include.
+- **exclude_params**: List of param names to exclude.
+
+#### Only show required params
+
 <CodeBlock language="python" code ={`Tool(
-    runnable=simple_function,
-    description="A simple tool"
-    )`}/>
+    runnable=get_weather,
+    description="Get the weather for a location",
+    params_mode="required"
+)`}/>
 
-2. **Dictionary Tools**
+#### Include extra params
+
+<CodeBlock language="python" code ={`Tool(
+    runnable=get_weather,
+    description="Get the weather for a location",
+    params_mode="required",
+    # Even if not required, 'unit' will be shown
+    include_params=["unit"]  
+)`}/>
+
+#### Exclude params
+
+<CodeBlock language="python" code ={`Tool(
+    runnable=get_weather,
+    description="Get the weather for a location",
+    # 'unit' will not be shown to the LLM
+    exclude_params=["unit"]  
+)`}/>
+
+#### Dictionary style
+
 <CodeBlock language="python" code ={`{
-    "runnable": your_function,
-    "description": "A tool defined as a dictionary",
-    "params_mode": "required"
-    }`}/>
+    "runnable": get_weather,
+    "description": "Get the weather for a location",
+    "params_mode": "required",
+    # You can combine include/exclude
+    "include_params": ["unit"],
+    "exclude_params": ["location"],
+}`}/>
 
-3. **Pre-built Tools** 
-    <CodeBlock language="python" code ={`search_internet  # A ready-to-use tool for web searches`}/>
+## Adding Descriptions
 
-    There's a huge list of pre-built tools that you can find in [Integrations](/integrations)
+Always add a `description` to your tool! This helps the LLM understand when and how to use it.
 
-## Next Steps
+<CodeBlock language="python" code ={`Tool(
+    runnable=get_weather,
+    description="Get the weather for a location"
+)`}/>
 
-You've just learned how to create and use Tools! Here's what you can do next:
+## Using Tools in Agents
 
-- Create your own custom tools
-- Combine multiple tools in an Agent
-- Build something amazing!
+You can combine multiple tools, both custom and built-in:
 
-Remember: The more tools you create, the more powerful your Agents become!
+<CodeBlock language="python" code ={`from timbal.steps.perplexity import search_internet
 
-## Want to Learn More?
+agent = Agent(
+    tools=[
+        search_internet,
+        Tool(
+            runnable=get_weather,
+            description="Get the weather of a location",
+            exclude_params=["query"]
+        ),
+        {
+            "runnable": get_time,
+            "description": "Get the time of a location",
+            "params_mode": "required",
+            "include_params": ["model"]
+        }
+    ]
+)`}/>
 
-Check out these related concepts:
-- Agents: Learn how to use tools with Agents
-- Flows: Discover how to integrate tools into workflows
-- Advanced Tools: Take your tools to the next level
+
+## Summary
+
+- Tools let your agent interact with the world.
+- You can use your own functions, built-in tools, or dictionaries.
+- Customize which parameters are visible and how they are described.
+- Add clear descriptions for best results.
+
+For more, see the [Integrations](/integrations) and [Advanced Tools](/agents/tools) docs!
+

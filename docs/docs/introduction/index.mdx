@@ -11,6 +11,8 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 Build, orchestrate, and deploy AI solutions with ease.
 </h2>
 
+---
+
 ## What is Timbal?
 
 **Timbal is an open-source framework for designing autonomous AI applications with flexible orchestration, real-time streaming, and multi-provider support.**
@@ -56,7 +58,7 @@ Timbal provides two main patterns for building AI applications:
       .set_input("convert_to_database.text", "text_processor.processed_text")
       .set_input("convert_to_database.chunk_size", 1000)
       # Return database information
-      .set_output("database_id", "convert_to_database.return")
+      .set_output("convert_to_database.return", "database_id")
   )`}
     />
   </div>
@@ -158,6 +160,8 @@ Choose the pattern that best aligns with your application's requirements for con
     <p style={{fontSize: '0.95rem', marginBottom: '0', color: 'var(--ifm-color-emphasis-900)'}}>Seamlessly integrate with leading LLM providers including OpenAI, Anthropic, Gemini, and TogetherAI.</p>
   </div>
 </div>
+
+---
 
 ## Why Choose Timbal?
 

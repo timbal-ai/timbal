@@ -4,149 +4,296 @@ sidebar: 'docsSidebar'
 ---
 import CodeBlock from '@site/src/theme/CodeBlock';
 
-# Understanding Flows
+# Orchestrating AI Workflows
 
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.2rem', fontWeight: 'normal'}}>
-Learn how Flows connect and coordinate tasks to create intelligent, end-to-end AI solutions.
+Design, connect, and control multi-step AI pipelines using Flows—Timbal's flexible workflow engine.
 </h2>
 
-## What is a Flow?
+---
 
-Think of a Flow as a super-smart assembly line for your AI tasks! It's like having a team of specialized workers (steps) who pass information to each other in a carefully planned sequence.
+## What Are Flows?
 
-<CodeBlock language="python" code ={`flow = Flow()`}/>
+A **Flow** is a programmable pipeline that lets you chain together steps—functions, LLMs, or even other flows—while controlling how data moves between them. Flows enable you to build complex, intelligent workflows with clear logic, memory, and branching.
 
-Now you have initialized a Flow! But this does not do nothing itself... We have to add functionalities! 
+<CodeBlock language="python" code={`from timbal import Flow
 
-## The Building Blocks
-A Flow is made up of two main components:
+flow = Flow(id="my_flow")`}/>
+
+---
+
+## Building Blocks of a Flow
 
 <div className="cards-container">
-<div className="card">
-<div className="card-content">
+  <div className="card">
+    <div className="card-content">
+      <h3>Steps</h3>
+      <p>
+        <strong>Steps</strong> are the core units of work.
 
-### Steps
-
-These are your individual workers:
-- Each step has a specific job to do
-- They can be simple functions or complex AI models
-- They process data and pass it along
-
-</div>
-</div>
-
-<div className="card">
-<div className="card-content">
-
-### Links
-
-These are the connections between steps:
-- They tell your flow how to move data around
-- They can even make decisions about which path to take!
-- They define the flow of information
-
-</div>
-</div>
-</div>
-
-## What Can Flows Do?
-
-<div className="capabilities">
-<div className="capability">
-<div className="capability-icon">
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="transparent" stroke="var(--timbal-purple)" stroke-linecap="round" stroke-width="1.5"><path d="M10.046 14c-1.506-1.512-1.37-4.1.303-5.779l4.848-4.866c1.673-1.68 4.25-1.816 5.757-.305s1.37 4.1-.303 5.78l-2.424 2.433"/><path d="M13.954 10c1.506 1.512 1.37 4.1-.303 5.779l-2.424 2.433l-2.424 2.433c-1.673 1.68-4.25 1.816-5.757.305s-1.37-4.1.303-5.78l2.424-2.433"/></g></svg>
-</div>
-<div className="capability-content">
-<h3>Connect Multiple Steps</h3>
-<p>Create complex workflows, pass data between different components, and make everything work together smoothly.</p>
-</div>
+        Each step can be:
+        - a function
+        - a BaseStep
+        - another flow. 
+        
+      Steps process data, perform actions, and pass results onward.
+      </p>
+    </div>
+  </div>
+  <div className="card">
+    <div className="card-content">
+      <h3>Links</h3>
+      <p>
+        <strong>Links</strong> define the order and dependencies between steps. 
+        
+        They control how data and execution flow from one step to another, and can be used for tool calls, tool results, and conditional branching.
+      </p>
+    </div>
+  </div>
 </div>
 
-<div className="capability">
-<div className="capability-icon">
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="none" stroke="var(--timbal-purple)" stroke-width="1.5"><path stroke-linecap="round" d="M18 10h-5"/><path d="M10 3h6.5c.464 0 .697 0 .892.026a3 3 0 0 1 2.582 2.582c.026.195.026.428.026.892"/><path d="M2 6.95c0-.883 0-1.324.07-1.692A4 4 0 0 1 5.257 2.07C5.626 2 6.068 2 6.95 2c.386 0 .58 0 .766.017a4 4 0 0 1 2.18.904c.144.119.28.255.554.529L11 4c.816.816 1.224 1.224 1.712 1.495a4 4 0 0 0 .848.352C14.098 6 14.675 6 15.828 6h.374c2.632 0 3.949 0 4.804.77q.119.105.224.224c.77.855.77 2.172.77 4.804V14c0 3.771 0 5.657-1.172 6.828S17.771 22 14 22h-4c-3.771 0-5.657 0-6.828-1.172S2 17.771 2 14z"/></g></svg>
-</div>
-<div className="capability-content">
-<h3>Handle Different Types of Work</h3>
-<p>Run tasks synchronously or asynchronously, work with AI models, and create reusable components.</p>
-</div>
-</div>
-
-<div className="capability">
-<div className="capability-icon">
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="none" stroke="var(--timbal-purple)" stroke-width="1.5"><path d="M7 10c0-1.414 0-2.121.44-2.56C7.878 7 8.585 7 10 7h4c1.414 0 2.121 0 2.56.44c.44.439.44 1.146.44 2.56v4c0 1.414 0 2.121-.44 2.56c-.439.44-1.146.44-2.56.44h-4c-1.414 0-2.121 0-2.56-.44C7 16.122 7 15.415 7 14z"/><path d="M4 12c0-3.771 0-5.657 1.172-6.828S8.229 4 12 4s5.657 0 6.828 1.172S20 8.229 20 12s0 5.657-1.172 6.828S15.771 20 12 20s-5.657 0-6.828-1.172S4 15.771 4 12Z"/><path stroke-linecap="round" d="M4 12H2m20 0h-2M4 9H2m20 0h-2M4 15H2m20 0h-2m-8 5v2m0-20v2M9 20v2M9 2v2m6 16v2m0-20v2"/></g></svg></div>
-<div className="capability-content">
-<h3>Manage Data</h3>
-<p>Stream results in real-time, save progress between runs, and keep everything organized.</p>
-</div>
-</div>
-</div>
-
-## 🛠️ Let's Build a Simple Flow!
-
-Ready to create your first flow? Let's do it step by step:
-
-<CodeBlock language="python" code ={`# 1. Create a new flow
-flow = Flow()
-
-# 2. Add a runnable
-flow.add_step(parse_documentation)
-
-# 3. Add more steps as needed
-flow.add_step(create_database)
-
-# 4. Connect them with links
-flow.add_link("create_database,text", "parse_documentation.return")
-
-# 5. Return the output as we want
-flow.set_output("status", "create_database.return")`}/>
-
-## Running a Flow
-
-Similar to Agent in order to run a Flow there are 2 ways depending on the synchronisation.
-
-### Synchronous Output Mode
-
-For when the agent returns a complete response after processing. We will use the `complete()` function:
-
-<CodeBlock language="python" code ={`response = await flow.complete(location="Barcelona")`}/>
-
-### Streaming Response
-
-Otherwise, when we want to know specific information on each event we can find the response asynchrounsly by running `run()`:
-
-<CodeBlock language="python" code ={`response = async for event in flow.run(locatin="Barcelona"):
-    print(event) `}/>
-
-Events tell you what's happening in your flow. Here's what you can do with them:
-
-<CodeBlock language="python" code ={`async for event in flow.run():
-    if event.type == "START":
-        print(f"Starting Agent: {event.step_id}")`}/>
-
-<CodeBlock language="python" code ={`async for event in flow.run():
-    if event.type == "OUTPUT":
-        print(f"Agent finished in {event.elapsed_time}ms")
-        print(f"Outputs: {event.outputs}")`}/>
-
-## Using Memory in Flows
-
-When using a state saver, memory persists between flow executions.
-
-To do it we have to use the function **compile()** and define and **state_saver** (You can find more information [here](/state))
-
-<CodeBlock language="python" code ={`flow = (
-      Flow()
-      .add_llm(memory_id="persistent_memory")
-      .compile(state_saver=InMemorySaver())
+<CodeBlock language="python" code={`flow = (
+    Flow()
+    .add_step("step_1", handler_1)
+    .add_step("step_2", handler_2)
+    .add_link("step_1", "step_2")
 )`}/>
 
-## Next Steps
 
-- Try creating your own Flow
-- Experiment with different configurations
-- See an example agent in [Examples](/examples)
+<div style={{ textAlign: 'center' }}>
+  <img src="/img/dag_link.png" style={{ width: '20rem' }} />
+</div>
+---
 
+## Controlling Step Inputs
+
+When building flows, you often need to control how each step receives its inputs. Timbal provides two powerful methods for this:
+
+- **Data Maps** (`set_data_map`): Dynamically connect a step's input to the output of another step or a flow input.
+- **Data Values** (`set_data_value`): Set a static value or template for a step's input.
+
+### Data Maps
+**Purpose:**
+Connect a step's input parameter to the output of another step, or to a flow input.
+
+**Syntax:**
+<CodeBlock language="python" code={`.set_data_map("step_name.parameter", "source")`}/>
+
+- `step_name.parameter`: The input parameter of a step (e.g., `check.fahrenheit`).
+- `source`: The data key to use as the value. This can be:
+  - The output of another step (e.g., `to_fahrenheit.return`)
+  - A flow input (e.g., `input_x`)
+
+**Example:**
+<CodeBlock language="python" code={`.set_data_map("to_fahrenheit.celsius", "get_temp.return")
+.set_data_map("check.fahrenheit", "to_fahrenheit.return")`}/>
+
+This means:
+- The `celsius` parameter of the `to_fahrenheit` step receives the output of `get_temp`.
+- The `fahrenheit` parameter of the `check` step receives the output of `to_fahrenheit`.
+
+### Data Values
+**Purpose:**
+Set a static value or template for a step's input.
+
+**Syntax:**
+<CodeBlock language="python" code={`.set_data_value("step_name.parameter", value)`}/>
+
+- `step_name.parameter`: The input parameter of a step (e.g., `check.threshold`).
+- `value`: A constant (e.g., `86`), or a template string (e.g., `"{{step_1.return}} and {{step_2.return}}"`).
+
+**Example:**
+<CodeBlock language="python" code={`.set_data_value("check.threshold", 86)`}/>
+
+This means:
+- The `threshold` parameter of the `check` step will always be set to `86`.
+
+### Inputs and Outputs
+
+**Inputs** and **outputs** in a flow are special cases of data mapping:
+
+- **Inputs**: Use `.set_input("step.parameter", "input_name")` to specify that a step should receive its value from a flow input.
+- **Outputs**: Use `.set_output("step.return", "result_name")` to specify which step's output is returned by the flow.
+
+:::note
+The output key will always be "**.return**" (e.g., "to_fahrenheit.return"), since it refers to the return value of the step.
+:::
+
+**Example:**
+
+<CodeBlock language="python" code={`flow = (
+    Flow()
+    .add_step("to_fahrenheit", celsius_to_fahrenheit)
+    .set_input("to_fahrenheit.celsius", "input_celsius")  # input_celsius is a flow input
+    .set_output("to_fahrenheit.return", "fahrenheit")   # expose flow output
+)`}/>
+
+This means:
+- The flow expects an input called `input_celsius`.
+- The output of `to_fahrenheit` will be available as `fahrenheit` in the flow's result.
+
+---
+
+### Example: Temperature Alert Flow
+
+<CodeBlock language="python" code={`from timbal import Flow
+
+def celsius_to_fahrenheit(celsius):
+    return celsius * 9 / 5 + 32
+
+def check_threshold(fahrenheit, threshold):
+    if fahrenheit > threshold:
+        return "Alert: Temperature is too high!"
+    else:
+        return "Temperature is normal."
+
+flow = (
+    Flow()
+    .add_step("to_fahrenheit", celsius_to_fahrenheit)
+    .add_step("check", check_threshold)
+    # Map Celsius input parameter to the function
+    .set_input("to_fahrenheit.celsius", "input_celsius")
+    # Map Fahrenheit output to threshold checker
+    .set_data_map("check.fahrenheit", "to_fahrenheit.return")
+    # Set a static threshold value
+    .set_data_value("check.threshold", 86)
+    .set_output("check.return", "status")
+)
+
+async def main():
+    result = await flow.complete(input_celsius=35)
+    print(result.output["status"])
+`}/>
+
+---
+
+## Dynamic Data with String Interpolation
+
+Template strings let you combine and transform outputs from multiple steps.  
+This is especially useful for LLM prompts or merging results.
+
+<CodeBlock language="python" code={`from timbal import Flow
+
+def get_first_name():
+    return "Alice"
+
+def get_last_name():
+    return "Smith"
+
+def check_full_name(full_name):
+    if full_name == "Alice Smith":
+        return "Welcome, Alice Smith!"
+    else:
+        return f"User {full_name} not recognized."
+
+flow = (
+    Flow()
+    .add_step("first_name", get_first_name)
+    .add_step("last_name", get_last_name)
+    .add_step("validate", check_full_name)
+    # Interpolate the outputs of first_name and last_name into a full name string
+    .set_data_value("validate.full_name", "{{first_name.return}} {{last_name.return}}")
+    .set_output("validate.return", "message")
+)
+
+async def main():
+    result = await flow.complete()
+    print(result.output["message"])`}/>
+
+---
+
+## Integrating LLMs
+
+You can add LLMs (Large Language Models) as steps in your flow using .add_llm().
+LLMs can use memory, call tools, and be chained with other steps for advanced reasoning.
+- **Memory**: Use the memory_id parameter to enable persistent context across runs.
+- **Tool Use**: Connect LLMs to tools or functions using .add_link(..., is_tool=True) and .add_link(..., is_tool_result=True) for advanced workflows.
+- **Prompt Construction**: Use string interpolation to dynamically build prompts from previous step outputs.
+
+Suppose you want to fetch an email, then have an LLM summarize it:
+
+<CodeBlock language="python" code={`from timbal import Flow
+
+def get_email():
+    return "Hi team, let's meet tomorrow at 10am to discuss the project. Best, Alice"
+
+flow = (
+    Flow()
+    .add_step("fetch_email", get_email)
+    .add_llm("llm", model="gpt-4o-mini", memory_id="persistent_memory")
+    # Use string interpolation to build the prompt from the previous step
+    .set_data_value("llm.prompt", "Summarize this email: {{fetch_email.return}}")
+    .set_output("llm.return", "summary")
+)
+
+async def main():
+    result = await flow.complete()
+    print(result.output["summary"].content[0].text)`}/>
+
+**What’s happening here?***
+- `fetch_email` retrieves the email text.
+- The LLM step receives a prompt that includes the email content.
+- The LLM generates a summary, which is returned as the flow output.
+
+:::tip
+You can chain multiple steps, use memory for context, and connect LLMs to external tools for even more powerful workflows.
+:::
+
+For more, see the [Advanced documentation](/flows/advanced)
+
+---
+
+## Enabling Memory and Finalizing Your Flow
+
+To enable advanced features like persistent memory, you need to finalize your flow using the .compile() method.
+
+Compiling your flow validates its structure and (optionally) attaches a state saver for memory.
+
+### Why compile?
+
+Compiling ensures your flow is ready for production, with all steps, data maps, and memory configured correctly.
+
+### How to enable memory?
+
+Pass a state saver (like InMemorySaver) to .compile() to persist context across runs.
+
+See [State Savers](/state) for more information.
+
+<CodeBlock language="python" code={`from timbal.state.savers import InMemorySaver
+
+flow = (
+    Flow()
+    .add_llm(memory_id="persistent_memory")
+    .compile(state_saver=InMemorySaver())
+)`}/>
+
+---
+
+## How to Run Your Flow
+
+Once your flow is defined and compiled, you can execute it in two main ways:
+
+**Get the final output:**
+<CodeBlock language="python" code={`result = await flow.complete(input_x=123)
+print(result.output["result"])`}/>
+
+**Stream events as they happen:**
+<CodeBlock language="python" code={`async for event in flow.run(input_x=123):
+    print(event)`}/>
+
+---
+
+## Quick Reference
+
+- **Steps**: Units of work (functions, LLMs, or flows)
+- **Links**: Control execution and data flow
+- **Data Maps/Values**: Connect and set step inputs
+- **String Interpolation**: Combine outputs flexibly
+- **LLMs**: Add language models as steps
+- **Inputs/Outputs**: Define what goes in and out of your flow
+- **compile()**: Finalize and enable memory/state
+
+For more, see the [Flows documentation](/flows), [Advanced Flow Concepts](/flows/advanced), and [Examples](/examples).
 
 <style>{`
 .cards-container {

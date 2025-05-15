@@ -10,9 +10,11 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 Master proven strategies for designing advanced, specialized AI agents that work together seamlessly to tackle complex challenges.
 </h2>
 
+---
+
 ## What is an Agent?
 
-An Agent is like having your own AI-powered teammate—one that can understand your goals, reason about the best way to achieve them, and take actions on your behalf. Powered by advanced Large Language Models (LLMs), Agents go far beyond simple chatbots or assistants.
+An <span style={{color: 'var(--timbal-purple)'}}><strong>Agent</strong></span> is like having your own AI-powered teammate—one that can understand your goals, reason about the best way to achieve them, and take actions on your behalf. Powered by advanced Large Language Models (LLMs), Agents go far beyond simple chatbots or assistants.
 
 Think of an Agent as:
 
@@ -39,7 +41,7 @@ def get_weather(location: str) -> str:
 
 # Create an agent with the weather tool
 agent = Agent(
-    model="gpt-4",
+    model="gemini-2.5-pro-preview-03-25",
     tools=[
         Tool(
             runnable=get_weather,
@@ -53,15 +55,157 @@ response = await agent.complete(
     prompt="What's the weather like in New York?"
 )`}/>
 
-<CodeBlock language="bash" title="Complete Agent Execution Logs" code={`StartEvent(type='START', run_id=..., path='agent', status_text=...)
-StartEvent(type='START', run_id=..., path='agent.llm-0', status_text=...)
-OutputEvent(type='OUTPUT', run_id=..., path='agent.llm-0', input={'messages': [Message(role=user, content=[TextContent(type='text', text="What's the weather like in New York?")])], 'tools': [{'type': 'function', 'function': {'name': 'get_weather', 'description': 'Get the weather for a specific location', 'parameters': {'properties': {'location': {'title': 'Location', 'type': 'string'}}, 'required': ['location'], 'title': 'Step_get_weather_params', 'type': 'object'}}}], 'system_prompt': None, 'model': 'gpt-4', 'max_tokens': None, 'stream': False}, output=Message(role=assistant, content=[ToolUseContent(type='tool_use', id='...', name='get_weather', input={'location': 'New York'})]), error=..., t0=..., t1=..., usage=...)
-StartEvent(type='START', run_id=..., path='agent.get_weather-call_...', status_text=...)
-OutputEvent(type='OUTPUT', run_id=..., path='agent.get_weather-...', input={'location': 'New York'}, output=Message(role=user, content=[TextContent(type='text', text='The weather is sunny')]), error=..., t0=..., t1=..., usage=...)
-StartEvent(type='START', run_id=..., path='agent.llm-1', status_text=...)
-OutputEvent(type='OUTPUT', run_id=..., path='agent.llm-1', input={'messages': [Message(role=user, content=[TextContent(type='text', text="What's the weather like in New York?")]), Message(role=assistant, content=[ToolUseContent(type='tool_use', id='...', name='get_weather', input={'location': 'New York'})]), Message(role=user, content=[ToolResultContent(type='tool_result', id='call_...', content=[TextContent(type='text', text='The weather is sunny')])])], 'tools': [{'type': 'function', 'function': {'name': 'get_weather', 'description': 'Get the weather for a specific location', 'parameters': {'properties': {'location': {'title': 'Location', 'type': 'string'}}, 'required': ['location'], 'title': 'Step_get_weather_params', 'type': 'object'}}}], 'system_prompt': None, 'model': 'gpt-4', 'max_tokens': None, 'stream': False}, output=Message(role=assistant, content=[TextContent(type='text', text='The weather in New York is sunny.')]), error=..., t0=..., t1=..., usage=...)
-OutputEvent(type='OUTPUT', run_id=..., path='agent', input={'prompt': {'role': 'user', 'content': [{'type': 'text', 'text': "What's the weather like in New York?"}]}}, output=Message(role=assistant, content=[TextContent(type='text', text='The weather in New York is sunny.')]), error=..., t0=..., t1=..., usage=...)
+ **Agent Execution Logs**:
+
+<div className="log-step-static">
+  StartEvent(..., path='agent, ...)
+</div>
+
+<details className="log-step-collapsible">
+<summary>
+  OutputEvent(..., path='agent.llm-0', ...)
+</summary>
+<CodeBlock language="bash" code={`OutputEvent(...,
+    path='agent.llm-0', 
+    input={
+      'messages': [
+        Message(
+          role=user,
+          content=[TextContent(
+            type='text', 
+            text="What's the weather like in New York?"
+          )]
+        )
+      ], 
+      'tools': [{
+        'type': 'function', 
+        'function': {
+          'name': 'get_weather',
+          'description': 'Get the weather for a specific location',
+          'parameters': {
+            'properties': {'location': {'title': 'Location', 'type': 'string'}}, 
+            'required': ['location'],
+            ...
+          }
+        }
+      }], 
+      'model': 'gpt-4',
+      ...
+    },
+    output=Message(
+      role=assistant,
+      content=[ToolUseContent(
+        type='tool_use', 
+        id='...', 
+        name='get_weather', 
+        input={'location': 'New York'}
+      )]
+    ), ...)
 `}/>
+</details>
+
+<div className="log-step-static">
+  StartEvent(..., path='agent.get_weather-call_...', ...)
+</div>
+
+<details className="log-step-collapsible">
+<summary>
+  OutputEvent(..., path='agent.get_weather-...)
+</summary>
+<CodeBlock language="bash" code={`OutputEvent(...,
+    path='agent.get_weather-...',
+    input={'location': 'New York'},
+    output=Message(
+      role=user,
+      content=[TextContent(type='text', text='The weather is sunny')]
+    ), ...)`}/>
+</details>
+
+<div className="log-step-static">
+  StartEvent(..., path='agent.llm-1', ...)
+</div>
+
+<details className="log-step-collapsible">
+<summary>
+  OutputEvent(..., path='agent.llm-1', ...)
+</summary>
+<CodeBlock language="bash" code={`OutputEvent(...,
+    path='agent.llm-1', 
+    input={
+      'messages': [
+        Message(
+          role=user, 
+          content=[TextContent(
+            type='text',
+            text="What's the weather like in New York?"
+          )]
+        ), 
+        Message(
+          role=assistant, 
+          content=[ToolUseContent(
+            type='tool_use',
+            id='...',
+            name='get_weather',
+            input={'location': 'New York'}
+          )]
+        ),
+        Message(
+          role=user, 
+          content=[ToolResultContent(
+            type='tool_result', 
+            id='call_...', 
+            content=[TextContent(type='text', text='The weather is sunny')]
+          )]
+        )
+      ],
+      'tools': [{
+        'type': 'function', 
+        'function': {
+          'name': 'get_weather',
+          'description': 'Get the weather for a specific location',
+          'parameters': {
+            'properties': {'location': {'title': 'Location', 'type': 'string'}},
+            'required': ['location'],
+            ...
+          }
+        }
+      }], 
+      'model': 'gpt-4',
+      ...
+    },
+    output=Message(
+      role=assistant, 
+      content=[TextContent(
+        type='text',
+        text='The weather in New York is sunny.'
+      )]
+    ),...)`}/>
+</details>
+
+<details className="log-step-collapsible">
+<summary>
+  OutputEvent(..., path='agent', ...)
+</summary>
+<CodeBlock language="bash" code={`OutputEvent(...,
+    path='agent',
+    input={
+      'prompt': {
+        'role': 'user', 
+        'content': [{
+          'type': 'text',
+          'text': "What's the weather like in New York?"
+        }]
+      }
+    },
+    output=Message(
+      role=assistant, 
+      content=[TextContent(
+        type='text',
+        text='The weather in New York is sunny.'
+      )]
+    ), ...)
+`}/>
+</details>
 
 This example shows how to create an agent with a custom tool. The agent can now use the weather tool to fetch real-time weather data when needed. You can add multiple tools to make your agent even more powerful!
 
@@ -171,13 +315,13 @@ They can handle a wide range of tasks, from answering questions to automating wo
 
 To execute an Agent, there are 2 possibilities depending on the synchronisation.
 
-### Asynchronous Output Mode
+### Get a Complete Answer
 
 For when the agent returns a complete response after processing. We will use the `complete()` function:
 
 <CodeBlock language="python" code ={`response = await agent.complete(prompt="What time is it?")`}/>
 
-### Streaming Response
+### Real-Time (Streaming) Output
 
 Otherwise, when we want to know specific information on each event we can find the response asynchrounsly by running `run()`:
 
@@ -195,56 +339,6 @@ Events tell you what's happening in your agent. Here's what you can do with them
         print(f"Agent finished in {event.elapsed_time}ms")
         print(f"Outputs: {event.outputs}")`}/>
 
-
-## Using Tools
-
-Great! Now that you understand how Agents work, let's make yours even more powerful by adding some tools:
-
-<CodeBlock language="python" code ={`Agent(
-    tools = [
-      search_internet,
-      Tool(
-        runnable = get_weather,
-        description = "Get the weather of a location",
-        exclude_params=["query"]
-      ),
-      {
-        "runnable": get_time,
-        "description": "Get the time of a location",
-        "params_mode": "required",
-        "invalid_key": "invalid_value",
-        "include_params": "model"
-      }
-    ]
-)`}/>
-
-Agents can be equipped with tools—custom functions that expand their abilities beyond text generation. With tools, agents can perform tasks like calculations, interact with external systems, and process data. 
-
-To learn more about creating and configurating tools, check out the [Tools documentation](/agents/tools).
-
-
-## Using Memory in Agents
-
-If we want our Agent to have memory we have to ensure this 2 steps:
-
-First, we have to add an `state_saver`.
-
-<CodeBlock language="python" code ={`Agent(
-        model="gpt-4o-mini",
-        state_saver=InMemorySaver(),
-    )`}/>
-
-Second, we have to add the context. To do it we have to first initialize a `RunContext`and when a response is generated updated with the parent context to ensure the tracebelity of it.
-
-<CodeBlock language="python" code ={`from timbal.state import RunContext
-run_context = RunContext()
-flow_output_event = await agent.complete(
-        context=run_context,
-        prompt="What's my name?"
-)
-run_context = RunContext(parent_id=flow_output_event.run_id)`}/>
-
-In order to know more about state savers and the ones done take a look at [State documentation](/state)
 
 ## Next Steps
 

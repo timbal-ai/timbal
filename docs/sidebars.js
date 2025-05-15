@@ -43,6 +43,7 @@
       items: [
         'flows/index',
         'flows/memory',
+        'flows/advanced',
     ],
     },
     {

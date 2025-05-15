@@ -10,9 +10,9 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 Build your first flow with Timbal with 5 lines of code.
 </h2>
 
-We'll start implementing an **agent**. It will be a **simple chatbot** and gradually enhance it with advanced features. Let's dive in!
+We'll start implementing an <span style={{color: 'var(--timbal-purple)'}}><strong>agent</strong></span>. It will be a <span style={{color: 'var(--timbal-purple)'}}><strong>simple chatbot</strong></span> and gradually enhance it with advanced features. Let's dive in!
 
-Before moving forward, ensure you've completed the installation of Timbal. If you haven't set it up yet, follow the **[installation guide](/getting-started/installation)** to get started.
+Before moving forward, ensure you've completed the installation of Timbal. If you haven't set it up yet, follow the [installation guide](/getting-started/installation) to get started.
 
 
 
@@ -26,7 +26,7 @@ Timbal makes your life easier by automatically setting up a complete project str
     <div class="step-content">
       <div class="step-title">Initialize Project Structure</div>
       <div class="step-desc">
-      - Run the `timbal` CLI command:
+      - Run the timbal CLI command:
 
         <CodeBlock language="bash" code ={`timbal init my-project`}/>
 
@@ -94,7 +94,7 @@ Timbal makes your life easier by automatically setting up a complete project str
       You will have a file `agent.py` with a basic structure of a flow.
 This is the only file you need to edit to create your own flow.
 
-<CodeBlock language="python" code ={`from datetime import datetime
+<CodeBlock language="python" title= "agent.py" code ={`from datetime import datetime
 
 from timbal import Agent
 from timbal.state.savers import TimbalPlatformSaver
@@ -140,11 +140,11 @@ This makes it easy to add new packages and manage your project's dependencies.
 
 **1. Import the class `Agent` from the `timbal` package.**
 
-<CodeBlock language="python" title="flow.py" code ={`from timbal import Agent`}/>
+<CodeBlock language="python" title="agent.py" code ={`from timbal import Agent`}/>
 
 **2. Initialize an `Agent` object.**
 
-<CodeBlock language="python" title="flow.py" code={`flow = Agent(
+<CodeBlock language="python" title="agent.py" code={`flow = Agent(
     model="gemini-2.5-pro-preview-03-25"
 )`}/>
 
@@ -158,22 +158,21 @@ Only with the `Agent` class we have a flow that represents a llm that receives a
 
 Now let's run the chatbot!
 
-<CodeBlock language="python" title="flow.py"
-code={`response = flow.complete(prompt="What is the capital of Germany?")
+<CodeBlock language="python" title="agent.py"
+code={`response = agent.complete(prompt="What is the capital of Germany?")
 print(response.content[0].text)`}/>
 
 
 You will see an output like this:
 
-
-The capital of Germany is Berlin.
+<CodeBlock language="bash" code={`The capital of Germany is Berlin.`}/>
 
 
 :::tip[Congratulations!]
 You've just created your first Timbal flow!
 :::
 
-This is the simplest flow you can create.
+This is the **simplest flow** you can create.
 
 You can modify it as you want. For example, you can add tools to the agent.
 
@@ -254,7 +253,7 @@ ___
 
 The best way to deploy your Timbal project is through the official Timbal Platform. It’s fast, easy, and gives you access to all the latest features and integrations.
 
-👉 Go to the [Timbal Platform](/platform) to get started!
+👉 Go to the [Timbal Platform] to get started!
 
 Prefer to run things locally or on your own infrastructure?
 
