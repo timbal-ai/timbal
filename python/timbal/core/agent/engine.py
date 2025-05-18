@@ -15,7 +15,7 @@ from openai.types.chat import (
 from openai.types.chat import (
     ChatCompletionMessage as OpenAIMessage,
 )
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 from timbal.types.events.chunk import ChunkEvent
 from uuid_extensions import uuid7
 
@@ -44,17 +44,18 @@ logger = structlog.get_logger("timbal.core.agent.engine")
 
 class AgentParamsModel(BaseModel):
     """Fixed parameter model for Agents."""
+    model_config = ConfigDict(extra="ignore")
 
     prompt: Message = Field(description="The prompt to use for the agent.")
-    system_prompt: str | None = Field(
+    system_prompt: str = Field(
         default=None,
         description="The system prompt to use for the agent."
     )
-    model: str | None = Field(
-        default="gpt-4o-mini",
+    model: str = Field(
+        default="gpt-4.1-nano",
         description="The model to use for the agent."
     )
-    max_tokens: int | None = Field(
+    max_tokens: int = Field(
         default=None,
         description="The maximum number of tokens to generate."
     )
@@ -478,7 +479,7 @@ class Agent(BaseStep):
 
     async def run(
         self, 
-        context: RunContext | None = None, # noqa: ARG002
+        context: RunContext | None = None,
         **kwargs: Any,
     ) -> Any:
         """Execute the agent's main processing loop with tool usage, state management, and event streaming.
@@ -536,7 +537,8 @@ class Agent(BaseStep):
             - Supports continuation of previous conversations
             - Handles both streaming and non-streaming LLMs
         """
-        # ? Find a way to encapsulate all this logic. I am imagining a class that implements the collect method, wraps the run method, etc. 
+        t0 = int(time.time() * 1000)
+
         if context is None:
             context = RunContext(id=uuid7(as_type="str"))
         elif context.id is None:
@@ -545,21 +547,8 @@ class Agent(BaseStep):
         # Set the run context for the duration of the agent run.
         run_context_var.set(context)
 
-        # This one is global to the agent.
-        t0 = int(time.time() * 1000)
-
-        agent_start_event = StartEvent(
-            run_id=context.id,
-            path=self.path,
-            status_text="Starting...",
-        )
-
-        logger.info("start_event", start_event=agent_start_event)
-        yield agent_start_event
-
-        # Aggregated traces and usage for the entire run.
-        run_steps = {}
-        run_usage = {}
+        # Copy the input as is, so we save the traces without validated data and defaults.
+        agent_input = dump(kwargs, context=context)
 
         # Load the memory.
         # Always do this first to ensure even if validation fails we can carry the memory to the next run.
@@ -585,40 +574,53 @@ class Agent(BaseStep):
                     for message in last_snapshot.data["memory"].resolve()
                 ])
 
-        # Copy the input as is, so we save the traces without validated data and defaults.
-        agent_input = dump(kwargs, context=context)
+        # Add all input kwargs to the run context data.
+        # This way we can access them from any part of the agent run.
+        for k, v in kwargs.items():
+            context.data[k] = v
+
+        agent_start_event = StartEvent(
+            run_id=context.id,
+            path=self.path,
+            status_text="Starting...",
+        )
+
+        logger.info("start_event", start_event=agent_start_event)
+        yield agent_start_event
+
+        # Aggregated traces and usage for the entire run.
+        run_steps = {}
+        run_usage = {}
 
         try:
             # TODO Review this. Will it make sense to pass the kwargs as well (with before agent callback)
             if self.before_agent_callback is not None:
-                self.before_agent_callback(context, **kwargs)
+                self.before_agent_callback(context)
 
-                if not len(messages):
-                    raise ValueError(
-                        "Cannot call an agent without some input messages."
-                        "Please review your before_agent_callback implementation.")
-
-                kwargs = {**self.llm_kwargs, "prompt": messages[-1]}
-                kwargs = dict(self.params_model().model_validate(kwargs))
-                kwargs.pop("prompt")
-            else:
+            has_prompt = False
+            if "prompt" in kwargs:
                 # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
-                # ? Ideally the client should be able to automatically handle this, but we do it ourselves to simplify the in/out interface.
-                if "prompt" not in kwargs:
-                    raise ValueError("The 'prompt' parameter is required when calling an Agent.")
-                
                 kwargs["prompt"] = Message.validate(kwargs["prompt"])
-
                 agent_input = dump(kwargs, context=context)
+                has_prompt = True
+            elif len(messages):
+                # Hack to pass the validation.
+                # TODO We should handle this better. Perhaps exposing a json schema and validating another model.
+                kwargs["prompt"] = Message.validate("hack")
+            else:
+                raise ValueError("No prompt or message history found!")
 
-                kwargs = {**self.llm_kwargs, **kwargs}
-                kwargs = dict(self.params_model().model_validate(kwargs))
+            kwargs = {**self.llm_kwargs, **kwargs}
+            kwargs = dict(self.params_model().model_validate(kwargs))
 
-                # Add the prompt to the messages. The LLM router expects everything inside the messages list.
-                prompt = kwargs.pop("prompt")
+            # Add the prompt to the messages. The LLM router expects everything inside the messages list.
+            prompt = kwargs.pop("prompt")
+            if has_prompt:
                 messages.append(prompt)
+
         except EarlyExit:
             return
+
         except Exception as err:
             error = {
                 "type": type(err).__name__,
