@@ -1,5 +1,5 @@
 """
-Slack Message Module
+Slack Messages Module
 
 Setup:
 1. Create app at https://api.slack.com/apps
@@ -80,24 +80,43 @@ def get_messages(
         if not token:
             raise APIKeyNotFoundError("SLACK_BOT_TOKEN or SLACK_USER_TOKEN not found")
         
-    try:
-        client = WebClient(token=token)
-        result = client.conversations_history(
-            channel=channel,
-            cursor=cursor,
-            include_all_metadata=include_all_metadata,
-            inclusive=inclusive,
-            limit=limit,
-            latest=latest,
-            oldest=oldest
-        )
-        messages = result["messages"]
-        return messages
-    except Exception as e:
-        return f"Error creating conversation: {e}"
+    client = WebClient(token=token)
+    result = client.conversations_history(
+        channel=channel,
+        cursor=cursor,
+        include_all_metadata=include_all_metadata,
+        inclusive=inclusive,
+        limit=limit,
+        latest=latest,
+        oldest=oldest
+    )
+    messages = result["messages"]
+    return messages
 
 
-# TODO Conversations replies
+def get_replies(
+    channel: str = Field(
+        description="The channel id or channel name to get the messages for."
+    ),
+    ts: str = Field(
+        description="The timestamp of the message to get the replies for."
+    ),
+    # TODO Add more stuff.
+) -> dict:
+
+    token = os.getenv("SLACK_BOT_TOKEN")
+    if not token:
+        token = os.getenv("SLACK_USER_TOKEN")
+        if not token:
+            raise APIKeyNotFoundError("SLACK_BOT_TOKEN or SLACK_USER_TOKEN not found")
+
+    client = WebClient(token=token)
+    result = client.conversations_replies(
+        channel=channel,
+        ts=ts,
+    )
+    replies = result["messages"]
+    return replies
 
 
 def send_message(
@@ -116,10 +135,6 @@ def send_message(
     blocks: str | None = Field(
         default=None,
         description="A JSON-based array of structured blocks, presented as a URL-encoded string."
-    ),
-    bot: bool = Field(
-        default=False,
-        description="Whether to use the bot token or user token."
     ),
     icon_emoji: str | None = Field(
         default=None,
@@ -171,7 +186,6 @@ def send_message(
     """This function can be used to send a message to a specific channel."""
     
     # Enable calling this step without pydantic model_validate()
-    bot = bot.default if hasattr(bot, "default") else bot
     text = text.default if hasattr(text, "default") else text
     attachments = attachments.default if hasattr(attachments, "default") else attachments
     blocks = blocks.default if hasattr(blocks, "default") else blocks
@@ -186,16 +200,11 @@ def send_message(
     unfurl_links = unfurl_links.default if hasattr(unfurl_links, "default") else unfurl_links
     unfurl_media = unfurl_media.default if hasattr(unfurl_media, "default") else unfurl_media
 
-    # TODO Remove bot param
-    if bot:
-        token = os.getenv("SLACK_BOT_TOKEN")
-    else:
-        token = os.getenv("SLACK_USER_TOKEN")
+    token = os.getenv("SLACK_BOT_TOKEN")
     if not token:
-        if bot:
-            raise APIKeyNotFoundError("SLACK_BOT_TOKEN not found")
-        else:
-            raise APIKeyNotFoundError("SLACK_USER_TOKEN not found")
+        token = os.getenv("SLACK_USER_TOKEN")
+        if not token:
+            raise APIKeyNotFoundError("SLACK_BOT_TOKEN or SLACK_USER_TOKEN not found")
         
     if text is None and attachments is None and blocks is None:
         raise ValueError("Either text, attachments, or blocks must be provided to send a message")
@@ -203,27 +212,24 @@ def send_message(
     if markdown_text is not None and (text is not None or blocks is not None):
         raise ValueError("markdown_text should not be used in conjunction with text or blocks")
 
-    try:
-        client = WebClient(token=token)
-        result = client.chat_postMessage(
-            channel=channel, 
-            text=text,
-            attachments=attachments,
-            blocks=blocks,
-            icon_emoji=icon_emoji,
-            icon_url=icon_url,
-            link_names=link_names,
-            markdown_text=markdown_text,
-            metadata=metadata,
-            parse=parse,
-            reply_broadcast=reply_broadcast,
-            thread_ts=thread_ts,
-            unfurl_links=unfurl_links,
-            unfurl_media=unfurl_media
-        )
-        return result
-    except Exception as e:
-        return f"Error sending message: {e}"
+    client = WebClient(token=token)
+    result = client.chat_postMessage(
+        channel=channel, 
+        text=text,
+        attachments=attachments,
+        blocks=blocks,
+        icon_emoji=icon_emoji,
+        icon_url=icon_url,
+        link_names=link_names,
+        mrkdwn=markdown_text,
+        metadata=metadata,
+        parse=parse,
+        reply_broadcast=reply_broadcast,
+        thread_ts=thread_ts,
+        unfurl_links=unfurl_links,
+        unfurl_media=unfurl_media
+    )
+    return result
     
 
 def schedule_message(
@@ -310,42 +316,40 @@ def schedule_message(
 
     token = os.getenv("SLACK_BOT_TOKEN")
     if not token:
-        raise APIKeyNotFoundError("SLACK_BOT_TOKEN not found")
+        token = os.getenv("SLACK_USER_TOKEN")
+        if not token:
+            raise APIKeyNotFoundError("SLACK_BOT_TOKEN or SLACK_USER_TOKEN not found")
     
-    try:
-        client = WebClient(token=token)
-        
-        if minutes_from_now is not None:
-            scheduled_time = datetime.now() + timedelta(minutes=minutes_from_now)
-            unix_timestamp = scheduled_time.timestamp()
-        elif timestamp is not None:
-            unix_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S%z").timestamp()
-        else:
-            raise ValueError("Either minutes_from_now or timestamp must be provided to schedule a message")
-        
-        if text is None and attachments is None and blocks is None:
-            raise ValueError("Either text, attachments, or blocks must be provided to schedule a message")
-        
-        if markdown_text is not None and (text is not None or blocks is not None):
-            raise ValueError("markdown_text should not be used in conjunction with text or blocks")
-        
-        result = client.chat_scheduleMessage(
-            channel=channel, 
-            text=text, 
-            attachments=attachments,
-            blocks=blocks,
-            post_at=int(unix_timestamp),
-            link_names=link_names,
-            markdown_text=markdown_text,
-            metadata=metadata,
-            parse=parse,
-            reply_broadcast=reply_broadcast,
-            thread_ts=thread_ts,
-            unfurl_links=unfurl_links,
-            unfurl_media=unfurl_media
-        )
-        
-        return result
-        
-    except Exception as e:
-        return f"Error scheduling message: {e}"
+    client = WebClient(token=token)
+    
+    if minutes_from_now is not None:
+        scheduled_time = datetime.now() + timedelta(minutes=minutes_from_now)
+        unix_timestamp = scheduled_time.timestamp()
+    elif timestamp is not None:
+        unix_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    else:
+        raise ValueError("Either minutes_from_now or timestamp must be provided to schedule a message")
+    
+    if text is None and attachments is None and blocks is None:
+        raise ValueError("Either text, attachments, or blocks must be provided to schedule a message")
+    
+    if markdown_text is not None and (text is not None or blocks is not None):
+        raise ValueError("markdown_text should not be used in conjunction with text or blocks")
+    
+    result = client.chat_scheduleMessage(
+        channel=channel, 
+        text=text, 
+        attachments=attachments,
+        blocks=blocks,
+        post_at=int(unix_timestamp),
+        link_names=link_names,
+        markdown_text=markdown_text, # TODO Review this
+        metadata=metadata,
+        parse=parse,
+        reply_broadcast=reply_broadcast,
+        thread_ts=thread_ts,
+        unfurl_links=unfurl_links,
+        unfurl_media=unfurl_media
+    )
+    
+    return result

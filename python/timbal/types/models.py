@@ -40,7 +40,9 @@ from pydantic import (
 from pydantic.fields import FieldInfo
 
 from ..state.context import RunContext
-from . import Field, File, Message
+from .field import Field
+from .file import File
+from .message import Message
 
 
 def safe_is_nan(value: Any) -> bool:

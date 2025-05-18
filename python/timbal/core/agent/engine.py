@@ -19,9 +19,8 @@ from pydantic import BaseModel, TypeAdapter
 from timbal.types.events.chunk import ChunkEvent
 from uuid_extensions import uuid7
 
-from ...errors import AgentError
+from ...errors import AgentError, EarlyExit
 from ...state.context import RunContext, run_context_var
-from ...state.data import DataValue
 from ...state.savers.base import BaseSaver
 from ...state.snapshot import Snapshot
 from ...steps.llms.router import llm_router
@@ -117,7 +116,7 @@ class Agent(BaseStep):
         ```
     """
 
-    # TODO before agent callback. after agent callback. before tools callbacks. after tools callbacks.
+    # TODO before tools callbacks. after tools callbacks.
     def __init__(
         self,
         id: str = "agent",
@@ -126,8 +125,9 @@ class Agent(BaseStep):
         tools: list[Callable | BaseStep | dict[str, Any] | Tool] = [],
         max_iter: int = 10,
         state_saver: BaseSaver | None = None,
+        # ? Should these be RunnableLike
         before_agent_callback: Callable | None = None,
-        # after_agent_callback: Callable | None = None,
+        after_agent_callback: Callable | None = None,
         **kwargs: Any, # These are the LLM specific kwargs.
     ) -> None:
         if path is None:
@@ -141,8 +141,9 @@ class Agent(BaseStep):
 
         self._load_tools(tools)
         self.max_iter = max_iter
+        # TODO Validate these.
         self.before_agent_callback = before_agent_callback
-        # self.after_agent_callback = after_agent_callback
+        self.after_agent_callback = after_agent_callback
 
         self.llm_kwargs = kwargs
 
@@ -590,10 +591,10 @@ class Agent(BaseStep):
         try:
             # TODO Review this. Will it make sense to pass the kwargs as well (with before agent callback)
             if self.before_agent_callback is not None:
-                self.before_agent_callback(**kwargs)
+                self.before_agent_callback(context, **kwargs)
 
                 if not len(messages):
-                    raise AgentError(
+                    raise ValueError(
                         "Cannot call an agent without some input messages."
                         "Please review your before_agent_callback implementation.")
 
@@ -604,7 +605,7 @@ class Agent(BaseStep):
                 # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
                 # ? Ideally the client should be able to automatically handle this, but we do it ourselves to simplify the in/out interface.
                 if "prompt" not in kwargs:
-                    raise AgentError("The 'prompt' parameter is required when calling an Agent.")
+                    raise ValueError("The 'prompt' parameter is required when calling an Agent.")
                 
                 kwargs["prompt"] = Message.validate(kwargs["prompt"])
 
@@ -616,6 +617,8 @@ class Agent(BaseStep):
                 # Add the prompt to the messages. The LLM router expects everything inside the messages list.
                 prompt = kwargs.pop("prompt")
                 messages.append(prompt)
+        except EarlyExit:
+            return
         except Exception as err:
             error = {
                 "type": type(err).__name__,
@@ -975,6 +978,13 @@ class Agent(BaseStep):
         logger.info("output_event", output_event=agent_output_event)
         yield agent_output_event
 
+        # TODO Make this async.
+        if self.after_agent_callback is not None:
+            try:
+                self.after_agent_callback(context)
+            except Exception as err:
+                logger.error("after_agent_callback_error", err=err)
+
     
     async def complete(
         self,
@@ -990,6 +1000,8 @@ class Agent(BaseStep):
         Returns:
             OutputEvent: The agent's selected outputs.
         """
+        agent_output_event = None
         async for event in self.run(context=context, **kwargs):
             if isinstance(event, OutputEvent) and event.path == self.path:
-                return event
+                agent_output_event = event
+        return agent_output_event

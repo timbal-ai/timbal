@@ -52,10 +52,6 @@ def get_channel_info(
         default=None, 
         description="Encoded team id to list channels in, required if token belongs to org-wide app"
     ),
-    bot: bool = Field(
-        default=False,
-        description="Whether to use the bot token"
-    )
 ) -> dict | list[dict]:
     """Retrieve information about Slack channels.
     This function can either get information about a specific channel or list all channels
@@ -71,45 +67,37 @@ def get_channel_info(
     team_id = team_id.default if hasattr(team_id, "default") else team_id
     types = types.default if hasattr(types, "default") else types
 
-    if bot:
-        token = os.getenv("SLACK_BOT_TOKEN")
-    else:
-        token = os.getenv("SLACK_USER_TOKEN")
+    token = os.getenv("SLACK_BOT_TOKEN")
     if not token:
-        if bot:
-            raise APIKeyNotFoundError("SLACK_BOT_TOKEN not found")
-        else:
-            raise APIKeyNotFoundError("SLACK_USER_TOKEN not found")
+        token = os.getenv("SLACK_USER_TOKEN")
+        if not token:
+            raise APIKeyNotFoundError("SLACK_BOT_TOKEN or SLACK_USER_TOKEN not found")
         
-    try:
-        client = WebClient(token=token)
-        
-        if channel:
-            result = client.conversations_info(
-                channel=channel,
-                include_num_members=include_num_members,
-                include_locale=include_locale
+    client = WebClient(token=token)
+    
+    if channel:
+        result = client.conversations_info(
+            channel=channel,
+            include_num_members=include_num_members,
+            include_locale=include_locale
+        )
+        channel = result["channel"]
+
+        return channel
+    else:
+        channels = []
+        cursor = None
+        while True:
+            result = client.conversations_list(
+                exclude_archived=exclude_archived,
+                types=types,
+                limit=limit,
+                team_id=team_id,
+                cursor=cursor
             )
-            channel = result["channel"]
-
-            return channel
-        else:
-            channels = []
-            cursor = None
-            while True:
-                result = client.conversations_list(
-                    exclude_archived=exclude_archived,
-                    types=types,
-                    limit=limit,
-                    team_id=team_id,
-                    cursor=cursor
-                )
-                channels.extend(result["channels"])
-                cursor = result.get("response_metadata", {}).get("next_cursor")
-                if not cursor:
-                    break
-            
-            return channels
-
-    except Exception as e:
-        return f"Error getting channel info: {e}"
+            channels.extend(result["channels"])
+            cursor = result.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+        
+        return channels

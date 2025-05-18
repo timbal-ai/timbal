@@ -105,6 +105,7 @@ class TimbalPlatformConfig(BaseModel):
 
 class RunContextData(UserDict):
 
+    # TODO We should call get_data_key internally for this.
     def __getitem__(self, key: str):
         return super().__getitem__(key).resolve()
 

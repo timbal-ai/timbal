@@ -10,15 +10,13 @@ from pathlib import Path
 
 import structlog
 import uvicorn
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
 from ..logs import setup_logging
 from ..state import RunContext
-from ..types.file import File
-from ..types.message import Message
 from ..types.models import dump
 from .utils import ModuleSpec, is_port_in_use, load_module
 
@@ -261,7 +259,8 @@ if __name__ == "__main__":
         print(f"Port {args.port} is already in use. Please use a different port.") # noqa: T201
         sys.exit(1)
 
-    load_dotenv()
+    logger.info("loading_dotenv", path=find_dotenv())
+    load_dotenv(override=True)
     setup_logging()
 
     loop = asyncio.new_event_loop()
