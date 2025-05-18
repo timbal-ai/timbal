@@ -1,10 +1,27 @@
 import contextvars
+from collections import UserDict
 from enum import Enum
+from functools import wraps
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
 
+from .data import BaseData, DataValue
+
 
 run_context_var = contextvars.ContextVar("run_context")
+
+
+def with_run_context(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        run_context = run_context_var.get(None)
+        if run_context is None:
+            raise ValueError(
+                "RunContext not found. "
+                "Please run this function as a timbal step or pass the timbal_platform_config explicitly.")
+        return fn(run_context, *args, **kwargs)
+    return wrapper
 
 
 class TimbalPlatformAuthType(str, Enum):
@@ -86,12 +103,27 @@ class TimbalPlatformConfig(BaseModel):
         return values
 
 
+class RunContextData(UserDict):
+
+    def __getitem__(self, key: str):
+        return super().__getitem__(key).resolve()
+
+    def __setitem__(self, key: str, value: Any):
+        if isinstance(value, BaseData):
+            super().__setitem__(key, value)
+        else:
+            super().__setitem__(key, DataValue(value=value))
+
+    def as_dict(self) -> dict[str, BaseData]:
+        return dict(self.data)
+
+
 class RunContext(BaseModel):
     """Context for a run.
     This is shared between all steps in a flow (including nested subflows).
     """
     # Allow for extra fields.
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore", arbitrary_types_allowed=True)
 
     id: str | None = None
     """Unique identifier for the run.
@@ -103,5 +135,7 @@ class RunContext(BaseModel):
     Can be used to recursively retrieve all runs into a single list -> chat history.
     Can also be used to create a new branch from a specific run -> rewind.
     """
+    data: RunContextData = RunContextData()
+    """Data to be shared between steps in an agent or workflow."""
     timbal_platform_config: TimbalPlatformConfig | None = None
     """Platform configuration for the run."""

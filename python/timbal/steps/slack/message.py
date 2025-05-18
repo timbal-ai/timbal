@@ -62,10 +62,6 @@ def get_messages(
         default=None,
         description="Only messages after this Unix timestamp will be included in results. "
         "Default is the current time."
-    ),
-    bot: bool = Field(
-        default=False,
-        description="Whether to use the bot token or user token"
     )
 ) -> dict:
     """This function can be used to get messages from a specific channel."""
@@ -78,15 +74,11 @@ def get_messages(
     latest = latest.default if hasattr(latest, "default") else latest
     oldest = oldest.default if hasattr(oldest, "default") else oldest
 
-    if bot:
-        token = os.getenv("SLACK_BOT_TOKEN")
-    else:
-        token = os.getenv("SLACK_USER_TOKEN")
+    token = os.getenv("SLACK_BOT_TOKEN")
     if not token:
-        if bot:
-            raise APIKeyNotFoundError("SLACK_BOT_TOKEN not found")
-        else:
-            raise APIKeyNotFoundError("SLACK_USER_TOKEN not found")
+        token = os.getenv("SLACK_USER_TOKEN")
+        if not token:
+            raise APIKeyNotFoundError("SLACK_BOT_TOKEN or SLACK_USER_TOKEN not found")
         
     try:
         client = WebClient(token=token)
@@ -103,6 +95,9 @@ def get_messages(
         return messages
     except Exception as e:
         return f"Error creating conversation: {e}"
+
+
+# TODO Conversations replies
 
 
 def send_message(
@@ -191,6 +186,7 @@ def send_message(
     unfurl_links = unfurl_links.default if hasattr(unfurl_links, "default") else unfurl_links
     unfurl_media = unfurl_media.default if hasattr(unfurl_media, "default") else unfurl_media
 
+    # TODO Remove bot param
     if bot:
         token = os.getenv("SLACK_BOT_TOKEN")
     else:

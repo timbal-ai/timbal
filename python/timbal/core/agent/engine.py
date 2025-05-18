@@ -126,6 +126,8 @@ class Agent(BaseStep):
         tools: list[Callable | BaseStep | dict[str, Any] | Tool] = [],
         max_iter: int = 10,
         state_saver: BaseSaver | None = None,
+        before_agent_callback: Callable | None = None,
+        # after_agent_callback: Callable | None = None,
         **kwargs: Any, # These are the LLM specific kwargs.
     ) -> None:
         if path is None:
@@ -139,6 +141,8 @@ class Agent(BaseStep):
 
         self._load_tools(tools)
         self.max_iter = max_iter
+        self.before_agent_callback = before_agent_callback
+        # self.after_agent_callback = after_agent_callback
 
         self.llm_kwargs = kwargs
 
@@ -557,10 +561,10 @@ class Agent(BaseStep):
         run_usage = {}
 
         # Load the memory.
-        # The data stored in the state saver is just the passed messages.
-        # We do this now so if the validation fails or anything happens we store the last snapshot
-        # with the last available information always.
+        # Always do this first to ensure even if validation fails we can carry the memory to the next run.
+        # Add this to the context. All modifications of messages will affect by reference the context data.
         messages = []
+        context.data["memory"] = messages
         if self.state_saver is not None and context.parent_id is not None:
             try:
                 if self._is_state_saver_get_async:
@@ -575,30 +579,43 @@ class Agent(BaseStep):
             # Ensure all the messages in the memory are actual Message instances.
             # (when loading from InMemorySaver, this will be already true)
             if last_snapshot is not None and "memory" in last_snapshot.data:
-                messages = [
+                messages.extend([
                     Message.validate(message) 
                     for message in last_snapshot.data["memory"].resolve()
-                ]
+                ])
 
         # Copy the input as is, so we save the traces without validated data and defaults.
         agent_input = dump(kwargs, context=context)
 
         try:
-            # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
-            # ? Ideally the client should be able to automatically handle this, but we do it ourselves to simplify the in/out interface.
-            if "prompt" not in kwargs:
-                raise AgentError("The 'prompt' parameter is required when calling an Agent.")
-            
-            kwargs["prompt"] = Message.validate(kwargs["prompt"])
+            # TODO Review this. Will it make sense to pass the kwargs as well (with before agent callback)
+            if self.before_agent_callback is not None:
+                self.before_agent_callback(**kwargs)
 
-            agent_input = dump(kwargs, context=context)
+                if not len(messages):
+                    raise AgentError(
+                        "Cannot call an agent without some input messages."
+                        "Please review your before_agent_callback implementation.")
 
-            kwargs = {**self.llm_kwargs, **kwargs}
-            kwargs = dict(self.params_model().model_validate(kwargs))
+                kwargs = {**self.llm_kwargs, "prompt": messages[-1]}
+                kwargs = dict(self.params_model().model_validate(kwargs))
+                kwargs.pop("prompt")
+            else:
+                # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
+                # ? Ideally the client should be able to automatically handle this, but we do it ourselves to simplify the in/out interface.
+                if "prompt" not in kwargs:
+                    raise AgentError("The 'prompt' parameter is required when calling an Agent.")
+                
+                kwargs["prompt"] = Message.validate(kwargs["prompt"])
 
-            # Add the prompt to the messages. The LLM router expects everything inside the messages list.
-            prompt = kwargs.pop("prompt")
-            messages.append(prompt)
+                agent_input = dump(kwargs, context=context)
+
+                kwargs = {**self.llm_kwargs, **kwargs}
+                kwargs = dict(self.params_model().model_validate(kwargs))
+
+                # Add the prompt to the messages. The LLM router expects everything inside the messages list.
+                prompt = kwargs.pop("prompt")
+                messages.append(prompt)
         except Exception as err:
             error = {
                 "type": type(err).__name__,
@@ -608,7 +625,6 @@ class Agent(BaseStep):
 
             if self.state_saver is not None:
                 t1 = int(time.time() * 1000)
-                data = {"memory": DataValue(value=messages)}
                 snapshot = Snapshot(
                     v="0.2.0",
                     id=context.id,
@@ -619,7 +635,7 @@ class Agent(BaseStep):
                     error=error,
                     t0=t0,
                     t1=t1,
-                    data=data,
+                    data=context.data.as_dict(),
                 )
                 
                 # We don't want to cancel the execution if this errors. 
@@ -701,7 +717,6 @@ class Agent(BaseStep):
         if llm_result.error is not None:
             if self.state_saver is not None:
                 t1 = int(time.time() * 1000)
-                data = {"memory": DataValue(value=messages)}
                 snapshot = Snapshot(
                     v="0.2.0",
                     id=context.id,
@@ -712,7 +727,7 @@ class Agent(BaseStep):
                     error=llm_result.error,
                     t0=t0,
                     t1=t1,
-                    data=data,
+                    data=context.data.as_dict(),
                     steps=run_steps,
                     usage=run_usage,
                 )
@@ -884,7 +899,6 @@ class Agent(BaseStep):
             if llm_result.error is not None:
                 if self.state_saver is not None:
                     t1 = int(time.time() * 1000)
-                    data = {"memory": DataValue(value=messages)}
                     snapshot = Snapshot(
                         v="0.2.0",
                         id=context.id,
@@ -895,7 +909,7 @@ class Agent(BaseStep):
                         error=llm_result.error,
                         t0=t0,
                         t1=t1,
-                        data=data,
+                        data=context.data.as_dict(),
                         steps=run_steps,
                         usage=run_usage,
                     )
@@ -923,7 +937,6 @@ class Agent(BaseStep):
         t1 = int(time.time() * 1000)
 
         if self.state_saver is not None:
-            data = {"memory": DataValue(value=messages)}
             snapshot = Snapshot(
                 v="0.2.0",
                 id=context.id,
@@ -934,7 +947,7 @@ class Agent(BaseStep):
                 error=None,
                 t0=t0,
                 t1=t1,
-                data=data,
+                data=context.data.as_dict(),
                 steps=run_steps,
                 usage=run_usage,
             )
