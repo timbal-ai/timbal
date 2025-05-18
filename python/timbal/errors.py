@@ -29,6 +29,10 @@ class FlowExecutionError(TimbalError):
     """Error raised when a step of the flow fails for some reason."""
 
 
+class EarlyExit(TimbalError):
+    """Error raised when you want to exit an execution before it finishes."""
+
+
 class AgentError(TimbalError):
     """Error raised when an agent fails (non-recoverable)."""
 

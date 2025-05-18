@@ -10,15 +10,13 @@ from pathlib import Path
 
 import structlog
 import uvicorn
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
 from ..logs import setup_logging
 from ..state import RunContext
-from ..types.file import File
-from ..types.message import Message
 from ..types.models import dump
 from .utils import ModuleSpec, is_port_in_use, load_module
 
@@ -117,41 +115,6 @@ def create_app(
             status_code=200,
             content=res_content,
         )
-
-
-    # ! WIP
-    @app.post("/webhooks/twilio")
-    async def twilio_webhook(req: Request) -> Response:
-        form_data = await req.form()
-        from_number = form_data.get("From", "") # e.g. whatsapp:+123456789
-        from_number = from_number.replace("whatsapp:", "")
-        message_body = form_data.get("Body", "")
-        media_url = form_data.get("MediaUrl0", None)
-        # content_type = form_data.get("MediaContentType0", "") if form_data.get("NumMedia", "0") != "0" else ""
-
-        message_content = []
-        # TODO We'll need to be able to pass specific authorization to perform the file download.
-        if media_url is not None:
-            message_content.append(File.validate(media_url))
-        if message_body.strip():
-            # ? We could add something here to allow the flow to distinguish between the user that's sending this.
-            message_content.append(message_body)
-
-        if not len(message_content):
-            logger.warning("twilio_webhook_no_content", from_number=from_number)
-            return Response(status_code=204)
-
-        message_content.append(f"Message received at twilio webhook for {from_number}")
-
-        message = Message.validate({
-            "role": "user",
-            "content": message_content,
-        })
-
-        req_context = RunContext()
-        async for event in app.state.flow.run(context=req_context, prompt=message):
-            if event.type == "STEP_OUTPUT":
-                print(f"Agent: {event.output}")
 
 
     @app.post("/stream")
@@ -296,7 +259,8 @@ if __name__ == "__main__":
         print(f"Port {args.port} is already in use. Please use a different port.") # noqa: T201
         sys.exit(1)
 
-    load_dotenv()
+    logger.info("loading_dotenv", path=find_dotenv())
+    load_dotenv(override=True)
     setup_logging()
 
     loop = asyncio.new_event_loop()

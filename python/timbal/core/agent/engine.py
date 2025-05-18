@@ -15,13 +15,12 @@ from openai.types.chat import (
 from openai.types.chat import (
     ChatCompletionMessage as OpenAIMessage,
 )
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 from timbal.types.events.chunk import ChunkEvent
 from uuid_extensions import uuid7
 
-from ...errors import AgentError
+from ...errors import AgentError, EarlyExit
 from ...state.context import RunContext, run_context_var
-from ...state.data import DataValue
 from ...state.savers.base import BaseSaver
 from ...state.snapshot import Snapshot
 from ...steps.llms.router import llm_router
@@ -45,17 +44,18 @@ logger = structlog.get_logger("timbal.core.agent.engine")
 
 class AgentParamsModel(BaseModel):
     """Fixed parameter model for Agents."""
+    model_config = ConfigDict(extra="ignore")
 
     prompt: Message = Field(description="The prompt to use for the agent.")
-    system_prompt: str | None = Field(
+    system_prompt: str = Field(
         default=None,
         description="The system prompt to use for the agent."
     )
-    model: str | None = Field(
-        default="gpt-4o-mini",
+    model: str = Field(
+        default="gpt-4.1-nano",
         description="The model to use for the agent."
     )
-    max_tokens: int | None = Field(
+    max_tokens: int = Field(
         default=None,
         description="The maximum number of tokens to generate."
     )
@@ -117,7 +117,7 @@ class Agent(BaseStep):
         ```
     """
 
-    # TODO before agent callback. after agent callback. before tools callbacks. after tools callbacks.
+    # TODO before tools callbacks. after tools callbacks.
     def __init__(
         self,
         id: str = "agent",
@@ -126,6 +126,9 @@ class Agent(BaseStep):
         tools: list[Callable | BaseStep | dict[str, Any] | Tool] = [],
         max_iter: int = 10,
         state_saver: BaseSaver | None = None,
+        # ? Should these be RunnableLike
+        before_agent_callback: Callable | None = None,
+        after_agent_callback: Callable | None = None,
         **kwargs: Any, # These are the LLM specific kwargs.
     ) -> None:
         if path is None:
@@ -139,6 +142,9 @@ class Agent(BaseStep):
 
         self._load_tools(tools)
         self.max_iter = max_iter
+        # TODO Validate these.
+        self.before_agent_callback = before_agent_callback
+        self.after_agent_callback = after_agent_callback
 
         self.llm_kwargs = kwargs
 
@@ -473,7 +479,7 @@ class Agent(BaseStep):
 
     async def run(
         self, 
-        context: RunContext | None = None, # noqa: ARG002
+        context: RunContext | None = None,
         **kwargs: Any,
     ) -> Any:
         """Execute the agent's main processing loop with tool usage, state management, and event streaming.
@@ -531,7 +537,8 @@ class Agent(BaseStep):
             - Supports continuation of previous conversations
             - Handles both streaming and non-streaming LLMs
         """
-        # ? Find a way to encapsulate all this logic. I am imagining a class that implements the collect method, wraps the run method, etc. 
+        t0 = int(time.time() * 1000)
+
         if context is None:
             context = RunContext(id=uuid7(as_type="str"))
         elif context.id is None:
@@ -540,27 +547,14 @@ class Agent(BaseStep):
         # Set the run context for the duration of the agent run.
         run_context_var.set(context)
 
-        # This one is global to the agent.
-        t0 = int(time.time() * 1000)
-
-        agent_start_event = StartEvent(
-            run_id=context.id,
-            path=self.path,
-            status_text="Starting...",
-        )
-
-        logger.info("start_event", start_event=agent_start_event)
-        yield agent_start_event
-
-        # Aggregated traces and usage for the entire run.
-        run_steps = {}
-        run_usage = {}
+        # Copy the input as is, so we save the traces without validated data and defaults.
+        agent_input = dump(kwargs, context=context)
 
         # Load the memory.
-        # The data stored in the state saver is just the passed messages.
-        # We do this now so if the validation fails or anything happens we store the last snapshot
-        # with the last available information always.
+        # Always do this first to ensure even if validation fails we can carry the memory to the next run.
+        # Add this to the context. All modifications of messages will affect by reference the context data.
         messages = []
+        context.data["memory"] = messages
         if self.state_saver is not None and context.parent_id is not None:
             try:
                 if self._is_state_saver_get_async:
@@ -575,30 +569,58 @@ class Agent(BaseStep):
             # Ensure all the messages in the memory are actual Message instances.
             # (when loading from InMemorySaver, this will be already true)
             if last_snapshot is not None and "memory" in last_snapshot.data:
-                messages = [
+                messages.extend([
                     Message.validate(message) 
                     for message in last_snapshot.data["memory"].resolve()
-                ]
+                ])
 
-        # Copy the input as is, so we save the traces without validated data and defaults.
-        agent_input = dump(kwargs, context=context)
+        # Add all input kwargs to the run context data.
+        # This way we can access them from any part of the agent run.
+        for k, v in kwargs.items():
+            context.data[k] = v
+
+        agent_start_event = StartEvent(
+            run_id=context.id,
+            path=self.path,
+            status_text="Starting...",
+        )
+
+        logger.info("start_event", start_event=agent_start_event)
+        yield agent_start_event
+
+        # Aggregated traces and usage for the entire run.
+        run_steps = {}
+        run_usage = {}
 
         try:
-            # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
-            # ? Ideally the client should be able to automatically handle this, but we do it ourselves to simplify the in/out interface.
-            if "prompt" not in kwargs:
-                raise AgentError("The 'prompt' parameter is required when calling an Agent.")
-            
-            kwargs["prompt"] = Message.validate(kwargs["prompt"])
+            # TODO Review this. Will it make sense to pass the kwargs as well (with before agent callback)
+            if self.before_agent_callback is not None:
+                self.before_agent_callback(context)
 
-            agent_input = dump(kwargs, context=context)
+            has_prompt = False
+            if "prompt" in kwargs:
+                # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
+                kwargs["prompt"] = Message.validate(kwargs["prompt"])
+                agent_input = dump(kwargs, context=context)
+                has_prompt = True
+            elif len(messages):
+                # Hack to pass the validation.
+                # TODO We should handle this better. Perhaps exposing a json schema and validating another model.
+                kwargs["prompt"] = Message.validate("hack")
+            else:
+                raise ValueError("No prompt or message history found!")
 
             kwargs = {**self.llm_kwargs, **kwargs}
             kwargs = dict(self.params_model().model_validate(kwargs))
 
             # Add the prompt to the messages. The LLM router expects everything inside the messages list.
             prompt = kwargs.pop("prompt")
-            messages.append(prompt)
+            if has_prompt:
+                messages.append(prompt)
+
+        except EarlyExit:
+            return
+
         except Exception as err:
             error = {
                 "type": type(err).__name__,
@@ -608,7 +630,6 @@ class Agent(BaseStep):
 
             if self.state_saver is not None:
                 t1 = int(time.time() * 1000)
-                data = {"memory": DataValue(value=messages)}
                 snapshot = Snapshot(
                     v="0.2.0",
                     id=context.id,
@@ -619,7 +640,7 @@ class Agent(BaseStep):
                     error=error,
                     t0=t0,
                     t1=t1,
-                    data=data,
+                    data=context.data.as_dict(),
                 )
                 
                 # We don't want to cancel the execution if this errors. 
@@ -701,7 +722,6 @@ class Agent(BaseStep):
         if llm_result.error is not None:
             if self.state_saver is not None:
                 t1 = int(time.time() * 1000)
-                data = {"memory": DataValue(value=messages)}
                 snapshot = Snapshot(
                     v="0.2.0",
                     id=context.id,
@@ -712,7 +732,7 @@ class Agent(BaseStep):
                     error=llm_result.error,
                     t0=t0,
                     t1=t1,
-                    data=data,
+                    data=context.data.as_dict(),
                     steps=run_steps,
                     usage=run_usage,
                 )
@@ -884,7 +904,6 @@ class Agent(BaseStep):
             if llm_result.error is not None:
                 if self.state_saver is not None:
                     t1 = int(time.time() * 1000)
-                    data = {"memory": DataValue(value=messages)}
                     snapshot = Snapshot(
                         v="0.2.0",
                         id=context.id,
@@ -895,7 +914,7 @@ class Agent(BaseStep):
                         error=llm_result.error,
                         t0=t0,
                         t1=t1,
-                        data=data,
+                        data=context.data.as_dict(),
                         steps=run_steps,
                         usage=run_usage,
                     )
@@ -923,7 +942,6 @@ class Agent(BaseStep):
         t1 = int(time.time() * 1000)
 
         if self.state_saver is not None:
-            data = {"memory": DataValue(value=messages)}
             snapshot = Snapshot(
                 v="0.2.0",
                 id=context.id,
@@ -934,7 +952,7 @@ class Agent(BaseStep):
                 error=None,
                 t0=t0,
                 t1=t1,
-                data=data,
+                data=context.data.as_dict(),
                 steps=run_steps,
                 usage=run_usage,
             )
@@ -962,6 +980,13 @@ class Agent(BaseStep):
         logger.info("output_event", output_event=agent_output_event)
         yield agent_output_event
 
+        # TODO Make this async.
+        if self.after_agent_callback is not None:
+            try:
+                self.after_agent_callback(context)
+            except Exception as err:
+                logger.error("after_agent_callback_error", err=err)
+
     
     async def complete(
         self,
@@ -977,6 +1002,8 @@ class Agent(BaseStep):
         Returns:
             OutputEvent: The agent's selected outputs.
         """
+        agent_output_event = None
         async for event in self.run(context=context, **kwargs):
             if isinstance(event, OutputEvent) and event.path == self.path:
-                return event
+                agent_output_event = event
+        return agent_output_event

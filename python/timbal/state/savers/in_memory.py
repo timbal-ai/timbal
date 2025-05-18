@@ -56,6 +56,7 @@ class InMemorySaver(BaseSaver):
             if snapshot_i.id == snapshot.id and snapshot_i.path == snapshot.path:
                 raise ValueError(f"Snapshot with id {snapshot.id} and path {snapshot.path} already exists.")
 
+        # TODO Fix (max recursion error / cannot pickle bufferedreader instances) with deepcopy and File objects.
         # When saving artifacts in memory, we might modify LLM memories by reference. 
         # We perform a deepcopy to avoid modifying the original snapshot data.
         self.snapshots.append(copy.deepcopy(snapshot))

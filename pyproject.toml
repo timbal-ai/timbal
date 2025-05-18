@@ -37,7 +37,6 @@ dependencies = [
     "pymupdf>=1.25.5",
     "python-docx>=1.1.2",
     "python-dotenv>=1.0.1",
-    "python-multipart>=0.0.20",
     "requests>=2.32.3",
     "structlog>=25.1.0",
     "uuid7>=0.1.0",

@@ -36,6 +36,8 @@ class Snapshot(BaseModel):
     steps: dict[str, Any] | None = {}
     """Run data of each step at the end of the run."""
     data: dict[str, BaseData] | None = {}
-    """Data state of the flow at the end of the run."""
+    """Data state of the flow at the end of the run.
+    We allow passing null values to make it more flexible.
+    """
     usage: dict[str, int] | None = {}
     """Accumulated usage across all steps of the flow."""
