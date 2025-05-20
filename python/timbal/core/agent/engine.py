@@ -3,7 +3,7 @@ import inspect
 import time
 import traceback
 from collections.abc import AsyncGenerator, Callable
-from typing import Any
+from typing import Any, get_type_hints
 
 import structlog
 from anthropic.types import (
@@ -142,8 +142,12 @@ class Agent(BaseStep):
 
         self._load_tools(tools)
         self.max_iter = max_iter
-        # TODO Validate these.
+
+        if before_agent_callback is not None:
+            self.is_before_agent_callback_async = self._validate_callback(before_agent_callback, "before_agent_callback")
         self.before_agent_callback = before_agent_callback
+        if after_agent_callback is not None:
+            self.is_after_agent_callback_async = self._validate_callback(after_agent_callback, "after_agent_callback")
         self.after_agent_callback = after_agent_callback
 
         self.llm_kwargs = kwargs
@@ -153,6 +157,20 @@ class Agent(BaseStep):
         self.is_llm = False
         self.is_coroutine = False
         self.is_async_gen = True
+
+
+    @staticmethod
+    def _validate_callback(callback: Any, name: str) -> bool:
+        if not callable(callback):
+            raise TypeError(f"{name} must be callable, got {type(callback)}")
+        sig = inspect.signature(callback)
+        params = list(sig.parameters.values())
+        if len(params) != 1:
+            raise TypeError(f"{name} must take exactly one parameter, got {len(params)}")
+        # No need to check for type annotation. We control the arguments passed to the callback.
+        if inspect.isgeneratorfunction(callback) or inspect.isasyncgenfunction(callback):
+            raise TypeError(f"{name} must not be a generator or async generator")
+        return inspect.iscoroutinefunction(callback)
 
 
     def prefix_path(self, prefix: str) -> None:
@@ -593,9 +611,12 @@ class Agent(BaseStep):
         run_usage = {}
 
         try:
-            # TODO Review this. Will it make sense to pass the kwargs as well (with before agent callback)
             if self.before_agent_callback is not None:
-                self.before_agent_callback(context)
+                if self.is_before_agent_callback_async:
+                    await self.before_agent_callback(context)
+                else:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, lambda: self.before_agent_callback(context))
 
             has_prompt = False
             if "prompt" in kwargs:
@@ -939,6 +960,16 @@ class Agent(BaseStep):
                 if isinstance(content, ToolUseContent)
             ]
 
+        if self.after_agent_callback is not None:
+            try:
+                if self.is_after_agent_callback_async:
+                    await self.after_agent_callback(context)
+                else:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, lambda: self.after_agent_callback(context))
+            except Exception as err:
+                logger.error("after_agent_callback_error", err=err)
+
         t1 = int(time.time() * 1000)
 
         if self.state_saver is not None:
@@ -979,13 +1010,6 @@ class Agent(BaseStep):
 
         logger.info("output_event", output_event=agent_output_event)
         yield agent_output_event
-
-        # TODO Make this async.
-        if self.after_agent_callback is not None:
-            try:
-                self.after_agent_callback(context)
-            except Exception as err:
-                logger.error("after_agent_callback_error", err=err)
 
     
     async def complete(
