@@ -353,3 +353,43 @@ def schedule_message(
     )
     
     return result
+
+
+def delete_message(
+    channel: str = Field(description="The channel id or channel name to delete the message from."),
+    ts: str = Field(description="The timestamp of the message to delete."),
+) -> dict:
+
+    token = os.getenv("SLACK_BOT_TOKEN")
+    if not token:
+        token = os.getenv("SLACK_USER_TOKEN")
+        if not token:
+            raise APIKeyNotFoundError("SLACK_BOT_TOKEN or SLACK_USER_TOKEN not found")
+    
+    client = WebClient(token=token)
+    result = client.chat_delete(
+        channel=channel,
+        ts=ts,
+    )
+    return result
+
+
+def edit_message(
+    channel: str = Field(description="The channel id or channel name to edit the message from."),
+    ts: str = Field(description="The timestamp of the message to edit."),
+    text: str | None = Field(description="The new text of the message."),
+) -> dict:
+
+    token = os.getenv("SLACK_BOT_TOKEN")
+    if not token:
+        token = os.getenv("SLACK_USER_TOKEN")
+        if not token:
+            raise APIKeyNotFoundError("SLACK_BOT_TOKEN or SLACK_USER_TOKEN not found")
+    
+    client = WebClient(token=token)
+    result = client.chat_update(
+        channel=channel,
+        ts=ts,
+        text=text,
+    )
+    return result
