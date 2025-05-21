@@ -14,9 +14,13 @@
     - input: 
         text: Hola, me he encontrado una tuerca en las patatas que he pedido, que debo hacer? 
         files: 
-          - /Users/usuario/Desktop/Screenshot2025-05-19.png
+          - /Users/dberges/Desktop/timbal-ai/timbal/.gitignore
       output:
-        semantic: Gracias por reportarlo y por compartir la foto. Esto es un incidente grave de seguridad alimentaria. Por favor, necesito saber exactamente en qué tienda se produjo esto para poder reportarlo y activar el protocolo correspondiente de inmediato. ¿Podrías confirmarme en qué local ocurrió este incidente?
+        text: ...
+        files:
+          - ...
+        validators:
+          semantic: Gracias por reportarlo y por compartir la foto. Esto es un incidente grave de seguridad alimentaria. Por favor, necesito saber exactamente en qué tienda se produjo esto para poder reportarlo y activar el protocolo correspondiente de inmediato. ¿Podrías confirmarme en qué local ocurrió este incidente?
 
 - name: eval_tuerca_patatas_2
   description:
@@ -97,7 +101,7 @@
       output: ¡Hola! He revisado casos similares y te comento lo siguiente - Ha ocurrido en otras ocasiones que la cantidad de salsas mostradas en la Sunmi y en el ticket impreso no coinciden, generando confusión. - Normalmente, si en Sunmi aparecen menos salsas, esa suele ser la cantidad correcta que realmente pidió el cliente, aunque el ticket refleje más. - En casos anteriores, este problema se debió a cómo llegan los extras (como salsas) desde la app de delivery (por ejemplo, Glovo). Si se cobra de más, se recomienda avisar al soporte de la plataforma de delivery para gestionar un posible reembolso al cliente. - Cuando hay confusión por combos, cada combo puede incluir varias salsas, sumando el total en el ticket pero agrupando en Sunmi. Hay reportes donde tres combos con tres salsas cada uno suman nueve salsas, aunque visualmente en Sunmi parece que son solo tres. **Qué hacer:** - Saca las salsas según el ticket de Sunmi (que suele mostrar correctamente lo pedido real). - Ten a mano ambas imágenes y repórtalo a la plataforma de delivery para informar el cobro extra. - Si necesitas que el Tech Team revise este caso en profundidad, puedo escalarlo para que revisen la integración o los cálculos de cantidades. ¿Quieres que lo escale al equipo técnico de @VICIO TECH Agent para revisión o tienes alguna preferencia de acción? Por favor, confirma.
     - input: escalalo
       output: 
-        contains: <#
+        contains: ["<#"]
 
 
 - name: eval_problemas_andy
