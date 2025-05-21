@@ -1,0 +1,122 @@
+- name: eval_solo_precio_datafono
+  description:
+  turns:
+    - input: No me sale el precio sólo en el datafono
+      steps: 
+        contains: search_vicio_info
+      output:
+        semantic: Para solucionar esto necesito que sigas estas instrucciones. Puedes seguir el manual aquí 'https://deliclever.com/admin/business/1/wiki/pos-reconfigure' Pero aquí te dejo los pasos a seguir Comprobar que tanto TABLET y TPV estan conectadas a la misma red WIFI vp3a5j Si no lo están, conectalos a esta red y si no sabes la contraseña pídela por '#ops_issues_tech' Limpiar almacenamiento Mantén pulsado el icono de Deliclever que usas para encender la aplicación de POS. Arriba a la derecha, al lado del nombre, aparecerá una ⓘ pulsa encima. En esta nueva pantalla, pulsa encima de Almacenamiento y después en Borrar datos, abajo a la izquierda. Reconfigurar el POS Ahora vuelve a abrir la aplicación. Aparecerá una pantalla azul pidiendo un {PIN}. Informa al equipo de Tech que estás en este punto y te proporcionarán el {PIN} que necesitas. En la siguiente pantalla ya debería aparecer el usuario escrito, sólo tienes que pulsar en Continuar El PIN que te pide a continuación lo puedes ver en la página de la store en Deliclever. Igualmente Tech te lo proporcionará si lo necesitas. Una vez se ha aceptado el PIN, ya debería funcionar. Para los pines, @rto y @vicio tech agent, os podrán ayudar.
+
+
+- name: eval_tuerca_patatas
+  description:
+  turns:
+    - input: 
+        text: Hola, me he encontrado una tuerca en las patatas que he pedido, que debo hacer? 
+        files: 
+          - /Users/usuario/Desktop/Screenshot2025-05-19.png
+      output:
+        semantic: Gracias por reportarlo y por compartir la foto. Esto es un incidente grave de seguridad alimentaria. Por favor, necesito saber exactamente en qué tienda se produjo esto para poder reportarlo y activar el protocolo correspondiente de inmediato. ¿Podrías confirmarme en qué local ocurrió este incidente?
+
+- name: eval_tuerca_patatas_2
+  description:
+  turns:
+    - input: Hola, me he encontrado una tuerca en las patatas que he pedido, que debo hacer? 
+      output: Gracias por reportarlo y por compartir la foto. Esto es un incidente grave de seguridad alimentaria. Por favor, necesito saber exactamente en qué tienda se produjo esto para poder reportarlo y activar el protocolo correspondiente de inmediato. ¿Podrías confirmarme en qué local ocurrió este incidente?
+    - input: en el local de lesseps
+      output: 
+        semantic: Gracias por la información. El protocolo que aplica en estos casos es muy estricto, ya que es una situación muy grave. Por favor, sigue estos pasos - 1. Notifica de inmediato al responsable o manager del local de Lesseps sobre la presencia de una tuerca en el pedido. 2. Retira y aísla todas las materias primas y elaboraciones de ese turno, especialmente las involucradas en ese pedido (nunca deben usarse hasta completar la investigación). 3. Limpia y desinfecta profundamente la cocina y todas las zonas de manipulación. 4. Recoge y guarda el objeto extraño (la tuerca) y la caja/foto como evidencia. 5. Asegúrate de registrar el incidente (con evidencia fotográfica) y repórtalo de inmediato tanto en Deliclever como a tu Area Manager. ¿Has podido notificar ya al responsable del local de Lesseps? Confírmame si has podido realizar este primer paso, por favor.
+
+- name: eval_tuerca_patatas_3
+  description:
+  turns:
+    - input: Hola, me he encontrado una tuerca en las patatas que he pedido, que debo hacer? 
+      output: Gracias por reportarlo y por compartir la foto. Esto es un incidente grave de seguridad alimentaria. Por favor, necesito saber exactamente en qué tienda se produjo esto para poder reportarlo y activar el protocolo correspondiente de inmediato. ¿Podrías confirmarme en qué local ocurrió este incidente?
+    - input: en el local de lesseps
+      output: Gracias por la información. El protocolo que aplica en estos casos es muy estricto, ya que es una situación muy grave. Por favor, sigue estos pasos - 1. Notifica de inmediato al responsable o manager del local de Lesseps sobre la presencia de una tuerca en el pedido. 2. Retira y aísla todas las materias primas y elaboraciones de ese turno, especialmente las involucradas en ese pedido (nunca deben usarse hasta completar la investigación). 3. Limpia y desinfecta profundamente la cocina y todas las zonas de manipulación. 4. Recoge y guarda el objeto extraño (la tuerca) y la caja/foto como evidencia. 5. Asegúrate de registrar el incidente (con evidencia fotográfica) y repórtalo de inmediato tanto en Deliclever como a tu Area Manager. ¿Has podido notificar ya al responsable del local de Lesseps? Confírmame si has podido realizar este primer paso, por favor.
+    - input: Si, ya he contactado con mi Store Manager
+      output: 
+        semantic: Perfecto, has hecho lo correcto notificando a tu Store Manager. Ahora, por favor, confirma si ya se han retirado y aislado las materias primas y elaboraciones del turno que podrían estar relacionadas con este pedido. ¿Pueden confirmar que este paso se ha realizado?
+
+- name: eval_tuerca_patatas_4
+  description:
+  turns:
+    - input: Hola, me he encontrado una tuerca en las patatas que he pedido, que debo hacer? 
+      output: Gracias por reportarlo y por compartir la foto. Esto es un incidente grave de seguridad alimentaria. Por favor, necesito saber exactamente en qué tienda se produjo esto para poder reportarlo y activar el protocolo correspondiente de inmediato. ¿Podrías confirmarme en qué local ocurrió este incidente?
+    - input: en el local de lesseps
+      output: Gracias por la información. El protocolo que aplica en estos casos es muy estricto, ya que es una situación muy grave. Por favor, sigue estos pasos - 1. Notifica de inmediato al responsable o manager del local de Lesseps sobre la presencia de una tuerca en el pedido. 2. Retira y aísla todas las materias primas y elaboraciones de ese turno, especialmente las involucradas en ese pedido (nunca deben usarse hasta completar la investigación). 3. Limpia y desinfecta profundamente la cocina y todas las zonas de manipulación. 4. Recoge y guarda el objeto extraño (la tuerca) y la caja/foto como evidencia. 5. Asegúrate de registrar el incidente (con evidencia fotográfica) y repórtalo de inmediato tanto en Deliclever como a tu Area Manager. ¿Has podido notificar ya al responsable del local de Lesseps? Confírmame si has podido realizar este primer paso, por favor.
+    - input: Si, ya he contactado con mi Store Manager
+      output: Perfecto, has hecho lo correcto notificando a tu Store Manager. Ahora, por favor, confirma si ya se han retirado y aislado las materias primas y elaboraciones del turno que podrían estar relacionadas con este pedido. ¿Pueden confirmar que este paso se ha realizado?
+    - input: Confirmo el haber retriado todo
+      output: 
+        semantic: Gracias por la confirmación. Ahora sigue con la limpieza y desinfección a fondo de la cocina, cámaras y zonas de almacenaje para prevenir cualquier posible contaminación. Por favor, confirma cuando la higienización esté finalizada, así seguimos con el resto del protocolo. ¿Avísame cuando esté hecho?
+
+- name: eval_tuerca_patatas_5
+  description:
+  turns:
+    - input: Hola, me he encontrado una tuerca en las patatas que he pedido, que debo hacer? 
+      output: Gracias por reportarlo y por compartir la foto. Esto es un incidente grave de seguridad alimentaria. Por favor, necesito saber exactamente en qué tienda se produjo esto para poder reportarlo y activar el protocolo correspondiente de inmediato. ¿Podrías confirmarme en qué local ocurrió este incidente?
+    - input: en el local de lesseps
+      output: Gracias por la información. El protocolo que aplica en estos casos es muy estricto, ya que es una situación muy grave. Por favor, sigue estos pasos - 1. Notifica de inmediato al responsable o manager del local de Lesseps sobre la presencia de una tuerca en el pedido. 2. Retira y aísla todas las materias primas y elaboraciones de ese turno, especialmente las involucradas en ese pedido (nunca deben usarse hasta completar la investigación). 3. Limpia y desinfecta profundamente la cocina y todas las zonas de manipulación. 4. Recoge y guarda el objeto extraño (la tuerca) y la caja/foto como evidencia. 5. Asegúrate de registrar el incidente (con evidencia fotográfica) y repórtalo de inmediato tanto en Deliclever como a tu Area Manager. ¿Has podido notificar ya al responsable del local de Lesseps? Confírmame si has podido realizar este primer paso, por favor.
+    - input: Si, ya he contactado con mi Store Manager
+      output: Perfecto, has hecho lo correcto notificando a tu Store Manager. Ahora, por favor, confirma si ya se han retirado y aislado las materias primas y elaboraciones del turno que podrían estar relacionadas con este pedido. ¿Pueden confirmar que este paso se ha realizado?
+    - input: Confirmo el haber retriado todo
+      output: Gracias por la confirmación. Ahora sigue con la limpieza y desinfección a fondo de la cocina, cámaras y zonas de almacenaje para prevenir cualquier posible contaminación. Por favor, confirma cuando la higienización esté finalizada, así seguimos con el resto del protocolo. ¿Avísame cuando esté hecho?
+    - input: Listo, todo limpio
+      output:
+        semantic: ¡Genial! Últimos pasos 1. **Registra el incidente:** - Asegúrate de dejar constancia de todo lo ocurrido en Deliclever (si no tienes acceso, pídele a tu Store Manager que lo haga). - Incluye detalles fecha y hora, explicación del incidente, acciones tomadas, fotos del objeto extraño, el lote afectado y si el cliente fue informado. 2. **Informa a tu Área Manager:** - Contacta a tu AM compartiendo toda la información y la evidencia recopilada. 3. **Conserva la evidencia (tuerca y caja):** - Guarda el objeto extraño y el embalaje afectado como muestra física, ya que podría requerirse para una investigación interna o para el seguro. ¿Puedes confirmar una vez hayas registrado el incidente y notificado a tu Área Manager?
+
+- name: eval_tuerca_patatas_6
+  description:
+  turns:
+    - input: Hola, me he encontrado una tuerca en las patatas que he pedido, que debo hacer? 
+      output: Gracias por reportarlo y por compartir la foto. Esto es un incidente grave de seguridad alimentaria. Por favor, necesito saber exactamente en qué tienda se produjo esto para poder reportarlo y activar el protocolo correspondiente de inmediato. ¿Podrías confirmarme en qué local ocurrió este incidente?
+    - input: en el local de lesseps
+      output: Gracias por la información. El protocolo que aplica en estos casos es muy estricto, ya que es una situación muy grave. Por favor, sigue estos pasos - 1. Notifica de inmediato al responsable o manager del local de Lesseps sobre la presencia de una tuerca en el pedido. 2. Retira y aísla todas las materias primas y elaboraciones de ese turno, especialmente las involucradas en ese pedido (nunca deben usarse hasta completar la investigación). 3. Limpia y desinfecta profundamente la cocina y todas las zonas de manipulación. 4. Recoge y guarda el objeto extraño (la tuerca) y la caja/foto como evidencia. 5. Asegúrate de registrar el incidente (con evidencia fotográfica) y repórtalo de inmediato tanto en Deliclever como a tu Area Manager. ¿Has podido notificar ya al responsable del local de Lesseps? Confírmame si has podido realizar este primer paso, por favor.
+    - input: Si, ya he contactado con mi Store Manager
+      output: Perfecto, has hecho lo correcto notificando a tu Store Manager. Ahora, por favor, confirma si ya se han retirado y aislado las materias primas y elaboraciones del turno que podrían estar relacionadas con este pedido. ¿Pueden confirmar que este paso se ha realizado?
+    - input: Confirmo el haber retriado todo
+      output: Gracias por la confirmación. Ahora sigue con la limpieza y desinfección a fondo de la cocina, cámaras y zonas de almacenaje para prevenir cualquier posible contaminación. Por favor, confirma cuando la higienización esté finalizada, así seguimos con el resto del protocolo. ¿Avísame cuando esté hecho?
+    - input: Listo, todo limpio
+      output: ¡Genial! Últimos pasos 1. **Registra el incidente:** - Asegúrate de dejar constancia de todo lo ocurrido en Deliclever (si no tienes acceso, pídele a tu Store Manager que lo haga). - Incluye detalles fecha y hora, explicación del incidente, acciones tomadas, fotos del objeto extraño, el lote afectado y si el cliente fue informado. 2. **Informa a tu Área Manager:** - Contacta a tu AM compartiendo toda la información y la evidencia recopilada. 3. **Conserva la evidencia (tuerca y caja):** - Guarda el objeto extraño y el embalaje afectado como muestra física, ya que podría requerirse para una investigación interna o para el seguro. ¿Puedes confirmar una vez hayas registrado el incidente y notificado a tu Área Manager?
+    - input: Listo, notificado a mi AM
+      output:
+        semantic: ¡Perfecto, muchas gracias por tu rapidez y gestión! 🙌 Has realizado todo el protocolo correctamente notificar al Store Manager, retirar productos, limpiar, registrar el incidente y avisar al Área Manager. Recuerda conservar la evidencia física (la tuerca y el packaging) por si hay una investigación posterior o lo solicita el AM. ¿Necesitas ayuda con algo más respecto a este incidente o cualquier otro tema?
+
+- name: eval_sumni_dif_ticket
+  description:
+  turns:
+    - input: Hola podrían ayudarme tengo un pedido en el que en sumni me marca 3 salsas y en el ticket me marca 9. Podrían verificarlo porque al cliente le cobraron las 9 y no pudimos comunicarnos con el cliente
+      output: 
+        semantic: ¡Hola! He revisado casos similares y te comento lo siguiente - Ha ocurrido en otras ocasiones que la cantidad de salsas mostradas en la Sunmi y en el ticket impreso no coinciden, generando confusión. - Normalmente, si en Sunmi aparecen menos salsas, esa suele ser la cantidad correcta que realmente pidió el cliente, aunque el ticket refleje más. - En casos anteriores, este problema se debió a cómo llegan los extras (como salsas) desde la app de delivery (por ejemplo, Glovo). Si se cobra de más, se recomienda avisar al soporte de la plataforma de delivery para gestionar un posible reembolso al cliente. - Cuando hay confusión por combos, cada combo puede incluir varias salsas, sumando el total en el ticket pero agrupando en Sunmi. Hay reportes donde tres combos con tres salsas cada uno suman nueve salsas, aunque visualmente en Sunmi parece que son solo tres. **Qué hacer:** - Saca las salsas según el ticket de Sunmi (que suele mostrar correctamente lo pedido real). - Ten a mano ambas imágenes y repórtalo a la plataforma de delivery para informar el cobro extra. - Si necesitas que el Tech Team revise este caso en profundidad, puedo escalarlo para que revisen la integración o los cálculos de cantidades. ¿Quieres que lo escale al equipo técnico para revisión o tienes alguna preferencia de acción? Por favor, confirma.
+
+- name: eval_sumni_dif_ticket_2
+  description:
+  turns:
+    - input: Hola podrían ayudarme tengo un pedido en el que en sumni me marca 3 salsas y en el ticket me marca 9. Podrían verificarlo porque al cliente le cobraron las 9 y no pudimos comunicarnos con el cliente
+      output: ¡Hola! He revisado casos similares y te comento lo siguiente - Ha ocurrido en otras ocasiones que la cantidad de salsas mostradas en la Sunmi y en el ticket impreso no coinciden, generando confusión. - Normalmente, si en Sunmi aparecen menos salsas, esa suele ser la cantidad correcta que realmente pidió el cliente, aunque el ticket refleje más. - En casos anteriores, este problema se debió a cómo llegan los extras (como salsas) desde la app de delivery (por ejemplo, Glovo). Si se cobra de más, se recomienda avisar al soporte de la plataforma de delivery para gestionar un posible reembolso al cliente. - Cuando hay confusión por combos, cada combo puede incluir varias salsas, sumando el total en el ticket pero agrupando en Sunmi. Hay reportes donde tres combos con tres salsas cada uno suman nueve salsas, aunque visualmente en Sunmi parece que son solo tres. **Qué hacer:** - Saca las salsas según el ticket de Sunmi (que suele mostrar correctamente lo pedido real). - Ten a mano ambas imágenes y repórtalo a la plataforma de delivery para informar el cobro extra. - Si necesitas que el Tech Team revise este caso en profundidad, puedo escalarlo para que revisen la integración o los cálculos de cantidades. ¿Quieres que lo escale al equipo técnico de @VICIO TECH Agent para revisión o tienes alguna preferencia de acción? Por favor, confirma.
+    - input: escalalo
+      output: 
+        contains: <#
+
+
+- name: eval_problemas_andy
+  description:
+  turns:
+    - input: Bom dia ! Temos problemas de conexão com internet. Reiniciamos o ruter e siga igual. Tenho problemas para realizar as tarefas do Andy. Ajuda por favor.
+      output: 
+        semantic: Bom dia! Entendi que já reiniciaram o roteador, mas continuam com problemas de internet e isso está afetando as tarefas do Andy. Vou te mostrar o primeiro passo para testar se conseguimos resolver do nosso lado  1.Confirme, por favor as outras telas ou dispositivos (além da do Andy) também estão sem internet, ou é só o Andy que não funciona? — Aguardo sua confirmação para continuar. Se puder, diga se o Andy dá algum erro específico ou se só não carrega.
+
+- name: eval_zona_riders
+  description:
+  turns:
+    - input: Buenos días!! No se escucha en la zona de riders, podríais ayudarnos porfa? Gracias:)
+      output: 
+        semantic: lo normal, una pantalla de riders esta conectada a un asus NUC y esta por HDMI. El problema de que no suene, puede ser - volumen bajo de la propia TV - Volumen bajo del minipc (Usuario no tiene posibilidad de cambiarlo) - Problema con el envoirement de linux y chrome, unica medida posible es reiniciar el minipc en todos los casos. Si no funciona ninguna, deberiamos revisar cableado o incluso TV a ver si se ha estropeado.
+
+- name: eval_problemas_pantalla
+  description:
+  turns:
+    - input: Buenas tardes equipo, ¿Nos echáis una mano con una pantalla en ALV? Tenemos problemas de conexión
+      output: 
+        semantic: Que problemas tiene la pantalla?
