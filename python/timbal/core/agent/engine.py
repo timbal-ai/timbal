@@ -640,6 +640,29 @@ class Agent(BaseStep):
                 messages.append(prompt)
 
         except EarlyExit:
+            if self.state_saver is not None:
+                t1 = int(time.time() * 1000)
+                snapshot = Snapshot(
+                    v="0.2.0",
+                    id=context.id,
+                    parent_id=context.parent_id,
+                    path=self.path,
+                    input=agent_input,
+                    output={},
+                    error=None,
+                    t0=t0,
+                    t1=t1,
+                    data=context.data.as_dict(),
+                )
+                
+                # We don't want to cancel the execution if this errors. 
+                try:
+                    if self._is_state_saver_put_async:
+                        await self.state_saver.put(snapshot=snapshot, context=context)
+                    else:
+                        self.state_saver.put(snapshot=snapshot, context=context)
+                except Exception as err:
+                    logger.error("put_memory_error", err=err)
             return
 
         except Exception as err:
