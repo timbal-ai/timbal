@@ -10,6 +10,8 @@ See Also:
 from typing import Any
 
 from pydantic import Field as PydanticField
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
 
 
 def Field(
@@ -60,3 +62,14 @@ def Field(
         field_info["json_schema_extra"]["choices"] = choices
 
     return PydanticField(default, **field_info)
+
+
+def resolve_default(key: str, value: Any) -> Any:
+    """Resolve the default value of a field.
+    Use this function to resolve default kwargs when calling a function that uses Field defaults.
+    """
+    if isinstance(value, FieldInfo):
+        if value.default == PydanticUndefined:
+            raise ValueError(f"{key} is required")
+        return value.default
+    return value

@@ -1,19 +1,15 @@
-from typing import Literal
-
 from httpx import AsyncClient
 
 from ...state.context import RunContext, run_context_var
 from ...types.field import Field, resolve_default
 
 
-async def post_reaction(
-    sentiment: Literal["positive", "negative"] = Field(
-        description="The sentiment of the reaction",
+async def search_runs(
+    metadata: dict[str, str] = Field(
+        default=None,
+        description="Filter runs that contain this metadata.",
     ),
-    feedback: str = Field(
-        default=None, 
-        description="Optional additional feedback",
-    ),
+    # TODO Add many more filters.
     org_id: str = Field(
         default=None,
         description="The org_id to post the reaction for."
@@ -26,23 +22,15 @@ async def post_reaction(
             "By default, it uses the app_id from the run_context.",
         private=True,
     ),
-    run_id: str = Field(
-        default=None,
-        description="The run_id to post the reaction for."
-            "By default, it uses the run_id from the run_context.",
-        private=True,
-    ),
     run_context: RunContext = Field(
         default=None, 
         private=True,
     ), 
-) -> None:
+) -> dict:
 
-    sentiment = resolve_default("sentiment", sentiment)
-    feedback = resolve_default("feedback", feedback)
+    metadata = resolve_default("metadata", metadata)
     org_id = resolve_default("org_id", org_id)
     app_id = resolve_default("app_id", app_id)
-    run_id = resolve_default("run_id", run_id)
     run_context = resolve_default("run_context", run_context)
 
     if not isinstance(run_context, RunContext):
@@ -60,10 +48,9 @@ async def post_reaction(
 
     org_id = org_id or timbal_platform_config.scope.org_id
     app_id = app_id or timbal_platform_config.scope.app_id
-    run_id = run_id or run_context.id
-    if org_id is None or app_id is None or run_id is None:
+    if org_id is None or app_id is None:
         raise ValueError(
-            "Missing org_id or app_id or run_id. "
+            "Missing org_id or app_id. "
             "Please specify it when running this function as a step or pass it explicitly as a function parameter.")
 
     async with AsyncClient() as client:
@@ -71,14 +58,15 @@ async def post_reaction(
         auth = timbal_platform_config.auth
         headers = {auth.header_key: auth.header_value}
 
-        payload = {
-            "sentiment": sentiment,
-            "feedback": feedback,
+        params = {
+            "metadata": metadata,
         }
 
-        res = await client.post(
-            f"https://{timbal_platform_config.host}/orgs/{org_id}/apps/{app_id}/runs/{run_id}/reactions", 
+        res = await client.get(
+            f"https://{timbal_platform_config.host}/orgs/{org_id}/apps/{app_id}/runs", 
             headers=headers,
-            json=payload,
+            params=params,
         )
         res.raise_for_status()
+
+        return res.json()

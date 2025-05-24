@@ -136,6 +136,8 @@ class RunContext(BaseModel):
     Can be used to recursively retrieve all runs into a single list -> chat history.
     Can also be used to create a new branch from a specific run -> rewind.
     """
+    idempotency_key: str | None = None
+    """Idempotency key for the run."""
     data: RunContextData = RunContextData()
     """Data to be shared between steps in an agent or workflow."""
     timbal_platform_config: TimbalPlatformConfig | None = None
