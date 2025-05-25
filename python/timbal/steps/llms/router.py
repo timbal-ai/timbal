@@ -33,9 +33,14 @@ async def llm_router(
         default=None,
         description="Maximum number of tokens to generate.",
     ),
+    json_schema: dict = Field(
+        default=None, 
+        description="The JSON schema that the model MUST adhere to.",
+    ),
     # TODO Add all the rest of parameters.
 ) -> Message: # type: ignore
     
+    # TODO Rethink this.
     # Enable calling this router without pydantic model_validate()
     model = model.default if hasattr(model, "default") else model
     system_prompt = system_prompt.default if hasattr(system_prompt, "default") else system_prompt
@@ -43,6 +48,7 @@ async def llm_router(
     tools = tools.default if hasattr(tools, "default") else tools
     stream = stream.default if hasattr(stream, "default") else stream
     max_tokens = max_tokens.default if hasattr(max_tokens, "default") else max_tokens
+    json_schema = json_schema.default if hasattr(json_schema, "default") else json_schema
 
     if model.startswith("claude"):
 
@@ -72,6 +78,10 @@ async def llm_router(
 
         if stream:
             anthropic_kwargs["stream"] = True
+
+        if json_schema:
+            # TODO Anthropic doesn't have a direct json schema param... we could implement this with tool use.
+            raise NotImplementedError("JSON schema validation is not supported for claude models.")
 
         res = await client.messages.create(
             model=model,
@@ -135,6 +145,12 @@ async def llm_router(
 
         if max_tokens:
             openai_kwargs["max_completion_tokens"] = max_tokens
+
+        if json_schema:
+            openai_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": json_schema,
+            } 
 
         res = await client.chat.completions.create(
             model=model,

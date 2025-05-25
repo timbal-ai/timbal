@@ -52,3 +52,8 @@ class AgentError(TimbalError):
 
 class APIKeyNotFoundError(TimbalError):
     """Error raised when an API key is not found."""
+
+
+class EvalError(TimbalError):
+    """Error raised when an eval test fails."""
+    
