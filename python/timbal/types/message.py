@@ -18,7 +18,7 @@ from pydantic import (
 )
 from pydantic_core import CoreSchema, core_schema
 
-from .chat.content import Content, ToolResultContent, ToolUseContent
+from .chat.content import Content, TextContent, ToolResultContent, ToolUseContent
 
 
 class Message:
@@ -103,6 +103,15 @@ class Message:
             "role": self.role,
             "content": content,
         }
+
+    
+    def collect_text(self) -> str:
+        """Collect all text from the message content."""
+        message_text = ""
+        for content in self.content:
+            if isinstance(content, TextContent):
+                message_text += content.text + "\n\n"
+        return message_text
 
 
     @classmethod
