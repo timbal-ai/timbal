@@ -1,7 +1,9 @@
+
 from pydantic import BaseModel, ConfigDict
 
 from .input import Input
 from .output import Output
+from .steps import Steps
 
 
 class Turn(BaseModel):
@@ -20,5 +22,14 @@ class Turn(BaseModel):
     """The output for this turn. When validators are present, this represents the expected output to be checked for correctness.
     When no validators are present, this output is used as a fixed response to store in the agent's memory or conversation history.
     """
-    # TODO usage
-    # TODO steps
+    steps: Steps | None = None
+    """Defines the expected sequence of tool-use or action steps for this turn, if available.
+    If this field is omitted or empty, no step validation is performed for the turn.
+    """
+
+    usage: list[dict] | None = None
+    """Defines the expected resource or token usage constraints for this turn, if available.
+    Each constraint is represented as a dictionary, and may include `max` and/or `min` 
+    values for a particular usage type (e.g., input or output tokens).
+    If this field is omitted or empty, no usage constraints are applied for the turn.
+    """

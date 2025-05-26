@@ -71,7 +71,7 @@ def regex(ref: str):
     return Validator(validator, "regex", ref)
 
 
-def semantic(ref: str | list[str]):
+def semantic_output(ref: str | list[str]):
     """Validate that the message matches the given semantic content."""
     if not isinstance(ref, list):
         ref = [ref]
@@ -115,6 +115,63 @@ Only mark as incorrect if the response is irrelevant, unhelpful, or fails to add
             json_schema=json_schema,
         )
         res = res.choices[0].message.content
-        return json.loads(res)
+        res = json.loads(res)
+
+        if not res["is_valid"]:
+            raise EvalError(res["explanation"])
 
     return Validator(validator, "semantic", ref)
+
+
+def semantic_steps(ref: str | list[str]):
+    """Validate that the message matches the given semantic content."""
+    if not isinstance(ref, list):
+        ref = [ref]
+
+    ref = [str(v) for v in ref]
+
+    async def validator(message: Message):
+        message_text = message.collect_text()
+        if not message_text:
+            raise EvalError("Message does not contain any text to validate.")
+
+        system_prompt = """You are a helpful assistant that evaluates if a sequence of steps (actions or tool uses) is semantically correct with respect to a set of reference steps.
+The steps should be considered correct if they are relevant, logically ordered, and cover the key actions or information present in the reference steps, even if the wording or exact details differ.
+Do not penalize for reasonable variations, extra helpful steps, or minor differences in order, as long as the essential actions are present and the user's need is addressed.
+Only mark as incorrect if the steps are missing key actions, are irrelevant, or fail to address the user's request as described in the reference.
+"""
+
+        prompt = f"""<steps>
+{message_text}
+</steps>
+
+{"\n".join([f"<reference>\n{v}\n</reference>\n" for v in ref])}
+"""
+        messages = [Message.validate(prompt)]
+
+        json_schema = {
+            "name": "SemanticEval",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "explanation": {"type": "string"}, 
+                    "is_valid": {"type": "boolean"}
+                }, 
+            }
+        }
+
+        res = await llm_router(
+            model="gpt-4.1",
+            system_prompt=system_prompt,
+            messages=messages,
+            json_schema=json_schema,
+        )
+        res = res.choices[0].message.content
+        res = json.loads(res)
+
+        if not res["is_valid"]:
+            raise EvalError(res["explanation"])
+
+    return Validator(validator, "semantic", ref)
+
+

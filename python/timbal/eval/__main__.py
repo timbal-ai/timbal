@@ -1,36 +1,23 @@
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
-from typing import Any
 
 import structlog
-import yaml
 from dotenv import find_dotenv, load_dotenv
 
 from .. import __version__
-from ..core.agent import Agent
 from ..logs import setup_logging
 
 # TODO This shouldn't be in just the server 'module'.
 from ..server.utils import ModuleSpec, load_module
-from .types.test_suite import TestSuite
+from .engine import eval_file
+from .types.result import EvalTestSuiteResult
 from .utils import discover_files
 
 logger = structlog.get_logger("timbal.eval")
 
-
-async def eval_file(
-    path: Path,
-    _agent: Agent
-) -> Any:
-    """Parse and run all the tests in the given file."""
-    with open(path) as f:
-        test_suite = yaml.safe_load(f)
-
-    test_suite = TestSuite.model_validate(test_suite)
-    
-    # TODO Run tests.
 
 
 if __name__ == "__main__":
@@ -82,8 +69,8 @@ if __name__ == "__main__":
 
     agent = load_module(module_spec)
 
-    # from timbal.state.savers import JSONLSaver
-    # agent.state_saver = JSONLSaver(path=Path("state.jsonl"))
+    from timbal.state.savers import JSONLSaver
+    agent.state_saver = JSONLSaver(path=Path("state.jsonl"))
 
     tests_path = args.tests
     if not tests_path:
@@ -102,5 +89,13 @@ if __name__ == "__main__":
     logger.info("tests_files", files=files)
 
     # TODO Improve this.
+    test_results = EvalTestSuiteResult()
     for file in files:
-        asyncio.run(eval_file(file, agent))
+        test_results.total_tests += 1
+        asyncio.run(eval_file(file, agent, test_results))
+
+    # Save all summaries to JSON
+    with open("summary.json", "w") as f:
+        from timbal.types.models import dump
+        dumped = dump(test_results)
+        json.dump(dumped, f, indent=2, ensure_ascii=False)
