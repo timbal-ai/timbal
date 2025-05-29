@@ -76,7 +76,13 @@ if __name__ == "__main__":
     if not tests_path:
         print("No tests path provided.") # noqa: T201
         sys.exit(1)
+    if ":" in tests_path:
+        tests_path, test_name = tests_path.split("::", 1)
+    else:
+        test_name = None
+    
     tests_path = Path(tests_path).expanduser().resolve()
+
     if not tests_path.exists():
         print(f"Tests path {tests_path} does not exist.") # noqa: T201
         sys.exit(1)
@@ -92,7 +98,7 @@ if __name__ == "__main__":
     test_results = EvalTestSuiteResult()
     for file in files:
         test_results.total_tests += 1
-        asyncio.run(eval_file(file, agent, test_results))
+        asyncio.run(eval_file(file, agent, test_results, test_name=test_name))
 
     # Save all summaries to JSON
     with open("summary.json", "w") as f:

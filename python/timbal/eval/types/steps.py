@@ -1,7 +1,7 @@
 import structlog
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from ..validators import Validator, contains, regex, semantic_steps
+from ..validators import Validator, contains_steps, not_contains_steps, regex, semantic_steps
 
 logger = structlog.get_logger("timbal.eval.types.steps")
 
@@ -40,14 +40,35 @@ class Steps(BaseModel):
         validators = []
         for validator_name, validator_arg in v.items():
             if validator_name == "contains":
-                validators.append(contains(validator_arg))
+                validators.append(contains_steps(validator_arg))
             elif validator_name == "regex":
                 validators.append(regex(validator_arg))
             elif validator_name == "semantic":
                 validators.append(semantic_steps(validator_arg))
+            elif validator_name == "not_contains":
+                validators.append(not_contains_steps(validator_arg))
             # TODO Add more validators.
             else:
                 logger.warning("unknown_validator", validator=validator_name)
 
         return validators
+        
+    def to_dict(self) -> dict:
+        d = {}
+        
+        if getattr(self, "validators", None):
+            validators_dict = {}
+            for v in self.validators:
+                key = getattr(v, "name", str(type(v)))
+                value = getattr(v, "ref", str(v))
+                # Group multiple validators of the same type
+                if key in validators_dict:
+                    if isinstance(validators_dict[key], list):
+                        validators_dict[key].append(value)
+                    else:
+                        validators_dict[key] = [validators_dict[key], value]
+                else:
+                    validators_dict[key] = value
+            d["validators"] = validators_dict
+        return d
     

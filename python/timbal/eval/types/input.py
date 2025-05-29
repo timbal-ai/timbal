@@ -27,7 +27,6 @@ class Input(BaseModel):
         if isinstance(v, str):
             return {"text": v}
         return v
-
     
     @field_validator("text", mode="before")
     def validate_text(cls, v):
@@ -49,3 +48,11 @@ class Input(BaseModel):
             "role": role, 
             "content": content,
         })
+    
+    def to_dict(self) -> dict:
+        d = {}
+        if self.text:
+            d["text"] = self.text
+        if self.files:
+            d["files"] = self.files
+        return d

@@ -34,7 +34,83 @@ class Validator:
         return f"<Validator(name={self.name}, ref={ref_repr})>"
 
 
-def contains(ref: list[str]):
+def contains_steps(ref: list[dict]):
+    """
+    Validate that the steps contain the given tool names and, optionally, input key-value substrings.
+    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input substrings).
+    """
+    if not isinstance(ref, list):
+        raise ValueError(f"Invalid contains_steps validator: expected list, got {type(ref)}")
+
+    def validator(steps: list[dict]):
+        for expected in ref:
+            tool_name = expected.get("name")
+            input_dict = expected.get("input", {})
+            found = False
+            for step in steps:
+                if step.get("tool") == tool_name:
+                    # If no input dict specified, just match tool
+                    if not input_dict:
+                        found = True
+                        break
+                    # Otherwise, check all input keys/values
+                    step_input = step.get("input", {})
+                    all_match = True
+                    for k, v in input_dict.items():
+                        step_val = step_input.get(k)
+                        if step_val is None or str(v) not in str(step_val):
+                            all_match = False
+                            break
+                    if all_match:
+                        found = True
+                        break
+            if not found:
+                if input_dict:
+                    raise EvalError(f"No step found with tool '{tool_name}' and input containing {input_dict}.")
+                else:
+                    raise EvalError(f"No step found with tool '{tool_name}'.")
+    return Validator(validator, "contains_steps", ref)
+
+
+def not_contains_steps(ref: list[dict]):
+    """
+    Validate that the steps contain the given tool names and, optionally, input key-value substrings.
+    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input substrings).
+    """
+    if not isinstance(ref, list):
+        raise ValueError(f"Invalid contains_steps validator: expected list, got {type(ref)}")
+
+    def validator(steps: list[dict]):
+        for expected in ref:
+            tool_name = expected.get("name")
+            input_dict = expected.get("input", {})
+            found = False
+            for step in steps:
+                if step.get("tool") == tool_name:
+                    # If no input dict specified, just match tool
+                    if not input_dict:
+                        found = True
+                        break
+                    # Otherwise, check all input keys/values
+                    step_input = step.get("input", {})
+                    all_match = True
+                    for k, v in input_dict.items():
+                        step_val = step_input.get(k)
+                        if step_val is None or str(v) not in str(step_val):
+                            all_match = False
+                            break
+                    if all_match:
+                        found = True
+                        break
+            if found:
+                if input_dict:
+                    raise EvalError(f"Step found with tool '{tool_name}' and input containing {input_dict}.")
+                else:
+                    raise EvalError(f"Step found with tool '{tool_name}'.")
+    return Validator(validator, "not_contains_steps", ref)
+
+
+def contains_output(ref: list[str]):
     """Validate that the message contains the given substrings."""
     if not isinstance(ref, list):
         raise ValueError(f"Invalid contains validator: expected list, got {type(ref)}")
@@ -51,6 +127,25 @@ def contains(ref: list[str]):
                 raise EvalError(f"Message does not contain '{v}'.")
 
     return Validator(validator, "contains", ref)
+
+
+def not_contains_output(ref: list[str]):
+    """Validate that the message contains the given substrings."""
+    if not isinstance(ref, list):
+        raise ValueError(f"Invalid contains validator: expected list, got {type(ref)}")
+
+    ref = [str(v) for v in ref]
+
+    def validator(message: Message):
+        message_text = message.collect_text()
+        if not message_text:
+            raise EvalError("Message does not contain any text to validate.")
+
+        for v in ref:
+            if v in message_text:
+                raise EvalError(f"Message contains '{v}'.")
+
+    return Validator(validator, "not_contains", ref)
 
 
 def regex(ref: str):

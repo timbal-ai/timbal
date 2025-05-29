@@ -14,7 +14,7 @@ from ..state.data import DataValue
 from ..state.snapshot import Snapshot
 from ..types.chat.content import TextContent
 from ..types.message import Message
-from .types.result import EvalTestSuiteResult, EvalResult
+from .types.result import EvalResult, EvalTestSuiteResult
 from .types.test import Test
 from .types.test_suite import TestSuite
 from .types.turn import Turn
@@ -45,15 +45,12 @@ async def eval_steps(
 
     explanations = []
     results = []
-    expected_steps = []
     for validator in turn.steps.validators:
         if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
             try:
                 await validator(actual_steps)
                 correct = True
             except EvalError as e:
-                print("error in ")
-                print(e)
                 correct = False
                 explanations.append(str(e))
         else:
@@ -64,19 +61,16 @@ async def eval_steps(
                 correct = False
                 explanations.append(str(e))
         results.append(correct)
-        # expected_steps.append(expected)
-    return all(results), explanations #, actual_steps, expected_steps
+    return all(results), explanations, actual_steps
 
 
 async def eval_output(
     turn: Turn,
     agent_output: str
 ) -> tuple[bool, list[str]]:
-    """"""
+    """Evaluate the output of a turn. If no validators are present, use semantic_output as default."""
     explanations = []
     results = []
-    actual_output = []
-    expected_output = []
     agent_output_message = Message(role="assistant", content=[TextContent(text=agent_output)])
 
     for validator in turn.output.validators:
@@ -96,9 +90,7 @@ async def eval_output(
                 explanations.append(str(e))
         results.append(correct)
         
-        # actual_output.append(actual)
-        # expected_output.append(expected)
-    return all(results), explanations #, actual_output, expected_output
+    return all(results), explanations, agent_output_message
 
 
 def eval_usage(
@@ -188,9 +180,9 @@ async def run_turn(
     run_context = RunContext(parent_id=agent_output_event.run_id)
 
     # Evaluate the steps
-    steps_passed, steps_explanations = None, []
+    steps_passed, steps_explanations, actual_steps = None, [], []
     if turn.steps:
-        steps_passed, steps_explanations = await eval_steps(turn, agent, run_context)
+        steps_passed, steps_explanations, actual_steps = await eval_steps(turn, agent, run_context)
         if steps_passed:
             test_results.steps_passed += 1
         else:
@@ -198,37 +190,42 @@ async def run_turn(
             reason.append("steps")
 
     # Evaluate the output
-    output_passed, output_explanations = await eval_output(turn, agent_output)
+    output_passed, output_explanations, agent_output_message = await eval_output(turn, agent_output)
     if output_passed:
         test_results.outputs_passed += 1
     else:
         test_results.outputs_failed += 1
         reason.append("output")
 
-    usage_comparisons = eval_usage(turn, agent_usage)
-    if all(comparison["correct"] for comparison in usage_comparisons):
-        test_results.usage_passed += 1
-    else:
-        test_results.usage_failed += 1
-        reason.append("usage")
+    usage_comparisons = []
+    if turn.usage:
+        usage_comparisons = eval_usage(turn, agent_usage)
+        if all(comparison["correct"] for comparison in usage_comparisons):
+            test_results.usage_passed += 1
+        else:
+            test_results.usage_failed += 1
+            reason.append("usage")
 
     if len(reason) > 0:
         test_results.tests_failed.append(
             EvalResult(
                 test_name=test.name,
-                test_path=f"{test_file_name}:{test.name}",
-                input=str(user_input),
+                test_path=f"{test_file_name}::{test.name}",
+                input=user_input.to_dict(),
                 reason=reason,
                 output_passed=output_passed,
                 output_explanations=output_explanations,
-                # actual_output=actual_output,
-                # expected_output=expected_output,
+                actual_output={
+                    "text": agent_output_message.content[0].text if agent_output_message.content[0].type == "text" else None,
+                    "files": [c.file for c in agent_output_message.content if c.type == "file"]
+                },
+                expected_output=turn.output.to_dict(),
                 usage_passed=all(comparison["correct"] for comparison in usage_comparisons),
-                usage_explanations= [comparison["explanation"] for comparison in usage_comparisons if not comparison["correct"]],
-                steps_passed=steps_passed if turn.steps else None,
-                steps_explanations=steps_explanations if turn.steps else None,
-                # actual_steps=actual_steps if turn.steps else [],
-                # expected_steps=expected_steps if turn.steps else [],
+                usage_explanations= [comparison["explanation"] for comparison in usage_comparisons],
+                steps_passed=steps_passed,
+                steps_explanations=steps_explanations,
+                actual_steps=actual_steps,
+                expected_steps=turn.steps.to_dict() if turn.steps else None,
             )
         )
 
@@ -239,15 +236,18 @@ async def run_turn(
 async def eval_file(
     path: Path,
     _agent: Agent,
-    test_results: EvalTestSuiteResult
+    test_results: EvalTestSuiteResult,
+    test_name: str = None
 ) -> Any:
-    """Parse and run all the tests in the given file."""
+    """Parse and run all the tests in the given file. Optionally, only run a specific test by name."""
     with open(path) as f:
         test_suite = yaml.safe_load(f)
 
     test_suite = TestSuite.model_validate(test_suite)
     
     for test in test_suite.tests:
+        if test_name is not None and test.name != test_name:
+            continue
         conversation_history = []
         for i, turn in enumerate(test.turns):
             is_last_turn = (i == len(test.turns) - 1)

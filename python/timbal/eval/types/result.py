@@ -1,18 +1,22 @@
-from pydantic import BaseModel
 from typing import Any
+
+from pydantic import BaseModel
+
 
 class EvalResult(BaseModel):
     test_path: str
-    input: str
+    input: str | dict
     reason: list[str] | None = None
     output_passed: bool | None = None
     output_explanations: list[str] | None = None
-    # actual_output: list[str]
-    # expected_output: list[str]
+    actual_output: str | dict
+    expected_output: str | dict
     steps_passed: bool | None = None
     steps_explanations: list[str] | None = None
-    # actual_steps: list[dict[str, Any]] | None = None
-    # expected_steps: list[dict[str, Any]] | None = None
+    actual_steps: list[dict[str, Any]] | None = None
+    expected_steps: str | dict | None = None
+    usage_passed: bool | None = None
+    usage_explanations: list[str] | None = None
 
 
 class EvalTestSuiteResult(BaseModel):
