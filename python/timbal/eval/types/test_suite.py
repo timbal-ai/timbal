@@ -7,6 +7,7 @@ from .test import Test
 
 class TestSuite(BaseModel):
     """Represents a collection of tests to evaluate."""
+    __test__ = False # This attribute explicitly tells pytest's discover mechanism to skip these classes.
     model_config = ConfigDict(extra="ignore")
 
     tests: list[Test]

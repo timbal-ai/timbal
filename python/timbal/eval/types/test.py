@@ -5,6 +5,7 @@ from .turn import Turn
 
 class Test(BaseModel):
     """Represents a single evaluation test case, identified by a unique name."""
+    __test__ = False # This attribute explicitly tells pytest's discover mechanism to skip these classes.
     model_config = ConfigDict(extra="ignore")
 
     name: str

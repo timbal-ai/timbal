@@ -117,7 +117,7 @@ class File(io.IOBase):
                 content_type = f"timbal/{self.__source_extension__}"
         object.__setattr__(self, "__content_type__", content_type)
 
-
+    
     def __str__(self) -> str:
         if self.__source_scheme__ == "bytes":
             ext_info = f"{self.__source_extension__}" if self.__source_extension__ else ""
@@ -407,6 +407,12 @@ class File(io.IOBase):
                 return value.__persisted__
 
         return value.to_data_url()
+
+
+    def save_to_disk(self, path: Path) -> None:
+        """Save the file to disk."""
+        with open(path, "wb") as f:
+            f.write(self.read())
 
 
     @classmethod

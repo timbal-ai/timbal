@@ -31,7 +31,7 @@ def acc_usage(
         input_tokens = int(openai_usage.prompt_tokens)
         input_tokens_details = openai_usage.prompt_tokens_details
 
-        if hasattr(input_tokens_details, "cached_tokens"):
+        if hasattr(input_tokens_details, "cached_tokens") and input_tokens_details.cached_tokens is not None:
             input_cached_tokens = int(input_tokens_details.cached_tokens)
             if input_cached_tokens:
                 input_tokens -= input_cached_tokens
@@ -39,7 +39,7 @@ def acc_usage(
                 existing_input_cached_tokens = acc.get(input_cached_tokens_key, 0)
                 acc[input_cached_tokens_key] = existing_input_cached_tokens + input_cached_tokens
 
-        if hasattr(input_tokens_details, "audio_tokens"):
+        if hasattr(input_tokens_details, "audio_tokens") and input_tokens_details.audio_tokens is not None:
             input_audio_tokens = int(input_tokens_details.audio_tokens)
             if input_audio_tokens:
                 input_tokens -= input_audio_tokens

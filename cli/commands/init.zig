@@ -28,7 +28,7 @@ fn printUsage() !void {
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
         "    \x1b[1;36m--agent \x1b[0m Initialize a timbal project as an agent (default)\n" ++
-        "    \x1b[1;36m--flow \x1b[0m Initialize a timbal project as a flow\n" ++
+        "    \x1b[1;36m--flow  \x1b[0m Initialize a timbal project as a flow\n" ++
         "\n" ++
         "\x1b[1;32mGlobal options:\n" ++
         "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet      \x1b[0mDo not print any output\n" ++

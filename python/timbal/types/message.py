@@ -13,6 +13,7 @@ from pydantic import (
     GetCoreSchemaHandler,
     GetJsonSchemaHandler,
     SerializationInfo,
+    TypeAdapter,
     ValidationInfo,
     ValidatorFunctionWrapHandler,
 )
@@ -225,3 +226,6 @@ class Message:
                 when_used="always",
             ),
         )
+
+
+message_model_schema = TypeAdapter(Message).json_schema()
