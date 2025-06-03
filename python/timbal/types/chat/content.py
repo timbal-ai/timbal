@@ -97,6 +97,7 @@ class Content(BaseModel):
             return ToolUseContent(
                 id=value.id,
                 name=value.function.name,
+                # TODO Review this. This can error. What about catching this?
                 input=literal_eval(value.function.arguments),
             )
         
@@ -137,6 +138,7 @@ class Content(BaseModel):
                 return ToolUseContent(
                     id=value.get("id"),  
                     name=value["function"]["name"],
+                    # TODO Review this. This can error. What about catching this?
                     input=literal_eval(value["function"]["arguments"]),
                 )
             
@@ -248,7 +250,7 @@ class FileContent(Content):
             return openai_input
 
         elif mime and mime.startswith("image/"):
-            url = File.serialize(self.file)
+            url = self.file.to_data_url()
             return {
                 "type": "image_url", 
                 "image_url": {"url": url},
@@ -259,7 +261,7 @@ class FileContent(Content):
             # it errors with missing_required_parameter 'file_id'. We don't want to upload the files to 
             # the openai platform (as of yet), since we don't want to control org limits and storage.
             # # We need the base64 data of the pdf.
-            # data_url = File.serialize(self.file)
+            # data_url = self.file.to_data_url()
             # base64_data = data_url.split(",", 1)[1]
             # return {
             #     "type": "file",
@@ -278,7 +280,7 @@ class FileContent(Content):
             )
             pages_input = []
             for page in pages:
-                url = File.serialize(page)
+                url = page.to_data_url()
                 pages_input.append({
                     "type": "image_url", 
                     "image_url": {"url": url},
@@ -408,7 +410,7 @@ class FileContent(Content):
             return anthropic_input
 
         elif mime and mime.startswith("image/"):
-            url = File.serialize(self.file)
+            url = self.file.to_data_url()
             if url.startswith("data:"):
                 base64_data = url.split(",", 1)[1]
                 return {
@@ -429,7 +431,7 @@ class FileContent(Content):
                 }
 
         elif mime == "application/pdf":
-            url = File.serialize(self.file)
+            url = self.file.to_data_url()
             if url.startswith("data:"):
                 base64_data = url.split(",", 1)[1]
                 return {

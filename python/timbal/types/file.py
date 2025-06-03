@@ -33,6 +33,7 @@ import base64
 import io
 import mimetypes
 import os
+import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -313,8 +314,65 @@ class File(io.IOBase):
         raise ValueError("Invalid file source. Must be a local file path, data URL, or HTTP/HTTPS url.")
 
     
-    def persist(self, context: RunContext) -> None:
-        """Persist the file to the Timbal platform."""
+    def to_disk(self, path: Path) -> None:
+        """Save the file to disk."""
+        # Ensure the file obj has the pointer at the start of the file.
+        self.seek(0)
+        content = self.read()
+        with open(path, "wb") as f:
+            f.write(content)
+
+    
+    def to_data_url(self) -> str:
+        """Serialize the file to a data url string."""
+        if self.__source_scheme__ == "data_url":
+            return str(self)
+
+        # Ensure the file obj has the pointer at the start of the file.
+        self.seek(0)
+        content = self.read()
+
+        bs64_content = base64.b64encode(content).decode("utf-8")
+        return f"data:{self.__content_type__};base64,{bs64_content}"
+
+    
+    def persist(self, context: RunContext | None = None) -> str | None:
+        """Persist the file to some storage.
+        If there's no context or no timbal_platform_config, the file will be persisted to local disk.
+        If there's a platform configuration, the file will be uploaded to the platform.
+        If the file is already persisted, it will be returned as is.
+        """
+        if self.__persisted__ is not None:
+            return self.__persisted__
+
+        # Pydantic might add serialization info as context.
+        if not isinstance(context, RunContext):
+            context = None
+
+        if self.__source_scheme__ == "url":
+            url = str(self)
+            if not context or not context.timbal_platform_config:
+                return url
+            elif url.startswith(f"https://{context.timbal_platform_config.cdn}"):
+                object.__setattr__(self, "__persisted__", url)
+                return url
+
+        if not context or not context.timbal_platform_config:
+            if self.__source_scheme__ == "local_path":
+                local_path = str(self)
+                object.__setattr__(self, "__persisted__", local_path)
+                return local_path
+
+            temp_dir = tempfile.gettempdir()
+            temp_name = str(uuid7())
+            if self.__source_extension__:
+                temp_name += self.__source_extension__
+            temp_path = Path(temp_dir) / temp_name
+            self.to_disk(temp_path)
+            temp_path = temp_path.as_posix()
+            object.__setattr__(self, "__persisted__", temp_path)
+            return temp_path
+
         host = context.timbal_platform_config.host
 
         auth = context.timbal_platform_config.auth
@@ -330,8 +388,12 @@ class File(io.IOBase):
         content = self.read()
         size = len(content)
 
+        name = str(uuid7())
+        if self.__source_extension__:
+            name += self.__source_extension__
+
         body = {
-            "name": f"{uuid7()}{self.__source_extension__}",
+            "name": name,
             "content_type": self.__content_type__,
             "content_length": size,
         }
@@ -363,19 +425,7 @@ class File(io.IOBase):
 
         content_url = uploader.get("content_url")
         object.__setattr__(self, "__persisted__", content_url)
-
-    
-    def to_data_url(self) -> str:
-        """Serialize the file to a data url string."""
-        if self.__source_scheme__ == "data_url":
-            return str(self)
-
-        # Ensure the file obj has the pointer at the start of the file.
-        self.seek(0)
-        content = self.read()
-
-        bs64_content = base64.b64encode(content).decode("utf-8")
-        return f"data:{self.__content_type__};base64,{bs64_content}"
+        return content_url
 
 
     @classmethod
@@ -393,26 +443,11 @@ class File(io.IOBase):
         if not isinstance(value, cls):
             raise ValueError("Cannot serialize a non-file object.")
 
-        if value.__persisted__ is not None:
-            return value.__persisted__
-
-        if isinstance(context, RunContext) and context.timbal_platform_config is not None:
-            if value.__source_scheme__ == "url":
-                url = str(value)
-                if url.startswith(f"https://{context.timbal_platform_config.cdn}"):
-                    value.__persisted__ = url
-                    return url
-            value.persist(context)
-            if value.__persisted__ is not None:
-                return value.__persisted__
+        persisted = value.persist(context=context)
+        if persisted is not None:
+            return persisted
 
         return value.to_data_url()
-
-
-    def save_to_disk(self, path: Path) -> None:
-        """Save the file to disk."""
-        with open(path, "wb") as f:
-            f.write(self.read())
 
 
     @classmethod

@@ -61,7 +61,7 @@ def test_file_serialize_byteslike() -> None:
 
     file = File.validate(test_io)
 
-    assert File.serialize(file) == "data:application/octet-stream;base64,SGVsbG8sIFdvcmxkIQ=="
+    assert file.to_data_url() == "data:application/octet-stream;base64,SGVsbG8sIFdvcmxkIQ=="
 
 
 def test_file_validate_local_path_from_str(tmp_path: pathlib.Path) -> None:
@@ -97,7 +97,7 @@ def test_file_serialize_local_path(tmp_path: pathlib.Path) -> None:
 
     file = File.validate(str(test_file))
 
-    assert File.serialize(file) == "data:text/plain;base64,SGVsbG8sIFdvcmxkIQ=="
+    assert file.to_data_url() == "data:text/plain;base64,SGVsbG8sIFdvcmxkIQ=="
 
 
 def test_file_validate_data_url() -> None:
@@ -129,7 +129,7 @@ def test_file_serialize_data_url() -> None:
 
     file = File.validate(data_url)
 
-    assert File.serialize(file) == data_url
+    assert file.to_data_url() == data_url
 
 
 def test_file_validate_url() -> None:
@@ -149,4 +149,4 @@ def test_file_serialize_url() -> None:
 
     file = File.validate(url)
 
-    assert File.serialize(file) == "data:text/plain;base64,SGVsbG8sIFdvcmxkIQo="
+    assert file.to_data_url() == "data:text/plain;base64,SGVsbG8sIFdvcmxkIQo="
