@@ -406,6 +406,7 @@ class Agent(BaseStep):
         llm_input = {
             "messages": messages,
             "tools": tools_dump,
+            "system_prompt": system_prompt,
             **kwargs,
         }
 
@@ -491,7 +492,7 @@ class Agent(BaseStep):
             if not isinstance(tool_output, Message):
                 tool_output = Message.validate({
                     "role": "user",
-                    "content": tool_output,
+                    "content": str(tool_output),
                 })
             
         except Exception as err:
