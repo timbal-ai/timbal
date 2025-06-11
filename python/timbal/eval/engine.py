@@ -66,12 +66,11 @@ async def eval_steps(
 
 async def eval_output(
     turn: Turn,
-    agent_output: str
+    agent_output_message: str
 ) -> tuple[bool, list[str]]:
     """Evaluate the output of a turn. If no validators are present, use semantic_output as default."""
     explanations = []
     results = []
-    agent_output_message = Message(role="assistant", content=[TextContent(text=agent_output)])
 
     for validator in turn.output.validators:
         if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
@@ -90,7 +89,7 @@ async def eval_output(
                 explanations.append(str(e))
         results.append(correct)
         
-    return all(results), explanations, agent_output_message
+    return all(results), explanations
 
 
 def eval_usage(
@@ -115,14 +114,20 @@ def eval_usage(
             if isinstance(item, dict):
                 for model, usage_types in item.items():
                     for usage_type, limits in usage_types.items():
-                        usage_items.append((f"{model}:{usage_type}", limits))
+                        usage_items.append((model, usage_type, limits))
     else:
         return []
 
-    for usage_key, limits in usage_items:
+    for model, usage_type, limits in usage_items:
         max_value = limits.get("max")
         min_value = limits.get("min")
-        actual_value = actual_usage.get(usage_key)
+        if "+" in usage_type:
+            keys = usage_type.split("+")
+            actual_value = sum(actual_usage.get(f"{model}:{k}", 0) for k in keys)
+            usage_key = f"{model}:{usage_type}"
+        else:
+            actual_value = actual_usage.get(f"{model}:{usage_type}")
+            usage_key = f"{model}:{usage_type}"
         if max_value is not None and actual_value is not None and actual_value > max_value:
             correct = False
             explanation = f"Actual value {actual_value} is greater than max value {max_value} for {usage_key}."
@@ -131,7 +136,14 @@ def eval_usage(
             explanation = f"Actual value {actual_value} is less than min value {min_value} for {usage_key}."
         elif actual_value is not None:
             correct = True
-            explanation = f"Actual value {actual_value} is between min value {min_value} and max value {max_value} for {usage_key}."
+            if min_value is not None and max_value is not None:
+                explanation = f"Actual value {actual_value} is between min value {min_value} and max value {max_value} for {usage_key}."
+            elif min_value is not None:
+                explanation = f"Actual value {actual_value} is greater than or equal to min value {min_value} for {usage_key}."
+            elif max_value is not None:
+                explanation = f"Actual value {actual_value} is less than or equal to max value {max_value} for {usage_key}."
+            else:
+                explanation = f"Actual value {actual_value} for {usage_key} (no min/max set)."
         else:
             correct = False
             explanation = f"No actual value found for {usage_key}."
@@ -189,13 +201,17 @@ async def run_turn(
             test_results.steps_failed += 1
             reason.append("steps")
 
+    output_passed = None
+    output_explanations = []
+    agent_output_message = Message(role="assistant", content=[TextContent(text=agent_output)])
     # Evaluate the output
-    output_passed, output_explanations, agent_output_message = await eval_output(turn, agent_output)
-    if output_passed:
-        test_results.outputs_passed += 1
-    else:
-        test_results.outputs_failed += 1
-        reason.append("output")
+    if turn.output:
+        output_passed, output_explanations = await eval_output(turn, agent_output_message)
+        if output_passed:
+            test_results.outputs_passed += 1
+        else:
+            test_results.outputs_failed += 1
+            reason.append("output")
 
     usage_comparisons = []
     if turn.usage:
@@ -216,12 +232,12 @@ async def run_turn(
                 output_passed=output_passed,
                 output_explanations=output_explanations,
                 actual_output={
-                    "text": agent_output_message.content[0].text if agent_output_message.content[0].type == "text" else None,
-                    "files": [c.file for c in agent_output_message.content if c.type == "file"]
+                    "text": agent_output_message.content[0].text if agent_output_message and agent_output_message.content[0].type == "text" else None,
+                    "files": [c.file for c in agent_output_message.content if c.type == "file"] if agent_output_message else None
                 },
-                expected_output=turn.output.to_dict(),
+                expected_output=turn.output.to_dict() if turn.output else None,
                 usage_passed=all(comparison["correct"] for comparison in usage_comparisons),
-                usage_explanations= [comparison["explanation"] for comparison in usage_comparisons],
+                usage_explanations = [comparison["explanation"] for comparison in usage_comparisons if not comparison["correct"]],
                 steps_passed=steps_passed,
                 steps_explanations=steps_explanations,
                 actual_steps=actual_steps,

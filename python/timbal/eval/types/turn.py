@@ -18,7 +18,7 @@ class Turn(BaseModel):
 
     input: Input
     """The input for this turn, representing what is sent to the agent. This may include text and/or files."""
-    output: Output
+    output: Output | None = None
     """The output for this turn. When validators are present, this represents the expected output to be checked for correctness.
     When no validators are present, this output is used as a fixed response to store in the agent's memory or conversation history.
     """

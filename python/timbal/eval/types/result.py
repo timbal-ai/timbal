@@ -10,7 +10,7 @@ class EvalResult(BaseModel):
     output_passed: bool | None = None
     output_explanations: list[str] | None = None
     actual_output: str | dict
-    expected_output: str | dict
+    expected_output: str | dict | None = None
     steps_passed: bool | None = None
     steps_explanations: list[str] | None = None
     actual_steps: list[dict[str, Any]] | None = None

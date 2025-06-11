@@ -94,11 +94,24 @@ class Content(BaseModel):
             )
 
         if isinstance(value, OpenAIToolCall):
+            arguments = value.function.arguments
+            input_value = None
+            if isinstance(arguments, dict):
+                input_value = arguments
+            else:
+                try:
+                    input_value = json.loads(arguments)
+                except Exception as json_exc:
+                    try:
+                        input_value = literal_eval(arguments)
+                    except Exception as lit_exc:
+                        logger.error("Both json.loads and literal_eval failed on OpenAI function arguments", exc_info=True)
+                        input_value = {}  # or: input_value = arguments
             return ToolUseContent(
                 id=value.id,
                 name=value.function.name,
                 # TODO Review this. This can error. What about catching this?
-                input=literal_eval(value.function.arguments),
+                input=input_value
             )
         
         # TODO Review
