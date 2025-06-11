@@ -11,7 +11,7 @@ from pathlib import Path
 import structlog
 import uvicorn
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
@@ -134,6 +134,44 @@ def create_app(
                 yield f"data: {json.dumps(event_content)}\n\n"
 
         return StreamingResponse(event_streamer(), media_type="text/event-stream")
+
+    
+    @app.websocket("/ws")
+    async def websocket(websocket: WebSocket):
+        logger.info("🔗 New WebSocket connection request")
+        await websocket.accept()
+        logger.info("✅ WebSocket connection established")
+
+        # TODO Get context from here
+        req_context = RunContext()
+
+        try:
+            while True:
+                message_json = await websocket.receive_text()
+                message = json.loads(message_json)
+
+                async for event in app.state.flow.run(context=req_context, **message):
+                    # TODO Depending on the event do something or not.
+                    print(event)
+                    # websocket.send_text(...)
+
+                # # TODO Move this.
+                # event_type = message.get("event")
+                
+                # if event_type == "start":
+                #     print("Start Message: ", message)
+                #     await handle_call_start(websocket, message, agent)
+                # elif event_type == "media":
+                #     await handle_media(websocket, message, agent)
+                # elif event_type == "stop":
+                #     await handle_call_stop(websocket, message, agent)
+                    
+        except WebSocketDisconnect:
+            logger.info("🔌 WebSocket connection closed by client")
+        except Exception as e:
+            logger.error(f"💥 WebSocket error: {e}")
+        finally:
+            logger.info("🧹 WebSocket connection terminated")
 
 
     return app
