@@ -34,7 +34,8 @@ dependencies = [
     "openpyxl>=3.1.5",
     "pandas>=2.2.3",
     "pydantic>=2.10.6",
-    "pymupdf>=1.25.5",
+    # PyMuPDF 1.26.1 does not have a wheel for aarch64 (2025-06-12) and would try to build from source otherwise.
+    "pymupdf==1.26.0",
     "python-docx>=1.1.2",
     "python-dotenv>=1.0.1",
     "requests>=2.32.3",

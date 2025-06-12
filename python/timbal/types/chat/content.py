@@ -66,6 +66,29 @@ class Content(BaseModel):
 
     type: Literal["text", "file", "tool_use", "tool_result"]
 
+
+    @staticmethod
+    def _parse_openai_function_arguments(arguments: Any) -> dict[str, Any]:
+        """Aux function to parse openai tool use arguments into python objects."""
+        input_arguments = {}
+
+        if isinstance(arguments, dict):
+            input_arguments = arguments
+        else:
+            try:
+                input_arguments = json.loads(arguments)
+            except Exception:
+                try:
+                    input_arguments = literal_eval(arguments)
+                except Exception:
+                    logger.error(
+                        "Both json.loads and literal_eval failed on OpenAI function arguments", 
+                        exc_info=True
+                    )
+        
+        return input_arguments
+        
+
     @classmethod 
     def model_validate(cls, value: Any, *args: Any, **kwargs: Any) -> "Content":
         """Validate and convert input formats into a Content instance."""
@@ -95,23 +118,11 @@ class Content(BaseModel):
 
         if isinstance(value, OpenAIToolCall):
             arguments = value.function.arguments
-            input_value = None
-            if isinstance(arguments, dict):
-                input_value = arguments
-            else:
-                try:
-                    input_value = json.loads(arguments)
-                except Exception as json_exc:
-                    try:
-                        input_value = literal_eval(arguments)
-                    except Exception as lit_exc:
-                        logger.error("Both json.loads and literal_eval failed on OpenAI function arguments", exc_info=True)
-                        input_value = {}  # or: input_value = arguments
+            input_arguments = Content._parse_openai_function_arguments(arguments)
             return ToolUseContent(
                 id=value.id,
                 name=value.function.name,
-                # TODO Review this. This can error. What about catching this?
-                input=input_value
+                input=input_arguments
             )
         
         # TODO Review
@@ -148,11 +159,12 @@ class Content(BaseModel):
             
             # OpenAI's tool use content.
             if content_type == "function":
+                arguments = value["function"]["arguments"]
+                input_arguments = Content._parse_openai_function_arguments(arguments)
                 return ToolUseContent(
                     id=value.get("id"),  
                     name=value["function"]["name"],
-                    # TODO Review this. This can error. What about catching this?
-                    input=literal_eval(value["function"]["arguments"]),
+                    input=input_arguments,
                 )
             
             # Anthropic's tool result content.
