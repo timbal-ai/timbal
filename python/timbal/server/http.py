@@ -49,6 +49,45 @@ async def lifespan(
     
     app.state.flow = load_module(module_spec)
     
+    # Update websocket URL if ngrok is enabled
+    if hasattr(app.state, 'ngrok_url') and app.state.ngrok_url:
+        try:
+            agent = app.state.flow
+            if hasattr(agent, "adapters"):
+                for adapter in agent.adapters:
+                    if hasattr(adapter, "config") and hasattr(adapter.config, "websocket_url"):
+                        wss_url = app.state.ngrok_url.replace("https://", "wss://") + "/ws"
+                        adapter.config.websocket_url = wss_url
+                        logger.info("Updated adapter's websocket_url with ngrok address.", url=wss_url)
+        except Exception as e:
+            logger.warning("Could not dynamically update websocket_url for agent adapter.", error=str(e))
+    
+    # Start the agent after the module is loaded and configured
+    try:
+        agent = app.state.flow
+        if hasattr(agent, "adapters") and agent.adapters:
+            # Set the agent reference in each adapter
+            for adapter in agent.adapters:
+                if hasattr(adapter, 'set_agent'):
+                    adapter.set_agent(agent)
+            
+            logger.info("🚀 Starting agent to initiate outbound call")
+            # agent.run() returns an async generator, so we need to consume it
+            async def run_agent():
+                while True:
+                    try:
+                        async for event in agent.run():
+                            pass  # Events are handled internally
+                        # If agent completes normally, break the loop
+                        break
+                    except Exception as e:
+                        # If agent fails, wait a bit and retry
+                        logger.debug(f"Agent execution ended: {e}")
+                        await asyncio.sleep(1)  # Wait 1 second before retry
+            asyncio.create_task(run_agent())
+    except Exception as e:
+        logger.error(f"Failed to start agent: {e}")
+    
     yield
     
     # ? Any additional cleanup
@@ -57,6 +96,7 @@ async def lifespan(
 def create_app(
     module_spec: ModuleSpec, 
     shutdown_event: asyncio.Event,
+    ngrok_url: str | None = None,
 ) -> FastAPI:
     """HTTP server implementation for Timbal.
 
@@ -68,6 +108,10 @@ def create_app(
         shutdown_event: Event to signal shutdown.
     """
     app = FastAPI(lifespan=lambda app: lifespan(app, module_spec))
+    
+    # Store ngrok URL in app state if provided
+    if ngrok_url:
+        app.state.ngrok_url = ngrok_url
 
 
     @app.get("/healthcheck")
@@ -138,40 +182,43 @@ def create_app(
     
     @app.websocket("/ws")
     async def websocket(websocket: WebSocket):
-        logger.info("🔗 New WebSocket connection request")
-        await websocket.accept()
-        logger.info("✅ WebSocket connection established")
+        logger.info("🔗 WebSocket connection attempt received")
+        agent = app.state.flow
 
-        # TODO Get context from here
-        req_context = RunContext()
+        await websocket.accept()
+        logger.info("✅ WebSocket connection accepted, starting message loop.")
 
         try:
             while True:
                 message_json = await websocket.receive_text()
-                message = json.loads(message_json)
-
-                async for event in app.state.flow.run(context=req_context, **message):
-                    # TODO Depending on the event do something or not.
-                    print(event)
-                    # websocket.send_text(...)
-
-                # # TODO Move this.
-                # event_type = message.get("event")
-                
-                # if event_type == "start":
-                #     print("Start Message: ", message)
-                #     await handle_call_start(websocket, message, agent)
-                # elif event_type == "media":
-                #     await handle_media(websocket, message, agent)
-                # elif event_type == "stop":
-                #     await handle_call_stop(websocket, message, agent)
+                try:
+                    response = await agent.handle_message(message_json)
+                    
+                    if response is not None:
+                        response_text = json.dumps(response) if isinstance(response, dict) else str(response)
+                        
+                        logger.debug("📤 Sending WebSocket message", message_preview=response_text[:100])
+                        await websocket.send_text(response_text)
+                        
+                        # Check for close event (works for both dict and string responses)
+                        is_close = (isinstance(response, dict) and response.get("event") == "close") or \
+                                  ("close" in response_text and "event" in response_text)
+                        
+                        if is_close:
+                            logger.info("🔚 Received close event, ending WebSocket connection.")
+                            break
+                            
+                except Exception as e:
+                    logger.error("Error processing WebSocket message", error=str(e), exc_info=True)
                     
         except WebSocketDisconnect:
-            logger.info("🔌 WebSocket connection closed by client")
-        except Exception as e:
-            logger.error(f"💥 WebSocket error: {e}")
-        finally:
-            logger.info("🧹 WebSocket connection terminated")
+            logger.info("🔌 WebSocket disconnected by client.")
+        except NotImplementedError:
+            logger.error("Agent has no adapter capable of handling messages. Closing connection.")
+            await websocket.close(code=1011)
+        except Exception:
+            logger.error("Unhandled error during websocket handling.", exc_info=True)
+            await websocket.close(code=1011)
 
 
     return app
@@ -198,12 +245,14 @@ async def main(
     """
     shutdown_event = asyncio.Event()
 
-    app = create_app(module_spec, shutdown_event)
-
+    # Setup ngrok if enabled
+    ngrok_url = None
     if os.getenv("TIMBAL_ENABLE_NGROK", "false").lower() == "true":
         from pyngrok import ngrok
-        public_url = ngrok.connect(port, "http")
-        logger.info("ngrok_public_url", public_url=public_url)
+        ngrok_url = ngrok.connect(port, "http").public_url
+        logger.info("ngrok_public_url", public_url=ngrok_url)
+
+    app = create_app(module_spec, shutdown_event, ngrok_url)
 
     config = uvicorn.Config(
         app, 

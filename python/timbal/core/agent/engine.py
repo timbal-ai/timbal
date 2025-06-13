@@ -39,6 +39,7 @@ from .types.llm_chunk import LLMChunk
 from .types.llm_result import LLMResult
 from .types.tool_result import ToolResult
 from .types.tool import Tool
+from ...adapters.base import BaseAdapter
 
 logger = structlog.get_logger("timbal.core.agent.engine")
 
@@ -102,6 +103,7 @@ class Agent(BaseStep):
         # ? Should these be RunnableLike
         before_agent_callback: Callable | None = None,
         after_agent_callback: Callable | None = None,
+        adapters: list[BaseAdapter] = [],
         # LLM specific params.
         system_prompt: str | None = None,
         model: str = "gpt-4.1",
@@ -158,6 +160,11 @@ class Agent(BaseStep):
             self.is_after_agent_callback_async = self._validate_callback(after_agent_callback, "after_agent_callback")
         self.after_agent_callback = after_agent_callback
 
+        if adapters is not None:
+            self.adapters = self._validate_adapters(adapters)
+        else:
+            self.adapters = []
+
         self.system_prompt = system_prompt
         self.model = model
         self.max_tokens = max_tokens
@@ -182,6 +189,15 @@ class Agent(BaseStep):
         if inspect.isgeneratorfunction(callback) or inspect.isasyncgenfunction(callback):
             raise TypeError(f"{name} must not be a generator or async generator")
         return inspect.iscoroutinefunction(callback)
+
+    def _validate_adapters(self, adapters: list[BaseAdapter]) -> list[BaseAdapter]:
+        """Validate the adapters."""
+        if not isinstance(adapters, list):
+            raise TypeError(f"adapters must be a list, got {type(adapters)}")
+        for adapter in adapters:
+            if not isinstance(adapter, BaseAdapter):
+                raise TypeError(f"adapter must be a BaseAdapter, got {type(adapter)}")
+        return adapters
 
 
     def prefix_path(self, prefix: str) -> None:
@@ -523,6 +539,32 @@ class Agent(BaseStep):
         )
 
 
+    async def handle_message(self, message_json):
+        """
+        Handles a single message by delegating to the appropriate adapter.
+        
+        Args:
+            message_json: The JSON message received
+            
+        Returns:
+            dict: Response message or None if no response needed
+        """
+        if not self.adapters:
+            raise NotImplementedError("No adapters configured to handle messages")
+        
+        # Find an adapter that can handle messages
+        message_adapter = None
+        for adapter in self.adapters:
+            if hasattr(adapter, 'handle_message'):
+                message_adapter = adapter
+                break
+        
+        if not message_adapter:
+            raise NotImplementedError("No adapter found that can handle messages")
+        
+        return await message_adapter.handle_message(message_json)
+
+    
     async def run(
         self, 
         context: RunContext | None = None,
@@ -583,6 +625,8 @@ class Agent(BaseStep):
             - Supports continuation of previous conversations
             - Handles both streaming and non-streaming LLMs
         """
+        # For now, we only support single-turn mode with adapter callbacks
+        # Interactive mode (listen/reply) would need to be implemented separately
         t0 = int(time.time() * 1000)
 
         if context is None:
@@ -640,21 +684,72 @@ class Agent(BaseStep):
         run_usage = {}
 
         try:
-            if self.before_agent_callback is not None:
-                if self.is_before_agent_callback_async:
-                    await self.before_agent_callback(context)
-                else:
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, lambda: self.before_agent_callback(context))
+            # Call adapter before_agent callbacks
+            for adapter in self.adapters:
+                try:
+                    await adapter.before_agent(context)
+                except EarlyExit:
+                    # Adapter can raise EarlyExit to stop execution
+                    if self.state_saver is not None:
+                        t1 = int(time.time() * 1000)
+                        snapshot = Snapshot(
+                            v="0.2.0",
+                            id=context.id,
+                            parent_id=context.parent_id,
+                            path=self.path,
+                            input=agent_input,
+                            output={},
+                            error=None,
+                            t0=t0,
+                            t1=t1,
+                            data=context.data.as_dict(),
+                        )
+                        
+                        try:
+                            if self._is_state_saver_put_async:
+                                await self.state_saver.put(snapshot=snapshot, context=context)
+                            else:
+                                self.state_saver.put(snapshot=snapshot, context=context)
+                        except Exception as err:
+                            logger.error("put_memory_error", err=err)
+                    return
+                except Exception as err:
+                    error = {
+                        "type": type(err).__name__,
+                        "message": str(err),
+                        "traceback": traceback.format_exc(),
+                    }
+                    # Call adapter on_error callback
+                    try:
+                        await adapter.on_error(context, error)
+                    except Exception:
+                        pass  # Don't let error handling fail
+                    raise
 
-            if "prompt" in kwargs:
+            # if self.before_agent_callback is not None:
+            #    if self.is_before_agent_callback_async:
+            #        await self.before_agent_callback(context)
+            #    else:
+            #        loop = asyncio.get_running_loop()
+            #        await loop.run_in_executor(None, lambda: self.before_agent_callback(context))
+
+            # Check if adapter provided a prompt in context
+            if "prompt" in context.data:
+                prompt_from_adapter = context.data["prompt"]
+                if isinstance(prompt_from_adapter, Message):
+                    messages.append(prompt_from_adapter)
+                else:
+                    messages.append(Message.validate(prompt_from_adapter))
+            elif "prompt" in kwargs:
                 # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
                 kwargs["prompt"] = Message.validate(kwargs["prompt"])
                 agent_input = dump(kwargs, context=context)
                 messages.append(kwargs.pop("prompt"))
 
+            # If no messages, exit early instead of failing
             if not len(messages):
-                raise ValueError("No prompt or message history found!")
+                logger.debug("No prompt or message history found, exiting early")
+                raise EarlyExit("No prompt or message history to process")
 
             kwargs = {
                 "system_prompt": self.system_prompt,
@@ -665,38 +760,19 @@ class Agent(BaseStep):
             }
             kwargs = dict(self.params_model().model_validate(kwargs))
 
-        except EarlyExit:
-            if self.state_saver is not None:
-                t1 = int(time.time() * 1000)
-                snapshot = Snapshot(
-                    v="0.2.0",
-                    id=context.id,
-                    parent_id=context.parent_id,
-                    path=self.path,
-                    input=agent_input,
-                    output={},
-                    error=None,
-                    t0=t0,
-                    t1=t1,
-                    data=context.data.as_dict(),
-                )
-                
-                # We don't want to cancel the execution if this errors. 
-                try:
-                    if self._is_state_saver_put_async:
-                        await self.state_saver.put(snapshot=snapshot, context=context)
-                    else:
-                        self.state_saver.put(snapshot=snapshot, context=context)
-                except Exception as err:
-                    logger.error("put_memory_error", err=err)
-            return
-
         except Exception as err:
             error = {
                 "type": type(err).__name__,
                 "message": str(err),
                 "traceback": traceback.format_exc(),
             }
+
+            # Call adapter on_error callbacks
+            for adapter in self.adapters:
+                try:
+                    await adapter.on_error(context, error)
+                except Exception:
+                    pass  # Don't let error handling fail
 
             if self.state_saver is not None:
                 t1 = int(time.time() * 1000)
@@ -756,17 +832,6 @@ class Agent(BaseStep):
                 logger.info("chunk_event", chunk_event=llm_chunk_event_dump)
                 yield llm_chunk_event
 
-                # # If the LLM is returning a stream, that indicates it's not going to use a tool.
-                # # We're safe streaming the chunks as the final agent response.
-                # agent_chunk_event = ChunkEvent(
-                #     run_id=context.id,
-                #     path=self.path,
-                #     chunk=llm_chunk.output,
-                # )
-
-                # logger.info("chunk_event", chunk_event=agent_chunk_event)
-                # yield agent_chunk_event
-
         llm_output_event = OutputEvent(
             run_id=context.id,
             path=llm_i_path,
@@ -793,6 +858,13 @@ class Agent(BaseStep):
         # An LLM error is non-recoverable for the agent (after retries and all).
         # We raise the error upwards so others can catch it if this is a subagent.
         if llm_result.error is not None:
+            # Call adapter on_error callbacks
+            for adapter in self.adapters:
+                try:
+                    await adapter.on_error(context, llm_result.error)
+                except Exception:
+                    pass  # Don't let error handling fail
+
             if self.state_saver is not None:
                 t1 = int(time.time() * 1000)
                 snapshot = Snapshot(
@@ -949,17 +1021,6 @@ class Agent(BaseStep):
                     logger.info("chunk_event", chunk_event=llm_chunk_event_dump)
                     yield llm_chunk_event
 
-                    # # If the LLM is returning a stream, that indicates it's not going to use a tool.
-                    # # We're safe streaming the chunks as the final agent response.
-                    # agent_chunk_event = ChunkEvent(
-                    #     run_id=context.id,
-                    #     path=self.path,
-                    #     chunk=llm_chunk.output,
-                    # )
-
-                    # logger.info("chunk_event", chunk_event=agent_chunk_event)
-                    # yield agent_chunk_event
-
             llm_output_event = OutputEvent(
                 run_id=context.id,
                 path=llm_i_path,
@@ -986,6 +1047,13 @@ class Agent(BaseStep):
             # An LLM error is non-recoverable for the agent (after retries and all).
             # We raise the error upwards so others can catch it if this is a subagent.
             if llm_result.error is not None:
+                # Call adapter on_error callbacks
+                for adapter in self.adapters:
+                    try:
+                        await adapter.on_error(context, llm_result.error)
+                    except Exception:
+                        pass  # Don't let error handling fail
+
                 if self.state_saver is not None:
                     t1 = int(time.time() * 1000)
                     snapshot = Snapshot(
@@ -1023,6 +1091,16 @@ class Agent(BaseStep):
                 if isinstance(content, ToolUseContent)
             ]
 
+        # Store the agent output in context for after_agent callbacks
+        context.data['output'] = last_message
+
+        # Call adapter after_agent callbacks
+        for adapter in self.adapters:
+            try:
+                await adapter.after_agent(context)
+            except Exception as err:
+                logger.error("adapter_after_agent_error", adapter_type=adapter.type, err=err)
+
         if self.after_agent_callback is not None:
             try:
                 if self.is_after_agent_callback_async:
@@ -1034,7 +1112,7 @@ class Agent(BaseStep):
                 logger.error("after_agent_callback_error", err=err)
 
         t1 = int(time.time() * 1000)
-
+ 
         if self.state_saver is not None:
             snapshot = Snapshot(
                 v="0.2.0",
@@ -1072,10 +1150,12 @@ class Agent(BaseStep):
         )
         agent_output_event_dump = dump(agent_output_event, context=context)
 
-        logger.info("output_event", output_event=agent_output_event_dump)
+        # logger.info("output_event", output_event=agent_output_event_dump)
+        input_text = agent_output_event_dump["output_event"]["input"]["messages"][0]["content"][0]["text"]
+        output_text = agent_output_event_dump["output_event"]["output"]["content"][0]["text"]
+        logger.info("agent_io", input=input_text, output=output_text)
         yield agent_output_event
 
-    
     async def complete(
         self,
         context: RunContext | None = None,

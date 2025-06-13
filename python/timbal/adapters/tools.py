@@ -1,14 +1,28 @@
-from __future__ import annotations
-import typing
+"""
+Tools for the agent.
+"""
 
-if typing.TYPE_CHECKING:
-    from agent import CallHandlerAgent
+# from timbal.state import RunContext
+import structlog
 
-async def hang_up_call() -> str:
+logger = structlog.get_logger("timbal.adapters.tools")
+
+async def hang_up_call():
     """
-    Signals that the conversation should end and the call should be terminated.
-    Use this tool AFTER providing the final response to the user (e.g., "Goodbye!").
-    The system will handle the actual termination of the call after this tool is used.
+    Hangs up the call.
+
+    This tool should be used to terminate the conversation after the final
+    goodbye message has been delivered.
     """
-    # This function is a signal. The implementation is handled by the calling logic.
-    return "Hang up signal received. The call will be terminated." 
+    logger.info("Executing hang_up_call tool.")
+    # try:
+    #    adapter = context.data.get('adapter')
+    #    if adapter and hasattr(adapter, 'stop'):
+    #        # The stop method in the adapter should handle the call termination
+    #        await adapter.stop()
+    #        logger.info("Hang up signal sent via adapter's stop() method.")
+    #    else:
+    #        logger.error("Could not find a compatible adapter in the context to hang up the call.")
+    #except Exception as e:
+    #    logger.error(f"Error while trying to hang up call: {e}", exc_info=True) 
+    return "Call ended."
