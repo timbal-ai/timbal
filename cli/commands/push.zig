@@ -1,10 +1,8 @@
 const std = @import("std");
 const fs = std.fs;
 
-
 // Embedded version.
 const timbal_version = @import("../version.zig").timbal_version;
-
 
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
@@ -143,11 +141,13 @@ fn parseArgs(args: []const []const u8) !TimbalPushArgs {
 }
 
 const ImageDigestInfo = struct {
+    id: []const u8,
     hash: []const u8,
     size: usize,
     platform: []const u8,
 
     pub fn deinit(self: *ImageDigestInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
         allocator.free(self.hash);
         allocator.free(self.platform);
     }
@@ -210,12 +210,14 @@ fn inspectImage(
     const platform = parts.next().?;
 
     if (verbose) {
+        std.debug.print("Image ID: {s}\n", .{image_id});
         std.debug.print("Image hash: {s}\n", .{hash});
         std.debug.print("Image size: {d}\n", .{size});
         std.debug.print("Image platform: {s}\n", .{platform});
     }
 
     return ImageDigestInfo{
+        .id = try allocator.dupe(u8, image_id),
         .hash = try allocator.dupe(u8, hash),
         .size = size,
         .platform = try allocator.dupe(u8, platform),
@@ -244,18 +246,16 @@ const ProbeRes = struct {
 
 fn probeImage(
     allocator: std.mem.Allocator,
-    image: []const u8,
+    image_id: []const u8,
     quiet: bool,
     verbose: bool,
 ) !ProbeRes {
-    _ = verbose;
-
     if (!quiet) {
-        std.debug.print("Probing image...\n", .{});
+        std.debug.print("Probing image {s}...\n", .{image_id});
     }
 
     const docker_run_args = [_][]const u8{
-        "docker", "run", "--rm", image,
+        "docker", "run", "--rm", image_id,
         "uv",     "run", "-m",   "timbal.server.probe",
     };
 
@@ -267,9 +267,15 @@ fn probeImage(
     defer allocator.free(result.stdout);
 
     if (result.term.Exited != 0) {
+        // Print both for maximum debugging info
         const stderr = std.io.getStdErr().writer();
-        try stderr.print("Error: {s}\n", .{result.stderr});
+        try stderr.print("stdout: {s}\n", .{result.stdout});
+        try stderr.print("stderr: {s}\n", .{result.stderr});
         std.process.exit(1);
+    }
+
+    if (verbose) {
+        std.debug.print("Probe result: {s}\n", .{result.stdout});
     }
 
     var parsed = try std.json.parseFromSlice(
@@ -539,7 +545,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var probe_res = try probeImage(
         allocator,
-        parsed_args.image,
+        image_digest_info.id,
         parsed_args.quiet,
         parsed_args.verbose,
     );

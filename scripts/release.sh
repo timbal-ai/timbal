@@ -17,17 +17,25 @@ cd ..
 RELEASE_URL="https://github.com/timbal-ai/timbal/releases/download/v$VERSION"
 
 ASSETS_PATH="cli/zig-out/$VERSION"
+
+# Determine the correct sha256sum command based on the OS.
+if [ "$(uname -s)" = "Darwin" ]; then 
+    SHASUM_CMD="shasum -a 256"
+else 
+    SHASUM_CMD="sha256sum"
+fi
+
 # ! We need to modify this if we want to add more targets.
 LINUX_AARCH64_NAME="timbal-${VERSION}-linux-aarch64-gnu"
-LINUX_AARCH64_SHA=$(sha256sum $ASSETS_PATH/$LINUX_AARCH64_NAME | awk '{print $1}')
+LINUX_AARCH64_SHA=$($SHASUM_CMD $ASSETS_PATH/$LINUX_AARCH64_NAME | awk '{print $1}')
 LINUX_X86_64_NAME="timbal-${VERSION}-linux-x86_64-gnu"
-LINUX_X86_64_SHA=$(sha256sum $ASSETS_PATH/$LINUX_X86_64_NAME | awk '{print $1}')
+LINUX_X86_64_SHA=$($SHASUM_CMD $ASSETS_PATH/$LINUX_X86_64_NAME | awk '{print $1}')
 MACOS_AARCH64_NAME="timbal-${VERSION}-macos-aarch64"
-MACOS_AARCH64_SHA=$(sha256sum $ASSETS_PATH/$MACOS_AARCH64_NAME | awk '{print $1}')
+MACOS_AARCH64_SHA=$($SHASUM_CMD $ASSETS_PATH/$MACOS_AARCH64_NAME | awk '{print $1}')
 MACOS_X86_64_NAME="timbal-${VERSION}-macos-x86_64"
-MACOS_X86_64_SHA=$(sha256sum $ASSETS_PATH/$MACOS_X86_64_NAME | awk '{print $1}')
+MACOS_X86_64_SHA=$($SHASUM_CMD $ASSETS_PATH/$MACOS_X86_64_NAME | awk '{print $1}')
 WINDOWS_X86_64_NAME="timbal-${VERSION}-windows-x86_64-gnu.exe"
-WINDOWS_X86_64_SHA=$(sha256sum $ASSETS_PATH/$WINDOWS_X86_64_NAME | awk '{print $1}')
+WINDOWS_X86_64_SHA=$($SHASUM_CMD $ASSETS_PATH/$WINDOWS_X86_64_NAME | awk '{print $1}')
 
 # Generate the manifest file. This file will be used by the installation scripts to determine the exact binaries to download.
 MANIFEST_PATH="$ASSETS_PATH/manifest.json"
