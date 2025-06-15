@@ -1,24 +1,24 @@
 from typing import Any, override
 
-from ..events.base import BaseEvent
+from ..events.base import Event
+from ..events.output import OutputEvent
 from .base import BaseCollector
 
 
 class AgentCollector(BaseCollector):
     """"""
 
-    last_event: BaseEvent | None = None
+    last_output_event: OutputEvent | None = None
 
     @override
     def handle_chunk(self, chunk: Any) -> Any | None:
         """"""
         # NOTE: An agent handler should only yield events yielded by timbal ToolLike instances.
-        assert isinstance(chunk, BaseEvent), \
-            f"AgentCollector expected a BaseEvent, got {type(chunk)}"
+        assert isinstance(chunk, Event), \
+            f"AgentCollector expected an Event, got {type(chunk)}"
         
-        # Hence, all these chunks will be 'nested' steps inside of the agent. 
-        # Therefore, we prepend the agent's path to each chunk.
-        self.last_event = chunk
+        if isinstance(chunk, OutputEvent):
+            self.last_output_event = chunk
         # We'll want to stream this upwards. 
         return chunk
 
@@ -26,9 +26,8 @@ class AgentCollector(BaseCollector):
     @override
     def collect(self) -> Any:
         """"""
-        
         # NOTE: The last yielded event of an agent should be an OutputEvent, always.
-        assert isinstance(self.last_event, BaseEvent), \
-            f"AgentCollector expected a BaseEvent, got {type(self.last_event)}"
+        assert isinstance(self.last_output_event, OutputEvent), \
+            f"AgentCollector expected an OutputEvent, got {type(self.last_output_event)}"
 
-        return self.last_event
+        return self.last_output_event.data.output

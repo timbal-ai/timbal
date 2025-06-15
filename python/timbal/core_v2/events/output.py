@@ -1,21 +1,38 @@
-from typing import Any
+from typing import Any, Literal
 
-from .base import BaseEvent
+from pydantic import BaseModel, Field
+
+from .base import Event
 
 
-class OutputEvent(BaseEvent):
-    """Event emitted when a step completes with its full output."""
-    type: str = "OUTPUT"
+class OutputEventData(BaseModel):
+    """"""
+    t0: int = Field(
+        ...,
+        description="The start time of the step in milliseconds.",
+    )
+    t1: int = Field(
+        ...,
+        description="The end time of the step in milliseconds.",
+    )
+    input: Any = Field(
+        ...,
+        description="The input to the step.",
+    )
+    output: Any | None = Field(
+        None,
+        description="The output of the step.",
+    )
+    error: Any | None = Field(
+        None,
+        description="The error that occurred during the step (if any).",
+    )
+    usage: dict[str, Any] | None = Field(
+        None,
+        description="The usage of the step.",
+    )
 
-    input: Any
-    """The input arguments passed to the step."""
-    output: Any | None = None
-    """The result of the step (if any)."""
-    error: Any | None = None
-    """The error that occurred during the step (if any)."""
-    t0: int 
-    """The start time of the step in milliseconds."""
-    t1: int 
-    """The end time of the step in milliseconds."""
-    usage: dict[str, int] = {}
-    """The usage of the step."""
+
+class OutputEvent(Event[OutputEventData]):
+    """"""
+    type: Literal["output"] = "output"

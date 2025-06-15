@@ -1,9 +1,9 @@
 import inspect
 from collections.abc import Callable
-from typing import Any, override
 from functools import cached_property
+from typing import Any, override
 
-from pydantic import BaseModel, PrivateAttr, computed_field, model_validator
+from pydantic import BaseModel, computed_field, model_validator
 
 from ..types.models import create_model_from_argspec
 from .runnable import Runnable

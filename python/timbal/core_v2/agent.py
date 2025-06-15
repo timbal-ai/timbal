@@ -1,14 +1,14 @@
 import asyncio
 from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
-from typing import Any, Type, override
+from typing import Any, override
 
 from pydantic import (
-    BaseModel, 
-    ConfigDict, 
-    Field, 
-    PrivateAttr, 
-    SkipValidation, 
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SkipValidation,
     computed_field,
 )
 
@@ -20,7 +20,6 @@ from .events.output import OutputEvent
 from .handlers import llm_router
 from .runnable import Runnable
 from .tool import Tool
-
 
 ToolLike = Runnable | dict[str, Any] | Callable[..., Any]
 
@@ -48,7 +47,7 @@ class Agent(Runnable):
     max_iter: int = 10
     """"""
     # We override the default here
-    collector_cls: Type[BaseCollector] = AgentCollector
+    collector_cls: type[BaseCollector] = AgentCollector
     """"""
 
     _llm: Tool = PrivateAttr()
@@ -128,11 +127,6 @@ class Agent(Runnable):
         """"""
         tool = self._tools_by_name[tool_call.name]
         async for event in tool(**tool_call.input):
-            if isinstance(event, OutputEvent) and not isinstance(event.output, Message):
-                event.output = Message.validate({
-                    "role": "user",
-                    "content": str(event.output),
-                })
             await queue.put((tool_call, event))
 
         # Signal completion with a sentinel value (None)
@@ -168,7 +162,6 @@ class Agent(Runnable):
         messages = [kwargs.pop("prompt")]
 
         while True:
-            print(self._path, messages)
             async for event in self._llm(
                 model=self.model,
                 messages=messages,
@@ -176,9 +169,9 @@ class Agent(Runnable):
                 **kwargs,
             ):
                 if isinstance(event, OutputEvent):
-                    assert isinstance(event.output, Message), \
-                        f"Expected Message, got {type(event.output)}"
-                    messages.append(event.output)
+                    assert isinstance(event.data.output, Message), \
+                        f"Expected Message, got {type(event.data.output)}"
+                    messages.append(event.data.output)
                 yield event
 
             tool_calls = [
@@ -191,16 +184,20 @@ class Agent(Runnable):
             async for tool_call, event in self._multiplex_tools(tool_calls):
                 # We'll receive a bunch of upwards streaming events from nested agents
                 # We only need to process the ones that are immediate children of this very agent
-                if isinstance(event, OutputEvent) and len(event.path.split(".")) == len(self._path.split(".")) + 1:
-                    # We're making sure we're returning messages from tools outputs in the tool handler. 
-                    # We need to further convert this to a tool result message. 
-                    # Each tool use message needs to be matched with its corresponding tool result message.
-                    # ? Using Message.validate() here returns an error
+                if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
+                    # We need to convert the tool output to a tool result message, for the next LLM to consume and match 
+                    # ? Can we optimize this double validate?
+                    event_output = event.data.output
+                    if not isinstance(event_output, Message):
+                        event_output = Message.validate({
+                            "role": "user",
+                            "content": str(event_output),
+                        })
                     message = Message(
                         role="tool",
                         content=[ToolResultContent(
                             id=tool_call.id,
-                            content=event.output.content,
+                            content=event_output.content,
                         )]
                     )
                     messages.append(message)

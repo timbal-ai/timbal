@@ -27,7 +27,7 @@ async def handler(
     # TODO Add all the rest of parameters.
 ) -> Message: # type: ignore
 
-    if not model.startswith(("gpt")):
+    if not model.startswith("gpt"):
         raise NotImplementedError("Only OpenAI models are supported at the mometn.")
 
     api_key = os.getenv("OPENAI_API_KEY")

@@ -15,7 +15,6 @@ from contextvars import ContextVar
 
 from .run_context import RunContext
 
-
 # INTERNAL: This variable holds the context. Do not access directly.
 _run_context_var: ContextVar[RunContext | None] = ContextVar("run_context", default=None)
 

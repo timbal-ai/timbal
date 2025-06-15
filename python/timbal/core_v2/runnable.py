@@ -1,30 +1,31 @@
 import asyncio
-import contextvars 
+import contextvars
 import time
 import traceback
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Literal, Type
+from collections.abc import AsyncGenerator
 from functools import cached_property
+from typing import Any, Literal
 
 import structlog
 from pydantic import (
-    BaseModel, 
-    ConfigDict, 
+    BaseModel,
+    ConfigDict,
     PrivateAttr,
     TypeAdapter,
     computed_field,
+    model_serializer,
 )
 from uuid_extensions import uuid7
 
-from ..types.models import dump
 from .collectors.base import BaseCollector
 from .collectors.default import DefaultCollector
 from .context import RunContext, get_run_context, set_run_context
-from .events.base import BaseEvent
-from .events.chunk import ChunkEvent
-from .events.output import OutputEvent
-from .events.start import StartEvent
-from .utils import sync_to_async_gen
+from .events.base import Event
+from .events.chunk import ChunkEvent, ChunkEventData
+from .events.output import OutputEvent, OutputEventData
+from .events.start import StartEvent, StartEventData
+from .utils import dump, sync_to_async_gen
 
 logger = structlog.get_logger("timbal.core_v2.runnable")
 
@@ -50,7 +51,7 @@ class Runnable(ABC, BaseModel):
     """"""
     fixed_params: dict[str, Any] = {}
     """"""
-    collector_cls: Type[BaseCollector] = DefaultCollector
+    collector_cls: type[BaseCollector] = DefaultCollector
     """"""
 
     _is_coroutine: bool = PrivateAttr()
@@ -158,8 +159,14 @@ class Runnable(ABC, BaseModel):
         }
         return anthropic_schema
 
+
+    @model_serializer
+    def serialize(self) -> dict[str, Any]:
+        """"""
+        return self.openai_schema
+
     
-    async def __call__(self, **kwargs: Any) -> AsyncGenerator[BaseEvent, None]:
+    async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
         """"""
         t0 = int(time.time() * 1000)
 
@@ -171,10 +178,11 @@ class Runnable(ABC, BaseModel):
         start_event = StartEvent(
             run_id=run_context.id,
             path=self._path,
+            data=StartEventData(),
         )
-        start_event_dump = dump(start_event, context=run_context)
+        start_event_dump = dump(start_event)
 
-        logger.info("start_event", data=start_event_dump)
+        logger.info("start_event", **start_event_dump)
         yield start_event
 
         # At initialization, we might want to fix some parameters for the handler.
@@ -210,15 +218,15 @@ class Runnable(ABC, BaseModel):
                     # If the handled chunk is None, it means we don't want to yield anything.
                     if chunk is not None:
                         # If it's already a base event, it means we have already emitted it.
-                        if not isinstance(chunk, BaseEvent):
+                        if not isinstance(chunk, Event):
                             chunk_event = ChunkEvent(
                                 run_id=run_context.id,
                                 path=self._path,
-                                chunk=chunk,
+                                data=ChunkEventData(chunk=chunk),
                             )
-                            chunk_event_dump = dump(chunk_event, context=run_context)
+                            chunk_event_dump = dump(chunk_event)
 
-                            logger.info("chunk_event", data=chunk_event_dump)
+                            logger.info("chunk_event", **chunk_event_dump)
                             yield chunk_event
 
                         else:
@@ -239,15 +247,17 @@ class Runnable(ABC, BaseModel):
             output_event = OutputEvent(
                 run_id=run_context.id,
                 path=self._path,
-                t0=t0,
-                t1=t1,
-                input=input,
-                output=output,
-                error=error,
-                # TODO This grabs all the usage, not just the one by this runnable component
-                usage=run_context.usage,
+                data=OutputEventData(
+                    t0=t0,
+                    t1=t1,
+                    input=input,
+                    output=output,
+                    error=error,
+                    # TODO This grabs all the usage, not just the one by this runnable component
+                    usage=run_context.usage,
+                ),
             )
-            output_event_dump = dump(output_event, context=run_context)
+            output_event_dump = dump(output_event)
 
-            logger.info("output_event", data=output_event_dump)
+            logger.info("output_event", **output_event_dump)
             yield output_event

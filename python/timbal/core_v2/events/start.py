@@ -1,6 +1,15 @@
-from .base import BaseEvent
+from typing import Literal
+
+from pydantic import BaseModel
+
+from .base import Event
 
 
-class StartEvent(BaseEvent):
-    """Event emitted when a step starts execution."""
-    type: str = "START"
+class StartEventData(BaseModel):
+    """"""
+    pass
+
+
+class StartEvent(Event[StartEventData]):
+    """"""
+    type: Literal["start"] = "start"

@@ -1,17 +1,39 @@
-from pydantic import BaseModel, ConfigDict
+from datetime import UTC, datetime
+from typing import Generic, TypeVar
+
+from pydantic import BaseModel, ConfigDict, Field
+
+EventData = TypeVar("EventData", bound=BaseModel)
 
 
-class BaseEvent(BaseModel):
-    """Base class for all timbal events yielded during execution."""
-    # Allow storing extra fields in the model.
-    model_config = ConfigDict(extra="allow")
+class Event(BaseModel, Generic[EventData]):
+    """"""
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="forbid",
+        frozen=True,
+    )
 
-    type: str
-    """The type of the event. This will be very useful for serializing and deserializing events."""
-    run_id: str
-    """The id of the run this event was emitted from."""
-    path: str
-    """The path of the element that yielded this event."""
-
-    # TODO Add if we need to add status text or status audio, etc.
-    # TODO Add a proper event id
+    # ? Add an event id
+    type: str = Field(
+        ..., 
+        description="Type of the event.",
+    )
+    run_id: str = Field(
+        ...,
+        description="ID of the run.",
+    )
+    path: str = Field(
+        ...,
+        description="Path of the runnable component that generated the event.",
+    )
+    # ? The path identifies what runnable component generated the event, but... do we need another identifier to group events?
+    data: EventData = Field(
+        ...,
+        description="Data associated with the event.",
+    )
+    ts: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp of the event (UTC).",
+    )
+    # ? Some mechanism to return status feedback or something

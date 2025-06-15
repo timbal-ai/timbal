@@ -1,9 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from ..events.base import BaseEvent
+from pydantic import BaseModel, ConfigDict
 
 
 class BaseCollector(ABC, BaseModel):
