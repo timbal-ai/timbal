@@ -34,6 +34,7 @@ from typing import (
 from annotated_types import Ge, Le, MaxLen, MinLen
 from pydantic import (
     BaseModel,
+    ConfigDict,
     create_model,
     model_validator,
 )
@@ -160,7 +161,7 @@ def create_model_from_argspec(name: str, argspec: NamedTuple) -> BaseModel:
         if not isinstance(field_default, FieldInfo):
             field_default = Field(default=field_default)
 
-        json_schema_extra = getattr(field_default, "json_schema_extra", {})
+        json_schema_extra = getattr(field_default, "json_schema_extra", None) or {}
         if json_schema_extra.get("private", False):
             continue
 
@@ -183,7 +184,8 @@ def create_model_from_argspec(name: str, argspec: NamedTuple) -> BaseModel:
         generic_validator = create_generics_validator(generic_fields_names)
         validators[f"{generic}_validator"] = model_validator(mode="before")(generic_validator)
     
-    model = create_model(name, __validators__=validators, **fields)
+    config = ConfigDict(extra="ignore")
+    model = create_model(name, __config__=config, __validators__=validators, **fields)
     return model
 
 
