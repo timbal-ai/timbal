@@ -28,6 +28,7 @@ from timbal.errors import APIKeyNotFoundError, EarlyExit
 
 from .base import BaseAdapter
 import structlog
+from uuid_extensions import uuid7
 
 logger = structlog.get_logger("timbal.adapters.twilio_adapter")
 from dotenv import load_dotenv
@@ -71,17 +72,13 @@ class CallSession:
     def __init__(self, call_sid: str, stream_sid: str, event_queue: asyncio.Queue, adapter_config: TwilioAdapterConfig):
         self.call_sid = call_sid
         self.stream_sid = stream_sid
-        self.event_queue = event_queue
         self.adapter_config = adapter_config
-        self.context = RunContext()
-        self.processing = False
         self.conversation_count = 0
-        self.conversation_history: List[Dict[str, Any]] = []
         self.start_time = datetime.now()
         self.openai_websocket = None
         self.openai_session_ready = False
         self.openai_task = None
-        self.audio_chunks: List[bytes] = []  # Store audio chunks for transcription
+        self.last_context_id: Optional[str] = None  # Track last context ID for parent_id chain
         
     async def initialize_openai_connection(self):
         try:
@@ -137,11 +134,6 @@ class CallSession:
             transcript = event.get("transcript", "")
             # logger.info(f"✅ Transcription completed: '{transcript}'")
             if self.validate_transcription(transcript):
-                self.conversation_history.append({
-                    "speaker": "user",
-                    "text": transcript,
-                    "timestamp": datetime.now().isoformat()
-                })
                 # Trigger agent processing with complete transcription
                 await self._trigger_agent_with_transcription(transcript)
 
@@ -166,16 +158,39 @@ class CallSession:
                 
             agent = adapter._agent
             
-            # Create context with transcription
-            from timbal.state.context import RunContext
-            context = RunContext()
-            context.data["transcription"] = transcript
-            context.data["call_session"] = self
+            # Create context with proper parent_id chain for conversation memory
+            # Generate new context ID for this turn
+            new_context_id = uuid7(as_type="str")
+            
+            # Create context with parent_id to maintain conversation chain
+            # For first turn: parent_id = None (no previous memory)
+            # For subsequent turns: parent_id = last_context_id (previous turn's context)
+            context = RunContext(
+                id=new_context_id,
+                parent_id=self.last_context_id  # None for first turn, context_id for subsequent turns
+            )
+            
+            logger.debug(f"🧠 Memory chain: context_id={new_context_id}, parent_id={context.parent_id}, turn={self.conversation_count + 1}")
+            
+            # Add transcription as prompt for the agent
+            if transcript.strip():
+                context.data["prompt"] = Message.validate({
+                    "role": "user", 
+                    "content": transcript
+                })
+            else:
+                # For initial greeting (empty transcript), let agent start
+                context.data["prompt"] = Message.validate({
+                    "role": "user", 
+                    "content": "Inicia la conversación con un saludo."
+                })
             
             # Run the agent with the transcription
             response_text = None
             async for event in agent.run(context=context):
-                if hasattr(event, 'output') and event.output:
+                # Extract response text from final agent output event (not tool results)
+                if (hasattr(event, 'output') and event.output and 
+                    hasattr(event, 'path') and event.path == 'agent'):
                     if hasattr(event.output, 'content') and event.output.content:
                         # Extract text properly from TextContent objects
                         for content_item in event.output.content:
@@ -184,7 +199,13 @@ class CallSession:
                                 break
                     else:
                         response_text = str(event.output)
-                    break
+                # Continue iterating to let the agent complete and save snapshots
+                # Don't break early - let the generator finish completely
+            
+            # Update last context ID for next turn's parent_id and increment conversation count
+            self.last_context_id = new_context_id
+            self.conversation_count += 1
+            logger.debug(f"🔄 Updated last_context_id to {new_context_id}, conversation_count: {self.conversation_count}")
             
             if response_text:
                 # Ensure proper UTF-8 encoding
@@ -195,21 +216,14 @@ class CallSession:
                 
                 logger.info(f"🤖 Agent response: {response_text}")
                 
-                # Add agent response to conversation history
-                self.conversation_history.append({
-                    "speaker": "agent",
-                    "text": response_text,
-                    "timestamp": datetime.now().isoformat()
-                })
-                
                 # Stream TTS response in real-time
-                logger.info(f"🔊 ELEVENLABS: Starting real-time TTS streaming for text: '{response_text[:50]}...'")
+                # logger.info(f"🔊 ELEVENLABS: Starting real-time TTS streaming for text: '{response_text[:50]}...'")
                 audio_chunks_streamed = 0
                 
                 async for audio_response in adapter._generate_tts_response(response_text, self):
                     if audio_response:
                         audio_chunks_streamed += 1
-                        logger.info(f"🔊 ELEVENLABS: Streaming audio chunk #{audio_chunks_streamed} to WebSocket")
+                        # logger.info(f"🔊 ELEVENLABS: Streaming audio chunk #{audio_chunks_streamed} to WebSocket")
                         # Send each chunk immediately to WebSocket for real-time playback
                         await adapter._send_audio_to_websocket(audio_response)
                     else:
@@ -220,13 +234,8 @@ class CallSession:
                 else:
                     logger.error(f"🔊 ELEVENLABS: ❌ No audio chunks were streamed")
                 
-                # Clear audio chunks after successful response
-                self.audio_chunks.clear()
-                
         except Exception as e:
             logger.error(f"❌ Error triggering agent: {e}", exc_info=True)
-
-
 
     async def send_audio_chunk_to_openai(self, audio_bytes: bytes):
         if self.openai_websocket and self.openai_session_ready:
@@ -235,12 +244,10 @@ class CallSession:
                 await self.openai_websocket.send(json.dumps({"type": "input_audio_buffer.append", "audio": audio_b64}))
             except Exception as e:
                 logger.error(f"💥 Error sending audio to OpenAI: {e}")
-    
+
     def add_audio_chunk(self, audio_bytes: bytes):
-        # Store audio chunk for transcription
-        self.audio_chunks.append(audio_bytes)
-        
-        # Also send to OpenAI if connection is ready (for compatibility)
+        """Add audio chunk and send to OpenAI for real-time transcription."""
+        # Send to OpenAI if connection is ready
         if self.openai_websocket and self.openai_session_ready:
             asyncio.create_task(self.send_audio_chunk_to_openai(audio_bytes))
 
@@ -278,57 +285,6 @@ class TwilioCallAdapter(BaseAdapter):
         """Set the agent instance for this adapter."""
         self._agent = agent
 
-    async def start(self):
-        """Initialize the adapter and start the call."""
-        if not self._call_initiated:
-            await self._initiate_call()
-            self._call_initiated = True
-
-    async def listen(self):
-        """Listen for user input (transcriptions) from active calls."""
-        while True:
-            # Wait for a call to be established
-            while not self._active_calls:
-                await asyncio.sleep(0.1)
-            
-            # Get the first active call session
-            call_session = list(self._active_calls.values())[0]
-            
-            # Wait for transcription from the user
-            transcription = await call_session.wait_for_transcription()
-            
-            # Yield the transcription to the agent
-            if transcription.strip():
-                yield transcription
-            else:
-                # For the first turn with empty transcription, let the agent start
-                yield "Iniciar conversación"
-
-    async def reply(self, response_generator):
-        """Send agent responses back to the call via TTS."""
-        async for event in response_generator:
-            # Handle different types of events from the agent
-            if hasattr(event, 'output') and hasattr(event.output, 'content'):
-                # This is the final agent response
-                response_text = ""
-                for content_item in event.output.content:
-                    if hasattr(content_item, 'text'):
-                        response_text += content_item.text
-                
-                if response_text.strip() and self._active_calls:
-                    call_session = list(self._active_calls.values())[0]
-                    call_session.conversation_count += 1
-                    
-                    # Add agent response to conversation history
-                    call_session.conversation_history.append({
-                        "speaker": "agent",
-                        "text": response_text,
-                        "timestamp": datetime.now().isoformat()
-                    })
-                    
-                    # Send the response via TTS
-                    await self._send_tts_response(response_text, call_session)
-
     async def stop(self):
         """Stop the adapter and clean up resources."""
         # Hang up all active calls
@@ -344,97 +300,30 @@ class TwilioCallAdapter(BaseAdapter):
                 pass
 
     async def before_agent(self, context: RunContext) -> None:
-        """Called before the agent processes each turn. Handles call initiation and transcription processing."""
-        # Store adapter reference in context for tools to access
-        context.data['adapter'] = self
-        
-        # Check if we need to initiate a call first
+        """Called before the agent processes each turn. Handles call initiation."""     # Check if we need to initiate a call first
         if not self._call_initiated:
             logger.info("📞 Initiating outbound call...")
             call_sid = await self._initiate_call()
             if call_sid:
                 self._call_initiated = True
-                logger.info(f"✅ Call initiated successfully. Call SID: {call_sid}")
+                logger.info(f"Call initiated successfully. Call SID: {call_sid}")
             else:
-                logger.error("❌ Failed to initiate call")
+                logger.error("Failed to initiate call")
             
             # Exit early after call initiation - wait for OpenAI VAD to trigger agent
             raise EarlyExit("Call initiated, waiting for OpenAI VAD to trigger agent")
         
-        # Check if we have a transcription ready to process (triggered by OpenAI VAD)
-        if "transcription" not in context.data:
-            logger.debug("No transcription available, agent will exit early")
-            raise EarlyExit("No transcription to process")
-        
-        transcription = context.data["transcription"]
-        
-        # For empty transcription (first turn), let agent start conversation
-        if not transcription.strip():
-            logger.info("🎯 First turn - agent will start conversation")
-            context.data["prompt"] = Message.validate({
-                "role": "user", 
-                "content": "Iniciar conversación"
-            })
-        else:
-            logger.info(f"🎤 Processing transcription: {transcription}")
-            # Set the transcription as the prompt for the agent
-            context.data["prompt"] = Message.validate({
-                "role": "user", 
-                "content": transcription
-            })
+        # If we reach here, the agent was triggered by _trigger_agent_with_transcription
+        # The prompt should already be set in context.data["prompt"]
+        if "prompt" not in context.data:
+            logger.warning("No prompt found in context - this shouldn't happen")
+            raise EarlyExit("No prompt to process")
 
     async def after_agent(self, context: RunContext) -> None:
-        """Called after the agent completes each turn. Handles output (TTS and audio streaming)."""
-        # Get the agent's response from the context
-        if 'output' not in context.data:
-            logger.warning("No agent output found in context")
-            return
-        
-        agent_output = context.data['output']
-        
-        # Extract text from the agent's response
-        response_text = ""
-        if hasattr(agent_output, 'content') and isinstance(agent_output.content, list):
-            for content_item in agent_output.content:
-                if hasattr(content_item, 'text'):
-                    response_text += content_item.text
-        elif isinstance(agent_output, str):
-            response_text = agent_output
-        
-        # Ensure proper UTF-8 encoding
-        if response_text:
-            try:
-                # Normalize the text to ensure proper UTF-8 encoding
-                response_text = response_text.encode('utf-8').decode('utf-8')
-            except (UnicodeEncodeError, UnicodeDecodeError) as e:
-                logger.warning(f"Text encoding issue: {e}")
-                # Fallback: remove problematic characters
-                response_text = response_text.encode('utf-8', errors='ignore').decode('utf-8')
-        
-        if not response_text.strip():
-            logger.warning("No text content found in agent response")
-            return
-        
-        # Get the current call session
-        if not self._active_calls:
-            logger.warning("No active call session for sending response")
-            return
-        
-        call_session = list(self._active_calls.values())[0]
-        call_session.conversation_count += 1
-        
-        # Add agent response to conversation history
-        call_session.conversation_history.append({
-            "speaker": "agent",
-            "text": response_text,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # Log the response with proper encoding
-        logger.info(f"🤖 Agent response: {response_text}")
-        
-        # Send the response via TTS
-        await self._send_tts_response(response_text, call_session)
+        """Called after the agent completes each turn. Response handling is done in _trigger_agent_with_transcription."""
+        # Response handling is already done in _trigger_agent_with_transcription
+        # This method is kept for compatibility but doesn't need to do anything
+        pass
 
     async def on_error(self, context: RunContext, error: dict[str, Any]) -> None:
         """Called when an error occurs during agent execution."""
@@ -472,11 +361,15 @@ class TwilioCallAdapter(BaseAdapter):
         logger.info(f"📋 TwiML being sent: {twiml_str}")
         
         try:
+            logger.info(f"📞 Initiating call to {self.config.to_phone_number}")
+            logger.info(f"📞 TwiML being sent: {twiml_str}")
+            logger.info(f"📞 From phone number: {self.config.twilio.from_phone_number}")
             call = self._twilio_client.calls.create(
                 to=self.config.to_phone_number, 
                 from_=self.config.twilio.from_phone_number, 
                 twiml=twiml_str
             )
+            logger.info(f"📞 Call SID: {call.sid}")
             logger.info(f"📞 Call initiated to {self.config.to_phone_number}. Call SID: {call.sid}")
             return call.sid
         except Exception as e:
@@ -519,10 +412,10 @@ class TwilioCallAdapter(BaseAdapter):
             return None
             
         except json.JSONDecodeError:
-            logger.error(f"💥 Invalid JSON received: {message_json}")
+            logger.error(f"Invalid JSON received: {message_json}")
             return None
         except Exception as e:
-            logger.error(f"💥 Error handling message: {e}")
+            logger.error(f"Error handling message: {e}")
             return None
 
     async def _handle_call_start(self, message: dict):
@@ -530,7 +423,6 @@ class TwilioCallAdapter(BaseAdapter):
         start_data = message.get("start", {})
         call_sid = start_data.get("callSid")
         stream_sid = message.get("streamSid")
-        # logger.info(f"📞 CALL STARTED - CallSid: {call_sid}")
 
         call_session = self._create_call_session(call_sid, stream_sid)
         if not call_session:
@@ -539,9 +431,6 @@ class TwilioCallAdapter(BaseAdapter):
 
         await call_session.initialize_openai_connection()
         
-        # Call session is now ready for agent interaction
-        # logger.info(f"📞 Call session {call_sid} ready for agent interaction")
-
     async def _handle_media(self, message: dict):
         """Handles received media (audio) data."""
         media_data = message.get("media", {})
@@ -556,14 +445,10 @@ class TwilioCallAdapter(BaseAdapter):
             if call_session:
                 audio_bytes = base64.b64decode(payload)
                 call_session.add_audio_chunk(audio_bytes)
-                
-                # Just accumulate audio - OpenAI VAD will handle transcription and agent triggering
-                # logger.debug(f"📡 Audio chunk received, total chunks: {len(call_session.audio_chunks)}")
-        
+                     
         # Check if we have pending audio chunks to send
         try:
             audio_response = self._pending_audio_queue.get_nowait()
-            logger.info(f"🔊 ELEVENLABS: Returning queued audio chunk")
             return audio_response
         except asyncio.QueueEmpty:
             # No audio chunks available
@@ -583,9 +468,6 @@ class TwilioCallAdapter(BaseAdapter):
             self._remove_call_session(call_sid)
 
 
-
-
-
     async def hang_up_call(self, call_sid: str):
         """Initiates the process of hanging up a specific call."""
         logger.info(f"--- HANG UP PROCESS STARTED for {call_sid} ---")
@@ -598,7 +480,6 @@ class TwilioCallAdapter(BaseAdapter):
                 logger.error(f"💥 Twilio hang up error for {call_sid}: {e}")
 
     def _create_call_session(self, call_sid: str, stream_sid: str) -> "CallSession":
-        # logger.info(f"Creating new call session for CallSid: {call_sid}")
         # Create a dummy event queue since we're not using it in the new approach
         event_queue = asyncio.Queue()
         call_session = CallSession(call_sid, stream_sid, event_queue, self.config)
@@ -617,76 +498,10 @@ class TwilioCallAdapter(BaseAdapter):
                 return call_session
         return None
 
-    def _get_call_session_by_websocket(self, websocket: WebSocket) -> Optional["CallSession"]:
-        call_sid = None
-        for sid, ws in self._active_websockets.items():
-            if ws == websocket:
-                call_sid = sid
-                break
-        
-        if call_sid:
-            return self.get_call_session(call_sid)
-        
-        return None
-
     def _remove_call_session(self, call_sid: str):
         if call_sid in self._active_calls:
             logger.info(f"Removing call session for CallSid: {call_sid}")
             del self._active_calls[call_sid]
-
-    async def _try_get_transcription(self, call_session: "CallSession") -> Optional[str]:
-        """
-        Try to get transcription from accumulated audio chunks.
-        Returns transcription if available, None otherwise.
-        """
-        try:
-            # Check if we have enough audio data (simple heuristic)
-            if len(call_session.audio_chunks) < 10:  # Need at least some chunks
-                return None
-                
-            # Combine all audio chunks
-            combined_audio = b''.join(call_session.audio_chunks)
-            
-            # Use OpenAI Whisper for transcription
-            import tempfile
-            import wave
-            
-            # Create a temporary WAV file
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                # Convert μ-law to PCM and save as WAV
-                with wave.open(temp_file.name, 'wb') as wav_file:
-                    wav_file.setnchannels(1)  # Mono
-                    wav_file.setsampwidth(2)  # 16-bit
-                    wav_file.setframerate(8000)  # 8kHz
-                    
-                    # Convert μ-law to linear PCM
-                    import audioop
-                    linear_audio = audioop.ulaw2lin(combined_audio, 2)
-                    wav_file.writeframes(linear_audio)
-                
-                # Transcribe using OpenAI
-                import openai
-                client = openai.AsyncOpenAI(api_key=self.config.openai.api_key.get_secret_value())
-                
-                with open(temp_file.name, 'rb') as audio_file:
-                    transcript = await client.audio.transcriptions.create(
-                        model=self.config.openai.transcription_model,
-                        file=audio_file,
-                        language=self.config.openai.transcription_language
-                    )
-                
-                # Clean up temp file
-                import os
-                os.unlink(temp_file.name)
-                
-                transcription_text = transcript.text.strip()
-                if transcription_text and len(transcription_text) > 3:  # Minimum meaningful length
-                    return transcription_text
-                    
-        except Exception as e:
-            logger.error(f"❌ Error getting transcription: {e}", exc_info=True)
-            
-        return None
 
     async def _generate_tts_response(self, text: str, call_session: "CallSession") -> AsyncGenerator[dict, None]:
         """
@@ -694,21 +509,14 @@ class TwilioCallAdapter(BaseAdapter):
         This replaces the old _send_tts_response method.
         """
         try:
-            logger.info(f"🔊 ELEVENLABS: Starting TTS generation for: '{text[:50]}...'")
-            
             # Create ElevenLabs WebSocket connection
             elevenlabs_ws = await self._create_elevenlabs_websocket()
             if not elevenlabs_ws:
-                logger.error("🔊 ELEVENLABS: ❌ Failed to create ElevenLabs WebSocket")
                 return
-
-            logger.info(f"🔊 ELEVENLABS: ✅ WebSocket connection established")
 
             # Send text to ElevenLabs
             await self._send_text_chunk_to_elevenlabs(elevenlabs_ws, text)
             await self._close_elevenlabs_stream(elevenlabs_ws)
-
-            logger.info(f"🔊 ELEVENLABS: Text sent, streaming audio chunks in real-time...")
 
             # Stream audio data as it arrives
             chunk_count = 0
@@ -720,8 +528,7 @@ class TwilioCallAdapter(BaseAdapter):
                     if event.get("audio"):
                         audio_chunk = base64.b64decode(event["audio"])
                         chunk_count += 1
-                        logger.info(f"🔊 ELEVENLABS: Streaming audio chunk #{chunk_count}, size: {len(audio_chunk)} bytes")
-                        
+ 
                         # Convert to base64 and yield immediately
                         payload = base64.b64encode(audio_chunk).decode("utf-8")
                         
@@ -734,12 +541,10 @@ class TwilioCallAdapter(BaseAdapter):
                             }
                         }
                         
-                        logger.info(f"🔊 ELEVENLABS: ✅ Yielding audio chunk #{chunk_count} for immediate streaming")
                         yield response
                         
                     # Check both camelCase and snake_case for final marker
                     if event.get("is_final") or event.get("isFinal"):
-                        logger.info(f"🔊 ELEVENLABS: Received final marker, total chunks streamed: {chunk_count}")
                         break
             except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
                 pass
@@ -760,7 +565,7 @@ class TwilioCallAdapter(BaseAdapter):
             headers = {"xi-api-key": config.api_key.get_secret_value()}
             elevenlabs_ws = await websockets.connect(ws_url, additional_headers=headers)
             bos_message = {
-                "text": " ",  # Small space as per documentation
+                "text": " ",  # documentation says this is a small space
                 "voice_settings": {
                     "speed": config.speed,
                     "stability": config.stability,
@@ -803,20 +608,13 @@ class TwilioCallAdapter(BaseAdapter):
     async def _send_audio_to_websocket(self, audio_response: dict):
         """Send audio response back to Twilio via WebSocket queue."""
         try:
-            logger.info(f"🔊 ELEVENLABS: Queuing audio chunk for WebSocket")
-            
             # The audio_response should be in Twilio WebSocket format
             if not audio_response:
-                logger.error(f"🔊 ELEVENLABS: No audio response to send")
                 return
-                
-            logger.info(f"🔊 ELEVENLABS: Audio response ready: {type(audio_response)}")
-            logger.info(f"🔊 ELEVENLABS: Audio response keys: {audio_response.keys() if isinstance(audio_response, dict) else 'Not a dict'}")
-            
+                  
             # Add the response to the queue for streaming
             await self._pending_audio_queue.put(audio_response)
-            logger.info(f"🔊 ELEVENLABS: ✅ Audio chunk queued successfully")
-            
+
         except Exception as e:
             logger.error(f"🔊 ELEVENLABS: Error queuing audio to WebSocket: {e}", exc_info=True)
 
