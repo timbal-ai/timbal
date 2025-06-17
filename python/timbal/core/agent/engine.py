@@ -646,21 +646,12 @@ class Agent(BaseStep):
         messages = []
         context.data["memory"] = messages
         
-        # DEBUG: Log memory loading attempt
-        logger.info(f"🧠 DEBUG: Attempting to load memory - state_saver: {self.state_saver is not None}, parent_id: {context.parent_id}")
-        
         if self.state_saver is not None and context.parent_id is not None:
             try:
                 if self._is_state_saver_get_async:
                     last_snapshot = await self.state_saver.get_last(path=self.path, context=context)
                 else:
                     last_snapshot = self.state_saver.get_last(path=self.path, context=context)
-                    
-                # DEBUG: Log snapshot retrieval result
-                logger.info(f"🧠 DEBUG: Snapshot retrieval - found: {last_snapshot is not None}, path: {self.path}")
-                if last_snapshot:
-                    logger.info(f"🧠 DEBUG: Snapshot details - id: {last_snapshot.id}, parent_id: {last_snapshot.parent_id}")
-                    logger.info(f"🧠 DEBUG: Snapshot data keys: {list(last_snapshot.data.keys())}")
                     
             except Exception as err:
                 logger.error("get_memory_error", err=err)
@@ -675,7 +666,6 @@ class Agent(BaseStep):
                     for message in last_snapshot.data["memory"].resolve()
                 ]
                 messages.extend(previous_messages)
-                logger.info(f"🧠 DEBUG: Loaded {len(previous_messages)} messages from memory")
                 for i, msg in enumerate(previous_messages):
                     content_preview = "empty"
                     if msg.content:
@@ -684,11 +674,6 @@ class Agent(BaseStep):
                             content_preview = first_content.text
                         else:
                             content_preview = str(first_content.type) if hasattr(first_content, 'type') else str(type(first_content).__name__)
-                    logger.info(f"🧠 DEBUG: Message {i}: {msg.role} - {content_preview}")
-            else:
-                logger.info(f"🧠 DEBUG: No memory found - snapshot: {last_snapshot is not None}, has_memory: {'memory' in last_snapshot.data if last_snapshot else False}")
-        else:
-            logger.info("🧠 DEBUG: Memory loading skipped - no state_saver or no parent_id")
 
         # Add all input kwargs to the run context data.
         # This way we can access them from any part of the agent run.
@@ -759,14 +744,7 @@ class Agent(BaseStep):
             #        loop = asyncio.get_running_loop()
             #        await loop.run_in_executor(None, lambda: self.before_agent_callback(context))
 
-            # Check if adapter provided a prompt in context
-            if "prompt" in context.data:
-                prompt_from_adapter = context.data["prompt"]
-                if isinstance(prompt_from_adapter, Message):
-                    messages.append(prompt_from_adapter)
-                else:
-                    messages.append(Message.validate(prompt_from_adapter))
-            elif "prompt" in kwargs:
+            if "prompt" in kwargs:
                 # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
                 kwargs["prompt"] = Message.validate(kwargs["prompt"])
                 agent_input = dump(kwargs, context=context)
@@ -774,7 +752,6 @@ class Agent(BaseStep):
 
             # If no messages, exit early instead of failing
             if not len(messages):
-                logger.debug("No prompt or message history found, exiting early")
                 raise EarlyExit("No prompt or message history to process")
 
             kwargs = {
@@ -838,18 +815,6 @@ class Agent(BaseStep):
         logger.info("start_event", start_event=llm_start_event_dump)
         yield llm_start_event
 
-        # DEBUG: Log messages being sent to LLM
-        logger.info(f"🧠 DEBUG: Sending {len(messages)} messages to LLM:")
-        for i, msg in enumerate(messages):
-            content_preview = "empty"
-            if msg.content:
-                first_content = msg.content[0]
-                if hasattr(first_content, 'text'):
-                    content_preview = first_content.text
-                else:
-                    content_preview = str(first_content.type) if hasattr(first_content, 'type') else str(type(first_content).__name__)
-            logger.info(f"🧠 DEBUG: LLM Message {i}: {msg.role} - {content_preview}")
-
         async for llm_output in self._run_llm(
             messages=messages,
             tools=self.tools,
@@ -867,7 +832,7 @@ class Agent(BaseStep):
                 )
                 llm_chunk_event_dump = dump(llm_chunk_event, context=context)
 
-                # logger.info("chunk_event", chunk_event=llm_chunk_event_dump)
+                # logger.info("chunk_event", chunk_event=llm_chunk_event_dump)
                 yield llm_chunk_event
 
         llm_output_event = OutputEvent(
@@ -905,7 +870,6 @@ class Agent(BaseStep):
 
             if self.state_saver is not None:
                 t1 = int(time.time() * 1000)
-                logger.info(f"🗄️ DEBUG: About to save snapshot - id: {context.id}, parent_id: {context.parent_id}, path: {self.path}")
                 snapshot = Snapshot(
                     v="0.2.0",
                     id=context.id,
@@ -923,12 +887,10 @@ class Agent(BaseStep):
                 
                 # We don't want to cancel the execution if this errors. 
                 try:
-                    logger.info(f"🗄️ DEBUG: Calling state_saver.put() for snapshot {context.id}")
                     if self._is_state_saver_put_async:
                         await self.state_saver.put(snapshot=snapshot, context=context)
                     else:
                         self.state_saver.put(snapshot=snapshot, context=context)
-                    logger.info(f"🗄️ DEBUG: Snapshot {context.id} saved successfully")
                 except Exception as err:
                     logger.error("put_memory_error", err=err)
 
@@ -1059,7 +1021,7 @@ class Agent(BaseStep):
                     )
                     llm_chunk_event_dump = dump(llm_chunk_event, context=context)
 
-                    logger.info("chunk_event", chunk_event=llm_chunk_event_dump)
+                    # logger.info("chunk_event", chunk_event=llm_chunk_event_dump)
                     yield llm_chunk_event
 
             llm_output_event = OutputEvent(
@@ -1097,7 +1059,6 @@ class Agent(BaseStep):
 
                 if self.state_saver is not None:
                     t1 = int(time.time() * 1000)
-                    logger.info(f"🗄️ DEBUG: About to save snapshot - id: {context.id}, parent_id: {context.parent_id}, path: {self.path}")
                     snapshot = Snapshot(
                         v="0.2.0",
                         id=context.id,
@@ -1115,12 +1076,10 @@ class Agent(BaseStep):
                     
                     # We don't want to cancel the execution if this errors. 
                     try:
-                        logger.info(f"🗄️ DEBUG: Calling state_saver.put() for snapshot {context.id}")
                         if self._is_state_saver_put_async:
                             await self.state_saver.put(snapshot=snapshot, context=context)
                         else:
                             self.state_saver.put(snapshot=snapshot, context=context)
-                        logger.info(f"🗄️ DEBUG: Snapshot {context.id} saved successfully")
                     except Exception as err:
                         logger.error("put_memory_error", err=err)
 
@@ -1158,7 +1117,6 @@ class Agent(BaseStep):
         t1 = int(time.time() * 1000)
  
         if self.state_saver is not None:
-            logger.info(f"🗄️ DEBUG: About to save snapshot - id: {context.id}, parent_id: {context.parent_id}, path: {self.path}")
             snapshot = Snapshot(
                 v="0.2.0",
                 id=context.id,
@@ -1176,16 +1134,14 @@ class Agent(BaseStep):
 
             # We don't want to cancel the execution if this errors. 
             try:
-                logger.info(f"🗄️ DEBUG: Calling state_saver.put() for snapshot {context.id}")
                 if self._is_state_saver_put_async:
                     await self.state_saver.put(snapshot=snapshot, context=context)
                 else:
                     self.state_saver.put(snapshot=snapshot, context=context)
-                logger.info(f"🗄️ DEBUG: Snapshot {context.id} saved successfully")
             except Exception as err:
                 logger.error("put_memory_error", err=err)
         else:
-            logger.info("🗄️ DEBUG: No state_saver configured, skipping snapshot save")
+            logger.info("DEBUG: No state_saver configured, skipping snapshot save")
 
         agent_output_event = OutputEvent(
             run_id=context.id,

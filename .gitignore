@@ -24,3 +24,9 @@ version.zig
 
 # Safe testing during development
 sandbox/
+
+debug_examples/
+adapters_backlog/
+trash_testing/
+multi_adapters/
+*.lock
