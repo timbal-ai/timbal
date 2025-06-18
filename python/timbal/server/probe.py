@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import io
 import json
 import os
 import sys
@@ -31,7 +33,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.version:
-        print(f"timbal.servers.http {__version__}") # noqa: T201
+        print(f"timbal.servers.http {__version__}", file=sys.stderr) # noqa: T201
         sys.exit(0)
 
     # We can overwrite the env TIMBAL_FLOW variable with the --module_spec flag.
@@ -40,12 +42,12 @@ if __name__ == "__main__":
         module_spec = os.getenv("TIMBAL_FLOW")
 
     if not module_spec:
-        print("No module spec provided. Set TIMBAL_FLOW env variable or use --module_spec to specify a module to load.") # noqa: T201
+        print("No module spec provided. Set TIMBAL_FLOW env variable or use --module_spec to specify a module to load.", file=sys.stderr) # noqa: T201
         sys.exit(1)
 
     module_parts = module_spec.split(":")
     if len(module_parts) > 2:
-        print("Invalid module spec format. Use 'path/to/file.py:object_name' or 'path/to/file.py'") # noqa: T201
+        print("Invalid module spec format. Use 'path/to/file.py:object_name' or 'path/to/file.py'", file=sys.stderr) # noqa: T201
         sys.exit(1)
     elif len(module_parts) == 2:
         module_path, module_name = module_parts
@@ -62,7 +64,9 @@ if __name__ == "__main__":
     load_dotenv()
     setup_logging()
 
-    flow = load_module(module_spec)
+    redirect = io.StringIO()
+    with contextlib.redirect_stdout(redirect):
+        flow = load_module(module_spec)
 
     if not isinstance(flow, (Agent, Flow)):
         raise ValueError("The loaded module is not a valid Agent or Flow instance.")
