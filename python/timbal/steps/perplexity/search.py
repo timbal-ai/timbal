@@ -84,7 +84,7 @@ async def search(
     if web_search_options:
         payload["web_search_options"] = web_search_options
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             "https://api.perplexity.ai/chat/completions",
             headers={
