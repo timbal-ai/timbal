@@ -81,8 +81,8 @@ const config = {
         items: [
           { to: '/introduction', label: 'Docs', position: 'left' },
           //{ to: '/platform', label: 'Platform', position: 'left' },
-          { to: '/examples', label: 'Examples', position: 'left' },
-          { to: '/releases', label: 'Releases', position: 'left' },
+          // { to: '/examples', label: 'Examples', position: 'left' },
+          // { to: '/releases', label: 'Releases', position: 'left' },
           {
             href: 'https://github.com/timbal-ai/timbal',
             label: 'GitHub',

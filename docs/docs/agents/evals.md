@@ -12,141 +12,349 @@ AI outputs are non-deterministic — the same input can yield different results.
 
 ## What Are Evals in Timbal?
 
-Evals are automated tests that assess your agent's outputs and tool usage. They use LLMs to compare your agent's process (the tools it used and how) and its result (the answer it gave) to the expected process and result. Evals can be run locally, in the cloud, or as part of your CI/CD pipeline
+Evals are automated tests that assess your agent's outputs and tool usage. They use LLMs to compare your agent's process (the tools it used and how) and its result (the answer it gave) to the expected process and result. Evals can be run locally, in the cloud, or as part of your CI/CD pipeline.
 
 ### Types of Evals
 
-- <span style={{color: 'var(--timbal-purple)'}}><strong>Process Evals</strong></span>: Did the agent use the right tools, in the right order, with the right inputs?
-- <span style={{color: 'var(--timbal-purple)'}}><strong>Result Evals</strong></span>: Did the agent produce the correct answer, regardless of wording or formatting?
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Output Evals</strong></span>: Did the agent produce the correct answer, with proper content and formatting?
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Steps Evals</strong></span>: Did the agent use the right tools, in the right order, with the right inputs?
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Usage Evals</strong></span>: Did the agent's resource consumption (tokens, API calls) meet expectations or stay within expected bounds?
 
 ---
 
-## Getting Started
+## How Evals Work
 
-### 1. Prepare Your Test Cases
+### Core Concepts
 
-Create a YAML file (e.g. `evals.yaml`, `eval_response.yaml`) with the following structure:
-<CodeBlock language="bash" code ={`- name: eval_reference_product
-  description:
+#### Test Suite
+A collection of test cases defined in YAML format. A test suite can contain multiple tests that validate different aspects of your agent's behavior. Timbal automatically discovers all files matching the pattern `eval*.yaml` in your test directory.
+
+#### Test
+A single test case with multiple turns. Each test focuses on a specific scenario or functionality of your agent. Tests are defined within YAML files and can be run individually or as part of a suite.
+
+#### Turn
+One interaction between user and agent. A test can contain multiple turns to validate multi-step conversations. Each turn consists of:
+- **Input**: What the user says or asks (text and optionally files) - **required**
+- **Output**: What the agent should respond (validated against expected content) - *optional*
+- **Steps**: Tools the agent should use (validated against expected tool calls) - *optional*
+- **Usage**: Resource consumption limits (token counts) - *optional*
+
+#### Validators
+Programmatic checks that compare actual vs expected behavior. Validators use both exact matching and LLM-powered semantic evaluation to assess correctness.
+
+---
+
+## Test Structure
+
+Evals are defined in YAML files with the following structure:
+
+<CodeBlock language="bash" code={`- name: test_name
+    description: Optional test description
+    turns:
+      - input:
+          text: User input here
+          files: ["path/to/file.pdf"]  # Optional file attachments
+        output:
+          text: Expected output text  # Optional: can use validators instead
+          validators:
+            contains:
+              - "expected substring"
+              - "another substring"
+            not_contains:
+              - "unwanted text"
+            regex: "^Success.*"
+            semantic: 
+              - "Should provide helpful response about the topic"
+        steps:
+          validators:
+            contains:
+              - name: tool_name
+                input:
+                  parameter: expected_value
+            not_contains:
+              - name: unwanted_tool
+            semantic: "Should use search tools to find information"
+        usage:
+          gpt-4.1:
+            input_text_tokens:
+              max: 5000
+              min: 1000
+            output_text_tokens:
+              max: 2000
+            input_text_tokens+output_text_tokens:  # Combined usage
+              max: 6000`}/>
+
+### Fields Reference
+
+#### Test Level
+- **`name`**: Unique identifier for the test (required)
+- **`description`**: Human-readable description of what the test validates (optional)
+- **`turns`**: Array of user-agent interactions to test (required)
+
+#### Turn Level
+- **`input`**: The user's message or query (required)
+  - **`text`**: Text content of the message
+  - **`files`**: Array of file paths to attach (optional)
+
+  **Note**: You can use shorthand syntax: `input: "Your message"` is equivalent to `input: { text: "Your message" }`
+- **`output`**: Expected agent response (optional)
+  - **`text`**: Response text to store in conversation memory (optional)
+
+  **Note**: You can use shorthand syntax: `output: "Response text"` is equivalent to `output: { text: "Response text" }`
+- **`validators`**: Validation rules for the output (optional)
+- **`steps`**: Expected tool usage (optional)
+  - **`validators`**: Validation rules for tool calls (optional)
+- **`usage`**: Resource consumption limits (optional)
+
+---
+
+## Validators
+
+Timbal provides several types of validators for comprehensive testing:
+
+### Output Validators
+
+| Validator      | Description                                                    | Example Usage                           |
+|---------------|----------------------------------------------------------------|-----------------------------------------|
+| `contains`     | Checks if output includes specified substrings                | `contains: ["hello", "world"]`         |
+| `not_contains` | Checks if output does NOT include specified substrings        | `not_contains: ["error", "failed"]`    |
+| `regex`        | Checks if output matches a regular expression pattern          | `regex: "^Success: .+"`               |
+| `semantic`     | Uses LLM to validate semantic correctness against reference    | `semantic: "Should greet user politely"` |
+
+### Steps Validators
+
+| Validator      | Description                                                    | Example Usage                           |
+|---------------|----------------------------------------------------------------|-----------------------------------------|
+| `contains`     | Checks if steps include specified tool calls with inputs      | `contains: [{"name": "search", "input": {"query": "test"}}]` |
+| `not_contains` | Checks if steps do NOT include specified tool calls           | `not_contains: [{"name": "delete_file"}]` |
+| `semantic`     | Uses LLM to validate tool usage against expected behavior     | `semantic: "Should search before providing answer"` |
+
+### Usage Validators
+
+Usage validators monitor resource consumption:
+
+<CodeBlock language="bash" code={`usage:
+    model_name:
+      # OpenAI models exact token field names:
+      input_text_tokens:
+        max: 5000
+        min: 100
+      input_cached_tokens:
+        max: 1000
+      input_audio_tokens:
+        max: 500
+      output_text_tokens:
+        max: 1000
+      output_audio_tokens:
+        max: 500
+      output_reasoning_tokens:
+        max: 2000
+      
+      # Anthropic models exact token field names:
+      input_tokens:
+        max: 5000
+      output_tokens:
+        max: 1000
+      
+      # Combined metrics using +
+      input_text_tokens+output_text_tokens:
+        max: 6000`}/>
+
+---
+
+## Running Evals
+
+### Command Line Interface
+
+<CodeBlock language="bash" code={`# Run all tests in a directory
+python -m timbal.eval --fqn path/to/agent.py::agent_name --tests path/to/tests/
+
+# Run a specific test file
+python -m timbal.eval --fqn path/to/agent.py::agent_name --tests path/to/tests/eval_search.yaml
+
+# Run a specific test by name
+python -m timbal.eval --fqn path/to/agent.py::agent_name --tests path/to/tests/eval_search.yaml::test_basic_search`}/>
+
+### Command Options
+
+- **`--fqn`**: Fully qualified name of your agent (format: `file.py::agent_name`)
+- **`--tests`**: Path to test file, directory, or specific test (format: `path/file.yaml::test_name`)
+
+---
+
+## Examples
+
+### Example 1: Product Search with Complete Validation
+
+<CodeBlock language="bash" code={`- name: eval_reference_product
+  description: Test product search by reference code
   turns:
-    - input: dime las medidas de H214E/1
+    - input:
+        text: tell me the measurements of H214E/1
       steps: 
-        contains: 
-          - search_by_reference
-        semantic: input reference code should be 'H214E/1'
+        validators:
+          contains:
+            - name: search_by_reference
+              input:
+                reference_code: H214E/1
+          semantic: "Should search for product using the exact reference code H214E/1"
       output: 
         validators: 
-          semantic: Las medidas de la Pilona Hospitalet Extraíble Ref. H214E/1 son *Diámetro Ø A 95 mm *B 120 mm *Altura total H 970 mm *Altura extraíble H1 170 mm Puedes ver más detalles y descargar ficha técnica, instrucciones de montaje, etc. en el siguiente enlace [Ver producto Pilona Hospitalet Extraíble H214E/1](https://www.benito.com/es/movilidad/bolardos-pilonas/hospitalet-extraible--H214E.html) [Ficha técnica](https://www.benito.com/es/download/BENITO_data-sheet-H214E) [Especificaciones técnicas (CAD)](https://www.benito.com/es/download/BENITO_H214E_FP.dwg) [Instrucciones de montaje](https://www.benito.com/es/download/BENITO_H214E-MU) [Plan de mantenimiento](https://www.benito.com/es/download/BENITO_H214E_HM.pdf)
+          contains:
+            - "H214E/1"
+            - "95 mm"
+            - "120 mm"
+          not_contains:
+            - "error"
+            - "not found"
+          semantic: "Should provide complete product measurements including diameter and height specifications"
       usage:
         - gpt-4.1:
             input_text_tokens:
               max: 5000
               min: 1000
             output_text_tokens:
-              max: 5000
-`}/>
-### 2. Set Up Your Evaluation Agents
+              max: 2000`}/>
 
-Define evaluation prompts for process and result checking, and create Timbal agents for each:
+**How this test works:**
+1. **Input**: User asks for measurements of product H214E/1
+2. **Steps Validation**: 
+   - `contains`: Verifies `search_by_reference` tool was called with correct parameters
+   - `semantic`: Uses LLM to verify search logic was appropriate
+3. **Output Validation**:
+   - `contains`: Checks for specific measurement values and product code
+   - `not_contains`: Ensures no error messages appear
+   - `semantic`: Validates that response provides comprehensive product information
+4. **Usage Validation**: Monitors token consumption within specified limits
 
-<CodeBlock language="bash" code ={`from timbal import Agent
+### Example 2: Multi-turn Conversation with Memory
 
-EVAL_PROCESS_PROMPT = """You are a helpful assistant that evaluates if the process done by the llm is correct.
-Compare two processes: the first is correct, check if in the second were used the correct tools and the correct inputs.
-Ignore case and formatting differences in all inputs.
-If the process is correct, return true, otherwise return false.
-Return: {"explanation": "Brief reasoning", "correct": true/false}
-"""
+<CodeBlock language="bash" code={`- name: eval_memory_retention
+  description: Test agent's ability to remember information across turns
+  turns:
+    - input: Hi, my name is David and I work in engineering
+      output: Nice to meet you David! How can I help you?
+    - input:
+        text: What's my name and what do I do for work?
+      steps:
+        validators:
+          not_contains:
+            - name: search_external
+          semantic: "Must not contain any tools"
+      output:
+        validators:
+          contains: ["David", "engineering"]
+          semantic: "Should recall both name and profession from previous turn"`}/>
 
-EVAL_RESULT_PROMPT = """You are a helpful assistant that evaluates if the result is correct.
-Compare two results: the first is correct, check if the second answers the question.
-You have to focus on the answer being right (dimensions, material, codes, links, lists, etc.) not on the exact wording.
-If the result is correct, return true, otherwise return false.
-Return: {"explanation": "Brief reasoning", "correct": true/false}
-"""
+**How multi-turn tests work:**
+- **Turn 1**: Establishes context (input and output only) by providing information to remember - no validators needed
+- **Turn 2**: Tests memory by asking for previously provided information - contains validators to verify behavior
+- **Memory validation**: Ensures agent retrieves information from conversation history rather than external sources
 
-eval_process = Agent(model="gpt-4.1-nano", system_prompt=EVAL_PROCESS_PROMPT)
-eval_result = Agent(model="gpt-4.1-nano", system_prompt=EVAL_RESULT_PROMPT)`}/>
+### Example 3: File Processing with Error Handling
 
-### 3. Run the Evals
-
-For each test case:
-- Run your agent or flow with the prompt.
-- Collect the output and the tools used (from the agent's memory).
-- Pass the actual and expected process/result to the evaluation agents.
-- Get a pass/fail and an explanation for each.
-
+<CodeBlock language="bash" code={`- name: eval_file_processing
+  description: Test file upload and processing with error scenarios
+  turns:
+    - input:
+        text: Analyze this document for key metrics
+        files: ["test_data/report.pdf"]
+      steps:
+        validators:
+          contains:
+            - name: extract_text_from_pdf
+              input:
+                file_path: report.pdf
+            - name: analyze_metrics
+          not_contains:
+            - name: delete_file
+          semantic: "Should extract text from PDF then analyze for metrics"
+      output:
+        validators:
+          contains: ["metrics", "analysis"]
+          not_contains: ["error", "failed", "unable"]
+          regex: ".*\\d+.*%.*"  # Should contain percentage
+          semantic: "Should provide quantitative analysis with specific metrics"`}/>
 
 ---
 
 ## Understanding Eval Results
 
-Each eval returns a json:
-<CodeBlock language="bash" code ={`{
-  "total_tests": 1,
-  "total_turns": 32,
-  "outputs_passed": 26,
-  "outputs_failed": 6,
-  "steps_passed": 14,
-  "steps_failed": 6,
-  "usage_passed": 0,
-  "usage_failed": 0,
-  "tests_failed": [
-    {
-      "test_path": "evals.yaml::eval_problemas_pantalla_foto",
-      "input": {
-        "text": "Buen dia equipo. Me echan una mano por favor, ya la he encendido para de veces y he apagado el ordenador para de veces también y se me queda así la pantalla, tengo el simulador colocado en temas de conexión está todo ok",
-        "files": [
-          "data:image/png;base64,iVBORw0KGgoAAAANSUh...
-        ]
-      },
-      "reason": [
-        "steps",
-        "output"
-      ],
-      "output_passed": false,
-      "output_explanations": [
-        "La respuesta proporcionada no aborda el problema expuesto en la referencia, que se trata de un error relacionado con la forma de encender el ordenador. En su lugar, la respuesta pide especificación del problema con la 'pantalla', lo cual no es relevante ni útil en este contexto."
-      ],
-      "actual_output": {
-        "text": "¿Puedes especificar exactamente qué problema estás teniendo con la pantalla?",
-        "files": []
-      },
-      "expected_output": {
-        "validators": {
-          "semantic": [
-            "¡hola! Gracias por toda la información. Este error ocurre cuando mantienes pulsado el botón de encendido al encender el ordenador. Prueba a apagarlo y volver a encenderlo, pulsando una única vez el botón."
-          ]
-        }
-      },
-      "steps_passed": false,
-      "steps_explanations": [
-        "No step found with tool 'search_info'."
-      ],
-      "actual_steps": [],
-      "expected_steps": {
-        "validators": {
-          "contains_steps": [
-            {
-              "name": "search_info"
-            }
-          ]
-        }
-      },
-      "usage_passed": true,
-      "usage_explanations": []
-    },
-`}/>
+Timbal generates comprehensive evaluation results in JSON format:
 
-You can use these results to:
-- Track your agent's quality over time
-- Debug and improve your prompts, tools, or workflows
-- Catch regressions before they reach production
+<CodeBlock language="bash" code={`{
+    "total_tests": 5,
+    "total_turns": 12,
+    "outputs_passed": 10,
+    "outputs_failed": 2,
+    "steps_passed": 8,
+    "steps_failed": 4,
+    "usage_passed": 12,
+    "usage_failed": 0,
+    "execution_errors": 1,
+    "tests_failed": [
+      {
+        "test_name": "eval_product_search",
+        "test_path": "evals/product.yaml::eval_product_search",
+        "input": {
+          "text": "Find product X123",
+          "files": []
+        },
+        "reason": ["steps", "output"],
+        "execution_error": null,
+        "output_passed": false,
+        "output_explanations": [
+          "Response did not include required product specifications"
+        ],
+        "actual_output": {
+          "text": "I couldn't find that product.",
+          "files": []
+        },
+        "expected_output": {
+          "validators": {
+            "semantic": ["Should provide product details and availability"]
+          }
+        },
+        "steps_passed": false,
+        "steps_explanations": [
+          "No step found with tool 'search_product_catalog'."
+        ],
+        "actual_steps": [
+          {
+            "tool": "general_search",
+            "input": {"query": "X123"}
+          }
+        ],
+        "expected_steps": {
+          "validators": {
+            "contains": [{"name": "search_product_catalog"}]
+          }
+        },
+        "usage_passed": true,
+        "usage_explanations": []
+      }
+    ]
+}`}/>
+
+### Result Analysis
+
+- **Summary metrics**: Total counts of passed/failed validations across all test types
+- **Detailed failures**: Complete information about each failed test including:
+  - **Actual vs Expected**: What the agent actually did vs what was expected
+  - **Explanations**: Detailed reasons for failures from each validator
+  - **Execution errors**: Runtime errors during test execution
+- **Usage monitoring**: Resource consumption tracking for cost and performance optimization
 
 ---
 
 ## Summary
 
-- **Evals** in Timbal let you automatically check if your agent is doing the right thing, both in process and result.
-- You get detailed, LLM-powered feedback for every test case.
-- This helps you build more reliable, trustworthy AI systems.
+Timbal's evaluation framework provides:
+
+- **Comprehensive Testing**: Validate outputs, tool usage, and resource consumption
+- **Flexible Validation**: From exact string matching to semantic LLM-powered checks  
+- **Multi-turn Support**: Test complex conversational flows and memory retention
+- **Detailed Reporting**: Rich failure analysis for debugging and improvement
+- **CI/CD Integration**: Automated testing to prevent regressions
+
+This evaluation system helps you build reliable, testable AI agents that consistently produce correct results and follow expected processes, giving you confidence in your agent's behavior across different scenarios and edge cases.
