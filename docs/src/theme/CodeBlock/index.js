@@ -142,7 +142,6 @@ const highlightMap = {
   complete: 'custom-highlight-green-fn',
   print: 'custom-highlight-green-fn',
   search: 'custom-highlight-green-fn',
-  search_internet: 'custom-highlight-green-fn',
   stt: 'custom-highlight-green-fn',
   tts: 'custom-highlight-green-fn',
   run: 'custom-highlight-green-fn',

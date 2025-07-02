@@ -6,9 +6,11 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Quickstart
 
-<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.2rem', fontWeight: 'normal'}}>
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
 Build your first flow with Timbal with 5 lines of code.
 </h2>
+
+---
 
 We'll start implementing an <span style={{color: 'var(--timbal-purple)'}}><strong>agent</strong></span>. It will be a <span style={{color: 'var(--timbal-purple)'}}><strong>simple chatbot</strong></span> and gradually enhance it with advanced features. Let's dive in!
 
@@ -160,7 +162,7 @@ Now let's run the chatbot!
 
 <CodeBlock language="python" title="agent.py"
 code={`response = agent.complete(prompt="What is the capital of Germany?")
-print(response.content[0].text)`}/>
+print(response.output.content[0].text)`}/>
 
 
 You will see an output like this:
@@ -178,7 +180,9 @@ You can modify it as you want. For example, you can add tools to the agent.
 
 ## Part 2: Enhancing the Chatbot with Tools
 
-A great feature of Timbal is that you can easily add tools to your agent, allowing it to perform actions or fetch information in real time. You can use both prebuilt tools (already provided by Timbal or the community) and custom tools (functions you create yourself).
+A great feature of Timbal is that you can easily add tools to your agent, allowing it to perform actions or fetch information in real time. 
+
+You can use both <span style={{color: 'var(--timbal-purple)'}}><strong>prebuilt tools</strong></span> (already provided by Timbal or the community) and <span style={{color: 'var(--timbal-purple)'}}><strong>custom tools</strong></span> (functions you create yourself).
 
 Let's see both approaches with practical examples:
 

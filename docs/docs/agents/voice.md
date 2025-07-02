@@ -6,9 +6,9 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Voice: Speech Capabilities for Agents
 
-Timbal agents can understand and generate speech using a variety of voice providers. This enables use cases like voice assistants, audio chatbots, and speech-to-speech interactions.
-
 ---
+
+Timbal agents can understand and generate speech using a variety of voice providers. This enables use cases like voice assistants, audio chatbots, and speech-to-speech interactions.
 
 ## Using a Single Provider
 

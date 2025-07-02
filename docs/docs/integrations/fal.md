@@ -10,6 +10,8 @@ import Table from '@site/src/components/Table';
 
 Timbal integrates with Fal.ai to enable AI-powered image generation. This integration allows you to generate high-quality images from text prompts using various models.
 
+---
+
 ## Prerequisites
 
 Before using the Fal integration, you'll need:

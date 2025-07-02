@@ -6,7 +6,7 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Orchestrating AI Workflows
 
-<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.2rem', fontWeight: 'normal'}}>
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
 Design, connect, and control multi-step AI pipelines using Flows—Timbal's flexible workflow engine.
 </h2>
 

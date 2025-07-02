@@ -9,7 +9,11 @@ import Table from '@site/src/components/Table';
 
 # ElevenLabs Integration
 
-Timbal provides seamless integration with ElevenLabs' powerful AI voice and speech services. This integration allows you to:
+Timbal provides seamless integration with ElevenLabs' powerful AI voice and speech services. 
+
+---
+
+This integration allows you to:
 - Convert speech to text using ElevenLabs' advanced transcription models
 - Generate natural-sounding speech from text using various voices and models
 

@@ -7,19 +7,22 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Installation
 
-This installation guide provides step-by-step instructions for setting up Timbal CLI.
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Step-by-step instructions for setting up Timbal CLI.
+</h2>
+---
 
-### Unix-based Systems (Linux/macOS)
+## macOS/Linux
 
 Use `curl` to download and execute the installation script:
 
 <CodeBlock language="bash" code={`curl -LsSf https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.sh | sh`}/>
 
-### Windows
+## Windows
 
 Use PowerShell to download and execute the installation script:
 
-<CodeBlock language="powershell" code={`powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.ps1 | iex"`}/>
+<CodeBlock language="bash" code={`powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.ps1 | iex"`}/>
 
 :::info[Python Version Requirements]{.tight-admonition}
 Before installing **Timbal CLI**, ensure you have:
@@ -58,11 +61,12 @@ You can install Timbal CLI using either `uv` or `pip`:
 Timbal also has **optional dependencies** for integrations (e.g., MySQL, Google Drive, etc.).
 You can install all optional dependencies at once with:
 
-<CodeBlock language="bash" code={`pip install timbal[all]`}/>
+<CodeBlock language="bash" code={`pip install "timbal[all]"`}/>
+<CodeBlock language="bash" code={`uv add "timbal[all]"`}/>
 
 Or, you can install only the integrations you need, for example:
 
-<CodeBlock language="bash" code={`pip install timbal[mysql,gdrive]`}/>
+<CodeBlock language="bash" code={`pip install "timbal[mysql,gdrive]"`}/>
 
 We'll cover integrations in more detail in the [Integrations](../integrations) section.
 

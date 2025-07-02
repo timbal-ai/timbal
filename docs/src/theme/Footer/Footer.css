@@ -20,3 +20,12 @@
     color: #000;
   }
   
+  /* Dark mode styles */
+  [data-theme='dark'] .social-icons a {
+    color: #777;
+  }
+  
+  [data-theme='dark'] .social-icons a:hover {
+    color: #ffffff;
+  }
+  

@@ -8,7 +8,7 @@ import React from 'react';
 # Changelog
 
 <h2 style={{
-  fontSize: '1.2rem',
+  fontSize: '1.1rem',
   fontWeight: 'normal',
   color: 'var(--ifm-font-color-base)'
 }}>

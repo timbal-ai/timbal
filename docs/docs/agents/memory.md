@@ -6,9 +6,10 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Using Memory in Agents
 
+---
+
 Memory in Timbal is implemented through state savers, which allow agents to maintain context across multiple interactions. This is achieved through a combination of <span style={{color: 'var(--timbal-purple)'}}><strong>state savers</strong></span> and <span style={{color: 'var(--timbal-purple)'}}><strong>run contexts</strong></span>.
 
----
 
 ## State Savers
 

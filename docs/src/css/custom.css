@@ -3,8 +3,8 @@
  * bundles Infima by default. Infima is a CSS framework designed to
  * work well for content-centric websites.
  */
+ @import "tailwindcss";
 
-/* You can override the default Infima variables here. */
 :root {
   --ifm-color-primary: #5012cb;
   --ifm-color-primary-dark: #5012cb;
@@ -15,8 +15,8 @@
   --ifm-color-primary-lightest: #c6b8ff;
   --ifm-code-font-size: 95%;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
-  --ifm-font-size-base: 1.1rem; /* Increase from default (usually 1rem) */
-  --ifm-line-height-base: 1.6;
+  --ifm-font-size-base: 1rem;
+  --ifm-line-height-base: 1.35;
   --timbal-purple: #5012cb;
   --icon-check-green: #4cd964; /* dark green for light mode */
   --release-badge-bg: var(--ifm-color-primary-light);
@@ -59,8 +59,8 @@ html, body {
   margin-left: auto;
   margin-right: auto;
   max-width: 1100px; /* Slightly narrower than default */
-  padding-left: 1rem; /* Increased left padding */
-  padding-right: 0rem; /* Increased right padding */
+  padding-left: 2rem; /* Left padding */
+  padding-right: 2rem; /* Right padding */
 }
 
 .navbar__brand {
@@ -77,21 +77,6 @@ div[class^="alert"] .admonition-heading {
   display: none; /* Hides the home icon and link */
 }
 
-article h1 {
-  font-size: 2rem; /* Adjust the size as needed */
-  font-weight: bold;
-}
-
-article h2 {
-  font-size: 1.8rem; /* Adjust the size as needed */
-  font-weight: bold;
-}
-
-article h3 {
-  font-size: 1.3rem; /* Adjust the size as needed */
-  font-weight: bold;
-  color: black;
-}
 
 /* Ensure all text is white in dark mode */
 /* [data-theme='dark'] article p,
@@ -141,12 +126,18 @@ article h3 {
   margin: 2rem 0;
   position: relative;
 }
+
 .step {
   display: flex;
   align-items: flex-start;
   position: relative;
-  margin-bottom: 1rem;
+  padding-bottom: 3rem; /* Add padding between steps */
 }
+
+.step:last-child {
+  padding-bottom: 0; /* Remove padding for last step */
+}
+
 .circle {
   width: 36px;
   height: 36px;
@@ -158,27 +149,31 @@ article h3 {
   justify-content: center;
   font-weight: bold;
   font-size: 1.3em;
-  z-index: 1;
+  z-index: 2; /* Ensure circle is above the line */
   margin-right: 16px;
   position: relative;
   border: 3px solid #333;
   box-shadow: 0 2px 8px 0 #0002;
+  flex-shrink: 0;
 }
-.step:not(:last-child) .circle::after {
+
+.step:not(:last-child)::after {
   content: "";
   position: absolute;
-  left: 50%;
-  top: 100%;
-  transform: translateX(-50%);
+  left: 17px; /* Half of circle width (36/2) minus half of line width (2/2) */
+  top: 36px; /* Height of circle */
   width: 2px;
-  height: 645px;
+  height: calc(100% - 36px); /* Full height minus circle */
   background: #333;
-  z-index: 0;
-  border-radius: 2px;
+  z-index: 1;
 }
+
 .step-content {
   flex: 1;
+  min-width: 0;
+  padding-top: 8px; /* Align content with circle */
 }
+
 .step-title {
   font-weight: bold;
   font-size: 1.25em;
@@ -310,6 +305,7 @@ div[class^="admonition"] {
 article p {
   margin-top: 0.3em;
   margin-bottom: 0.3em;
+  line-height: var(--ifm-line-height-base);
 }
 
 /* Optionally, reduce space after headings too */
@@ -321,6 +317,7 @@ article h5,
 article h6 {
   margin-bottom: 0.4em;
   margin-top: 0.7em;
+  line-height: var(--ifm-line-height-base);
 }
 
 .theme-code-block-title,
@@ -335,11 +332,9 @@ div[class*="codeBlock"] [class*="codeBlockTitle"] {
 .theme-doc-sidebar-container {
   width: 300px !important;
   font-size: 0.92em !important;
-}
-
-.theme-doc-sidebar-container {
   margin-left: 4em !important;
   padding-top: 0.5em !important;
+  line-height: var(--ifm-line-height-base);
 }
 
 .menu__link--sublist-caret::after {
@@ -349,11 +344,13 @@ div[class*="codeBlock"] [class*="codeBlockTitle"] {
   min-width: 1.2em !important;
   min-height: 1.2em !important;
   background-size: 1.2em 1.2em !important;
+  line-height: var(--ifm-line-height-base);
 }
 
 /* Make sidebar category titles bold */
 .theme-doc-sidebar-container .menu__list-item-collapsible > .menu__link {
   font-weight: bold !important;
+  line-height: var(--ifm-line-height-base);
 }
 
 
@@ -406,6 +403,7 @@ div[class*="codeBlock"] [class*="codeBlockTitle"] {
 
 .menu__link[href$="/introduction"] {
   font-weight: bold;
+  line-height: var(--ifm-line-height-base);
 }
 
 .wider-table, .wider-table th, .wider-table td {
@@ -415,15 +413,14 @@ div[class*="codeBlock"] [class*="codeBlockTitle"] {
 
 /* Adjust heading sizes proportionally */
 article h1 {
-  font-size: 1.9rem; /* Reduced from 2rem */
+  font-size: 1.8rem; 
 }
-
 article h2 {
-  font-size: 1.65rem; /* Reduced from 1.8rem */
+  font-size: 1.6rem;
 }
 
 article h3 {
-  font-size: 1.25rem; /* Reduced from 1.3rem */
+  font-size: 1.3rem;
 }
 
 /* Adjust table text size */
@@ -445,6 +442,7 @@ code {
 .theme-doc-sidebar-menu,
 .theme-doc-sidebar {
   font-size: 0.92em !important; /* Keep original size */
+  line-height: var(--ifm-line-height-base);
 }
 
 [data-docs-sidebar="examplesSidebar"] h1:first-child {
@@ -726,4 +724,108 @@ details.log-step-collapsible > summary {
 /* Add extra space below the last sidebar item */
 .theme-doc-sidebar-menu .menu__list > li:last-child {
   margin-bottom: 0.8em; /* Adjust as needed */
+  line-height: var(--ifm-line-height-base);
 }
+
+/* Forzar interlineado compacto en toda la sidebar de Docusaurus */
+.theme-doc-sidebar-container,
+.theme-doc-sidebar-menu,
+.theme-doc-sidebar,
+.menu__list,
+.menu__list-item,
+.menu__link,
+.menu__link--sublist,
+.menu__link--sublist-caret,
+.menu__caret,
+.menu__list .menu__list,
+.menu__list .menu__list-item,
+.menu__list .menu__link {
+  line-height: 0.8 !important;
+}
+
+/* Ensure GitHub nav item stays in one line */
+.navbar__items--right .navbar__item {
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+}
+
+/* List styling with hierarchical bullets */
+article ul {
+  list-style-type: disc;
+  padding-left: 2em;
+  margin: 0.5em 0;
+}
+
+article ul ul {
+  list-style-type: circle;
+  margin: 0.2em 0;
+}
+
+article ul li {
+  margin: 0.3em 0;
+  position: relative;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .step {
+    padding-bottom: 2rem;
+  }
+  
+  .step-content {
+    font-size: 0.9em;
+  }
+  
+  .circle {
+    width: 32px;
+    height: 32px;
+    font-size: 1.2em;
+  }
+  
+  .step:not(:last-child)::after {
+    left: 15px;
+    top: 32px;
+    height: calc(100% - 32px);
+  }
+}
+
+@media (max-width: 480px) {
+  .step {
+    padding-bottom: 1.5rem;
+  }
+  
+  .circle {
+    width: 28px;
+    height: 28px;
+    font-size: 1.1em;
+    margin-right: 12px;
+  }
+  
+  .step:not(:last-child)::after {
+    left: 13px;
+    top: 28px;
+    height: calc(100% - 28px);
+  }
+  
+  .step-content {
+    font-size: 0.85em;
+  }
+}
+
+/* Responsive container padding */
+@media (max-width: 768px) {
+  .container {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .container {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+}
+
+

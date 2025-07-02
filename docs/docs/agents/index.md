@@ -6,7 +6,7 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 
 # Understanding Agents
-<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.2rem', fontWeight: 'normal'}}>
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
 Master proven strategies for designing advanced, specialized AI agents that work together seamlessly to tackle complex challenges.
 </h2>
 
