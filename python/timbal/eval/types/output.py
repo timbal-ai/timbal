@@ -1,7 +1,7 @@
 import structlog
 from pydantic import ConfigDict, field_validator
 
-from ..validators import Validator, contains_output, regex, semantic_output
+from ..validators import Validator, contains_output, not_contains_output, regex, semantic_output
 from .input import Input
 
 logger = structlog.get_logger("timbal.eval.types.output")
@@ -47,6 +47,8 @@ class Output(Input):
         for validator_name, validator_arg in v.items():
             if validator_name == "contains":
                 validators.append(contains_output(validator_arg))
+            elif validator_name == "not_contains":
+                validators.append(not_contains_output(validator_arg))
             elif validator_name == "regex":
                 validators.append(regex(validator_arg))
             elif validator_name == "semantic":

@@ -41,8 +41,8 @@ class Steps(BaseModel):
         for validator_name, validator_arg in v.items():
             if validator_name == "contains":
                 validators.append(contains_steps(validator_arg))
-            elif validator_name == "regex":
-                validators.append(regex(validator_arg))
+            # elif validator_name == "regex":
+            #     validators.append(regex(validator_arg))
             elif validator_name == "semantic":
                 validators.append(semantic_steps(validator_arg))
             elif validator_name == "not_contains":

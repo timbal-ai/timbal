@@ -51,9 +51,9 @@ if __name__ == "__main__":
         print("No timbal app Fully Qualified Name (FQN) provided.") # noqa: T201
         sys.exit(1)
 
-    fqn_parts = fqn.split(":")
+    fqn_parts = fqn.split("::")
     if len(fqn_parts) > 2:
-        print("Invalid timbal app Fully Qualified Name (FQN) format. Use 'path/to/file.py:object_name' or 'path/to/file.py'") # noqa: T201
+        print("Invalid timbal app Fully Qualified Name (FQN) format. Use 'path/to/file.py::object_name' or 'path/to/file.py'") # noqa: T201
         sys.exit(1)
     elif len(fqn_parts) == 2:
         module_path, module_name = fqn_parts

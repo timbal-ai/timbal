@@ -74,16 +74,21 @@ def contains_steps(ref: list[dict]):
 
 def not_contains_steps(ref: list[dict]):
     """
-    Validate that the steps contain the given tool names and, optionally, input key-value substrings.
+    Validate that the steps do not contain the given tool names and, optionally, input key-value substrings.
     Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input substrings).
     """
     if not isinstance(ref, list):
-        raise ValueError(f"Invalid contains_steps validator: expected list, got {type(ref)}")
+        raise ValueError(f"Invalid not_contains_steps validator: expected list, got {type(ref)}")
 
     def validator(steps: list[dict]):
         for expected in ref:
             tool_name = expected.get("name")
+            # Handle input parameters the same way as contains_steps
             input_dict = expected.get("input", {})
+            # If no explicit input dict, treat all other keys as input parameters
+            if not input_dict:
+                input_dict = {k: v for k, v in expected.items() if k != "name"}
+            
             found = False
             for step in steps:
                 if step.get("tool") == tool_name:
@@ -219,25 +224,28 @@ Only mark as incorrect if the response is irrelevant, unhelpful, or fails to add
 
 
 def semantic_steps(ref: str | list[str]):
-    """Validate that the message matches the given semantic content."""
+    """Validate that the steps sequence matches the given semantic content."""
     if not isinstance(ref, list):
         ref = [ref]
 
     ref = [str(v) for v in ref]
 
-    async def validator(message: Message):
-        message_text = message.collect_text()
-        if not message_text:
-            raise EvalError("Message does not contain any text to validate.")
+    async def validator(steps: list[dict]):
+        # Convert steps list to text representation
+        if not steps:
+            steps_text = "No steps were executed."
+        else:
+            steps_text = "\n".join([f"- Tool: {step.get('tool', 'unknown')}, Input: {step.get('input', {})}" for step in steps])
 
         system_prompt = """You are a helpful assistant that evaluates if a sequence of steps (actions or tool uses) is semantically correct with respect to a set of reference steps.
 The steps should be considered correct if they are relevant, logically ordered, and cover the key actions or information present in the reference steps, even if the wording or exact details differ.
 Do not penalize for reasonable variations, extra helpful steps, or minor differences in order, as long as the essential actions are present and the user's need is addressed.
+Note that no steps can be correct if the reference indicates no tools should be used.
 Only mark as incorrect if the steps are missing key actions, are irrelevant, or fail to address the user's request as described in the reference.
 """
 
         prompt = f"""<steps>
-{message_text}
+{steps_text}
 </steps>
 
 {"\n".join([f"<reference>\n{v}\n</reference>\n" for v in ref])}
