@@ -1,27 +1,12 @@
 import contextvars
 from collections import UserDict
 from enum import Enum
-from functools import wraps
+
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
 
 from .data import BaseData, DataValue
-
-
-run_context_var = contextvars.ContextVar("run_context")
-
-
-def with_run_context(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        run_context = run_context_var.get(None)
-        if run_context is None:
-            raise ValueError(
-                "RunContext not found. "
-                "Please run this function as a timbal step or pass the timbal_platform_config explicitly.")
-        return fn(run_context, *args, **kwargs)
-    return wrapper
 
 
 class TimbalPlatformAuthType(str, Enum):
