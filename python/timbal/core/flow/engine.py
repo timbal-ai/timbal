@@ -19,7 +19,8 @@ from ...errors import (
     StepExecutionError,
     StepKeyError,
 )
-from ...state.context import RunContext, run_context_var
+from ...state.context import RunContext
+from ...state import set_run_context
 from ...state.data import (
     BaseData,
     DataError,
@@ -507,7 +508,7 @@ class Flow(BaseStep):
             context.id = uuid7(as_type="str")
 
         # Set the run context for the duration of the agent run.
-        run_context_var.set(context)
+        set_run_context(context)
 
         t0 = int(time.time() * 1000)
 

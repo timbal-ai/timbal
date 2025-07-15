@@ -20,7 +20,8 @@ from timbal.types.events.chunk import ChunkEvent
 from uuid_extensions import uuid7
 
 from ...errors import AgentError, EarlyExit
-from ...state.context import RunContext, run_context_var
+from ...state.context import RunContext
+from ...state import set_run_context
 from ...state.savers.base import BaseSaver
 from ...state.snapshot import Snapshot
 from ...steps.llms.router import llm_router
@@ -406,7 +407,6 @@ class Agent(BaseStep):
         llm_input = {
             "messages": messages,
             "tools": tools_dump,
-            "system_prompt": system_prompt,
             **kwargs,
         }
 
@@ -492,7 +492,7 @@ class Agent(BaseStep):
             if not isinstance(tool_output, Message):
                 tool_output = Message.validate({
                     "role": "user",
-                    "content": str(tool_output),
+                    "content": tool_output,
                 })
             
         except Exception as err:
@@ -591,7 +591,7 @@ class Agent(BaseStep):
             context.id = uuid7(as_type="str")
 
         # Set the run context for the duration of the agent run.
-        run_context_var.set(context)
+        set_run_context(context)
 
         # Copy the input as is, so we save the traces without validated data and defaults.
         agent_input = dump(kwargs, context=context)
