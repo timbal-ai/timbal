@@ -10,7 +10,6 @@ from timbal.errors import APIKeyNotFoundError
 # Integration tests that require real API keys
 # These tests are marked separately so they can be skipped if no API key is available
 
-@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_real_tts_basic():
     """Integration test for basic TTS functionality with real API."""
@@ -32,7 +31,6 @@ async def test_real_tts_basic():
     assert len(content) > 100  # Audio files should be reasonably sized
 
 
-@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_real_tts_different_voice():
     """Integration test with different voice."""
@@ -51,7 +49,6 @@ async def test_real_tts_different_voice():
     assert len(content) > 100
 
 
-@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_real_tts_wav_format():
     """Integration test with WAV format."""
@@ -72,7 +69,6 @@ async def test_real_tts_wav_format():
     assert content[:4] == b"RIFF"
 
 
-@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_real_tts_gpt4o_mini_with_instructions():
     """Integration test with gpt-4o-mini-tts model and instructions."""
@@ -92,7 +88,6 @@ async def test_real_tts_gpt4o_mini_with_instructions():
     assert len(content) > 100
 
 
-@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_real_tts_long_text():
     """Integration test with longer text content."""
@@ -116,7 +111,6 @@ async def test_real_tts_long_text():
     assert len(content) > 1000
 
 
-@pytest.mark.integration
 @pytest.mark.asyncio 
 async def test_real_tts_multiple_formats():
     """Integration test to verify different output formats work."""
