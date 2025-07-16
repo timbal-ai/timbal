@@ -37,19 +37,24 @@ async def create_index(
     async with AsyncClient() as client:
         res = await client.post(url, headers=headers, json=payload, timeout=None)
         res.raise_for_status()
-        return res.json()
 
     
 async def list_indexes(
     kb_id: str = Field(description="The ID of the knowledge base."),
     org_id: str = Field(description="The organization ID."),
+    table_name: str = Field(default=None, description="Optional table name to filter indexes by."),
 ) -> list[IndexesResponseModel] | None:
     """Lists the indexes in a knowledge base."""
     host, headers = resolve_platform_auth(get_run_context())
     url = f"https://{host}/orgs/{org_id}/kbs/{kb_id}/indexes"
     headers = {**headers, "Content-Type": "application/json"}
+    
+    payload = {}
+    if table_name:
+        payload["table_name"] = table_name
+    
     async with AsyncClient() as client:
-        res = await client.get(url, headers=headers, timeout=None)
+        res = await client.get(url, headers=headers, params=payload, timeout=None)
         res.raise_for_status()
         return res.json()
 
@@ -66,4 +71,3 @@ async def delete_index(
     async with AsyncClient() as client:
         res = await client.delete(url, headers=headers, timeout=None)
         res.raise_for_status()
-        return res.json()

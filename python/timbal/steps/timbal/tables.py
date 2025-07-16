@@ -56,7 +56,6 @@ async def create_table(
     async with AsyncClient() as client:
         res = await client.post(url, headers=headers, json=payload, timeout=None)
         res.raise_for_status()
-        return res.json() if res.text else None
 
 
 async def delete_table(
@@ -73,7 +72,6 @@ async def delete_table(
     async with AsyncClient() as client:
         res = await client.request(method="DELETE", url=url, headers=headers, content=json.dumps(payload), timeout=None)
         res.raise_for_status()
-        return res.json() if res.text else None
 
 
 async def get_table(
@@ -131,7 +129,7 @@ async def import_records(
     async with AsyncClient() as client:
         res = await client.post(url, headers=headers, json=payload, timeout=None)
         res.raise_for_status()
-        return res.json() if res.text else None
+        return res
     
 
 async def query(
@@ -146,26 +144,6 @@ async def query(
 
     payload = {"sql": sql_query}
 
-    async with AsyncClient() as client:
-        res = await client.post(url, headers=headers, json=payload, timeout=None)
-        res.raise_for_status()
-        return res.json() if res.text else None
-
-
-async def describe_table(
-    table_name: str = Field(description="The name of the table to describe."),
-    kb_id: str = Field(description="The ID of the knowledge base."),
-    org_id: str = Field(description="The organization ID."),
-    columns: Optional[list[str]] = Field(default=None, description="Optional list of specific columns to describe. If not provided, all columns will be described."),
-) -> dict | None:
-    """Describes a table in a knowledge base."""
-    host, headers = resolve_platform_auth(get_run_context())
-    url = f"https://{host}/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/describe"
-
-    payload = {}
-    if columns:
-        payload["columns"] = columns
-    
     async with AsyncClient() as client:
         res = await client.post(url, headers=headers, json=payload, timeout=None)
         res.raise_for_status()
@@ -185,12 +163,9 @@ async def get_table_definition(
     host, headers = resolve_platform_auth(get_run_context())
     url = f"https://{host}/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}?format=definition"
     async with AsyncClient() as client:
-        try:
-            res = await client.get(url, headers=headers, timeout=None)
-            res.raise_for_status()
-            return res.json().get("table")
-        except Exception:
-            return None
+        res = await client.get(url, headers=headers, timeout=None)
+        res.raise_for_status()
+        return res.json().get("table")
 
 
 async def list_tables(
@@ -208,9 +183,6 @@ async def list_tables(
     host, headers = resolve_platform_auth(get_run_context())
     url = f"https://{host}/orgs/{org_id}/kbs/{kb_id}/tables?format={format}"
     async with AsyncClient() as client:
-        try:
-            res = await client.get(url, headers=headers, timeout=None)
-            res.raise_for_status()
-            return res.json().get("tables")
-        except Exception:
-            return None
+        res = await client.get(url, headers=headers, timeout=None)
+        res.raise_for_status()
+        return res.json().get("tables")
