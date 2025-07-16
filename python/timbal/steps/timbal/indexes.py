@@ -1,73 +1,123 @@
-import os
-from typing import Literal, List
-from pydantic import BaseModel, Field
-from httpx import AsyncClient
+from typing import Literal
 
-from ...state import get_run_context, resolve_platform_auth
-from ...types.field import Field
+from pydantic import BaseModel
+
+from ...types.field import Field, resolve_default
+from ...utils import _platform_api_call
 
 
-class IndexModel(BaseModel):
-    table: str = Field(description="The name of the table the index is on.")
-    name: str = Field(description="The name of the index.")
-    columns: List[str] = Field(description="The columns included in the index.")
-    type: str = Field(description="The type of the index (e.g., btree, hnsw, etc.).")
-    is_unique: bool = Field(description="Whether the index is unique.")
-    definition: str = Field(description="The SQL definition of the index.")
-
-class IndexesResponseModel(BaseModel):
-    indexes: List[IndexModel] = Field(description="A list of index definitions.")
-
+class Index(BaseModel):
+    table: str
+    """The name of the table the index is on."""
+    name: str
+    """The name of the index."""
+    columns: list[str]
+    """The columns included in the index."""
+    type: str
+    """The type of the index (e.g., btree, hnsw, etc.)."""
+    is_unique: bool
+    """Whether the index is unique."""
+    definition: str
+    """The SQL definition of the index."""
 
 
 async def create_index(
-    table_name: str = Field(description="The name of the table to create the index on."),
-    index_name: str = Field(description="The name of the index to create."),
-    index_columns: list[str] = Field(description="The columns to create the index on."),
-    index_type: Literal["btree", "hash", "gin", "gist", "brin"] = Field(description="The type of the index to create."),
-    index_unique: bool = Field(description="Whether the index should be unique."),
-    kb_id: str = Field(description="The ID of the knowledge base."),
     org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base."),
+    table_name: str = Field(description="The name of the table to create the index on."),
+    name: str = Field(description="The name of the index to create."),
+    column_names: list[str] = Field(description="The columns to create the index on."),
+    type: Literal["btree", "hash", "gin", "gist", "brin"] = Field(description="The type of the index to create."),
+    is_unique: bool = Field(description="Whether the index should be unique."),
 ) -> None:
-    """Creates an index on a table in a knowledge base."""
-    host, headers = resolve_platform_auth(get_run_context())
-    url = f"https://{host}/orgs/{org_id}/kbs/{kb_id}/indexes"
-    headers = {**headers, "Content-Type": "application/json"}
-    payload = {"table_name": table_name, "index_name": index_name, "index_columns": index_columns, "index_type": index_type, "index_unique": index_unique}
-    async with AsyncClient() as client:
-        res = await client.post(url, headers=headers, json=payload, timeout=None)
-        res.raise_for_status()
+    """
+    Create an index on a table in a knowledge base.
+
+    This function sends a request to the platform API to create a new index on the specified table 
+    within a knowledge base, with support for different index types and uniqueness constraints.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID.
+        table_name (str): The name of the table to create the index on.
+        name (str): The name of the index to create.
+        column_names (list[str]): The columns to include in the index.
+        type (Literal["btree", "hash", "gin", "gist", "brin"]): The type of index to create.
+        is_unique (bool): Whether the index should enforce uniqueness.
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    table_name = resolve_default("table_name", table_name)
+    name = resolve_default("name", name)
+    column_names = resolve_default("column_names", column_names)
+    type = resolve_default("type", type)
+    is_unique = resolve_default("is_unique", is_unique)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/indexes"
+    payload = {
+        "table_name": table_name, 
+        "name": name, 
+        "column_names": column_names, 
+        "type": type, 
+        "is_unique": is_unique,
+    }
+
+    await _platform_api_call("POST", path, json=payload)
 
     
 async def list_indexes(
     kb_id: str = Field(description="The ID of the knowledge base."),
     org_id: str = Field(description="The organization ID."),
-    table_name: str = Field(default=None, description="Optional table name to filter indexes by."),
-) -> list[IndexesResponseModel] | None:
-    """Lists the indexes in a knowledge base."""
-    host, headers = resolve_platform_auth(get_run_context())
-    url = f"https://{host}/orgs/{org_id}/kbs/{kb_id}/indexes"
-    headers = {**headers, "Content-Type": "application/json"}
-    
-    payload = {}
+    table_name: str | None = Field(
+        default=None,
+        description="The name of the table to list indexes for."
+    ),
+) -> list[Index]:
+    """
+    List all indexes in a knowledge base.
+
+    Sends a request to the platform API to retrieve all index definitions for the specified knowledge base.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID.
+        table_name (str | None): The name of the table to list indexes for.
+
+    Returns:
+        list[Index]: A list of index definitions.
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    table_name = resolve_default("table_name", table_name)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/indexes"
+    params = {}
     if table_name:
-        payload["table_name"] = table_name
-    
-    async with AsyncClient() as client:
-        res = await client.get(url, headers=headers, params=payload, timeout=None)
-        res.raise_for_status()
-        return res.json()
+        params["table_name"] = table_name
+
+    res = await _platform_api_call("GET", path, params=params)
+    return [Index.model_validate(index) for index in res.json().get("indexes", [])]
 
 
 async def delete_index(
-    index_name: str = Field(description="The name of the index to delete."),
-    kb_id: str = Field(description="The ID of the knowledge base."),
     org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base."),
+    name: str = Field(description="The name of the index to delete."),
 ) -> None:
-    """Deletes an index on a table in a knowledge base."""
-    host, headers = resolve_platform_auth(get_run_context())
-    url = f"https://{host}/orgs/{org_id}/kbs/{kb_id}/indexes/{index_name}"
-    headers = {**headers, "Content-Type": "application/json"}
-    async with AsyncClient() as client:
-        res = await client.delete(url, headers=headers, timeout=None)
-        res.raise_for_status()
+    """
+    Delete an index from a knowledge base.
+
+    Sends a request to the platform API to delete the specified index from the given knowledge base.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID.
+        name (str): The name of the index to delete.
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    name = resolve_default("name", name)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/indexes/{name}"
+
+    await _platform_api_call("DELETE", path)

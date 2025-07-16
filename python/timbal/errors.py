@@ -57,3 +57,6 @@ class APIKeyNotFoundError(TimbalError):
 class EvalError(TimbalError):
     """Error raised when an eval test fails."""
     
+
+class PlatformError(TimbalError):
+    """Error raised when a platform API call fails."""

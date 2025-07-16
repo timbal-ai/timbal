@@ -1,7 +1,5 @@
-import contextvars
 from collections import UserDict
 from enum import Enum
-
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
@@ -47,7 +45,7 @@ class TimbalPlatformAuth(BaseModel):
             raise NotImplementedError(f"Unknown auth type: {self.type}")
 
 
-class TimbalPlatformScope(BaseModel):
+class TimbalPlatformSubject(BaseModel):
     """Contains identifiers to the platform resource the run context applies to."""
 
     org_id: str | None = None
@@ -69,8 +67,8 @@ class TimbalPlatformConfig(BaseModel):
     """CDN host."""
     auth: TimbalPlatformAuth
     """Platform authentication configuration."""
-    scope: TimbalPlatformScope
-    """Platform application configuration."""
+    subject: TimbalPlatformSubject | None = None
+    """Platform subject configuration. i.e. this is the agent/workflow platform identifiers context."""
 
     @model_validator(mode="before")
     @classmethod
@@ -81,9 +79,11 @@ class TimbalPlatformConfig(BaseModel):
             values["auth"] = values.pop("auth_config")
 
         if "app_config" in values:
-            values["scope"] = values.pop("app_config")
+            values["subject"] = values.pop("app_config")
         elif "app" in values:
-            values["scope"] = values.pop("app")
+            values["subject"] = values.pop("app")
+        elif "scope" in values:
+            values["subject"] = values.pop("scope")
 
         return values
 

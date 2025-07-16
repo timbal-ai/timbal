@@ -378,9 +378,9 @@ class File(io.IOBase):
         auth = context.timbal_platform_config.auth
         headers = {auth.header_key: auth.header_value}
 
-        scope = context.timbal_platform_config.scope
-        org_id = scope.org_id
-        app_id = scope.app_id
+        subject = context.timbal_platform_config.subject
+        org_id = subject.org_id
+        app_id = subject.app_id
         resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
 
         # Ensure the file obj has the pointer at the start of the file.
