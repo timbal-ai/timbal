@@ -1,9 +1,11 @@
+from typing import Literal
+
 from .base import BaseEvent
 
 
 class StartEvent(BaseEvent):
     """Event emitted when a step starts execution."""
-    type: str = "START"
+    type: Literal["START"] = "START"
 
     status_text: str | None = None
     """Optional user-facing text describing the action the step is performing.

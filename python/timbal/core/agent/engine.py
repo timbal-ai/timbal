@@ -15,31 +15,34 @@ from openai.types.chat import (
 from openai.types.chat import (
     ChatCompletionMessage as OpenAIMessage,
 )
-from pydantic import BaseModel
-from timbal.types.events.chunk import ChunkEvent
+from pydantic import BaseModel, TypeAdapter
 from uuid_extensions import uuid7
 
+from timbal.types.events.chunk import ChunkEvent
+
 from ...errors import AgentError, EarlyExit
-from ...state.context import RunContext
 from ...state import set_run_context
+from ...state.context import RunContext
 from ...state.savers.base import BaseSaver
 from ...state.snapshot import Snapshot
 from ...steps.llms.router import llm_router
 from ...types.chat.content import FileContent, ToolResultContent, ToolUseContent
-from ...types.events import OutputEvent, StartEvent
+from ...types.events import Event, OutputEvent, StartEvent
 from ...types.file import File
 from ...types.llms.usage import acc_usage
 from ...types.message import Message, message_model_schema
 from ...types.models import dump
+from ...utils import _platform_api_stream_call
 from ..base import BaseStep
 from ..flow.engine import Flow
+from ..shared import RemoteConfig
 from ..step import Step
 from ..stream import AsyncGenState, handle_event, sync_to_async_gen
 from .types.agent_params_model import BaseAgentParamsModel, agent_params_model_schema
 from .types.llm_chunk import LLMChunk
 from .types.llm_result import LLMResult
-from .types.tool_result import ToolResult
 from .types.tool import Tool
+from .types.tool_result import ToolResult
 
 logger = structlog.get_logger("timbal.core.agent.engine")
 
@@ -60,21 +63,9 @@ class Agent(BaseStep):
         - Parallel tool execution.
         - Support for both sync and async tools.
         - Automatic state persistence (optional).
+        - Remote execution (optional).
         - Usage tracking and detailed execution traces.
         - Compatible with multiple LLM providers (OpenAI, Anthropic).
-
-    Attributes:
-        id (str): Unique identifier for the agent, defaults to "agent".
-                  This is useful when adding the agent as a substep of a flow or as a tool of another agent.
-        path (str): Hierarchical path identifier for nested flows/agents.
-        metadata (dict): Custom metadata for the agent instance.
-        tools (list): Available tools, which can be:
-            - Callable functions (automatically wrapped).
-            - BaseStep instances (direct tool implementations).
-            - Dicts with {"tool": callable, "description": str} for custom tool configs.
-        max_iter (int): Maximum number of tool-use iterations, defaults to 10.
-        state_saver (BaseSaver): Optional component for persisting conversation state.
-        **kwargs (dict): Configuration for the underlying LLM (model, system_prompt, temperature, etc.).
 
     Example:
         ```python
@@ -91,7 +82,6 @@ class Agent(BaseStep):
         ```
     """
 
-    # TODO before tools callbacks. after tools callbacks.
     def __init__(
         self,
         id: str = "agent",
@@ -103,46 +93,65 @@ class Agent(BaseStep):
         # ? Should these be RunnableLike
         before_agent_callback: Callable | None = None,
         after_agent_callback: Callable | None = None,
+        # ? We could add before/after tool callbacks
+        # ? We could add before/after llm callbacks
+        remote_config: RemoteConfig | None = None,
         # LLM specific params.
         system_prompt: str | None = None,
         model: str = "gpt-4.1",
         max_tokens: int | None = None,
         stream: bool = False,
     ) -> None:
-        """Initializes an Agent instance.
+        """
+        Initializes an Agent instance.
 
         Args:
             id: The unique identifier for this agent instance. Defaults to "agent".
-            path: The path for this agent, used for identification, state saving and logging.
+            path: The path for this agent, used for identification, state saving, and logging.
             metadata: A dictionary of arbitrary metadata associated with the agent.
-            tools: A list of tools available to the agent. Tools can be provided
-                as callable functions, BaseStep instances, dictionaries conforming
-                to OpenAI tool format, or Tool objects. Defaults to an empty list.
+            tools: A list of tools available to the agent. Tools can be provided as callable functions,
+                BaseStep instances, dictionaries conforming to OpenAI tool format, or Tool objects.
+                Defaults to an empty list.
             max_iter: The maximum number of iterations (LLM calls and tool executions).
-                Helps prevent infinite loops. Defaults to 10.
-            state_saver: An optional saver object responsible for persisting and
-                retrieving the agent's state, allowing for conversations to be resumed.
+                Prevents infinite loops. Defaults to 10.
+            state_saver: Optional saver object for persisting and retrieving the agent's state,
+                allowing conversations to be resumed. Defaults to None.
+            before_agent_callback: Optional callable executed before each main agent processing cycle
+                (e.g., before the LLM call). Can be sync or async. Defaults to None.
+            after_agent_callback: Optional callable executed after each main agent processing cycle
+                (e.g., after the LLM call and any tool execution). Can be sync or async. Defaults to None.
+            system_prompt: Optional system prompt to guide the LLM's behavior throughout the conversation.
                 Defaults to None.
-            before_agent_callback: An optional callable that is executed before each
-                main agent processing cycle (e.g., before the LLM call).
-                Can be a synchronous or asynchronous function. Defaults to None.
-            after_agent_callback: An optional callable that is executed after each
-                main agent processing cycle (e.g., after the LLM call and potential
-                tool execution). Can be a synchronous or asynchronous function.
-                Defaults to None.
-            system_prompt: An optional system prompt to guide the LLM's behavior
-                throughout the conversation. Defaults to None.
-            model: The identifier of the language model to be used by the agent
-                (e.g., "gpt-4.1", "claude-3-opus"). Defaults to "gpt-4.1".
-            max_tokens: The maximum number of tokens the LLM should generate in a
-                single response. If None, the model's default will be used.
-                Defaults to None.
-            stream: Whether the agent should stream responses back as they are
-                generated by the LLM. Defaults to False.
+            model: The identifier of the language model to use (e.g., "gpt-4.1", "claude-3-opus").
+                Defaults to "gpt-4.1".
+            max_tokens: The maximum number of tokens the LLM should generate in a single response.
+                If None, the model's default is used. Defaults to None.
+            stream: Whether to stream responses as they are generated by the LLM. Defaults to False.
+            remote_config: Optional RemoteConfig. If provided, the agent will execute remotely
+                via the Timbal platform API, streaming and validating events from the remote agent.
+                If None, the agent executes locally. Defaults to None.
+
+        Remote Execution:
+            When `remote_config` is provided, the agent streams events from a remote Timbal deployment
+            using the provided organization, app, and (optionally) version identifiers. 
+
+        Raises:
+            ValueError: If invalid tool definitions are provided (e.g., unnamed lambda handlers).
         """
         if path is None:
             path = id
         super().__init__(id=id, path=path, metadata=metadata)
+
+        # ? These params are used to enable passing this as a substep of a flow
+        # ? (might remove them in the future).
+        self.is_llm = False
+        self.is_coroutine = False
+        self.is_async_gen = True
+
+        # TODO Methods to retrieve the tools remotely
+        self.remote_config = remote_config
+        if self.remote_config:
+            return
 
         self.state_saver = state_saver
         if self.state_saver is not None:
@@ -163,12 +172,6 @@ class Agent(BaseStep):
         self.model = model
         self.max_tokens = max_tokens
         self.stream = stream
-
-        # ? These params are used to enable passing this as a substep of a flow
-        # ? (might remove them in the future).
-        self.is_llm = False
-        self.is_coroutine = False
-        self.is_async_gen = True
 
 
     @staticmethod
@@ -524,75 +527,13 @@ class Agent(BaseStep):
         )
 
 
-    async def run(
+    async def _run_local(
         self, 
         context: RunContext | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Execute the agent's main processing loop with tool usage, state management, and event streaming.
-        
-        This method implements the core agent execution cycle, including:
-            - State loading and conversation history retrieval
-            - Initial LLM execution with provided prompt
-            - Tool execution based on LLM decisions
-            - Result feeding back to LLM for next decisions
-            - State persistence and usage tracking
-            - Event streaming for monitoring/logging
-
-        Args:
-            context (RunContext | None): Execution context containing:
-                - Run identifiers (auto-generated if None)
-                - Parent context for nested executions
-                - Session tracking for state persistence
-                - Additional execution metadata
-            **kwargs: Agent input parameters.
-
-        Yields:
-            Event objects in sequence:
-                StartEvent:
-                    - Marks beginning of agent/tool executions
-                    - Contains run identifiers and paths
-                OutputEvent:
-                    - Contains execution results or errors
-                    - Includes usage statistics
-                    - Marks completion of execution steps
-
-        State Management:
-            - Loads previous conversation if state_saver configured
-            - Maintains message history across iterations
-            - Persists state after each significant step
-            - Handles state loading/saving errors gracefully
-
-        Error Handling:
-            - Non-recoverable LLM errors propagate up
-            - Tool errors are captured and fed back to LLM
-            - State persistence errors are logged but non-fatal
-            - Input validation errors raise AgentError
-
-        Usage Tracking:
-            - Accumulates token usage across all LLM calls
-            - Tracks tool-specific resource usage
-            - Maintains execution timing information
-            - Preserves full execution traces
-
-        Notes:
-            - Implements parallel tool execution when possible
-            - Respects max_iter limit for tool usage
-            - Automatically formats all messages for LLM consumption
-            - Provides detailed tracing for debugging/monitoring
-            - Can be used as both standalone agent or subagent
-            - Supports continuation of previous conversations
-            - Handles both streaming and non-streaming LLMs
-        """
+        """Runs the agent locally."""
         t0 = int(time.time() * 1000)
-
-        if context is None:
-            context = RunContext(id=uuid7(as_type="str"))
-        elif context.id is None:
-            context.id = uuid7(as_type="str")
-
-        # Set the run context for the duration of the agent run.
-        set_run_context(context)
 
         # Copy the input as is, so we save the traces without validated data and defaults.
         agent_input = dump(kwargs, context=context)
@@ -1075,6 +1016,107 @@ class Agent(BaseStep):
 
         logger.info("output_event", output_event=agent_output_event_dump)
         yield agent_output_event
+
+
+    async def _run_remote(
+        self,
+        context: RunContext | None = None,
+        **kwargs: Any,
+    ) -> Any: 
+        """Runs the agent remotely. The agent must be deployed in the Timbal platform."""
+        prompt = kwargs.pop("prompt", None)
+        prompt = Message.validate(prompt)
+
+        path = f"orgs/{self.remote_config.org_id}/apps/{self.remote_config.app_id}/runs/stream"
+        payload = {
+            "version_id": self.remote_config.version_id, 
+            # "parent_id": parent_id,
+            # "group_id": group_id,
+            "input": {
+                "prompt": dump(prompt, context=context),
+                **kwargs,
+            },
+        }
+
+        async for event in _platform_api_stream_call("POST", path, json=payload):
+            yield event
+
+
+    async def run(
+        self,
+        context: RunContext | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Execute the agent's main processing loop with tool usage, state management, and event streaming.
+        
+        This method implements the core agent execution cycle, including:
+            - State loading and conversation history retrieval
+            - Initial LLM execution with provided prompt
+            - Tool execution based on LLM decisions
+            - Result feeding back to LLM for next decisions
+            - State persistence and usage tracking
+            - Event streaming for monitoring/logging
+
+        Args:
+            context (RunContext | None): Execution context containing:
+                - Run identifiers (auto-generated if None)
+                - Parent context for nested executions
+                - Session tracking for state persistence
+                - Additional execution metadata
+            **kwargs: Agent input parameters.
+
+        Yields:
+            Event objects in sequence:
+                StartEvent:
+                    - Marks beginning of agent/tool executions
+                    - Contains run identifiers and paths
+                OutputEvent:
+                    - Contains execution results or errors
+                    - Includes usage statistics
+                    - Marks completion of execution steps
+
+        State Management:
+            - Loads previous conversation if state_saver configured
+            - Maintains message history across iterations
+            - Persists state after each significant step
+            - Handles state loading/saving errors gracefully
+
+        Error Handling:
+            - Non-recoverable LLM errors propagate up
+            - Tool errors are captured and fed back to LLM
+            - State persistence errors are logged but non-fatal
+            - Input validation errors raise AgentError
+
+        Usage Tracking:
+            - Accumulates token usage across all LLM calls
+            - Tracks tool-specific resource usage
+            - Maintains execution timing information
+            - Preserves full execution traces
+
+        Notes:
+            - Implements parallel tool execution when possible
+            - Respects max_iter limit for tool usage
+            - Automatically formats all messages for LLM consumption
+            - Provides detailed tracing for debugging/monitoring
+            - Can be used as both standalone agent or subagent
+            - Supports continuation of previous conversations
+            - Handles both streaming and non-streaming LLMs
+        """
+        if context is None:
+            context = RunContext(id=uuid7(as_type="str"))
+        elif context.id is None:
+            context.id = uuid7(as_type="str")
+
+        # Set the run context for the duration of the agent run.
+        set_run_context(context)
+
+        if self.remote_config:
+            async for event in self._run_remote(context=context, **kwargs):
+                event = TypeAdapter(Event).validate_python(event)
+                yield event
+        else:
+            async for event in self._run_local(context=context, **kwargs):
+                yield event
 
     
     async def complete(

@@ -84,6 +84,7 @@ class Flow(BaseStep):
         self, 
         id: str = "flow", 
         path: str | None = None,
+        # TODO Add remote config as well
         **kwargs: Any,
     ) -> None:
         """Initialize a new Flow instance.

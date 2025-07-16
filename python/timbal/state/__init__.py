@@ -75,9 +75,11 @@ def resolve_platform_config() -> TimbalPlatformConfig:
         return current_context.timbal_platform_config
     else:
         host = os.getenv("TIMBAL_API_HOST")
+        if not host:
+            raise ValueError("Missing TIMBAL_API_HOST environment variable.")
         token = os.getenv("TIMBAL_API_KEY") or os.getenv("TIMBAL_API_TOKEN")
-        if not host or not token:
-            raise ValueError("Missing TIMBAL_API_HOST or TIMBAL_API_KEY environment variables.")
+        if not token:
+            raise ValueError("Missing TIMBAL_API_KEY environment variable.")
         return TimbalPlatformConfig.model_validate({
             "host": host,
             "auth": {
