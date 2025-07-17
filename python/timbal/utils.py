@@ -92,9 +92,14 @@ async def _platform_api_stream_call(
 
         except httpx.HTTPStatusError as exc:
             try:
-                error_body = exc.response.json()
+                # Read the raw bytes first
+                content = await exc.response.aread()
+                try:
+                    error_body = exc.response.json()
+                except Exception:
+                    error_body = content.decode(errors="replace")
             except Exception:
-                error_body = exc.response.text
+                error_body = None
             raise PlatformError(
                 f"\n"
                 f"  URL: {exc.request.url}\n"
