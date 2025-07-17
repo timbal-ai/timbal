@@ -59,10 +59,13 @@ async def create_table(
     columns = resolve_default("columns", columns)
     comment = resolve_default("comment", comment)
 
+    # Validate columns
+    columns = [column if isinstance(column, Column) else Column.model_validate(column) for column in columns]
+
     path = f"orgs/{org_id}/kbs/{kb_id}/tables"
     payload = {
         "name": name,
-        "columns": columns,
+        "columns": [column.model_dump() for column in columns],
         "comment": comment,
     }
 
