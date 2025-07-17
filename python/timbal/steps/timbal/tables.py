@@ -278,6 +278,62 @@ async def import_csv(
     await _platform_api_call("POST", path, headers=headers, content=csv_data)
 
 
+async def search_table(
+    org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base containing the table."),
+    table_name: str = Field(description="The name of the table to search."),
+    query: str = Field(description="The query to search for."),
+    embedding_names: list[str] = Field(description="The names of the embeddings to use for the search."),
+    # TODO Add more params
+    limit: int = Field(
+        default=10,
+        description="The maximum number of results to return.",
+    ),
+    offset: int = Field(
+        default=0,
+        description="The offset to use for pagination.",
+    ),
+) -> list[dict[str, Any]]:
+    """
+    Perform a semantic search on a table within a knowledge base using embeddings.
+
+    This function queries the specified table for records most relevant to the provided query string,
+    leveraging one or more embedding models for semantic similarity. The search returns the top matching rows
+    based on the embeddings and query.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The ID of the knowledge base containing the table.
+        table_name (str): The name of the table to search.
+        query (str): The natural language query or search phrase.
+        embedding_names (list[str]): The names of the embedding models to use for the search.
+        limit (int, optional): The maximum number of results to return. Defaults to 10.
+        offset (int, optional): The offset for pagination. Defaults to 0.
+
+    Returns:
+        list[dict[str, Any]]: A list of ordered records, each as a dictionary. The structure of each record
+        depends on the table schema and the specified select columns.
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    table_name = resolve_default("table_name", table_name)
+    query = resolve_default("query", query)
+    embedding_names = resolve_default("embedding_names", embedding_names)
+    limit = resolve_default("limit", limit)
+    offset = resolve_default("offset", offset)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search"
+    payload = {
+        "query": query,
+        "embedding_names": embedding_names,
+        "limit": limit,
+        "offset": offset,
+    }
+
+    res = await _platform_api_call("POST", path, json=payload)
+    return res.json()
+
+
 async def query(
     org_id: str = Field(description="The organization ID."),
     kb_id: str = Field(description="The ID of the knowledge base."),
