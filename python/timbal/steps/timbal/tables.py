@@ -18,6 +18,8 @@ class Column(BaseModel):
     """Whether the column can be null."""
     is_unique: bool
     """Whether the column is unique."""
+    is_primary: bool 
+    """Whether the column is a primary key or part of a composite primary key."""
     comment: str | None = None
     """The comment of the column."""
 
