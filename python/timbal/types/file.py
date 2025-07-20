@@ -159,6 +159,28 @@ class File(io.IOBase):
     def __iter__(self) -> Iterator[bytes]:
         """Iterate over the wrapped file object."""
         return iter(self.__wrapped__)
+
+    
+    def __copy__(self) -> "File":
+        """Return self for shallow copy - File objects are immutable references."""
+        return self
+    
+    
+    def __deepcopy__(self, memo: dict) -> "File":
+        """Return self for deep copy - File objects are immutable references.
+        
+        File objects represent immutable references to file sources and should not
+        be deeply copied. The underlying file content and metadata remain the same,
+        so we return the same instance to avoid issues with copying file handles
+        and other system resources.
+        
+        Args:
+            memo: Dictionary used by deepcopy to track already copied objects
+            
+        Returns:
+            File: The same File instance
+        """
+        return self
     
 
     @property
