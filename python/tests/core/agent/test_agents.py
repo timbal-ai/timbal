@@ -5,7 +5,7 @@ from datetime import datetime
 from timbal import Agent
 from timbal.errors import AgentError
 from timbal.state.context import RunContext
-from timbal.state.savers import InMemorySaver, JSONLSaver
+from timbal.state.savers import InMemorySaver
 from timbal.steps.perplexity import search
 
 
@@ -189,7 +189,6 @@ async def test_run_llm_error():
 
 @pytest.mark.asyncio
 async def test_other_models():
-    state_saver = JSONLSaver("test_jsonl.jsonl")
     agent = Agent(
         model="gpt-4o-mini",
         # model="gemini-2.0-flash-lite",
@@ -199,7 +198,6 @@ async def test_other_models():
         # model="claude-3-5-sonnet-20241022",
         # model="o1",
         tools=[get_current_time],
-        state_saver=state_saver,
         max_tokens=2048,
     )
     res = await agent.complete(prompt="What is the time?")

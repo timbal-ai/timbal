@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 from timbal import Agent
-from timbal.state.savers.jsonl import JSONLSaver
+from timbal.state.savers import InMemorySaver
 from timbal.types import File
 from timbal.steps.elevenlabs import tts # , stt
 
@@ -78,7 +78,7 @@ async def test_agent_stt_tts():
             "You are a helpful assistant and you must always respond in audio format. "
             "Always use '56AoDkrOh6qfVPDXZ7Pt' as the voice_id for the TTS model."
         ),
-        state_saver=JSONLSaver("test_jsonl.jsonl")
+        state_saver=InMemorySaver(),
     )
 
     run_context = RunContext.model_validate({
