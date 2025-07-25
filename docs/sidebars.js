@@ -48,10 +48,21 @@
     },
     {
       type: 'category',
+      label: 'Knowledge Bases',
+      collapsed: false,
+      items: [
+        'kb/index',
+        'kb/tables',
+        'kb/indexes',
+        'kb/embeddings'
+    ],
+    },
+    {
+      type: 'category',
       label: 'State',
       collapsed: false,
       items: [
-        'state/index',
+        'state/index'
     ],
     },
     {

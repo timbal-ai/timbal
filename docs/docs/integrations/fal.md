@@ -8,9 +8,13 @@ import Table from '@site/src/components/Table';
 
 # Fal Integration
 
-Timbal integrates with Fal.ai to enable AI-powered image generation. This integration allows you to generate high-quality images from text prompts using various models.
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Generate high-quality images from text prompts using Fal.ai's advanced AI image generation models.
+</h2>
 
 ---
+
+Timbal integrates with Fal.ai to enable AI-powered image generation. This integration allows you to generate high-quality images from text prompts using various models.
 
 ## Prerequisites
 

@@ -207,7 +207,9 @@ response = await agent.complete(
 `}/>
 </details>
 
+<div style={{marginTop: '2rem'}}>
 This example shows how to create an agent with a custom tool. The agent can now use the weather tool to fetch real-time weather data when needed. You can add multiple tools to make your agent even more powerful!
+</div>
 
 ## Key Capabilities of an Agent
 

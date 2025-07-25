@@ -6,13 +6,18 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # State Management
 
-Timbal provides a powerful state management system that enables your AI applications to maintain context, track conversations, and persist data across interactions.
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Maintain context, track conversations, and persist data across interactions with powerful state management.
+</h2>
 
 ---
 
+Timbal provides a powerful state management system that enables your AI applications to maintain context, track conversations, and persist data across interactions.
+
+
 ## What are Snapshots?
 
-A **Snapshot** is a complete record of a flow's execution at a specific point in time. Each time you run a flow, Timbal automatically creates snapshots that capture:
+A <span style={{color: 'var(--timbal-purple)'}}><strong>Snapshot</strong></span> is a complete record of a flow's execution at a specific point in time. Each time you run a flow, Timbal automatically creates snapshots that capture:
 
 - Input parameters
 - Output results

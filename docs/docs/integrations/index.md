@@ -6,9 +6,14 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Timbal Integrations
 
-Timbal supports a variety of integrations to extend its capabilities with external services such as speech, language, and data tools. This page provides general guidance for using integrations in your projects.
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Extend Timbal's capabilities with external services for speech, language, and data tools.
+</h2>
 
 ---
+
+Timbal supports a variety of integrations to extend its capabilities with external services such as speech, language, and data tools. This page provides general guidance for using integrations in your projects.
+
 
 ## Package Installation
 

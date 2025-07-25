@@ -7,9 +7,13 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Perplexity Integration
 
-Timbal integrates with Perplexity to provide advanced search and LLM capabilities. 
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Perform web searches and leverage Perplexity's advanced LLM models for real-time information retrieval.
+</h2>
 
 ---
+
+Timbal integrates with Perplexity to provide advanced search and LLM capabilities. 
 
 This integration allows you to perform web searches and leverage Perplexity's models directly within your Timbal workflows.
 

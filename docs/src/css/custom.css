@@ -400,6 +400,9 @@ div[class*="codeBlock"] [class*="codeBlockTitle"] {
   color: #A6E22E !important;
 }
 
+.custom-highlight-white {
+  color: #ffffff !important;
+}
 
 .menu__link[href$="/introduction"] {
   font-weight: bold;
@@ -763,6 +766,16 @@ article ul ul {
 }
 
 article ul li {
+  margin: 0.3em 0;
+  position: relative;
+}
+
+article ol {
+  list-style-type: decimal;
+  padding-left: 2em;
+  margin: 0.5em 0;
+}
+article ol li {
   margin: 0.3em 0;
   position: relative;
 }

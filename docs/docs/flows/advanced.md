@@ -4,6 +4,12 @@ sidebar: 'docsSidebar'
 ---
 import CodeBlock from '@site/src/theme/CodeBlock';
 
+# Advanced Flow Concepts
+
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Build complex workflows with conditional branching, tool integration, nested flows, and advanced debugging.
+</h2>
+
 ---
 
 ## Conditional Branching

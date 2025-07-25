@@ -60,8 +60,8 @@ flow = Flow(id="my_flow")`}/>
 )`}/>
 
 
-<div style={{ textAlign: 'center' }}>
-  <img src="/img/dag_link.png" style={{ width: '20rem' }} />
+<div style={{ textAlign: 'center', display: 'flex', justifyContent: 'center', alignItems: 'center', margin: '0rem 0' }}>
+  <img src="/img/dag_link.png" style={{ width: '20rem', maxWidth: '100%' }} />
 </div>
 ---
 
@@ -257,7 +257,7 @@ Compiling ensures your flow is ready for production, with all steps, data maps, 
 
 Pass a state saver (like InMemorySaver) to .compile() to persist context across runs.
 
-See [State Savers](/state) for more information.
+See [State Savers] for more information.
 
 <CodeBlock language="python" code={`from timbal.state.savers import InMemorySaver
 
@@ -282,16 +282,6 @@ print(result.output["result"])`}/>
     print(event)`}/>
 
 ---
-
-## Quick Reference
-
-- **Steps**: Units of work (functions, LLMs, or flows)
-- **Links**: Control execution and data flow
-- **Data Maps/Values**: Connect and set step inputs
-- **String Interpolation**: Combine outputs flexibly
-- **LLMs**: Add language models as steps
-- **Inputs/Outputs**: Define what goes in and out of your flow
-- **compile()**: Finalize and enable memory/state
 
 For more, see the [Flows documentation](/flows), [Advanced Flow Concepts](/flows/advanced), and [Examples](/examples).
 

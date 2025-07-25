@@ -8,24 +8,14 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 # Installation
 
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-Step-by-step instructions for setting up Timbal CLI.
+Step-by-step instructions for setting up Timbal CLI and Python package.
 </h2>
 ---
 
-## macOS/Linux
+## Prerequisites
 
-Use `curl` to download and execute the installation script:
-
-<CodeBlock language="bash" code={`curl -LsSf https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.sh | sh`}/>
-
-## Windows
-
-Use PowerShell to download and execute the installation script:
-
-<CodeBlock language="bash" code={`powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.ps1 | iex"`}/>
-
-:::info[Python Version Requirements]{.tight-admonition}
-Before installing **Timbal CLI**, ensure you have:
+:::info[Requirements]{.tight-admonition}
+Before installing **Timbal**, ensure you have:
 - **Docker** installed and running: Check the [documentation](https://docs.docker.com/engine/install/).
 - **Python 3.12 or higher**: Make sure you have the correct version installed before proceeding.
 :::
@@ -51,12 +41,38 @@ Install uv to manage your Python dependencies.
 If you run into any issues, refer to **[UV's installation](https://docs.astral.sh/uv/get-started/installation/)** guide for more information.
 :::
 
-## Install Timbal
+## Install Timbal CLI
 
-You can install Timbal CLI using either `uv` or `pip`:
+The **Timbal CLI** provides a command-line interface for managing Timbal projects, including initialization, building, deploying, and other project management tasks.
+
+### macOS/Linux
+
+Use `curl` to download and execute the installation script:
+
+<CodeBlock language="bash" code={`curl -LsSf https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.sh | sh`}/>
+
+### Windows
+
+Use PowerShell to download and execute the installation script:
+
+<CodeBlock language="bash" code={`powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.ps1 | iex"`}/>
+
+:::success[CLI Ready]
+Once installed, you can use the `timbal` command to manage your projects!
+:::
+
+## Install Timbal Python Package
+
+If you want to use Timbal directly in your Python projects or integrate it into existing code, you can install the Python package directly.
+
+### Basic Installation
+
+You can install the Timbal Python package using either `uv` or `pip`:
 
 <CodeBlock language="bash" code={`uv add timbal`}/>
 <CodeBlock language="bash" code={`pip install timbal`}/>
+
+### Optional Dependencies
 
 Timbal also has **optional dependencies** for integrations (e.g., MySQL, Google Drive, etc.).
 You can install all optional dependencies at once with:

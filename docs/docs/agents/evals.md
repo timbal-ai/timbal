@@ -6,6 +6,10 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Automated Testing for Timbal Agents
 
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Measure, test, and improve your agents with automated LLM-powered validation and comprehensive reporting.
+</h2>
+
 ---
 
 AI outputs are non-deterministic — the same input can yield different results. **Evals** in Timbal help you measure, test, and improve your agents and flows with automated, LLM-powered checks.
@@ -16,9 +20,9 @@ Evals are automated tests that assess your agent's outputs and tool usage. They 
 
 ### Types of Evals
 
-- <span style={{color: 'var(--timbal-purple)'}}><strong>Output Evals</strong></span>: Did the agent produce the correct answer, with proper content and formatting?
-- <span style={{color: 'var(--timbal-purple)'}}><strong>Steps Evals</strong></span>: Did the agent use the right tools, in the right order, with the right inputs?
-- <span style={{color: 'var(--timbal-purple)'}}><strong>Usage Evals</strong></span>: Did the agent's resource consumption (tokens, API calls) meet expectations or stay within expected bounds?
+- **Output Evals**: Did the agent produce the correct answer, with proper content and formatting?
+- **Steps Evals**: Did the agent use the right tools, in the right order, with the right inputs?
+- **Usage Evals**: Did the agent's resource consumption (tokens, API calls) meet expectations or stay within expected bounds?
 
 ---
 
@@ -346,6 +350,20 @@ Timbal generates comprehensive evaluation results in JSON format:
 - **Usage monitoring**: Resource consumption tracking for cost and performance optimization
 
 ---
+
+:::warning Current Limitation
+**Important**: The eval system automatically overrides your agent's state saver configuration. During evaluation, your agent will use `JSONLSaver` regardless of its original configuration.
+
+<CodeBlock language="python" code={`# Your agent can use any state saver - it will be overridden during evals
+from timbal.state.savers import InMemorySaver, JSONLSaver, TimbalPlatformSaver
+
+agent = Agent(
+    # ... other parameters
+    state_saver=InMemorySaver()  # or any other saver - will be overridden
+)`}/>
+
+The eval system automatically sets: `agent.state_saver = JSONLSaver(path=Path("state.jsonl"))`
+:::
 
 ## Summary
 

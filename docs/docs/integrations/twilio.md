@@ -7,9 +7,13 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Twilio Integration
 
-Timbal integrates with Twilio to enable sending WhatsApp messages programmatically. 
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Send WhatsApp messages programmatically with Twilio integration for both free-form and template-based messaging.
+</h2>
 
 ---
+
+Timbal integrates with Twilio to enable sending WhatsApp messages programmatically. 
 
 This integration allows you to send both free-form and template-based WhatsApp messages directly from your Timbal workflows.
 

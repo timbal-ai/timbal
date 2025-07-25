@@ -6,6 +6,10 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Understanding Tools
 
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Give your agents superpowers by adding tools to interact with APIs, perform calculations, and more.
+</h2>
+
 ---
 
 Tools are the way to give your Agents superpowers: they allow your agent to interact with the outside world, call APIs, perform calculations, and much more.

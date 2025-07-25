@@ -75,8 +75,9 @@ const config = {
           alt: 'Timbal Logo',
           src: '/img/LogoBlack.svg',
           srcDark: '/img/LogoWhite.svg',
-          width: '100px',  
+          width: '80px',  
           height: 'auto',
+          style: { marginLeft: '18px' },
         },
         items: [
           { to: '/introduction', label: 'Docs', position: 'left' },

@@ -46,12 +46,27 @@ Timbal makes your life easier by automatically setting up a complete project str
           }}
         >
           <div className="file-tree-box" style={{ fontSize: '0.85em', maxWidth: '320px' }}>
-            <img src="/img/folder.svg" className="file-tree-icon" style={{ width: '14px' }} /> my-project
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: '0.2rem' }}>
+              <img src="/img/folder.svg" className="file-tree-icon" style={{ width: '14px', marginRight: '0.5rem' }} />
+              <span>my-project</span>
+            </div>
             <div className="file-list" style={{ marginLeft: '1.5rem' }}>
-              <div><img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px' }} /> agent.py</div>
-              <div><img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px' }} /> .dockerignore</div>
-              <div><img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px' }} /> pyproject.toml</div>
-              <div><img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px' }} /> timbal.yaml</div>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '0.2rem' }}>
+                <img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px', marginRight: '0.5rem' }} />
+                <span>agent.py</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '0.2rem' }}>
+                <img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px', marginRight: '0.5rem' }} />
+                <span>.dockerignore</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '0.2rem' }}>
+                <img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px', marginRight: '0.5rem' }} />
+                <span>pyproject.toml</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center' }}>
+                <img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px', marginRight: '0.5rem' }} />
+                <span>timbal.yaml</span>
+              </div>
             </div>
           </div>
           <div style={{ minWidth: '320px', flex: 1 }}>
@@ -154,7 +169,7 @@ This makes it easy to add new packages and manage your project's dependencies.
 Before running your flow, make sure you have the keys needed set as environment variables in your `.env` file:
 
 👀 It will depend on the LLM you're using, in this case we are using a Gemini model
-<CodeBlock language="bash" title=".env" code={`GEMINI_API_KEYY=your_api_key_here `}/>
+<CodeBlock language="bash" title=".env" code={`GEMINI_API_KEY=your_api_key_here `}/>
 
 Only with the `Agent` class we have a flow that represents a llm that receives a `prompt` and returns a `response`.
 

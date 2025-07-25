@@ -8,9 +8,13 @@ import Table from '@site/src/components/Table';
 
 # SharePoint Integration
 
-Timbal integrates with SharePoint to enable listing, downloading, and managing files programmatically. 
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+List, download, and manage files programmatically with SharePoint integration and Microsoft Graph API.
+</h2>
 
 ---
+
+Timbal integrates with SharePoint to enable listing, downloading, and managing files programmatically. 
 
 This integration allows you to access both personal and shared files across different scopes in your SharePoint environment.
 
