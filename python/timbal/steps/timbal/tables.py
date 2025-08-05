@@ -283,7 +283,7 @@ async def import_csv(
 async def search_table(
     org_id: str = Field(description="The organization ID."),
     kb_id: str = Field(description="The ID of the knowledge base containing the table."),
-    table_name: str = Field(description="The name of the table to search."),
+    name: str = Field(description="The name of the table to search."),
     query: str = Field(description="The query to search for."),
     embedding_names: list[str] = Field(description="The names of the embeddings to use for the search."),
     # TODO Add more params
@@ -306,7 +306,7 @@ async def search_table(
     Args:
         org_id (str): The organization ID.
         kb_id (str): The ID of the knowledge base containing the table.
-        table_name (str): The name of the table to search.
+        name (str): The name of the table to search.
         query (str): The natural language query or search phrase.
         embedding_names (list[str]): The names of the embedding models to use for the search.
         limit (int, optional): The maximum number of results to return. Defaults to 10.
@@ -318,13 +318,13 @@ async def search_table(
     """
     org_id = resolve_default("org_id", org_id)
     kb_id = resolve_default("kb_id", kb_id)
-    table_name = resolve_default("table_name", table_name)
+    name = resolve_default("name", name)
     query = resolve_default("query", query)
     embedding_names = resolve_default("embedding_names", embedding_names)
     limit = resolve_default("limit", limit)
     offset = resolve_default("offset", offset)
 
-    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search"
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{name}/search"
     payload = {
         "query": query,
         "embedding_names": embedding_names,
@@ -374,4 +374,286 @@ async def query(
 
     res = await _platform_api_call("POST", path, json=payload)
     return res.json()
+    
+
+async def add_column(
+    org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base to create the table in."),
+    table_name: str = Field(description="The name of the table to add the column to."),
+    column: Column = Field(description="The column to add."),
+) -> None:
+    """
+    Add a column to an existing table in a knowledge base.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID containing the table.
+        table_name (str): The name of the table to add the column to.
+        column (Column): The column definition to add to the table.
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    table_name = resolve_default("table_name", table_name)
+    column = resolve_default("column", column)
+
+    # Validate column
+    column = column if isinstance(column, Column) else Column.model_validate(column)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}"
+    payload = {"operations": [{"add_column": column.model_dump()}]}
+
+    await _platform_api_call("PATCH", path, json=payload)
+    
+
+async def drop_column(
+    org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base containing the table."),
+    table_name: str = Field(description="The name of the table to drop the column from."),
+    name: str = Field(description="The name of the column to drop."),
+    cascade: bool = Field(description="Whether to cascade the drop to dependent objects."),
+) -> None:
+    """
+    Drop a column from an existing table in a knowledge base.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID containing the table.
+        table_name (str): The name of the table to drop the column from.
+        name (str): The name of the column to drop.
+        cascade (bool): Whether to cascade the drop to dependent objects.
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    table_name = resolve_default("table_name", table_name)
+    name = resolve_default("name", name)
+    cascade = resolve_default("cascade", cascade)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}"
+    payload = {"operations": [{"drop_column": {
+        "name": name,
+        "cascade": cascade
+    }}]}
+
+    await _platform_api_call("PATCH", path, json=payload)
+
+
+async def rename_column(
+    org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base containing the table."),
+    table_name: str = Field(description="The name of the table to rename the column in."),
+    name: str = Field(description="The name of the column to rename."),
+    new_name: str = Field(description="The new name for the column."),
+) -> None:
+    """
+    Rename a column in an existing table in a knowledge base.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID containing the table.
+        table_name (str): The name of the table to rename the column in.
+        name (str): The current name of the column to rename.
+        new_name (str): The new name for the column.
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    table_name = resolve_default("table_name", table_name)
+    name = resolve_default("name", name)
+    new_name = resolve_default("new_name", new_name)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}"
+    payload = {"operations": [{"rename_column": {
+        "name": name,
+        "new_name": new_name
+    }}]}
+
+    await _platform_api_call("PATCH", path, json=payload)
+
+
+async def rename_table(
+    org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base containing the table."),
+    name: str = Field(description="The name of the table to rename."),
+    new_name: str = Field(description="The new name for the table."),
+) -> None:
+    """
+    Rename an existing table in a knowledge base.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID containing the table.
+        name (str): The current name of the table to rename.
+        new_name (str): The new name for the table.
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    name = resolve_default("name", name)
+    new_name = resolve_default("new_name", new_name)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{name}"
+    payload = {"operations": [{"rename_table": {"new_name": new_name}}]}
+
+    await _platform_api_call("PATCH", path, json=payload)
+
+
+async def add_fk(
+    org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base containing the table."),
+    table_name: str = Field(description="The name of the table to add the foreign key to."),
+    column_names: list[str] = Field(description="The name of the columns to add the foreign key to."),
+    fk_table_name: str = Field(description="The name of the referenced table."),
+    fk_column_names: list[str] = Field(description="The name of the referenced columns in the foreign table."),
+    name: str = Field(description="The name of the foreign key constraint."),
+    on_delete_action: str = Field(description="The action to take on delete (e.g., 'NO ACTION', 'CASCADE')."),
+    on_update_action: str = Field(description="The action to take on update (e.g., 'NO ACTION', 'CASCADE')."),
+) -> None:
+    """
+    Add a foreign key to an existing table in a knowledge base.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID containing the table.
+        table_name (str): The name of the table to add the foreign key to.
+        column_names (list[str]): The name of the columns to add the foreign key to.
+        fk_table_name (str): The name of the referenced table.
+        fk_column_names (list[str]): The name of the referenced columns in the foreign table.
+        name (str): The name of the foreign key constraint.
+        on_delete_action (str): The action to take on delete (e.g., 'NO ACTION', 'CASCADE').
+        on_update_action (str): The action to take on update (e.g., 'NO ACTION', 'CASCADE').
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    table_name = resolve_default("table_name", table_name)
+    column_names = resolve_default("column_names", column_names)
+    fk_table_name = resolve_default("fk_table_name", fk_table_name)
+    fk_column_names = resolve_default("fk_column_names", fk_column_names)
+    name = resolve_default("name", name)
+    on_delete_action = resolve_default("on_delete_action", on_delete_action)
+    on_update_action = resolve_default("on_update_action", on_update_action)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}"
+    payload = {
+        "operations": [{
+            "add_constraint": {
+                "type": "FOREIGN KEY",
+                "name": name,
+                "columns": column_names,
+                "reference_table": fk_table_name,
+                "reference_columns": fk_column_names,
+                "on_delete_action": on_delete_action,
+                "on_update_action": on_update_action
+            }
+        }]
+    }
+
+    await _platform_api_call("PATCH", path, json=payload)
+
+
+async def drop_constraint(
+    org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base containing the table."),
+    table_name: str = Field(description="The name of the table to drop the constraint from."),
+    name: str = Field(description="The name of the constraint to drop."),
+    cascade: bool = Field(description="Whether to cascade the drop to dependent objects."),
+) -> None:
+    """
+    Drop a constraint from an existing table in a knowledge base.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID containing the table.
+        table_name (str): The name of the table to drop the constraint from.
+        name (str): The name of the constraint to drop.
+        cascade (bool): Whether to cascade the drop to dependent objects.
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    table_name = resolve_default("table_name", table_name)
+    name = resolve_default("name", name)
+    cascade = resolve_default("cascade", cascade)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}"
+    payload = {
+        "operations": [{
+            "drop_constraint": {
+                "name": name,
+                "cascade": cascade
+            }
+        }]
+    }
+
+    await _platform_api_call("PATCH", path, json=payload)
+
+
+async def add_check(
+    org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base containing the table."),
+    table_name: str = Field(description="The name of the table to add the check constraint to."),
+    name: str = Field(description="The name of the check constraint."),
+    expression: str = Field(description="The check constraint expression (e.g., 'length(name) < 10')."),
+) -> None:
+    """
+    Add a check constraint to an existing table in a knowledge base.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID containing the table.
+        table_name (str): The name of the table to add the check constraint to.
+        name (str): The name of the check constraint.
+        expression (str): The check constraint expression (e.g., 'length(name) < 10').
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    table_name = resolve_default("table_name", table_name)
+    name = resolve_default("name", name)
+    expression = resolve_default("expression", expression)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}"
+    payload = {
+        "operations": [{
+            "add_constraint": {
+                "type": "CHECK",
+                "name": name,
+                "expression": expression
+            }
+        }]
+    }
+
+    await _platform_api_call("PATCH", path, json=payload)
+
+
+async def add_unique(
+    org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(description="The ID of the knowledge base containing the table."),
+    table_name: str = Field(description="The name of the table to add the unique constraint to."),
+    name: str = Field(description="The name of the unique constraint."),
+    columns: list[str] = Field(description="The columns to add the unique constraint to."),
+) -> None:
+    """
+    Add a unique constraint to an existing table in a knowledge base.
+
+    Args:
+        org_id (str): The organization ID.
+        kb_id (str): The knowledge base ID containing the table.
+        table_name (str): The name of the table to add the unique constraint to.
+        name (str): The name of the unique constraint.
+        columns (list[str]): The columns to add the unique constraint to.
+    """
+    org_id = resolve_default("org_id", org_id)
+    kb_id = resolve_default("kb_id", kb_id)
+    table_name = resolve_default("table_name", table_name)
+    name = resolve_default("name", name)
+    columns = resolve_default("columns", columns)
+
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}"
+    payload = {
+        "operations": [{
+            "add_constraint": {
+                "type": "UNIQUE",
+                "name": name,
+                "columns": columns
+            }
+        }]
+    }
+
+    await _platform_api_call("PATCH", path, json=payload)
     
