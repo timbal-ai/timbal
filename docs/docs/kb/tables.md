@@ -286,7 +286,7 @@ For semantic search capabilities, you'll need to create embeddings first (see [E
 results = await search_table(
     org_id="your-org-id",
     kb_id="your-kb-id",
-    table_name="Documents", 
+    name="Documents", 
     query="artificial intelligence and machine learning",
     embedding_names=["content_embeddings"],
     limit=10,
@@ -347,6 +347,22 @@ sql_definition = await get_table_sql(
 print(sql_definition)
 # Output: CREATE TABLE "Users" ("id" INT NOT NULL, "email" TEXT NOT NULL, ... CONSTRAINT "Users_email_key" UNIQUE (email), ...)`} />
 
+### Get All Tables SQL Definition
+
+Returns the SQL definitions for all tables in the knowledge base.
+
+<CodeBlock language="python" code={`from timbal.steps.timbal.tables import get_tables_sql
+
+# Get the CREATE TABLE statements for all tables
+sql_definitions = await get_tables_sql(
+    org_id="your-org-id", 
+    kb_id="your-kb-id"
+)
+
+for sql in sql_definitions:
+    print(sql)
+    print("---")`} />
+
 ### Delete Table
 
 Completely removes the table structure and data from the knowledge base.
@@ -359,4 +375,166 @@ await delete_table(
     kb_id="your-kb-id", 
     name="Users",
     cascade=True  # Also delete associated indexes and embeddings
+)`} />
+
+## Modifying Tables
+
+### Add Column
+
+Adds a new column to an existing table.
+
+<CodeBlock language="python" code={`from timbal.steps.timbal.tables import add_column, Column
+
+# Add a new column to an existing table
+await add_column(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    column=Column(
+        name="phone_number",
+        data_type="varchar(20)",
+        is_nullable=True,
+        is_unique=False,
+        is_primary=False,
+        comment="User's phone number"
+    )
+)`} />
+
+### Drop Column
+
+Removes a column from an existing table.
+
+<CodeBlock language="python" code={`from timbal.steps.timbal.tables import drop_column
+
+# Remove a column from the table
+await drop_column(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="phone_number",
+    cascade=True  # Also drop dependent objects
+)`} />
+
+### Rename Column
+
+Changes the name of an existing column.
+
+<CodeBlock language="python" code={`from timbal.steps.timbal.tables import rename_column
+
+# Rename a column
+await rename_column(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="name",
+    new_name="full_name"
+)`} />
+
+### Rename Table
+
+Changes the name of an existing table.
+
+<CodeBlock language="python" code={`from timbal.steps.timbal.tables import rename_table
+
+# Rename the entire table
+await rename_table(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    name="Users",
+    new_name="Customers"
+)`} />
+
+## Adding Constraints
+
+### Add Foreign Key
+
+Creates a foreign key relationship between tables.
+
+<CodeBlock language="python" code={`from timbal.steps.timbal.tables import add_fk
+
+# Add a foreign key constraint
+await add_fk(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Posts",
+    column_names=["customer_id"],
+    fk_table_name="Users",
+    fk_column_names=["id"],
+    name="fk_posts_customer_id",
+    on_delete_action="CASCADE",
+    on_update_action="NO ACTION"
+)`} />
+
+This creates a relationship between the two tables as shown:
+
+<div style={{ display: 'flex', justifyContent: 'center', gap: '20px', alignItems: 'center' }}>
+  <img src="/img/add_fk.png" alt="Foreign Key Relationship" style={{ maxWidth: '660px', height: 'auto' }} />
+</div>
+
+<br/>
+
+What happens with this constraint:
+
+- **Data integrity**: You can only insert `customer_id` values in Posts that exist as `id` values in Users
+- **Cascade delete**: When a User is deleted, all their Posts are automatically deleted too
+- **Referential consistency**: The database ensures the relationship between tables is always valid
+- **Query optimization**: The database can optimize joins between these tables more efficiently
+
+### Add Check Constraint
+
+Adds a validation rule to ensure data meets specific conditions.
+
+<CodeBlock language="python" code={`from timbal.steps.timbal.tables import add_check
+
+# Add a check constraint
+await add_check(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="check_email_format",
+    expression="email LIKE '%@%'"
+)`} />
+
+<br/>
+
+What happens with this constraint:
+
+- **Data validation**: Every insert or update must satisfy the check condition
+- **Automatic rejection**: Records that don't meet the criteria are automatically rejected
+
+### Add Unique Constraint
+
+Ensures that values in specified columns are unique across rows.
+
+<CodeBlock language="python" code={`from timbal.steps.timbal.tables import add_unique
+
+# Add a unique constraint across multiple columns
+await add_unique(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="unique_email_domain",
+    columns=["email", "domain"]
+)`} />
+
+<br/>
+
+What happens with this constraint:
+
+- **Uniqueness enforcement**: No two rows can have the same combination of values in the specified columns
+- **Composite uniqueness**: When multiple columns are specified, the combination must be unique (individual columns can still have duplicates)
+
+### Drop Constraint
+
+Removes any type of constraint from a table.
+
+<CodeBlock language="python" code={`from timbal.steps.timbal.tables import drop_constraint
+
+# Remove a constraint
+await drop_constraint(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="check_email_format",
+    cascade=True # Also drop dependent objects
 )`} />
