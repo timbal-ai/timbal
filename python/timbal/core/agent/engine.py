@@ -494,9 +494,13 @@ class Agent(BaseStep):
 
             # Handle the case where the tool already returns an LLM message. We need to modify it so it represents the result of a tool call.
             if not isinstance(tool_output, Message):
+                if isinstance(tool_output, File):
+                    tool_output_content = FileContent(file=tool_output)
+                else:
+                    tool_output_content = TextContent(text=str(tool_output))
                 tool_output = Message.validate({
                     "role": "user",
-                    "content": str(tool_output),
+                    "content": tool_output_content,
                 })
             
         except Exception as err:
