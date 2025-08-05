@@ -26,7 +26,7 @@ from ...state.context import RunContext
 from ...state.savers.base import BaseSaver
 from ...state.snapshot import Snapshot
 from ...steps.llms.router import llm_router
-from ...types.chat.content import FileContent, ToolResultContent, ToolUseContent, TextContent
+from ...types.chat.content import FileContent, ToolResultContent, ToolUseContent
 from ...types.events import Event, OutputEvent, StartEvent
 from ...types.file import File
 from ...types.llms.usage import acc_usage
@@ -494,24 +494,13 @@ class Agent(BaseStep):
 
             # Handle the case where the tool already returns an LLM message. We need to modify it so it represents the result of a tool call.
             if not isinstance(tool_output, Message):
-                content_items = []
-                
-                # Handle different output types
                 if isinstance(tool_output, File):
-                    content_items.append(FileContent(file=tool_output))
-                elif isinstance(tool_output, (list, tuple)):
-                    # Handle mixed content (text + files)
-                    for item in tool_output:
-                        if isinstance(item, File):
-                            content_items.append(FileContent(file=item))
-                        else:
-                            content_items.append(TextContent(text=str(item)))
+                    tool_output_content = FileContent(file=tool_output)
                 else:
-                    content_items.append(TextContent(text=str(tool_output)))
-                
+                    tool_output_content = TextContent(text=str(tool_output))
                 tool_output = Message.validate({
                     "role": "user",
-                    "content": content_items,
+                    "content": tool_output_content,
                 })
             
         except Exception as err:
@@ -989,27 +978,6 @@ class Agent(BaseStep):
                     await loop.run_in_executor(None, lambda: self.after_agent_callback(context))
             except Exception as err:
                 logger.error("after_agent_callback_error", err=err)
-
-        final_content = list(last_message.content)
-
-        for message in messages:
-            if message.role == "user":
-                for content in message.content:
-                    if isinstance(content, ToolResultContent):
-                        for tool_content in content.content:
-                            if isinstance(tool_content, FileContent):
-                                file_already_included = any(
-                                    isinstance(c, FileContent) and c.file == tool_content.file 
-                                    for c in final_content
-                                )
-                                if not file_already_included:
-                                    final_content.append(tool_content)
-        
-        if len(final_content) > len(last_message.content):
-            last_message = Message.validate({
-                "role": "assistant",
-                "content": final_content,
-            })
 
         t1 = int(time.time() * 1000)
 
