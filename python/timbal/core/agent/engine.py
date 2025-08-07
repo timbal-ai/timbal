@@ -26,7 +26,12 @@ from ...state.context import RunContext
 from ...state.savers.base import BaseSaver
 from ...state.snapshot import Snapshot
 from ...steps.llms.router import llm_router
-from ...types.chat.content import FileContent, ToolResultContent, ToolUseContent
+from ...types.chat.content import (
+    FileContent, 
+    TextContent,
+    ToolResultContent, 
+    ToolUseContent
+)
 from ...types.events import Event, OutputEvent, StartEvent
 from ...types.file import File
 from ...types.llms.usage import acc_usage
