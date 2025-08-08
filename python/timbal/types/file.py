@@ -132,10 +132,11 @@ class File(io.IOBase):
 
     def __getattr__(self, name: str) -> Any:
         """Proxy attribute access through to the wrapped file object."""
-        if name in ("__source__", "__source_scheme__", "__source_extension__", "__fileobj__", "__fetcher__"):
-            raise AttributeError(name)
+        if name == "extension":
+            return object.__getattribute__(self, "__source_extension__")
         elif name == "persisted":
             return object.__getattribute__(self, "__persisted__")
+        # TODO Add more aliases here
         else:
             return getattr(self.__wrapped__, name)
 
@@ -183,6 +184,7 @@ class File(io.IOBase):
         return self
     
 
+    # TODO Remove the fetching from here. Move to validation
     @property
     def __wrapped__(self) -> Any:
         """Get the underlying file object, fetching it if necessary."""
@@ -475,7 +477,11 @@ class File(io.IOBase):
     @classmethod
     def _fetch_local_file(cls, path: Path) -> io.IOBase:
         """Fetch a local file from a valid path in the system."""
-        return path.open("rb")
+        # We don't use path.open("rb") because it used the full path as the name,
+        # and we weren't able to et the name property after the fact.
+        fileobj = io.BytesIO(path.read_bytes())
+        fileobj.name = path.name
+        return fileobj
 
 
     @classmethod
@@ -485,12 +491,15 @@ class File(io.IOBase):
         return io.BytesIO(res.read())
 
 
+    # TODO Make async
     @classmethod
     def _fetch_http_file(cls, url: str) -> io.IOBase:
         """Fetch a file from a HTTP/HTTPS URL."""
         res = requests.get(url, stream=True)
         res.raise_for_status()
-        return io.BytesIO(res.content)
+        fileobj = io.BytesIO(res.content)
+        fileobj.name = url.split("/")[-1]
+        return fileobj
 
 
     @classmethod
