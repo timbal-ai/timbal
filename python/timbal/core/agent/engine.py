@@ -340,18 +340,18 @@ class Agent(BaseStep):
 
         system_prompt = kwargs.pop("system_prompt", None)
 
-        context_files = []
-        for message in messages:
-            for content in message.content:
-                if isinstance(content, FileContent):
-                    file = File.serialize(content.file)
-                    context_files.append(file)
+        # context_files = []
+        # for message in messages:
+        #     for content in message.content:
+        #         if isinstance(content, FileContent):
+        #             file = File.serialize(content.file)
+        #             context_files.append(file)
 
-        if len(context_files):
-            if system_prompt is None:
-                system_prompt = f"<context_data>{''.join(f'\n- {f}' for f in context_files)}\n</context_data>"
-            else:
-                system_prompt += f"\n\n<context_data>{''.join(f'\n- {f}' for f in context_files)}\n</context_data>"
+        # if len(context_files):
+        #     if system_prompt is None:
+        #         system_prompt = f"<context_data>{''.join(f'\n- {f}' for f in context_files)}\n</context_data>"
+        #     else:
+        #         system_prompt += f"\n\n<context_data>{''.join(f'\n- {f}' for f in context_files)}\n</context_data>"
 
         llm_error = None
         llm_message = None
@@ -545,7 +545,7 @@ class Agent(BaseStep):
         t0 = int(time.time() * 1000)
 
         # Copy the input as is, so we save the traces without validated data and defaults.
-        agent_input = dump(kwargs, context=context)
+        agent_input = await dump(kwargs)
 
         # Load the memory.
         # Always do this first to ensure even if validation fails we can carry the memory to the next run.
@@ -576,14 +576,13 @@ class Agent(BaseStep):
         for k, v in kwargs.items():
             context.data[k] = v
 
-        agent_start_event = StartEvent(
+        agent_start_event = await StartEvent.build(
             run_id=context.id,
             path=self.path,
             status_text="Starting...",
         )
-        agent_start_event_dump = dump(agent_start_event, context=context)
 
-        logger.info("start_event", start_event=agent_start_event_dump)
+        logger.info("start_event", start_event=agent_start_event.dump)
         yield agent_start_event
 
         # Aggregated traces and usage for the entire run.
@@ -601,7 +600,7 @@ class Agent(BaseStep):
             if "prompt" in kwargs:
                 # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
                 kwargs["prompt"] = Message.validate(kwargs["prompt"])
-                agent_input = dump(kwargs, context=context)
+                agent_input = await dump(kwargs)
                 messages.append(kwargs.pop("prompt"))
 
             if not len(messages):
@@ -677,14 +676,13 @@ class Agent(BaseStep):
 
         # Run an llm first (that is, the handler_fn for the llm gateway step).
         llm_i_path = f"{self.path}.llm-0"
-        llm_start_event = StartEvent(
+        llm_start_event = await StartEvent.build(
             run_id=context.id,
             path=llm_i_path,
             status_text="Thinking...",
         )
-        llm_start_event_dump = dump(llm_start_event, context=context)
 
-        logger.info("start_event", start_event=llm_start_event_dump)
+        logger.info("start_event", start_event=llm_start_event.dump)
         yield llm_start_event
 
         async for llm_output in self._run_llm(
@@ -697,28 +695,16 @@ class Agent(BaseStep):
             else:
                 llm_chunk = llm_output
 
-                llm_chunk_event = ChunkEvent(
+                llm_chunk_event = await ChunkEvent.build(
                     run_id=context.id,
                     path=llm_i_path,
                     chunk=llm_chunk.output,
                 )
-                llm_chunk_event_dump = dump(llm_chunk_event, context=context)
 
-                logger.info("chunk_event", chunk_event=llm_chunk_event_dump)
+                logger.info("chunk_event", chunk_event=llm_chunk_event.dump)
                 yield llm_chunk_event
 
-                # # If the LLM is returning a stream, that indicates it's not going to use a tool.
-                # # We're safe streaming the chunks as the final agent response.
-                # agent_chunk_event = ChunkEvent(
-                #     run_id=context.id,
-                #     path=self.path,
-                #     chunk=llm_chunk.output,
-                # )
-
-                # logger.info("chunk_event", chunk_event=agent_chunk_event)
-                # yield agent_chunk_event
-
-        llm_output_event = OutputEvent(
+        llm_output_event = await OutputEvent.build(
             run_id=context.id,
             path=llm_i_path,
             input=llm_result.input,
@@ -728,13 +714,12 @@ class Agent(BaseStep):
             t1=llm_result.t1,
             usage=llm_result.usage,
         )
-        llm_output_event_dump = dump(llm_output_event, context=context)
 
-        logger.info("output_event", output_event=llm_output_event_dump)
+        logger.info("output_event", output_event=llm_output_event.dump)
         yield llm_output_event
 
         # Store the trace of the LLM step.
-        run_steps[llm_i_path] = llm_output_event_dump
+        run_steps[llm_i_path] = llm_output_event.dump
 
         # Aggregate the usage of the LLM step.
         for k, v in llm_result.usage.items():
@@ -794,15 +779,14 @@ class Agent(BaseStep):
                 assert len(self.tools) > tool_idx, f"Tool {tool_call.name} not found at index {tool_idx}."
                 tool = self.tools[tool_idx]
 
-                tool_start_event = StartEvent(
+                tool_start_event = await StartEvent.build(
                     run_id=context.id,
                     path=f"{tool.path}-{tool_call.id}",
                     # TODO Review this one.
                     status_text=f"Running tool: {tool.path}...",
                 )
-                tool_start_event_dump = dump(tool_start_event, context=context)
 
-                logger.info("start_event", start_event=tool_start_event_dump)
+                logger.info("start_event", start_event=tool_start_event.dump)
                 yield tool_start_event
 
                 tool_task = asyncio.create_task(
@@ -830,7 +814,7 @@ class Agent(BaseStep):
                 })
                 messages.append(tool_result_message)
                 
-                tool_output_event = OutputEvent(
+                tool_output_event = await OutputEvent.build(
                     run_id=context.id,
                     path=f"{tool.path}-{tool_call.id}",
                     input=tool_result.input,
@@ -840,13 +824,12 @@ class Agent(BaseStep):
                     t1=tool_result.t1,
                     usage=tool_result.usage,
                 )
-                tool_output_event_dump = dump(tool_output_event, context=context)
 
-                logger.info("output_event", output_event=tool_output_event_dump)
+                logger.info("output_event", output_event=tool_output_event.dump)
                 yield tool_output_event
 
                 # Store the trace of the LLM step.
-                run_steps[f"{tool.path}-{tool_call.id}"] = tool_output_event_dump
+                run_steps[f"{tool.path}-{tool_call.id}"] = tool_output_event.dump
 
                 # Aggregate the usage of the tool step.
                 for k, v in tool_result.usage.items():
@@ -869,14 +852,13 @@ class Agent(BaseStep):
             # Run the llm again.
             llm_i_path = f"{self.path}.llm-{i}"
 
-            llm_start_event = StartEvent(
+            llm_start_event = await StartEvent.build(
                 run_id=context.id,
                 path=llm_i_path,
                 status_text="Thinking...",
             )
-            llm_start_event_dump = dump(llm_start_event, context=context)
 
-            logger.info("start_event", start_event=llm_start_event_dump)
+            logger.info("start_event", start_event=llm_start_event.dump)
             yield llm_start_event
 
             async for llm_output in self._run_llm(
@@ -890,28 +872,16 @@ class Agent(BaseStep):
                 else:
                     llm_chunk = llm_output
 
-                    llm_chunk_event = ChunkEvent(
+                    llm_chunk_event = await ChunkEvent.build(
                         run_id=context.id,
                         path=llm_i_path,
                         chunk=llm_chunk.output,
                     )
-                    llm_chunk_event_dump = dump(llm_chunk_event, context=context)
 
-                    logger.info("chunk_event", chunk_event=llm_chunk_event_dump)
+                    logger.info("chunk_event", chunk_event=llm_chunk_event.dump)
                     yield llm_chunk_event
 
-                    # # If the LLM is returning a stream, that indicates it's not going to use a tool.
-                    # # We're safe streaming the chunks as the final agent response.
-                    # agent_chunk_event = ChunkEvent(
-                    #     run_id=context.id,
-                    #     path=self.path,
-                    #     chunk=llm_chunk.output,
-                    # )
-
-                    # logger.info("chunk_event", chunk_event=agent_chunk_event)
-                    # yield agent_chunk_event
-
-            llm_output_event = OutputEvent(
+            llm_output_event = await OutputEvent.build(
                 run_id=context.id,
                 path=llm_i_path,
                 input=llm_result.input,
@@ -921,13 +891,12 @@ class Agent(BaseStep):
                 t1=llm_result.t1,
                 usage=llm_result.usage,
             )
-            llm_output_event_dump = dump(llm_output_event, context=context)
 
-            logger.info("output_event", output_event=llm_output_event_dump)
+            logger.info("output_event", output_event=llm_output_event.dump)
             yield llm_output_event
 
             # Store the trace of the LLM step.
-            run_steps[llm_i_path] = llm_output_event_dump
+            run_steps[llm_i_path] = llm_output_event.dump
 
             # Aggregate the usage of the LLM step.
             for k, v in llm_result.usage.items():
@@ -1011,7 +980,7 @@ class Agent(BaseStep):
             except Exception as err:
                 logger.error("put_memory_error", err=err)
 
-        agent_output_event = OutputEvent(
+        agent_output_event = await OutputEvent.build(
             run_id=context.id,
             path=self.path,
             input=agent_input,
@@ -1021,9 +990,8 @@ class Agent(BaseStep):
             t1=t1,
             usage=run_usage,
         )
-        agent_output_event_dump = dump(agent_output_event, context=context)
 
-        logger.info("output_event", output_event=agent_output_event_dump)
+        logger.info("output_event", output_event=agent_output_event.dump)
         yield agent_output_event
 
 
@@ -1035,6 +1003,7 @@ class Agent(BaseStep):
         """Runs the agent remotely. The agent must be deployed in the Timbal platform."""
         prompt = kwargs.pop("prompt", None)
         prompt = Message.validate(prompt)
+        prompt = await dump(prompt)
 
         path = f"orgs/{self.remote_config.org_id}/apps/{self.remote_config.app_id}/runs/stream"
         payload = {
@@ -1042,7 +1011,7 @@ class Agent(BaseStep):
             # "parent_id": parent_id,
             # "group_id": group_id,
             "input": {
-                "prompt": dump(prompt, context=context),
+                "prompt": prompt,
                 **kwargs,
             },
         }

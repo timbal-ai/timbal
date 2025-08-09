@@ -49,7 +49,7 @@ class JSONLSaver(BaseSaver):
         return Snapshot(**snapshot)
 
     
-    def get_last(
+    async def get_last(
         self, 
         path: str,
         context: RunContext,
@@ -73,7 +73,7 @@ class JSONLSaver(BaseSaver):
         return None
     
 
-    def put(
+    async def put(
         self, 
         snapshot: Snapshot,
         context: RunContext,
@@ -87,7 +87,7 @@ class JSONLSaver(BaseSaver):
                 if snapshot_i.id == snapshot.id and snapshot_i.path == snapshot.path:
                     raise ValueError(f"Snapshot with id {snapshot.id} and path {snapshot.path} already exists.")
 
-        snapshot_dump = dump(snapshot, context)
+        snapshot_dump = await dump(snapshot)
         with open(self.path, "a") as f:
             f.write(json.dumps(snapshot_dump) + "\n")
     

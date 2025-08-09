@@ -66,6 +66,7 @@ class TimbalPlatformSaver(BaseSaver):
         app_id = subject.app_id
         resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.parent_id}"
 
+        # TODO Convert to async method -> create a new tool to fetch snapshots
         res = requests.get(
             f"https://{host}/{resource_path}/snapshots", 
             headers=headers,
@@ -105,8 +106,9 @@ class TimbalPlatformSaver(BaseSaver):
         app_id = subject.app_id
         resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
 
-        body = dump(snapshot, context)
+        body = await dump(snapshot)
 
+        # TODO Convert to async method -> create a new tool to upload snapshots
         res = requests.post(
             f"https://{host}/{resource_path}/snapshots", 
             headers=headers,

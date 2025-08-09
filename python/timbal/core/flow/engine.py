@@ -456,7 +456,7 @@ class Flow(BaseStep):
 
         step_input = self._resolve_step_args(step_id, data)
         # We need to copy to avoid the LLM memories being modified by reference.
-        step_input_dump = dump(step_input, context)
+        step_input_dump = await dump(step_input)
 
         try:
             # Flow input is validated in the .run() method. That is because we want to validate
@@ -513,12 +513,12 @@ class Flow(BaseStep):
 
         t0 = int(time.time() * 1000)
 
-        flow_start_event = StartEvent(
+        flow_start_event = await StartEvent.build(
             run_id=context.id,
             path=self.path,
         )
 
-        logger.info("start_event", start_event=flow_start_event)
+        logger.info("start_event", start_event=flow_start_event.dump)
         yield flow_start_event
 
         # Copy the data to avoid potential bugs with data being modified by reference.
@@ -576,7 +576,7 @@ class Flow(BaseStep):
                                 data[memory_key] = DataValue(value=memory)
         
         # Copy the input as is, so we have the traces without validated data and defaults.
-        flow_input = dump(kwargs, context=context)
+        flow_input = await dump(kwargs)
 
         # Validate kwargs to store the validated inputs in the snapshot.
         try:
@@ -631,12 +631,12 @@ class Flow(BaseStep):
         tasks = []
         start_times = {}
         for source_id in sources_ids:
-            step_start_event = StartEvent(
+            step_start_event = await StartEvent.build(
                 run_id=context.id,
                 path=self.steps[source_id].path,
             )
 
-            logger.info("start_event", start_event=step_start_event)
+            logger.info("start_event", start_event=step_start_event.dump)
             yield step_start_event
             
             task = asyncio.create_task(self._run_step(
@@ -676,13 +676,13 @@ class Flow(BaseStep):
                         step_chunk = handle_event(event=step_chunk, async_gen_state=async_gen_state)
 
                         if step_chunk is not None:
-                            step_chunk_event = ChunkEvent(
+                            step_chunk_event = await ChunkEvent.build(
                                 run_id=context.id,
                                 path=step_path,
                                 chunk=step_chunk,
                             )
 
-                            logger.info("chunk_event", chunk_event=step_chunk_event)
+                            logger.info("chunk_event", chunk_event=step_chunk_event.dump)
                             yield step_chunk_event
 
                         continue
@@ -788,12 +788,12 @@ class Flow(BaseStep):
                         # Link conditions are only evaluated once all the ancestors are completed.
                         # If any of the conditions is true, we start the next step.
                         if any(ancestor_link.evaluate_condition(data) for _, ancestor_link in ancestors):
-                            step_start_event = StartEvent(
+                            step_start_event = await StartEvent.build(
                                 run_id=context.id,
                                 path=self.steps[successor_id].path,
                             )
 
-                            logger.info("start_event", start_event=step_start_event)
+                            logger.info("start_event", start_event=step_start_event.dump)
                             yield step_start_event
 
                             task = asyncio.create_task(self._run_step(
@@ -810,7 +810,7 @@ class Flow(BaseStep):
                 start_time = start_times[step_id]
                 end_time = int(time.time() * 1000)
 
-                step_output_event = OutputEvent(
+                step_output_event = await OutputEvent.build(
                     run_id=context.id,
                     path=step_path,
                     input=step_input,
@@ -821,10 +821,10 @@ class Flow(BaseStep):
                     usage=step_usage,
                 )
 
-                logger.info("output_event", output_event=step_output_event)
+                logger.info("output_event", output_event=step_output_event.dump)
                 yield step_output_event
 
-                steps[step_path] = dump(step_output_event, context=context)
+                steps[step_path] = step_output_event.dump
 
                 for k, v in step_usage.items():
                     current_key_value = flow_usage.get(k, 0)
@@ -874,7 +874,7 @@ class Flow(BaseStep):
         if exception is not None:
             raise exception
         
-        flow_output_event = OutputEvent(
+        flow_output_event = await OutputEvent.build(
             run_id=context.id,
             path=self.path,
             input=flow_input,
@@ -885,7 +885,7 @@ class Flow(BaseStep):
             usage=flow_usage,
         )
 
-        logger.info("output_event", output_event=flow_output_event)
+        logger.info("output_event", output_event=flow_output_event.dump)
         yield flow_output_event
     
 

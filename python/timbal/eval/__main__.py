@@ -13,6 +13,7 @@ from ..logs import setup_logging
 # TODO This shouldn't be in just the server 'module'.
 from ..server.utils import ModuleSpec, load_module
 from .engine import eval_file
+from .types.models import dump
 from .types.result import EvalTestSuiteResult
 from .utils import discover_files
 
@@ -102,6 +103,5 @@ if __name__ == "__main__":
 
     # Save all summaries to JSON
     with open("summary.json", "w") as f:
-        from timbal.types.models import dump
-        dumped = dump(test_results)
+        dumped = asyncio.run(dump(test_results))
         json.dump(dumped, f, indent=2, ensure_ascii=False)

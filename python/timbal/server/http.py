@@ -109,11 +109,10 @@ def create_app(
             req_context = RunContext()
 
         res_content = await app.state.flow.complete(context=req_context, **req_data)
-        res_content = dump(res_content, req_context)
 
         return JSONResponse(
             status_code=200,
-            content=res_content,
+            content=res_content.dump,
         )
 
 
@@ -129,9 +128,8 @@ def create_app(
         # TODO Study if we need to filter these. Or if we need to add something to indicate chunks are for the response.
         async def event_streamer() -> AsyncGenerator[str, None]:
             async for event in app.state.flow.run(context=req_context, **req_data):
-                event_content = dump(event, req_context) # Assumes dump returns serializable dict/list
                 # Format as SSE message: data: <json_string>\n\n
-                yield f"data: {json.dumps(event_content)}\n\n"
+                yield f"data: {json.dumps(event.dump)}\n\n"
 
         return StreamingResponse(event_streamer(), media_type="text/event-stream")
 
