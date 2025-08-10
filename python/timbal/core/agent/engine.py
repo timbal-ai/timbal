@@ -21,7 +21,7 @@ from uuid_extensions import uuid7
 from timbal.types.events.chunk import ChunkEvent
 
 from ...errors import AgentError, EarlyExit
-from ...state import set_run_context
+from ...state import get_run_context, set_run_context
 from ...state.context import RunContext
 from ...state.savers.base import BaseSaver
 from ...state.snapshot import Snapshot
@@ -159,9 +159,6 @@ class Agent(BaseStep):
             return
 
         self.state_saver = state_saver
-        if self.state_saver is not None:
-            self._is_state_saver_get_async = inspect.iscoroutinefunction(self.state_saver.get_last)
-            self._is_state_saver_put_async = inspect.iscoroutinefunction(self.state_saver.put)
 
         self._load_tools(tools)
         self.max_iter = max_iter
@@ -536,13 +533,11 @@ class Agent(BaseStep):
         )
 
 
-    async def _run_local(
-        self, 
-        context: RunContext | None = None,
-        **kwargs: Any,
-    ) -> Any:
+    async def _run_local(self, **kwargs: Any) -> Any:
         """Runs the agent locally."""
         t0 = int(time.time() * 1000)
+
+        context = get_run_context()
 
         # Copy the input as is, so we save the traces without validated data and defaults.
         agent_input = await dump(kwargs)
@@ -554,10 +549,7 @@ class Agent(BaseStep):
         context.data["memory"] = messages
         if self.state_saver is not None and context.parent_id is not None:
             try:
-                if self._is_state_saver_get_async:
-                    last_snapshot = await self.state_saver.get_last(path=self.path, context=context)
-                else:
-                    last_snapshot = self.state_saver.get_last(path=self.path, context=context)
+                last_snapshot = await self.state_saver.get_last(path=self.path)
             except Exception as err:
                 logger.error("get_memory_error", err=err)
                 last_snapshot = None
@@ -633,10 +625,7 @@ class Agent(BaseStep):
                 
                 # We don't want to cancel the execution if this errors. 
                 try:
-                    if self._is_state_saver_put_async:
-                        await self.state_saver.put(snapshot=snapshot, context=context)
-                    else:
-                        self.state_saver.put(snapshot=snapshot, context=context)
+                    await self.state_saver.put(snapshot=snapshot)
                 except Exception as err:
                     logger.error("put_memory_error", err=err)
             return
@@ -665,10 +654,7 @@ class Agent(BaseStep):
                 
                 # We don't want to cancel the execution if this errors. 
                 try:
-                    if self._is_state_saver_put_async:
-                        await self.state_saver.put(snapshot=snapshot, context=context)
-                    else:
-                        self.state_saver.put(snapshot=snapshot, context=context)
+                    await self.state_saver.put(snapshot=snapshot)
                 except Exception as err:
                     logger.error("put_memory_error", err=err)
 
@@ -748,10 +734,7 @@ class Agent(BaseStep):
                 
                 # We don't want to cancel the execution if this errors. 
                 try:
-                    if self._is_state_saver_put_async:
-                        await self.state_saver.put(snapshot=snapshot, context=context)
-                    else:
-                        self.state_saver.put(snapshot=snapshot, context=context)
+                    await self.state_saver.put(snapshot=snapshot)
                 except Exception as err:
                     logger.error("put_memory_error", err=err)
 
@@ -925,10 +908,7 @@ class Agent(BaseStep):
                     
                     # We don't want to cancel the execution if this errors. 
                     try:
-                        if self._is_state_saver_put_async:
-                            await self.state_saver.put(snapshot=snapshot, context=context)
-                        else:
-                            self.state_saver.put(snapshot=snapshot, context=context)
+                        await self.state_saver.put(snapshot=snapshot)
                     except Exception as err:
                         logger.error("put_memory_error", err=err)
 
@@ -973,10 +953,7 @@ class Agent(BaseStep):
 
             # We don't want to cancel the execution if this errors. 
             try:
-                if self._is_state_saver_put_async:
-                    await self.state_saver.put(snapshot=snapshot, context=context)
-                else:
-                    self.state_saver.put(snapshot=snapshot, context=context)
+                await self.state_saver.put(snapshot=snapshot)
             except Exception as err:
                 logger.error("put_memory_error", err=err)
 
@@ -995,11 +972,7 @@ class Agent(BaseStep):
         yield agent_output_event
 
 
-    async def _run_remote(
-        self,
-        context: RunContext | None = None,
-        **kwargs: Any,
-    ) -> Any: 
+    async def _run_remote(self, **kwargs: Any) -> Any: 
         """Runs the agent remotely. The agent must be deployed in the Timbal platform."""
         prompt = kwargs.pop("prompt", None)
         prompt = Message.validate(prompt)
@@ -1080,20 +1053,19 @@ class Agent(BaseStep):
             - Supports continuation of previous conversations
             - Handles both streaming and non-streaming LLMs
         """
-        if context is None:
-            context = RunContext(id=uuid7(as_type="str"))
-        elif context.id is None:
-            context.id = uuid7(as_type="str")
-
-        # Set the run context for the duration of the agent run.
-        set_run_context(context)
+        run_context = get_run_context()
+        if not run_context:
+            run_context = RunContext(id=uuid7(as_type="str"))
+            set_run_context(run_context)
+        if not run_context.id:
+            run_context.id = uuid7(as_type="str")
 
         if self.remote_config:
-            async for event in self._run_remote(context=context, **kwargs):
+            async for event in self._run_remote(**kwargs):
                 event = TypeAdapter(Event).validate_python(event)
                 yield event
         else:
-            async for event in self._run_local(context=context, **kwargs):
+            async for event in self._run_local(**kwargs):
                 yield event
 
     

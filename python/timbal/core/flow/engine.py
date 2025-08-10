@@ -20,7 +20,7 @@ from ...errors import (
     StepKeyError,
 )
 from ...state.context import RunContext
-from ...state import set_run_context
+from ...state import get_run_context, set_run_context
 from ...state.data import (
     BaseData,
     DataError,
@@ -503,13 +503,12 @@ class Flow(BaseStep):
         Returns:
             Any: The step's processing result. Can be any object, a coroutine or an async generator.
         """
-        if context is None:
+        context = get_run_context()
+        if not context:
             context = RunContext(id=uuid7(as_type="str"))
-        elif context.id is None:
+            set_run_context(context)
+        if not context.id:
             context.id = uuid7(as_type="str")
-
-        # Set the run context for the duration of the agent run.
-        set_run_context(context)
 
         t0 = int(time.time() * 1000)
 
@@ -536,10 +535,7 @@ class Flow(BaseStep):
         # TODO Optimize this. There's no need to load previous snapshot if there are no memories to load.
         if self.state_saver is not None and context.parent_id is not None:
             try:
-                if self._is_state_saver_get_async:
-                    last_snapshot = await self.state_saver.get_last(path=self.path, context=context)
-                else:
-                    last_snapshot = self.state_saver.get_last(path=self.path, context=context)
+                last_snapshot = await self.state_saver.get_last(path=self.path)
             except Exception as err:
                 logger.error("get_memory_error", err=err)
                 last_snapshot = None
@@ -605,10 +601,7 @@ class Flow(BaseStep):
 
                 # We don't want to cancel the execution if this errors. 
                 try:
-                    if self._is_state_saver_put_async:
-                        await self.state_saver.put(snapshot=snapshot, context=context)
-                    else:
-                        self.state_saver.put(snapshot=snapshot, context=context)
+                    await self.state_saver.put(snapshot=snapshot, context=context)
                 except Exception as err:
                     logger.error("put_memory_error", err=err)
 
@@ -864,10 +857,7 @@ class Flow(BaseStep):
 
             # We don't want to cancel the execution if this errors. 
             try:
-                if self._is_state_saver_put_async:
-                    await self.state_saver.put(snapshot=snapshot, context=context)
-                else:
-                    self.state_saver.put(snapshot=snapshot, context=context)
+                await self.state_saver.put(snapshot=snapshot)
             except Exception as err:
                 logger.error("put_memory_error", err=err)
 
@@ -1464,9 +1454,6 @@ class Flow(BaseStep):
         self._return_model_schema = self.return_model_schema()
 
         self.state_saver = state_saver
-        if self.state_saver is not None:
-            self._is_state_saver_get_async = inspect.iscoroutinefunction(self.state_saver.get_last)
-            self._is_state_saver_put_async = inspect.iscoroutinefunction(self.state_saver.put)
 
         # Mark the flow as compiled to prevent re-compiling when importing as a subflow.
         self._is_compiled = True

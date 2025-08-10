@@ -5,7 +5,7 @@ import structlog
 from pydantic import TypeAdapter
 
 from ...types.models import dump
-from ..context import RunContext
+from .. import get_run_context
 from ..data import Data
 from ..snapshot import Snapshot
 from .base import BaseSaver
@@ -35,12 +35,9 @@ class TimbalPlatformSaver(BaseSaver):
         return Snapshot(**res_body)
 
 
-    async def get_last(
-        self,
-        path: str,
-        context: RunContext,
-    ) -> Snapshot | None:
+    async def get_last(self, path: str) -> Snapshot | None:
         """See base class."""
+        context = get_run_context()
         if not context.timbal_platform_config:
             if not self._get_warning_shown:
                 logger.warning(
@@ -78,12 +75,9 @@ class TimbalPlatformSaver(BaseSaver):
         return self._load_snapshot_from_res_body(res_body)
 
 
-    async def put(
-        self, 
-        snapshot: Snapshot,
-        context: RunContext,
-    ) -> None:
+    async def put(self, snapshot: Snapshot) -> None:
         """See base class."""
+        context = get_run_context()
         if not context.timbal_platform_config:
             if not self._put_warning_shown:
                 logger.warning(

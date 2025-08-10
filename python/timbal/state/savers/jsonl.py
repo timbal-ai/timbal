@@ -4,7 +4,7 @@ from pathlib import Path
 from pydantic import TypeAdapter
 
 from ...types.models import dump
-from ..context import RunContext
+from .. import get_run_context
 from ..data import Data
 from ..snapshot import Snapshot
 from .base import BaseSaver
@@ -49,17 +49,14 @@ class JSONLSaver(BaseSaver):
         return Snapshot(**snapshot)
 
     
-    async def get_last(
-        self, 
-        path: str,
-        context: RunContext,
-    ) -> Snapshot | None:
+    async def get_last(self, path: str) -> Snapshot | None:
         """See base class.
 
         Warning:
             This method loads the entire file into memory. For production use cases with large files,
             consider implementing a streaming approach that reads the file line by line.
         """
+        context = get_run_context()
         if context.parent_id is None:
             return None 
 
@@ -73,11 +70,7 @@ class JSONLSaver(BaseSaver):
         return None
     
 
-    async def put(
-        self, 
-        snapshot: Snapshot,
-        context: RunContext,
-    ) -> None:
+    async def put(self, snapshot: Snapshot) -> None:
         """See base class."""
         # Since we're appending lines to a file and there's no intrinsic way of ensuring
         # unicity of ids, we need to check if the snapshot already exists.

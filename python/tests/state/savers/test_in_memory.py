@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from timbal import Agent
-from timbal.state import RunContext
+from timbal.state import RunContext, set_run_context
 from timbal.state.savers import InMemorySaver
 from timbal.types.file import File
 
@@ -27,10 +27,8 @@ async def test_in_memory(csv):
         assert len(agent_memory) == (i + 1) * 2
 
     run_context = RunContext(parent_id=agent_output_event.run_id)
-    agent_output_event = await agent.complete(
-        context=run_context,
-        prompt="Too verbose",
-    )
+    set_run_context(run_context)
+    agent_output_event = await agent.complete(prompt="Too verbose")
 
     assert len(agent.state_saver.snapshots) == 2
     for i, snapshot in enumerate(agent.state_saver.snapshots):
@@ -38,10 +36,8 @@ async def test_in_memory(csv):
         assert len(agent_memory) == (i + 1) * 2
 
     run_context = RunContext(parent_id=agent_output_event.run_id)
-    _ = await agent.complete(
-        context=run_context,
-        prompt="Thanks",
-    )
+    set_run_context(run_context)
+    _ = await agent.complete(prompt="Thanks")
 
     assert len(agent.state_saver.snapshots) == 3
     for i, snapshot in enumerate(agent.state_saver.snapshots):
