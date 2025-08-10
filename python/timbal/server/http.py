@@ -16,8 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
 from ..logs import setup_logging
-from ..state import RunContext
-from ..types.models import dump
+from ..state import RunContext, set_run_context
 from .utils import ModuleSpec, is_port_in_use, load_module
 
 logger = structlog.get_logger("timbal.server.http")
@@ -107,8 +106,9 @@ def create_app(
             req_context = RunContext.model_validate(req_context)
         else:
             req_context = RunContext()
+        set_run_context(req_context)
 
-        res_content = await app.state.flow.complete(context=req_context, **req_data)
+        res_content = await app.state.flow.complete(**req_data)
 
         return JSONResponse(
             status_code=200,
@@ -124,10 +124,11 @@ def create_app(
             req_context = RunContext.model_validate(req_context)
         else:
             req_context = RunContext()
+        set_run_context(req_context)
 
         # TODO Study if we need to filter these. Or if we need to add something to indicate chunks are for the response.
         async def event_streamer() -> AsyncGenerator[str, None]:
-            async for event in app.state.flow.run(context=req_context, **req_data):
+            async for event in app.state.flow.run(**req_data):
                 # Format as SSE message: data: <json_string>\n\n
                 yield f"data: {json.dumps(event.dump)}\n\n"
 
