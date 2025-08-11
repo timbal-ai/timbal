@@ -17,17 +17,16 @@ from pydantic import (
     model_serializer,
 )
 
-from ..core.stream import sync_to_async_gen
+from ..core.stream import AsyncGenState, handle_event, sync_to_async_gen
 from ..state import get_run_context, set_run_context
 from ..state.context import RunContext
 from ..types.events import (
+    BaseEvent,
     ChunkEvent,
     Event,
     OutputEvent,
     StartEvent,
 )
-from .collectors.base import BaseCollector
-from .collectors.default import DefaultCollector
 
 logger = structlog.get_logger("timbal.core_v2.runnable")
 
@@ -52,8 +51,6 @@ class Runnable(ABC, BaseModel):
     exclude_params: list[str] | None = None
     """"""
     fixed_params: dict[str, Any] = {}
-    """"""
-    collector_cls: type[BaseCollector] = DefaultCollector
     """"""
 
     _is_coroutine: bool = PrivateAttr()
@@ -122,15 +119,15 @@ class Runnable(ABC, BaseModel):
         if self.exclude_params is not None:
             selected_params.difference_update(self.exclude_params)
 
-        formatted_params_model_schema = {
-            "type": "object",
-            "properties": {
-                k: v 
-                for k, v in self.params_model_schema["properties"].items()
-                if k in selected_params
-            }
+        properties = {
+            k: v 
+            for k, v in self.params_model_schema["properties"].items()
+            if k in selected_params
         }
-        return formatted_params_model_schema
+        return {
+            **self.params_model_schema,
+            "properties": properties,
+        }
 
     
     @computed_field
@@ -181,7 +178,6 @@ class Runnable(ABC, BaseModel):
             run_id=run_context.id,
             path=self._path,
         )
-
         logger.info("start_event", **start_event.dump)
         yield start_event
 
@@ -212,26 +208,33 @@ class Runnable(ABC, BaseModel):
                 async_gen = self.handler(**input)
             
             if async_gen:
-                collector = self.collector_cls()
+                async_gen_state = AsyncGenState()
                 async for chunk in async_gen:
-                    chunk = collector.handle_chunk(chunk)
-                    # If the handled chunk is None, it means we don't want to yield anything.
-                    if chunk is not None:
-                        # If it's already a base event, it means we have already emitted it.
-                        if not isinstance(chunk, Event):
+                    # Handle chunk using the stream.py logic
+                    # TODO Refactor for the types
+                    processed_chunk = handle_event(chunk, async_gen_state)
+                    
+                    # If the processed chunk is not None, it means we have streaming content
+                    if processed_chunk is not None:
+                        # If it's already a BaseEvent, it means we have already emitted it.
+                        if not isinstance(chunk, BaseEvent):
                             chunk_event = await ChunkEvent.build(
                                 run_id=run_context.id,
                                 path=self._path,
-                                chunk=chunk,
+                                chunk=processed_chunk,
                             )
-
                             logger.info("chunk_event", **chunk_event.dump)
                             yield chunk_event
-
                         else:
                             yield chunk
 
-                output = collector.collect()
+                # Update run context usage from async_gen_state
+                # TODO Review this
+                if async_gen_state.usage:
+                    for key, value in async_gen_state.usage.items():
+                        run_context.update_usage(key, value)
+                
+                output = async_gen_state.collect()
             
         except Exception as err:
             error = {
@@ -254,6 +257,5 @@ class Runnable(ABC, BaseModel):
                 # TODO This grabs all the usage, not just the one by this runnable component
                 usage=run_context.usage,
             )
-
             logger.info("output_event", **output_event.dump)
             yield output_event

@@ -12,6 +12,7 @@ from anthropic.types import (
 from openai.types.chat import ChatCompletionChunk
 from pydantic import Field
 
+from .base import BaseEvent
 from .chunk import ChunkEvent
 from .output import OutputEvent
 from .start import StartEvent

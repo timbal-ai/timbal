@@ -15,8 +15,6 @@ from pydantic import (
 from ..types.chat.content import ToolResultContent, ToolUseContent
 from ..types.events import OutputEvent
 from ..types.message import Message
-from .collectors.agent import AgentCollector
-from .collectors.base import BaseCollector
 from .handlers import llm_router
 from .runnable import Runnable
 from .tool import Tool
@@ -45,9 +43,6 @@ class Agent(Runnable):
     tools: list[SkipValidation[ToolLike]] = []
     """"""
     max_iter: int = 10
-    """"""
-    # We override the default here
-    collector_cls: type[BaseCollector] = AgentCollector
     """"""
 
     _llm: Tool = PrivateAttr()
@@ -169,9 +164,12 @@ class Agent(Runnable):
                 **kwargs,
             ):
                 if isinstance(event, OutputEvent):
-                    assert isinstance(event.output, Message), \
-                        f"Expected Message, got {type(event.output)}"
-                    messages.append(event.output)
+                    # TODO The returned event.output should already be collected as a Message
+                    output_message = Message.validate({
+                        "role": "assistant",
+                        "content": event.output,
+                    })
+                    messages.append(output_message)
                 yield event
 
             tool_calls = [
