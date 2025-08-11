@@ -431,7 +431,6 @@ class Flow(BaseStep):
         self, 
         step_id: str, 
         data: dict[str, Any],
-        context: RunContext,
     ) -> tuple[Any, Any]:
         """Executes a single step in the flow and returns its result.
 
@@ -441,8 +440,6 @@ class Flow(BaseStep):
         Args:
             step_id: Identifier of the step to execute
             data: Dictionary containing all flow data, including inputs and previous step results
-            context: Run context
-
 
         Returns:
             The step's input arguments
@@ -467,18 +464,12 @@ class Flow(BaseStep):
             # avoid blocking the event loop.
             if not step.is_coroutine and not step.is_async_gen:
                 loop = asyncio.get_running_loop()
-                step_result = await loop.run_in_executor(None, lambda: step.run(
-                    context=context,
-                    **step_input
-                ))
+                step_result = await loop.run_in_executor(None, lambda: step.run(**step_input))
                 if inspect.isgenerator(step_result):
                     return step_input, sync_to_async_gen(step_result, loop)
                 return step_input, step_result
             
-            step_result = step.run(
-                context=context,
-                **step_input
-            )
+            step_result = step.run(**step_input)
 
             if step.is_coroutine:
                 step_result = await step_result
@@ -489,15 +480,10 @@ class Flow(BaseStep):
             raise StepExecutionError(step_input_dump, e) from e
 
 
-    async def run(
-        self, 
-        context: RunContext | None = None,
-        **kwargs: Any
-    ) -> Any:
+    async def run(self, **kwargs: Any) -> Any:
         """Executes the step's processing logic.
         
         Args:
-            context: RunContext
             **kwargs: Additional keyword arguments required for step execution.
         
         Returns:
@@ -601,7 +587,7 @@ class Flow(BaseStep):
 
                 # We don't want to cancel the execution if this errors. 
                 try:
-                    await self.state_saver.put(snapshot=snapshot, context=context)
+                    await self.state_saver.put(snapshot=snapshot)
                 except Exception as err:
                     logger.error("put_memory_error", err=err)
 
@@ -635,7 +621,6 @@ class Flow(BaseStep):
             task = asyncio.create_task(self._run_step(
                 step_id=source_id, 
                 data=data,
-                context=context,
             ))
             task.step_id = source_id
             tasks.append(task)
@@ -792,7 +777,6 @@ class Flow(BaseStep):
                             task = asyncio.create_task(self._run_step(
                                 step_id=successor_id, 
                                 data=data,
-                                context=context,
                             ))
                             task.step_id = successor_id
                             tasks.append(task)
@@ -879,21 +863,16 @@ class Flow(BaseStep):
         yield flow_output_event
     
 
-    async def complete(
-        self,
-        context: RunContext | None = None,
-        **kwargs: Any
-    ) -> OutputEvent:
+    async def complete(self, **kwargs: Any) -> OutputEvent:
         """Flow.run() wrapper method that completes the flow execution.
         
         Args: 
-            context: RunContext
             **kwargs: Additional keyword arguments required for step execution.
         
         Returns:
             OutputEvent: The flow's selected outputs.
         """
-        async for event in self.run(context=context, **kwargs):
+        async for event in self.run(**kwargs):
             if isinstance(event, OutputEvent) and event.path == self.path:
                 return event
 

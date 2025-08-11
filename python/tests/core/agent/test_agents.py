@@ -4,7 +4,7 @@ from datetime import datetime
 
 from timbal import Agent
 from timbal.errors import AgentError
-from timbal.state.context import RunContext
+from timbal.state import RunContext, set_run_context
 from timbal.state.savers import InMemorySaver
 from timbal.steps.perplexity import search
 
@@ -157,10 +157,9 @@ async def test_run_with_memory():
         print()
         print("Event: ", event)
 
-    async for event in agent.run(
-        context=RunContext(parent_id=parent_run_id),
-        prompt="What was I talking about?"
-    ):
+    run_context = RunContext(parent_id=parent_run_id)
+    set_run_context(run_context)
+    async for event in agent.run(prompt="What was I talking about?"):
         print()
         print("Event: ", event)
 

@@ -6,15 +6,9 @@ from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 import structlog
-from anthropic.types import (
-    Message as AnthropicMessage,
-)
-from openai.types.chat import (
-    ChatCompletion as OpenAICompletion,
-)
-from openai.types.chat import (
-    ChatCompletionMessage as OpenAIMessage,
-)
+from anthropic.types import Message as AnthropicMessage
+from openai.types.chat import ChatCompletion as OpenAICompletion
+from openai.types.chat import ChatCompletionMessage as OpenAIMessage
 from pydantic import BaseModel, TypeAdapter
 from uuid_extensions import uuid7
 
@@ -431,7 +425,6 @@ class Agent(BaseStep):
         tool: BaseStep,
         tool_input: dict[str, Any],
         tool_use_id: str,
-        context: RunContext,
     ) -> ToolResult:
         """Agent tool execution wrapper.
         
@@ -446,7 +439,6 @@ class Agent(BaseStep):
             tool (BaseStep): The tool to execute.
             tool_input (dict[str, Any]): The input to the tool.
             tool_use_id (str): The id of the tool use.
-            context (RunContext): The run context. Needed when tools are nested agents or flows.
 
         Returns:
             ToolResult
@@ -468,19 +460,13 @@ class Agent(BaseStep):
             # avoid blocking the event loop.
             if not tool.is_coroutine and not tool.is_async_gen:
                 loop = asyncio.get_running_loop()
-                tool_output = await loop.run_in_executor(None, lambda: tool.run(
-                    context=context,
-                    **tool_input
-                ))
+                tool_output = await loop.run_in_executor(None, lambda: tool.run(**tool_input))
                 # Convert to async generator.
                 if inspect.isgenerator(tool_output):
                     tool_output = sync_to_async_gen(tool_output, loop)
             
             else:
-                tool_output = tool.run(
-                    context=context,
-                    **tool_input
-                )
+                tool_output = tool.run(**tool_input)
 
                 if tool.is_coroutine:
                     tool_output = await tool_output
@@ -777,7 +763,6 @@ class Agent(BaseStep):
                         tool=tool,
                         tool_input=tool_call.input,
                         tool_use_id=tool_call.id,
-                        context=context,
                     ),
                     name=tool_call.id,
                 )
@@ -993,11 +978,7 @@ class Agent(BaseStep):
             yield event
 
 
-    async def run(
-        self,
-        context: RunContext | None = None,
-        **kwargs: Any,
-    ) -> Any:
+    async def run(self, **kwargs: Any) -> Any:
         """Execute the agent's main processing loop with tool usage, state management, and event streaming.
         
         This method implements the core agent execution cycle, including:
@@ -1009,11 +990,6 @@ class Agent(BaseStep):
             - Event streaming for monitoring/logging
 
         Args:
-            context (RunContext | None): Execution context containing:
-                - Run identifiers (auto-generated if None)
-                - Parent context for nested executions
-                - Session tracking for state persistence
-                - Additional execution metadata
             **kwargs: Agent input parameters.
 
         Yields:
@@ -1069,22 +1045,17 @@ class Agent(BaseStep):
                 yield event
 
     
-    async def complete(
-        self,
-        context: RunContext | None = None,
-        **kwargs: Any,
-    ) -> OutputEvent:
+    async def complete(self, **kwargs: Any) -> OutputEvent:
         """run() wrapper method that completes the flow execution.
         
         Args: 
-            context: RunContext
             **kwargs: Additional keyword arguments required for step execution.
         
         Returns:
             OutputEvent: The agent's selected outputs.
         """
         agent_output_event = None
-        async for event in self.run(context=context, **kwargs):
+        async for event in self.run(**kwargs):
             if isinstance(event, OutputEvent) and event.path == self.path:
                 agent_output_event = event
         return agent_output_event
