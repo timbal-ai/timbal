@@ -8,7 +8,15 @@ import Table from '@site/src/components/Table';
 
 # Gmail Integration
 
-Timbal integrates with Gmail to enable sending, searching, and managing emails programmatically. This integration allows you to send emails, create drafts, search messages, and handle attachments directly from your Timbal workflows.
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Send, search, and manage emails programmatically with Gmail API integration and OAuth authentication.
+</h2>
+
+---
+
+Timbal integrates with Gmail to enable sending, searching, and managing emails programmatically. 
+
+This integration allows you to send emails, create drafts, search messages, and handle attachments directly from your Timbal workflows.
 
 ## Prerequisites
 

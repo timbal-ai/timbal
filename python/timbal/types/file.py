@@ -51,7 +51,8 @@ from pydantic import (
 from pydantic_core import CoreSchema, core_schema
 from uuid_extensions import uuid7
 
-from ..state.context import RunContext
+from ..state import get_run_context
+from ..utils import _platform_api_call
 
 
 class File(io.IOBase):
@@ -132,10 +133,11 @@ class File(io.IOBase):
 
     def __getattr__(self, name: str) -> Any:
         """Proxy attribute access through to the wrapped file object."""
-        if name in ("__source__", "__source_scheme__", "__source_extension__", "__fileobj__", "__fetcher__"):
-            raise AttributeError(name)
+        if name == "extension":
+            return object.__getattribute__(self, "__source_extension__")
         elif name == "persisted":
             return object.__getattribute__(self, "__persisted__")
+        # TODO Add more aliases here
         else:
             return getattr(self.__wrapped__, name)
 
@@ -159,8 +161,31 @@ class File(io.IOBase):
     def __iter__(self) -> Iterator[bytes]:
         """Iterate over the wrapped file object."""
         return iter(self.__wrapped__)
+
+    
+    def __copy__(self) -> "File":
+        """Return self for shallow copy - File objects are immutable references."""
+        return self
+    
+    
+    def __deepcopy__(self, memo: dict) -> "File":
+        """Return self for deep copy - File objects are immutable references.
+        
+        File objects represent immutable references to file sources and should not
+        be deeply copied. The underlying file content and metadata remain the same,
+        so we return the same instance to avoid issues with copying file handles
+        and other system resources.
+        
+        Args:
+            memo: Dictionary used by deepcopy to track already copied objects
+            
+        Returns:
+            File: The same File instance
+        """
+        return self
     
 
+    # TODO Remove the fetching from here. Move to validation
     @property
     def __wrapped__(self) -> Any:
         """Get the underlying file object, fetching it if necessary."""
@@ -336,7 +361,11 @@ class File(io.IOBase):
         return f"data:{self.__content_type__};base64,{bs64_content}"
 
     
-    def persist(self, context: RunContext | None = None) -> str | None:
+    async def persist(
+        self, 
+        org_id: str | None = None,
+        # ? Add more resource specifiers
+    ) -> str | None:
         """Persist the file to some storage.
         If there's no context or no timbal_platform_config, the file will be persisted to local disk.
         If there's a platform configuration, the file will be uploaded to the platform.
@@ -345,9 +374,7 @@ class File(io.IOBase):
         if self.__persisted__ is not None:
             return self.__persisted__
 
-        # Pydantic might add serialization info as context.
-        if not isinstance(context, RunContext):
-            context = None
+        context = get_run_context()
 
         if self.__source_scheme__ == "url":
             url = str(self)
@@ -373,66 +400,29 @@ class File(io.IOBase):
             object.__setattr__(self, "__persisted__", temp_path)
             return temp_path
 
-        host = context.timbal_platform_config.host
+        subject = context.timbal_platform_config.subject
+        org_id = org_id or subject.org_id
+        # ? We could add more subject info here
 
-        auth = context.timbal_platform_config.auth
-        headers = {auth.header_key: auth.header_value}
-
-        scope = context.timbal_platform_config.scope
-        org_id = scope.org_id
-        app_id = scope.app_id
-        resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
-
-        # Ensure the file obj has the pointer at the start of the file.
         self.seek(0)
         content = self.read()
-        size = len(content)
 
-        name = str(uuid7())
-        if self.__source_extension__:
-            name += self.__source_extension__
+        path = f"orgs/{org_id}/files"
+        files = {"file": (self.name, content, self.__content_type__)}
 
-        body = {
-            "name": name,
-            "content_type": self.__content_type__,
-            "content_length": size,
-        }
-
-        res = requests.post(
-            f"https://{host}/{resource_path}/files", 
-            headers=headers,
-            json=body,
-        )
-        res.raise_for_status()
-
-        res_body = res.json()
-        uploader = res_body.get("uploader")
-        if uploader is None:
-            return
-
-        upload_uri = uploader.get("upload_uri")
-        upload_headers = {
-            "Content-Length": str(size),
-            "Content-Type": self.__content_type__,
-        }
-
-        upload_res = requests.put(
-            upload_uri, 
-            data=content, 
-            headers=upload_headers,
-        )
-        upload_res.raise_for_status()
-
-        content_url = uploader.get("content_url")
-        object.__setattr__(self, "__persisted__", content_url)
-        return content_url
+        res = await _platform_api_call("POST", path, files=files)
+        # ? We could use an UploadFileResponse pydantic model
+        url = res.json()["url"]
+        object.__setattr__(self, "__persisted__", url)
+        return url
 
 
     @classmethod
     def serialize(
         cls, 
         value: Any, 
-        context: RunContext | None = None,
+        *args,
+        **kwargs,
     ) -> str:
         """Serialize the file to a data url string. Bytes-like files are not supported will have octet-stream as content type."""
         # When creating a model with fields with File type that are nullable,
@@ -443,17 +433,20 @@ class File(io.IOBase):
         if not isinstance(value, cls):
             raise ValueError("Cannot serialize a non-file object.")
 
-        persisted = value.persist(context=context)
-        if persisted is not None:
-            return persisted
-
-        return value.to_data_url()
+        if value.__persisted__ is not None:
+            return value.__persisted__
+        else:
+            return value.to_data_url()
 
 
     @classmethod
     def _fetch_local_file(cls, path: Path) -> io.IOBase:
         """Fetch a local file from a valid path in the system."""
-        return path.open("rb")
+        # We don't use path.open("rb") because it used the full path as the name,
+        # and we weren't able to et the name property after the fact.
+        fileobj = io.BytesIO(path.read_bytes())
+        fileobj.name = path.name
+        return fileobj
 
 
     @classmethod
@@ -463,12 +456,15 @@ class File(io.IOBase):
         return io.BytesIO(res.read())
 
 
+    # TODO Make async
     @classmethod
     def _fetch_http_file(cls, url: str) -> io.IOBase:
         """Fetch a file from a HTTP/HTTPS URL."""
         res = requests.get(url, stream=True)
         res.raise_for_status()
-        return io.BytesIO(res.content)
+        fileobj = io.BytesIO(res.content)
+        fileobj.name = url.split("/")[-1]
+        return fileobj
 
 
     @classmethod
@@ -490,7 +486,7 @@ class File(io.IOBase):
             cls.validate,
             serialization=core_schema.plain_serializer_function_ser_schema(
                 cls.serialize,
-                info_arg=True,
+                info_arg=False,
                 when_used="always",
             ),
         )

@@ -5,7 +5,7 @@ import structlog
 from pydantic import TypeAdapter
 
 from ...types.models import dump
-from ..context import RunContext
+from .. import get_run_context
 from ..data import Data
 from ..snapshot import Snapshot
 from .base import BaseSaver
@@ -35,12 +35,9 @@ class TimbalPlatformSaver(BaseSaver):
         return Snapshot(**res_body)
 
 
-    async def get_last(
-        self,
-        path: str,
-        context: RunContext,
-    ) -> Snapshot | None:
+    async def get_last(self, path: str) -> Snapshot | None:
         """See base class."""
+        context = get_run_context()
         if not context.timbal_platform_config:
             if not self._get_warning_shown:
                 logger.warning(
@@ -61,11 +58,12 @@ class TimbalPlatformSaver(BaseSaver):
         auth = context.timbal_platform_config.auth
         headers = {auth.header_key: auth.header_value}
 
-        scope = context.timbal_platform_config.scope
-        org_id = scope.org_id
-        app_id = scope.app_id
+        subject = context.timbal_platform_config.subject
+        org_id = subject.org_id
+        app_id = subject.app_id
         resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.parent_id}"
 
+        # TODO Convert to async method -> create a new tool to fetch snapshots
         res = requests.get(
             f"https://{host}/{resource_path}/snapshots", 
             headers=headers,
@@ -77,12 +75,9 @@ class TimbalPlatformSaver(BaseSaver):
         return self._load_snapshot_from_res_body(res_body)
 
 
-    async def put(
-        self, 
-        snapshot: Snapshot,
-        context: RunContext,
-    ) -> None:
+    async def put(self, snapshot: Snapshot) -> None:
         """See base class."""
+        context = get_run_context()
         if not context.timbal_platform_config:
             if not self._put_warning_shown:
                 logger.warning(
@@ -100,13 +95,14 @@ class TimbalPlatformSaver(BaseSaver):
         auth = context.timbal_platform_config.auth
         headers = {auth.header_key: auth.header_value}
 
-        scope = context.timbal_platform_config.scope
-        org_id = scope.org_id
-        app_id = scope.app_id
+        subject = context.timbal_platform_config.subject
+        org_id = subject.org_id
+        app_id = subject.app_id
         resource_path = f"orgs/{org_id}/apps/{app_id}/runs/{context.id}"
 
-        body = dump(snapshot, context)
+        body = await dump(snapshot)
 
+        # TODO Convert to async method -> create a new tool to upload snapshots
         res = requests.post(
             f"https://{host}/{resource_path}/snapshots", 
             headers=headers,

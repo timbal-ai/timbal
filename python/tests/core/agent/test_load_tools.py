@@ -11,10 +11,10 @@ async def test_init_as_callable():
     agent = Agent(tools=[search])
 
     openai_tool_input = agent.tools[0].to_openai_tool()
-    assert len(openai_tool_input["function"]["parameters"]["properties"]) == 14
+    assert len(openai_tool_input["function"]["parameters"]["properties"]) == 10
 
     anthropic_tool_input = agent.tools[0].to_anthropic_tool()
-    assert len(anthropic_tool_input["input_schema"]["properties"]) == 14
+    assert len(anthropic_tool_input["input_schema"]["properties"]) == 10
 
 
 @pytest.mark.asyncio
@@ -23,10 +23,10 @@ async def test_init_as_step():
     agent = Agent(tools=[search_step])
 
     openai_tool_input = agent.tools[0].to_openai_tool()
-    assert len(openai_tool_input["function"]["parameters"]["properties"]) == 14
+    assert len(openai_tool_input["function"]["parameters"]["properties"]) == 10
 
     anthropic_tool_input = agent.tools[0].to_anthropic_tool()
-    assert len(anthropic_tool_input["input_schema"]["properties"]) == 14
+    assert len(anthropic_tool_input["input_schema"]["properties"]) == 10
 
 
 @pytest.mark.asyncio

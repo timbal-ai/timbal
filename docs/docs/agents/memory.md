@@ -6,9 +6,14 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Using Memory in Agents
 
-Memory in Timbal is implemented through state savers, which allow agents to maintain context across multiple interactions. This is achieved through a combination of <span style={{color: 'var(--timbal-purple)'}}><strong>state savers</strong></span> and <span style={{color: 'var(--timbal-purple)'}}><strong>run contexts</strong></span>.
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Learn how to add memory and context to your agents across multiple interactions.
+</h2>
 
 ---
+
+Agent memory lets your agent remember past conversations and context. This works by saving the conversation history with a state saver. Without a <span style={{color: 'var(--timbal-purple)'}}><strong>state saver</strong></span>, the agent starts fresh every time and can't recall previous interactions.
+
 
 ## State Savers
 
@@ -200,4 +205,4 @@ Interaction 1 (run_id: abc123)
 
 Each interaction maintains its connection to the previous one through the `parent_id`, creating a chain of memory that allows the agent to maintain context throughout the conversation.
 
-For more information about different types of state savers and their implementations, check out the [State documentation](/state).
+For more information about different types of state savers and their implementations, check out the [State documentation].

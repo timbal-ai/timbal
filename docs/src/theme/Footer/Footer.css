@@ -2,7 +2,9 @@
     display: flex;
     justify-content: center;
     padding: 20px;
-    background: #f8f9fa;
+    background: transparent;
+    border-top: 1px solid #eaecef;
+    margin-top: 2rem;
   }
   
   .social-icons {
@@ -18,5 +20,19 @@
   
   .social-icons a:hover {
     color: #000;
+  }
+  
+  /* Dark mode styles */
+  [data-theme='dark'] .custom-footer {
+    border-top-color: #444950;
+    background: transparent !important;
+  }
+
+  [data-theme='dark'] .social-icons a {
+    color: #999;
+  }
+  
+  [data-theme='dark'] .social-icons a:hover {
+    color: #ffffff;
   }
   

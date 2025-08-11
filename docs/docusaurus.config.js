@@ -75,14 +75,15 @@ const config = {
           alt: 'Timbal Logo',
           src: '/img/LogoBlack.svg',
           srcDark: '/img/LogoWhite.svg',
-          width: '100px',  
+          width: '80px',  
           height: 'auto',
+          style: { marginLeft: '18px' },
         },
         items: [
           { to: '/introduction', label: 'Docs', position: 'left' },
           //{ to: '/platform', label: 'Platform', position: 'left' },
-          { to: '/examples', label: 'Examples', position: 'left' },
-          { to: '/releases', label: 'Releases', position: 'left' },
+          // { to: '/examples', label: 'Examples', position: 'left' },
+          // { to: '/releases', label: 'Releases', position: 'left' },
           {
             href: 'https://github.com/timbal-ai/timbal',
             label: 'GitHub',

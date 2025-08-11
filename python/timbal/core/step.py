@@ -5,7 +5,6 @@ from typing import Any
 import structlog
 from pydantic import BaseModel, TypeAdapter
 
-from ..state import RunContext
 from ..types.models import create_model_from_argspec
 from .base import BaseStep
 
@@ -101,11 +100,7 @@ class Step(BaseStep):
         return self.handler_return_model_schema
 
 
-    def run(
-        self, 
-        context: RunContext | None = None, # noqa: ARG002
-        **kwargs: Any,
-    ) -> Any:
+    def run(self, **kwargs: Any) -> Any:
         """Executes the step's processing logic."""
         return self.handler_fn(**kwargs)
     

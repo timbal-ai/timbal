@@ -1,41 +1,45 @@
+from pathlib import Path
+
 import pytest
 from timbal import Agent
-from timbal.state import RunContext
+from timbal.state import RunContext, set_run_context
 from timbal.state.savers import InMemorySaver
+from timbal.types.file import File
+
+
+@pytest.fixture(params=[Path(__file__).parent / "fixtures" / "test.csv"])
+def csv(request):
+    return File.validate(request.param)
 
 
 @pytest.mark.asyncio
-async def test_in_memory():
-
-
-    flow = Agent(
-        model="gpt-4o-mini",
+async def test_in_memory(csv):
+    agent = Agent(
+        model="gpt-4.1-nano",
         state_saver=InMemorySaver(),
     )
 
-    flow_output_event = await flow.complete(prompt="My name is David")
+    agent_output_event = await agent.complete(prompt=[csv, "Explain the data."])
 
-    assert len(flow.state_saver.snapshots) == 1
-    for i, snapshot in enumerate(flow.state_saver.snapshots):
+    assert len(agent.state_saver.snapshots) == 1
+    for i, snapshot in enumerate(agent.state_saver.snapshots):
         agent_memory = snapshot.data["memory"].resolve()
         assert len(agent_memory) == (i + 1) * 2
 
-    flow_output_event = await flow.complete(
-        context=RunContext(parent_id=flow_output_event.run_id),
-        prompt="What's my name?"
-    )
+    run_context = RunContext(parent_id=agent_output_event.run_id)
+    set_run_context(run_context)
+    agent_output_event = await agent.complete(prompt="Too verbose")
 
-    assert len(flow.state_saver.snapshots) == 2
-    for i, snapshot in enumerate(flow.state_saver.snapshots):
+    assert len(agent.state_saver.snapshots) == 2
+    for i, snapshot in enumerate(agent.state_saver.snapshots):
         agent_memory = snapshot.data["memory"].resolve()
         assert len(agent_memory) == (i + 1) * 2
 
-    await flow.complete(
-        context=RunContext(parent_id=flow_output_event.run_id),
-        prompt="And what's yours?"
-    )
+    run_context = RunContext(parent_id=agent_output_event.run_id)
+    set_run_context(run_context)
+    _ = await agent.complete(prompt="Thanks")
 
-    assert len(flow.state_saver.snapshots) == 3
-    for i, snapshot in enumerate(flow.state_saver.snapshots):
+    assert len(agent.state_saver.snapshots) == 3
+    for i, snapshot in enumerate(agent.state_saver.snapshots):
         agent_memory = snapshot.data["memory"].resolve()
         assert len(agent_memory) == (i + 1) * 2

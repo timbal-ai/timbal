@@ -6,15 +6,19 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Voice: Speech Capabilities for Agents
 
-Timbal agents can understand and generate speech using a variety of voice providers. This enables use cases like voice assistants, audio chatbots, and speech-to-speech interactions.
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Add speech-to-text and text-to-speech capabilities to your agents with multiple voice providers.
+</h2>
 
 ---
+
+Timbal agents can understand and generate speech using a variety of voice providers. This enables use cases like voice assistants, audio chatbots, and speech-to-speech interactions.
 
 ## Using a Single Provider
 
 You can add voice capabilities to your agent using a single provider, such as OpenAI or ElevenLabs.
 
-**Speech-to-Text (STT):** Convert audio to text.
+<span style={{color: 'var(--timbal-purple)'}}><strong>Speech-to-Text (STT):</strong></span> Convert audio to text.
 
 <CodeBlock language="python" code={`from timbal.steps.elevenlabs import stt
 from timbal.types import File
@@ -23,7 +27,7 @@ audio_file = File.validate("path/to/audio.wav")
 transcription = await stt(audio_file=audio_file)
 print(transcription)`}/>
 
-**Text-to-Speech (TTS):** Convert text to audio.
+<span style={{color: 'var(--timbal-purple)'}}><strong>Text-to-Speech (TTS):</strong></span> Convert text to audio.
 
 <CodeBlock language="python" code={`from timbal.steps.elevenlabs import tts
 

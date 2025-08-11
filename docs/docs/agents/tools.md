@@ -6,9 +6,13 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Understanding Tools
 
-Tools are the way to give your Agents superpowers: they allow your agent to interact with the outside world, call APIs, perform calculations, and much more.
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Give your agents superpowers by adding tools to interact with APIs, perform calculations, and more.
+</h2>
 
 ---
+
+Tools are the way to give your Agents superpowers: they allow your agent to interact with the outside world, call APIs, perform calculations, and much more.
 
 ## What is a Tool?
 
@@ -56,13 +60,13 @@ agent = Agent(
 
 ## Using Built-in Tools
 
-Timbal comes with many built-in tools, such as `search_internet` using Perplexity or `send_message` using Slack.  
+Timbal comes with many built-in tools, such as `search` using Perplexity or `send_message` using Slack.  
 You can add them directly:
 
-<CodeBlock language="python" code ={`from timbal.steps.perplexity import search_internet
+<CodeBlock language="python" code ={`from timbal.steps.perplexity import search
 
 agent = Agent(
-    tools=[search_internet]
+    tools=[search]
 )`}/>
 
 Find more in the [Integrations](/integrations) section.
@@ -140,11 +144,11 @@ Always add a `description` to your tool! This helps the LLM understand when and 
 
 You can combine multiple tools, both custom and built-in:
 
-<CodeBlock language="python" code ={`from timbal.steps.perplexity import search_internet
+<CodeBlock language="python" code ={`from timbal.steps.perplexity import search
 
 agent = Agent(
     tools=[
-        search_internet,
+        search,
         Tool(
             runnable=get_weather,
             description="Get the weather of a location",

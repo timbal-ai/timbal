@@ -6,9 +6,13 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Rewind
 
-The **rewind** feature in Timbal allows you to branch or "rewind" the memory of an agent or flow by changing the `parent_id` in the `RunContext`. This is useful when you want to continue a conversation from a previous point, ignoring any newer context that was added after that point.
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Branch conversations and rewind agent memory to any previous point in the conversation.
+</h2>
 
 ---
+
+The <span style={{color: 'var(--timbal-purple)'}}><strong>rewind</strong></span> and feature in Timbal allows you to branch or "rewind" the memory of an agent or flow by changing the `parent_id` in the `RunContext`. This is useful when you want to continue a conversation from a previous point, ignoring any newer context that was added after that point.
 
 ## How Rewind Works
 

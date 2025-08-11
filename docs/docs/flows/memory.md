@@ -4,9 +4,16 @@ sidebar: 'docsSidebar'
 ---
 import CodeBlock from '@site/src/theme/CodeBlock';
 
-When we talk about "memory" in Timbal, there are two distinct concepts:
+# Using Memory in Flows
+
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Understand LLM memory sharing and flow state persistence for building conversational and stateful workflows.
+</h2>
 
 ---
+
+When we talk about "memory" in Timbal, there are two distinct concepts:
+
 
 ## LLM Memory
 

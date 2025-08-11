@@ -3,13 +3,14 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+import traceback
 
 import structlog
 import yaml
 
 from ..core.agent import Agent
 from ..errors import EvalError
-from ..state.context import RunContext
+from ..state import RunContext, set_run_context
 from ..state.data import DataValue
 from ..state.snapshot import Snapshot
 from ..types.chat.content import TextContent
@@ -18,76 +19,107 @@ from .types.result import EvalResult, EvalTestSuiteResult
 from .types.test import Test
 from .types.test_suite import TestSuite
 from .types.turn import Turn
+from .validators import semantic_output
 
 logger = structlog.get_logger("timbal.eval.engine")
 
 
 
-async def eval_steps(
-    turn: Turn,
-    agent: Agent,
-    run_context: RunContext
-) -> None:
+async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[dict]]:
     """"""
-    last_snapshot = agent.state_saver.get_last(path=agent.path, context=run_context)
-    agent_memory = last_snapshot.data["memory"].resolve()
-    actual_steps = []
-    for message in agent_memory:
-        if isinstance(message, dict):
-            message = Message.validate(message)
-        if message.content[0].type == "tool_use":
-            actual_steps.append(
-                {
-                    "tool": message.content[0].name,
-                    "input": message.content[0].input
-                }
-            )
+    try:
+        if agent.state_saver is None:
+            return False, ["No state saver available"], []
+            
+        last_snapshot = await agent.state_saver.get_last(path=agent.path)
+        if last_snapshot is None:
+            return False, ["No snapshot found"], []
+            
+        agent_memory = last_snapshot.data["memory"].resolve()
+        actual_steps = []
+        for message in agent_memory:
+            if isinstance(message, dict):
+                message = Message.validate(message)
+            if message.content and len(message.content) > 0 and message.content[0].type == "tool_use":
+                actual_steps.append(
+                    {
+                        "tool": message.content[0].name,
+                        "input": message.content[0].input
+                    }
+                )
 
-    explanations = []
-    results = []
-    for validator in turn.steps.validators:
-        if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
-            try:
-                await validator(actual_steps)
-                correct = True
-            except EvalError as e:
-                correct = False
-                explanations.append(str(e))
-        else:
-            try:
-                validator(actual_steps)
-                correct = True
-            except EvalError as e:
-                correct = False
-                explanations.append(str(e))
-        results.append(correct)
-    return all(results), explanations, actual_steps
+        explanations = []
+        results = []
+        if turn.steps and turn.steps.validators:
+            for i, validator in enumerate(turn.steps.validators):
+                if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
+                    try:
+                        await validator(actual_steps)
+                        correct = True
+                        logger.info("eval_steps_validator_result", validator_index=i, result="passed")
+                    except EvalError as e:
+                        correct = False
+                        explanations.append(str(e))
+                        logger.info("eval_steps_validator_result", validator_index=i, result="failed", error=str(e))
+                else:
+                    try:
+                        validator(actual_steps)
+                        correct = True
+                        logger.info("eval_steps_validator_result", validator_index=i, result="passed")
+                    except EvalError as e:
+                        correct = False
+                        explanations.append(str(e))
+                        logger.info("eval_steps_validator_result", validator_index=i, result="failed", error=str(e))
+                results.append(correct)
+        
+        final_result = all(results) if results else True
+        logger.info("eval_steps_final_result", results=results, final_result=final_result, explanations=explanations)
+        return final_result, explanations, actual_steps
+    except Exception as e:
+        # If there's an error accessing agent memory or evaluating steps
+        error_msg = f"Error evaluating steps: {str(e)}"
+        logger.error("eval_steps_exception", error=error_msg, exception=str(e))
+        return False, [error_msg], []
 
 
 async def eval_output(
     turn: Turn,
-    agent_output_message: str
+    agent_output_message: Message
 ) -> tuple[bool, list[str]]:
     """Evaluate the output of a turn. If no validators are present, use semantic_output as default."""
     explanations = []
     results = []
 
-    for validator in turn.output.validators:
-        if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
-            try:
-                await validator(agent_output_message)
-                correct = True
-            except EvalError as e:
-                correct = False
-                explanations.append(str(e))
-        else:
-            try:
-                validator(agent_output_message)
-                correct = True
-            except EvalError as e:
-                correct = False
-                explanations.append(str(e))
-        results.append(correct)
+    # If we have output text but no validators, use semantic validation as default
+    if turn.output and not turn.output.validators and turn.output.text:
+        default_validator = semantic_output(turn.output.text)
+        try:
+            if hasattr(default_validator, "func") and inspect.iscoroutinefunction(default_validator.func):
+                await default_validator(agent_output_message)
+            else:
+                default_validator(agent_output_message)
+            results.append(True)
+        except EvalError as e:
+            results.append(False)
+            explanations.append(str(e))
+    elif turn.output and turn.output.validators:
+        # Use explicit validators if provided
+        for validator in turn.output.validators:
+            if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
+                try:
+                    await validator(agent_output_message)
+                    correct = True
+                except EvalError as e:
+                    correct = False
+                    explanations.append(str(e))
+            else:
+                try:
+                    validator(agent_output_message)
+                    correct = True
+                except EvalError as e:
+                    correct = False
+                    explanations.append(str(e))
+            results.append(correct)
         
     return all(results), explanations
 
@@ -172,6 +204,8 @@ async def run_turn(
     test_results.total_turns += 1
     user_input = turn.input
     reason = []
+    execution_error = None
+    
     # Add memory to the agent
     data = {"memory": DataValue(value=conversation_history)}
     snapshot = Snapshot(
@@ -182,19 +216,45 @@ async def run_turn(
         t0=int(time.time() * 1000),
         data=data,
     )
-    agent.state_saver.put(snapshot, RunContext())
+    await agent.state_saver.put(snapshot)
     run_context = RunContext(parent_id=snapshot.id)
+    set_run_context(run_context)
 
     # Run the agent
-    agent_output_event = await agent.complete(context=run_context, prompt=user_input)
-    agent_usage = agent_output_event.usage
-    agent_output = agent_output_event.output.content[0].text
-    run_context = RunContext(parent_id=agent_output_event.run_id)
+    try:
+        agent_output_event = await agent.complete(prompt=user_input)
+        agent_usage = agent_output_event.usage
+        if agent_output_event.output and agent_output_event.output.content and len(agent_output_event.output.content) > 0:
+            agent_output = agent_output_event.output.content[0].text
+        else:
+            agent_output = "No output generated"
+        run_context = RunContext(parent_id=agent_output_event.run_id)
+        set_run_context(run_context)
+        
+        # Check if there was an execution error in the agent output event
+        if agent_output_event.error is not None:
+            execution_error = agent_output_event.error
+            reason.append("execution_error")
+            test_results.execution_errors += 1
+            
+    except Exception as e:
+        # Capture any exceptions that occur during agent execution
+        execution_error = {
+            "type": type(e).__name__,
+            "message": str(e),
+            "traceback": traceback.format_exc(),
+        }
+        reason.append("execution_error")
+        test_results.execution_errors += 1
+        agent_usage = {}
+        agent_output = f"Execution failed: {str(e)}"
+        run_context = RunContext(parent_id=snapshot.id)
+        set_run_context(run_context)
 
     # Evaluate the steps
     steps_passed, steps_explanations, actual_steps = None, [], []
-    if turn.steps:
-        steps_passed, steps_explanations, actual_steps = await eval_steps(turn, agent, run_context)
+    if turn.steps and execution_error is None:  # Only evaluate steps if no execution error
+        steps_passed, steps_explanations, actual_steps = await eval_steps(turn, agent)
         if steps_passed:
             test_results.steps_passed += 1
         else:
@@ -205,7 +265,7 @@ async def run_turn(
     output_explanations = []
     agent_output_message = Message(role="assistant", content=[TextContent(text=agent_output)])
     # Evaluate the output
-    if turn.output:
+    if turn.output and execution_error is None:  # Only evaluate output if no execution error
         output_passed, output_explanations = await eval_output(turn, agent_output_message)
         if output_passed:
             test_results.outputs_passed += 1
@@ -229,6 +289,7 @@ async def run_turn(
                 test_path=f"{test_file_name}::{test.name}",
                 input=user_input.to_dict(),
                 reason=reason,
+                execution_error=execution_error,
                 output_passed=output_passed,
                 output_explanations=output_explanations,
                 actual_output={
@@ -253,7 +314,7 @@ async def eval_file(
     path: Path,
     _agent: Agent,
     test_results: EvalTestSuiteResult,
-    test_name: str = None
+    test_name: str | None = None
 ) -> Any:
     """Parse and run all the tests in the given file. Optionally, only run a specific test by name."""
     with open(path) as f:
@@ -268,9 +329,10 @@ async def eval_file(
         for i, turn in enumerate(test.turns):
             is_last_turn = (i == len(test.turns) - 1)
             if is_last_turn:
-                await run_turn(_agent, turn, test, conversation_history, test_results, path.name)
+                await run_turn(_agent, turn, test, conversation_history, test_results, str(path.name))
             else:
                 conversation_history.append(turn.input.to_message(role="user"))
-                conversation_history.append(turn.output.to_message(role="assistant"))
+                if turn.output:
+                    conversation_history.append(turn.output.to_message(role="assistant"))
     
     return test_results

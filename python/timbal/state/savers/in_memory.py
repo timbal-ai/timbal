@@ -1,6 +1,6 @@
 import copy
 
-from ..context import RunContext
+from .. import get_run_context
 from ..snapshot import Snapshot
 from .base import BaseSaver
 
@@ -28,12 +28,9 @@ class InMemorySaver(BaseSaver):
         self.snapshots = snapshots if snapshots is not None else []
     
 
-    def get_last(
-        self, 
-        path: str,
-        context: RunContext,
-    ) -> Snapshot | None:
+    async def get_last(self, path: str) -> Snapshot | None:
         """See base class."""
+        context = get_run_context()
         if context.parent_id is None:
             return None
 
@@ -44,11 +41,7 @@ class InMemorySaver(BaseSaver):
         return None
     
 
-    def put(
-        self, 
-        snapshot: Snapshot,
-        context: RunContext, # noqa: ARG002
-    ) -> None:
+    async def put(self, snapshot: Snapshot) -> None:
         """See base class."""
         # Since we're appending snapshots to a python list and there's no intrinsic way of ensuring
         # unicity of ids, we need to check if the snapshot already exists.

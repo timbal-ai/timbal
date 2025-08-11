@@ -6,13 +6,20 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Timbal Integrations
 
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Extend Timbal's capabilities with external services for speech, language, and data tools.
+</h2>
+
+---
+
 Timbal supports a variety of integrations to extend its capabilities with external services such as speech, language, and data tools. This page provides general guidance for using integrations in your projects.
+
 
 ## Package Installation
 
 Some integrations require additional Python packages. To simplify setup, you can install all necessary dependencies for a specific integration using:
 
-<CodeBlock language="bash" code ={`uv add timbal[steps-<integration>]`}/>
+<CodeBlock language="bash" code ={`uv add timbal[<integration>]`}/>
 
 Replace `<integration>` with the name of the integration you want to use (e.g., `elevenlabs`, `gmail`, etc).
 

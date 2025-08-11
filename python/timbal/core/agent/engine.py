@@ -6,39 +6,42 @@ from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 import structlog
-from anthropic.types import (
-    Message as AnthropicMessage,
-)
-from openai.types.chat import (
-    ChatCompletion as OpenAICompletion,
-)
-from openai.types.chat import (
-    ChatCompletionMessage as OpenAIMessage,
-)
-from pydantic import BaseModel
-from timbal.types.events.chunk import ChunkEvent
+from anthropic.types import Message as AnthropicMessage
+from openai.types.chat import ChatCompletion as OpenAICompletion
+from openai.types.chat import ChatCompletionMessage as OpenAIMessage
+from pydantic import BaseModel, TypeAdapter
 from uuid_extensions import uuid7
 
+from timbal.types.events.chunk import ChunkEvent
+
 from ...errors import AgentError, EarlyExit
-from ...state.context import RunContext, run_context_var
+from ...state import get_run_context, set_run_context
+from ...state.context import RunContext
 from ...state.savers.base import BaseSaver
 from ...state.snapshot import Snapshot
 from ...steps.llms.router import llm_router
-from ...types.chat.content import FileContent, ToolResultContent, ToolUseContent
-from ...types.events import OutputEvent, StartEvent
+from ...types.chat.content import (
+    FileContent, 
+    TextContent,
+    ToolResultContent, 
+    ToolUseContent
+)
+from ...types.events import Event, OutputEvent, StartEvent
 from ...types.file import File
 from ...types.llms.usage import acc_usage
 from ...types.message import Message, message_model_schema
 from ...types.models import dump
+from ...utils import _platform_api_stream_call
 from ..base import BaseStep
 from ..flow.engine import Flow
+from ..shared import RemoteConfig
 from ..step import Step
 from ..stream import AsyncGenState, handle_event, sync_to_async_gen
 from .types.agent_params_model import BaseAgentParamsModel, agent_params_model_schema
 from .types.llm_chunk import LLMChunk
 from .types.llm_result import LLMResult
-from .types.tool_result import ToolResult
 from .types.tool import Tool
+from .types.tool_result import ToolResult
 
 logger = structlog.get_logger("timbal.core.agent.engine")
 
@@ -59,21 +62,9 @@ class Agent(BaseStep):
         - Parallel tool execution.
         - Support for both sync and async tools.
         - Automatic state persistence (optional).
+        - Remote execution (optional).
         - Usage tracking and detailed execution traces.
         - Compatible with multiple LLM providers (OpenAI, Anthropic).
-
-    Attributes:
-        id (str): Unique identifier for the agent, defaults to "agent".
-                  This is useful when adding the agent as a substep of a flow or as a tool of another agent.
-        path (str): Hierarchical path identifier for nested flows/agents.
-        metadata (dict): Custom metadata for the agent instance.
-        tools (list): Available tools, which can be:
-            - Callable functions (automatically wrapped).
-            - BaseStep instances (direct tool implementations).
-            - Dicts with {"tool": callable, "description": str} for custom tool configs.
-        max_iter (int): Maximum number of tool-use iterations, defaults to 10.
-        state_saver (BaseSaver): Optional component for persisting conversation state.
-        **kwargs (dict): Configuration for the underlying LLM (model, system_prompt, temperature, etc.).
 
     Example:
         ```python
@@ -90,7 +81,6 @@ class Agent(BaseStep):
         ```
     """
 
-    # TODO before tools callbacks. after tools callbacks.
     def __init__(
         self,
         id: str = "agent",
@@ -102,51 +92,67 @@ class Agent(BaseStep):
         # ? Should these be RunnableLike
         before_agent_callback: Callable | None = None,
         after_agent_callback: Callable | None = None,
+        # ? We could add before/after tool callbacks
+        # ? We could add before/after llm callbacks
+        remote_config: RemoteConfig | None = None,
         # LLM specific params.
         system_prompt: str | None = None,
         model: str = "gpt-4.1",
         max_tokens: int | None = None,
         stream: bool = False,
     ) -> None:
-        """Initializes an Agent instance.
+        """
+        Initializes an Agent instance.
 
         Args:
             id: The unique identifier for this agent instance. Defaults to "agent".
-            path: The path for this agent, used for identification, state saving and logging.
+            path: The path for this agent, used for identification, state saving, and logging.
             metadata: A dictionary of arbitrary metadata associated with the agent.
-            tools: A list of tools available to the agent. Tools can be provided
-                as callable functions, BaseStep instances, dictionaries conforming
-                to OpenAI tool format, or Tool objects. Defaults to an empty list.
+            tools: A list of tools available to the agent. Tools can be provided as callable functions,
+                BaseStep instances, dictionaries conforming to OpenAI tool format, or Tool objects.
+                Defaults to an empty list.
             max_iter: The maximum number of iterations (LLM calls and tool executions).
-                Helps prevent infinite loops. Defaults to 10.
-            state_saver: An optional saver object responsible for persisting and
-                retrieving the agent's state, allowing for conversations to be resumed.
+                Prevents infinite loops. Defaults to 10.
+            state_saver: Optional saver object for persisting and retrieving the agent's state,
+                allowing conversations to be resumed. Defaults to None.
+            before_agent_callback: Optional callable executed before each main agent processing cycle
+                (e.g., before the LLM call). Can be sync or async. Defaults to None.
+            after_agent_callback: Optional callable executed after each main agent processing cycle
+                (e.g., after the LLM call and any tool execution). Can be sync or async. Defaults to None.
+            system_prompt: Optional system prompt to guide the LLM's behavior throughout the conversation.
                 Defaults to None.
-            before_agent_callback: An optional callable that is executed before each
-                main agent processing cycle (e.g., before the LLM call).
-                Can be a synchronous or asynchronous function. Defaults to None.
-            after_agent_callback: An optional callable that is executed after each
-                main agent processing cycle (e.g., after the LLM call and potential
-                tool execution). Can be a synchronous or asynchronous function.
-                Defaults to None.
-            system_prompt: An optional system prompt to guide the LLM's behavior
-                throughout the conversation. Defaults to None.
-            model: The identifier of the language model to be used by the agent
-                (e.g., "gpt-4.1", "claude-3-opus"). Defaults to "gpt-4.1".
-            max_tokens: The maximum number of tokens the LLM should generate in a
-                single response. If None, the model's default will be used.
-                Defaults to None.
-            stream: Whether the agent should stream responses back as they are
-                generated by the LLM. Defaults to False.
+            model: The identifier of the language model to use (e.g., "gpt-4.1", "claude-3-opus").
+                Defaults to "gpt-4.1".
+            max_tokens: The maximum number of tokens the LLM should generate in a single response.
+                If None, the model's default is used. Defaults to None.
+            stream: Whether to stream responses as they are generated by the LLM. Defaults to False.
+            remote_config: Optional RemoteConfig. If provided, the agent will execute remotely
+                via the Timbal platform API, streaming and validating events from the remote agent.
+                If None, the agent executes locally. Defaults to None.
+
+        Remote Execution:
+            When `remote_config` is provided, the agent streams events from a remote Timbal deployment
+            using the provided organization, app, and (optionally) version identifiers. 
+
+        Raises:
+            ValueError: If invalid tool definitions are provided (e.g., unnamed lambda handlers).
         """
         if path is None:
             path = id
         super().__init__(id=id, path=path, metadata=metadata)
 
+        # ? These params are used to enable passing this as a substep of a flow
+        # ? (might remove them in the future).
+        self.is_llm = False
+        self.is_coroutine = False
+        self.is_async_gen = True
+
+        # TODO Methods to retrieve the tools remotely
+        self.remote_config = remote_config
+        if self.remote_config:
+            return
+
         self.state_saver = state_saver
-        if self.state_saver is not None:
-            self._is_state_saver_get_async = inspect.iscoroutinefunction(self.state_saver.get_last)
-            self._is_state_saver_put_async = inspect.iscoroutinefunction(self.state_saver.put)
 
         self._load_tools(tools)
         self.max_iter = max_iter
@@ -162,12 +168,6 @@ class Agent(BaseStep):
         self.model = model
         self.max_tokens = max_tokens
         self.stream = stream
-
-        # ? These params are used to enable passing this as a substep of a flow
-        # ? (might remove them in the future).
-        self.is_llm = False
-        self.is_coroutine = False
-        self.is_async_gen = True
 
 
     @staticmethod
@@ -331,18 +331,18 @@ class Agent(BaseStep):
 
         system_prompt = kwargs.pop("system_prompt", None)
 
-        context_files = []
-        for message in messages:
-            for content in message.content:
-                if isinstance(content, FileContent):
-                    file = File.serialize(content.file)
-                    context_files.append(file)
+        # context_files = []
+        # for message in messages:
+        #     for content in message.content:
+        #         if isinstance(content, FileContent):
+        #             file = File.serialize(content.file)
+        #             context_files.append(file)
 
-        if len(context_files):
-            if system_prompt is None:
-                system_prompt = f"<context_data>{''.join(f'\n- {f}' for f in context_files)}\n</context_data>"
-            else:
-                system_prompt += f"\n\n<context_data>{''.join(f'\n- {f}' for f in context_files)}\n</context_data>"
+        # if len(context_files):
+        #     if system_prompt is None:
+        #         system_prompt = f"<context_data>{''.join(f'\n- {f}' for f in context_files)}\n</context_data>"
+        #     else:
+        #         system_prompt += f"\n\n<context_data>{''.join(f'\n- {f}' for f in context_files)}\n</context_data>"
 
         llm_error = None
         llm_message = None
@@ -425,7 +425,6 @@ class Agent(BaseStep):
         tool: BaseStep,
         tool_input: dict[str, Any],
         tool_use_id: str,
-        context: RunContext,
     ) -> ToolResult:
         """Agent tool execution wrapper.
         
@@ -440,7 +439,6 @@ class Agent(BaseStep):
             tool (BaseStep): The tool to execute.
             tool_input (dict[str, Any]): The input to the tool.
             tool_use_id (str): The id of the tool use.
-            context (RunContext): The run context. Needed when tools are nested agents or flows.
 
         Returns:
             ToolResult
@@ -462,19 +460,13 @@ class Agent(BaseStep):
             # avoid blocking the event loop.
             if not tool.is_coroutine and not tool.is_async_gen:
                 loop = asyncio.get_running_loop()
-                tool_output = await loop.run_in_executor(None, lambda: tool.run(
-                    context=context,
-                    **tool_input
-                ))
+                tool_output = await loop.run_in_executor(None, lambda: tool.run(**tool_input))
                 # Convert to async generator.
                 if inspect.isgenerator(tool_output):
                     tool_output = sync_to_async_gen(tool_output, loop)
             
             else:
-                tool_output = tool.run(
-                    context=context,
-                    **tool_input
-                )
+                tool_output = tool.run(**tool_input)
 
                 if tool.is_coroutine:
                     tool_output = await tool_output
@@ -490,9 +482,13 @@ class Agent(BaseStep):
 
             # Handle the case where the tool already returns an LLM message. We need to modify it so it represents the result of a tool call.
             if not isinstance(tool_output, Message):
+                if isinstance(tool_output, File):
+                    tool_output_content = FileContent(file=tool_output)
+                else:
+                    tool_output_content = TextContent(text=str(tool_output))
                 tool_output = Message.validate({
                     "role": "user",
-                    "content": str(tool_output),
+                    "content": tool_output_content,
                 })
             
         except Exception as err:
@@ -523,78 +519,14 @@ class Agent(BaseStep):
         )
 
 
-    async def run(
-        self, 
-        context: RunContext | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Execute the agent's main processing loop with tool usage, state management, and event streaming.
-        
-        This method implements the core agent execution cycle, including:
-            - State loading and conversation history retrieval
-            - Initial LLM execution with provided prompt
-            - Tool execution based on LLM decisions
-            - Result feeding back to LLM for next decisions
-            - State persistence and usage tracking
-            - Event streaming for monitoring/logging
-
-        Args:
-            context (RunContext | None): Execution context containing:
-                - Run identifiers (auto-generated if None)
-                - Parent context for nested executions
-                - Session tracking for state persistence
-                - Additional execution metadata
-            **kwargs: Agent input parameters.
-
-        Yields:
-            Event objects in sequence:
-                StartEvent:
-                    - Marks beginning of agent/tool executions
-                    - Contains run identifiers and paths
-                OutputEvent:
-                    - Contains execution results or errors
-                    - Includes usage statistics
-                    - Marks completion of execution steps
-
-        State Management:
-            - Loads previous conversation if state_saver configured
-            - Maintains message history across iterations
-            - Persists state after each significant step
-            - Handles state loading/saving errors gracefully
-
-        Error Handling:
-            - Non-recoverable LLM errors propagate up
-            - Tool errors are captured and fed back to LLM
-            - State persistence errors are logged but non-fatal
-            - Input validation errors raise AgentError
-
-        Usage Tracking:
-            - Accumulates token usage across all LLM calls
-            - Tracks tool-specific resource usage
-            - Maintains execution timing information
-            - Preserves full execution traces
-
-        Notes:
-            - Implements parallel tool execution when possible
-            - Respects max_iter limit for tool usage
-            - Automatically formats all messages for LLM consumption
-            - Provides detailed tracing for debugging/monitoring
-            - Can be used as both standalone agent or subagent
-            - Supports continuation of previous conversations
-            - Handles both streaming and non-streaming LLMs
-        """
+    async def _run_local(self, **kwargs: Any) -> Any:
+        """Runs the agent locally."""
         t0 = int(time.time() * 1000)
 
-        if context is None:
-            context = RunContext(id=uuid7(as_type="str"))
-        elif context.id is None:
-            context.id = uuid7(as_type="str")
-
-        # Set the run context for the duration of the agent run.
-        run_context_var.set(context)
+        context = get_run_context()
 
         # Copy the input as is, so we save the traces without validated data and defaults.
-        agent_input = dump(kwargs, context=context)
+        agent_input = await dump(kwargs)
 
         # Load the memory.
         # Always do this first to ensure even if validation fails we can carry the memory to the next run.
@@ -603,10 +535,7 @@ class Agent(BaseStep):
         context.data["memory"] = messages
         if self.state_saver is not None and context.parent_id is not None:
             try:
-                if self._is_state_saver_get_async:
-                    last_snapshot = await self.state_saver.get_last(path=self.path, context=context)
-                else:
-                    last_snapshot = self.state_saver.get_last(path=self.path, context=context)
+                last_snapshot = await self.state_saver.get_last(path=self.path)
             except Exception as err:
                 logger.error("get_memory_error", err=err)
                 last_snapshot = None
@@ -625,14 +554,13 @@ class Agent(BaseStep):
         for k, v in kwargs.items():
             context.data[k] = v
 
-        agent_start_event = StartEvent(
+        agent_start_event = await StartEvent.build(
             run_id=context.id,
             path=self.path,
             status_text="Starting...",
         )
-        agent_start_event_dump = dump(agent_start_event, context=context)
 
-        logger.info("start_event", start_event=agent_start_event_dump)
+        logger.info("start_event", start_event=agent_start_event.dump)
         yield agent_start_event
 
         # Aggregated traces and usage for the entire run.
@@ -650,7 +578,7 @@ class Agent(BaseStep):
             if "prompt" in kwargs:
                 # We pre-validate the prompt field as a message. Frontend expects this to be a Message instance.
                 kwargs["prompt"] = Message.validate(kwargs["prompt"])
-                agent_input = dump(kwargs, context=context)
+                agent_input = await dump(kwargs)
                 messages.append(kwargs.pop("prompt"))
 
             if not len(messages):
@@ -683,10 +611,7 @@ class Agent(BaseStep):
                 
                 # We don't want to cancel the execution if this errors. 
                 try:
-                    if self._is_state_saver_put_async:
-                        await self.state_saver.put(snapshot=snapshot, context=context)
-                    else:
-                        self.state_saver.put(snapshot=snapshot, context=context)
+                    await self.state_saver.put(snapshot=snapshot)
                 except Exception as err:
                     logger.error("put_memory_error", err=err)
             return
@@ -715,10 +640,7 @@ class Agent(BaseStep):
                 
                 # We don't want to cancel the execution if this errors. 
                 try:
-                    if self._is_state_saver_put_async:
-                        await self.state_saver.put(snapshot=snapshot, context=context)
-                    else:
-                        self.state_saver.put(snapshot=snapshot, context=context)
+                    await self.state_saver.put(snapshot=snapshot)
                 except Exception as err:
                     logger.error("put_memory_error", err=err)
 
@@ -726,14 +648,13 @@ class Agent(BaseStep):
 
         # Run an llm first (that is, the handler_fn for the llm gateway step).
         llm_i_path = f"{self.path}.llm-0"
-        llm_start_event = StartEvent(
+        llm_start_event = await StartEvent.build(
             run_id=context.id,
             path=llm_i_path,
             status_text="Thinking...",
         )
-        llm_start_event_dump = dump(llm_start_event, context=context)
 
-        logger.info("start_event", start_event=llm_start_event_dump)
+        logger.info("start_event", start_event=llm_start_event.dump)
         yield llm_start_event
 
         async for llm_output in self._run_llm(
@@ -746,28 +667,16 @@ class Agent(BaseStep):
             else:
                 llm_chunk = llm_output
 
-                llm_chunk_event = ChunkEvent(
+                llm_chunk_event = await ChunkEvent.build(
                     run_id=context.id,
                     path=llm_i_path,
                     chunk=llm_chunk.output,
                 )
-                llm_chunk_event_dump = dump(llm_chunk_event, context=context)
 
-                logger.info("chunk_event", chunk_event=llm_chunk_event_dump)
+                logger.info("chunk_event", chunk_event=llm_chunk_event.dump)
                 yield llm_chunk_event
 
-                # # If the LLM is returning a stream, that indicates it's not going to use a tool.
-                # # We're safe streaming the chunks as the final agent response.
-                # agent_chunk_event = ChunkEvent(
-                #     run_id=context.id,
-                #     path=self.path,
-                #     chunk=llm_chunk.output,
-                # )
-
-                # logger.info("chunk_event", chunk_event=agent_chunk_event)
-                # yield agent_chunk_event
-
-        llm_output_event = OutputEvent(
+        llm_output_event = await OutputEvent.build(
             run_id=context.id,
             path=llm_i_path,
             input=llm_result.input,
@@ -777,13 +686,12 @@ class Agent(BaseStep):
             t1=llm_result.t1,
             usage=llm_result.usage,
         )
-        llm_output_event_dump = dump(llm_output_event, context=context)
 
-        logger.info("output_event", output_event=llm_output_event_dump)
+        logger.info("output_event", output_event=llm_output_event.dump)
         yield llm_output_event
 
         # Store the trace of the LLM step.
-        run_steps[llm_i_path] = llm_output_event_dump
+        run_steps[llm_i_path] = llm_output_event.dump
 
         # Aggregate the usage of the LLM step.
         for k, v in llm_result.usage.items():
@@ -812,10 +720,7 @@ class Agent(BaseStep):
                 
                 # We don't want to cancel the execution if this errors. 
                 try:
-                    if self._is_state_saver_put_async:
-                        await self.state_saver.put(snapshot=snapshot, context=context)
-                    else:
-                        self.state_saver.put(snapshot=snapshot, context=context)
+                    await self.state_saver.put(snapshot=snapshot)
                 except Exception as err:
                     logger.error("put_memory_error", err=err)
 
@@ -843,15 +748,14 @@ class Agent(BaseStep):
                 assert len(self.tools) > tool_idx, f"Tool {tool_call.name} not found at index {tool_idx}."
                 tool = self.tools[tool_idx]
 
-                tool_start_event = StartEvent(
+                tool_start_event = await StartEvent.build(
                     run_id=context.id,
                     path=f"{tool.path}-{tool_call.id}",
                     # TODO Review this one.
                     status_text=f"Running tool: {tool.path}...",
                 )
-                tool_start_event_dump = dump(tool_start_event, context=context)
 
-                logger.info("start_event", start_event=tool_start_event_dump)
+                logger.info("start_event", start_event=tool_start_event.dump)
                 yield tool_start_event
 
                 tool_task = asyncio.create_task(
@@ -859,7 +763,6 @@ class Agent(BaseStep):
                         tool=tool,
                         tool_input=tool_call.input,
                         tool_use_id=tool_call.id,
-                        context=context,
                     ),
                     name=tool_call.id,
                 )
@@ -879,7 +782,7 @@ class Agent(BaseStep):
                 })
                 messages.append(tool_result_message)
                 
-                tool_output_event = OutputEvent(
+                tool_output_event = await OutputEvent.build(
                     run_id=context.id,
                     path=f"{tool.path}-{tool_call.id}",
                     input=tool_result.input,
@@ -889,13 +792,12 @@ class Agent(BaseStep):
                     t1=tool_result.t1,
                     usage=tool_result.usage,
                 )
-                tool_output_event_dump = dump(tool_output_event, context=context)
 
-                logger.info("output_event", output_event=tool_output_event_dump)
+                logger.info("output_event", output_event=tool_output_event.dump)
                 yield tool_output_event
 
                 # Store the trace of the LLM step.
-                run_steps[f"{tool.path}-{tool_call.id}"] = tool_output_event_dump
+                run_steps[f"{tool.path}-{tool_call.id}"] = tool_output_event.dump
 
                 # Aggregate the usage of the tool step.
                 for k, v in tool_result.usage.items():
@@ -918,14 +820,13 @@ class Agent(BaseStep):
             # Run the llm again.
             llm_i_path = f"{self.path}.llm-{i}"
 
-            llm_start_event = StartEvent(
+            llm_start_event = await StartEvent.build(
                 run_id=context.id,
                 path=llm_i_path,
                 status_text="Thinking...",
             )
-            llm_start_event_dump = dump(llm_start_event, context=context)
 
-            logger.info("start_event", start_event=llm_start_event_dump)
+            logger.info("start_event", start_event=llm_start_event.dump)
             yield llm_start_event
 
             async for llm_output in self._run_llm(
@@ -939,28 +840,16 @@ class Agent(BaseStep):
                 else:
                     llm_chunk = llm_output
 
-                    llm_chunk_event = ChunkEvent(
+                    llm_chunk_event = await ChunkEvent.build(
                         run_id=context.id,
                         path=llm_i_path,
                         chunk=llm_chunk.output,
                     )
-                    llm_chunk_event_dump = dump(llm_chunk_event, context=context)
 
-                    logger.info("chunk_event", chunk_event=llm_chunk_event_dump)
+                    logger.info("chunk_event", chunk_event=llm_chunk_event.dump)
                     yield llm_chunk_event
 
-                    # # If the LLM is returning a stream, that indicates it's not going to use a tool.
-                    # # We're safe streaming the chunks as the final agent response.
-                    # agent_chunk_event = ChunkEvent(
-                    #     run_id=context.id,
-                    #     path=self.path,
-                    #     chunk=llm_chunk.output,
-                    # )
-
-                    # logger.info("chunk_event", chunk_event=agent_chunk_event)
-                    # yield agent_chunk_event
-
-            llm_output_event = OutputEvent(
+            llm_output_event = await OutputEvent.build(
                 run_id=context.id,
                 path=llm_i_path,
                 input=llm_result.input,
@@ -970,13 +859,12 @@ class Agent(BaseStep):
                 t1=llm_result.t1,
                 usage=llm_result.usage,
             )
-            llm_output_event_dump = dump(llm_output_event, context=context)
 
-            logger.info("output_event", output_event=llm_output_event_dump)
+            logger.info("output_event", output_event=llm_output_event.dump)
             yield llm_output_event
 
             # Store the trace of the LLM step.
-            run_steps[llm_i_path] = llm_output_event_dump
+            run_steps[llm_i_path] = llm_output_event.dump
 
             # Aggregate the usage of the LLM step.
             for k, v in llm_result.usage.items():
@@ -1005,10 +893,7 @@ class Agent(BaseStep):
                     
                     # We don't want to cancel the execution if this errors. 
                     try:
-                        if self._is_state_saver_put_async:
-                            await self.state_saver.put(snapshot=snapshot, context=context)
-                        else:
-                            self.state_saver.put(snapshot=snapshot, context=context)
+                        await self.state_saver.put(snapshot=snapshot)
                     except Exception as err:
                         logger.error("put_memory_error", err=err)
 
@@ -1053,14 +938,11 @@ class Agent(BaseStep):
 
             # We don't want to cancel the execution if this errors. 
             try:
-                if self._is_state_saver_put_async:
-                    await self.state_saver.put(snapshot=snapshot, context=context)
-                else:
-                    self.state_saver.put(snapshot=snapshot, context=context)
+                await self.state_saver.put(snapshot=snapshot)
             except Exception as err:
                 logger.error("put_memory_error", err=err)
 
-        agent_output_event = OutputEvent(
+        agent_output_event = await OutputEvent.build(
             run_id=context.id,
             path=self.path,
             input=agent_input,
@@ -1070,28 +952,110 @@ class Agent(BaseStep):
             t1=t1,
             usage=run_usage,
         )
-        agent_output_event_dump = dump(agent_output_event, context=context)
 
-        logger.info("output_event", output_event=agent_output_event_dump)
+        logger.info("output_event", output_event=agent_output_event.dump)
         yield agent_output_event
 
+
+    async def _run_remote(self, **kwargs: Any) -> Any: 
+        """Runs the agent remotely. The agent must be deployed in the Timbal platform."""
+        prompt = kwargs.pop("prompt", None)
+        prompt = Message.validate(prompt)
+        prompt = await dump(prompt)
+
+        path = f"orgs/{self.remote_config.org_id}/apps/{self.remote_config.app_id}/runs/stream"
+        payload = {
+            "version_id": self.remote_config.version_id, 
+            # "parent_id": parent_id,
+            # "group_id": group_id,
+            "input": {
+                "prompt": prompt,
+                **kwargs,
+            },
+        }
+
+        async for event in _platform_api_stream_call("POST", path, json=payload):
+            yield event
+
+
+    async def run(self, **kwargs: Any) -> Any:
+        """Execute the agent's main processing loop with tool usage, state management, and event streaming.
+        
+        This method implements the core agent execution cycle, including:
+            - State loading and conversation history retrieval
+            - Initial LLM execution with provided prompt
+            - Tool execution based on LLM decisions
+            - Result feeding back to LLM for next decisions
+            - State persistence and usage tracking
+            - Event streaming for monitoring/logging
+
+        Args:
+            **kwargs: Agent input parameters.
+
+        Yields:
+            Event objects in sequence:
+                StartEvent:
+                    - Marks beginning of agent/tool executions
+                    - Contains run identifiers and paths
+                OutputEvent:
+                    - Contains execution results or errors
+                    - Includes usage statistics
+                    - Marks completion of execution steps
+
+        State Management:
+            - Loads previous conversation if state_saver configured
+            - Maintains message history across iterations
+            - Persists state after each significant step
+            - Handles state loading/saving errors gracefully
+
+        Error Handling:
+            - Non-recoverable LLM errors propagate up
+            - Tool errors are captured and fed back to LLM
+            - State persistence errors are logged but non-fatal
+            - Input validation errors raise AgentError
+
+        Usage Tracking:
+            - Accumulates token usage across all LLM calls
+            - Tracks tool-specific resource usage
+            - Maintains execution timing information
+            - Preserves full execution traces
+
+        Notes:
+            - Implements parallel tool execution when possible
+            - Respects max_iter limit for tool usage
+            - Automatically formats all messages for LLM consumption
+            - Provides detailed tracing for debugging/monitoring
+            - Can be used as both standalone agent or subagent
+            - Supports continuation of previous conversations
+            - Handles both streaming and non-streaming LLMs
+        """
+        run_context = get_run_context()
+        if not run_context:
+            run_context = RunContext(id=uuid7(as_type="str"))
+            set_run_context(run_context)
+        if not run_context.id:
+            run_context.id = uuid7(as_type="str")
+
+        if self.remote_config:
+            async for event in self._run_remote(**kwargs):
+                event = TypeAdapter(Event).validate_python(event)
+                yield event
+        else:
+            async for event in self._run_local(**kwargs):
+                yield event
+
     
-    async def complete(
-        self,
-        context: RunContext | None = None,
-        **kwargs: Any,
-    ) -> OutputEvent:
+    async def complete(self, **kwargs: Any) -> OutputEvent:
         """run() wrapper method that completes the flow execution.
         
         Args: 
-            context: RunContext
             **kwargs: Additional keyword arguments required for step execution.
         
         Returns:
             OutputEvent: The agent's selected outputs.
         """
         agent_output_event = None
-        async for event in self.run(context=context, **kwargs):
+        async for event in self.run(**kwargs):
             if isinstance(event, OutputEvent) and event.path == self.path:
                 agent_output_event = event
         return agent_output_event

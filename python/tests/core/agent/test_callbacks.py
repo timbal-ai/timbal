@@ -3,6 +3,7 @@ import pytest
 
 from timbal import Agent
 from timbal.state.context import RunContext
+from timbal.state import set_run_context
 
 
 @pytest.mark.asyncio
@@ -41,7 +42,8 @@ async def test_sync_callbacks():
     )
 
     run_context = RunContext(id="test_sync_callbacks")
-    await agent.complete(prompt="Hello", context=run_context)
+    set_run_context(run_context)
+    await agent.complete(prompt="Hello")
 
     assert run_context.data["before_agent_callback_called"]
     assert run_context.data["after_agent_callback_called"]
@@ -63,7 +65,8 @@ async def test_async_callbacks():
     )
 
     run_context = RunContext(id="test_async_callbacks")
-    await agent.complete(prompt="Hello", context=run_context)
+    set_run_context(run_context)
+    await agent.complete(prompt="Hello")
 
     assert run_context.data["before_agent_callback_called"]
     assert run_context.data["after_agent_callback_called"]

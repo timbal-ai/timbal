@@ -4,9 +4,11 @@ from pydantic import BaseModel
 
 
 class EvalResult(BaseModel):
+    test_name: str
     test_path: str
     input: str | dict
     reason: list[str] | None = None
+    execution_error: dict | None = None
     output_passed: bool | None = None
     output_explanations: list[str] | None = None
     actual_output: str | dict
@@ -28,4 +30,5 @@ class EvalTestSuiteResult(BaseModel):
     steps_failed: int = 0
     usage_passed: int = 0
     usage_failed: int = 0
+    execution_errors: int = 0
     tests_failed: list[EvalResult] = []

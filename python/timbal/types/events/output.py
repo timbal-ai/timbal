@@ -1,11 +1,11 @@
-from typing import Any
+from typing import Any, Literal
 
 from .base import BaseEvent
 
 
 class OutputEvent(BaseEvent):
     """Event emitted when a step completes with its full output."""
-    type: str = "OUTPUT"
+    type: Literal["OUTPUT"] = "OUTPUT"
 
     input: Any
     """The input arguments passed to the step."""

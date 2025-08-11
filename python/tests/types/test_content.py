@@ -9,10 +9,14 @@ from anthropic.types import (
     ToolUseBlock as AnthropicToolUseBlock,
 )
 from json.decoder import JSONDecodeError
-from openai.types.chat import (
-    ChatCompletionMessageToolCall as OpenAIToolCall,
-)
-from openai.types.chat.chat_completion_message_tool_call import Function as OpenAIFunction
+try:
+    # In newer OpenAI SDK versions, use the concrete function tool call type
+    from openai.types.chat.chat_completion_message_function_tool_call import ChatCompletionMessageFunctionToolCall as OpenAIToolCall
+    from openai.types.chat.chat_completion_message_function_tool_call import Function as OpenAIFunction
+except ImportError:
+    # Fallback for older versions
+    from openai.types.chat import ChatCompletionMessageToolCall as OpenAIToolCall
+    from openai.types.chat.chat_completion_message_tool_call import Function as OpenAIFunction
 from timbal.types import Content, File, FileContent, TextContent, ToolResultContent, ToolUseContent
 
 

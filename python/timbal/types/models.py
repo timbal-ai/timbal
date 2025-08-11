@@ -18,6 +18,7 @@ Usage:
     >>> schema, metadata = get_schema_from_annotation(List[int])
     >>> print(schema)  # {'type': 'array', 'items': {'type': 'integer'}}
 """
+import asyncio
 import math
 from collections import defaultdict
 from collections.abc import Callable
@@ -40,7 +41,6 @@ from pydantic import (
 )
 from pydantic.fields import FieldInfo
 
-from ..state.context import RunContext
 from .field import Field
 from .file import File
 from .message import Message
@@ -61,7 +61,7 @@ def safe_is_nan(value: Any) -> bool:
         return False
 
 
-def dump(value: Any, context: RunContext | None = None) -> Any:
+async def dump(value: Any) -> Any:
     """Dumps all models that live within a nested structure of arbitrary depth."""
     # Handle float("nan"), np.nan, pd.NA, etc. (might need to handle more scenarios here)
     if safe_is_nan(value):
@@ -75,16 +75,20 @@ def dump(value: Any, context: RunContext | None = None) -> Any:
     elif isinstance(value, Message): # Message is no longer a BaseModel.
         return {
             "role": value.role,
-            "content": [dump(c, context) for c in value.content],
+            "content": await asyncio.gather(*[dump(c) for c in value.content]),
         }
     elif isinstance(value, BaseModel): # Handle BaseModel instances as we handle dictionaries.
-        return {k: dump(v, context) for k, v in value.__dict__.items()}
+        items = await asyncio.gather(*[dump(v) for v in value.__dict__.values()])
+        return dict(zip(value.__dict__.keys(), items))
     elif isinstance(value, dict):
-        return {k: dump(v, context) for k, v in value.items()}
+        keys, values = zip(*value.items()) if value else ([], [])
+        dumped_values = await asyncio.gather(*[dump(v) for v in values])
+        return dict(zip(keys, dumped_values))
     elif isinstance(value, (list, tuple)): # noqa: UP038
-        return [dump(v, context) for v in value]
+        dumped_items = await asyncio.gather(*[dump(v) for v in value])
+        return dumped_items if isinstance(value, list) else tuple(dumped_items)
     elif isinstance(value, File):
-        return File.serialize(value, context)
+        return await value.persist()
     elif isinstance(value, Exception):
         return {
             "error_type": type(value).__name__,

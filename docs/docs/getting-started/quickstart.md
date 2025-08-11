@@ -6,9 +6,11 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Quickstart
 
-<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.2rem', fontWeight: 'normal'}}>
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
 Build your first flow with Timbal with 5 lines of code.
 </h2>
+
+---
 
 We'll start implementing an <span style={{color: 'var(--timbal-purple)'}}><strong>agent</strong></span>. It will be a <span style={{color: 'var(--timbal-purple)'}}><strong>simple chatbot</strong></span> and gradually enhance it with advanced features. Let's dive in!
 
@@ -44,12 +46,27 @@ Timbal makes your life easier by automatically setting up a complete project str
           }}
         >
           <div className="file-tree-box" style={{ fontSize: '0.85em', maxWidth: '320px' }}>
-            <img src="/img/folder.svg" className="file-tree-icon" style={{ width: '14px' }} /> my-project
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: '0.2rem' }}>
+              <img src="/img/folder.svg" className="file-tree-icon" style={{ width: '14px', marginRight: '0.5rem' }} />
+              <span>my-project</span>
+            </div>
             <div className="file-list" style={{ marginLeft: '1.5rem' }}>
-              <div><img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px' }} /> agent.py</div>
-              <div><img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px' }} /> .dockerignore</div>
-              <div><img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px' }} /> pyproject.toml</div>
-              <div><img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px' }} /> timbal.yaml</div>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '0.2rem' }}>
+                <img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px', marginRight: '0.5rem' }} />
+                <span>agent.py</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '0.2rem' }}>
+                <img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px', marginRight: '0.5rem' }} />
+                <span>.dockerignore</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '0.2rem' }}>
+                <img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px', marginRight: '0.5rem' }} />
+                <span>pyproject.toml</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center' }}>
+                <img src="/img/file.svg" className="file-tree-icon" style={{ width: '14px', marginRight: '0.5rem' }} />
+                <span>timbal.yaml</span>
+              </div>
             </div>
           </div>
           <div style={{ minWidth: '320px', flex: 1 }}>
@@ -152,7 +169,7 @@ This makes it easy to add new packages and manage your project's dependencies.
 Before running your flow, make sure you have the keys needed set as environment variables in your `.env` file:
 
 👀 It will depend on the LLM you're using, in this case we are using a Gemini model
-<CodeBlock language="bash" title=".env" code={`GEMINI_API_KEYY=your_api_key_here `}/>
+<CodeBlock language="bash" title=".env" code={`GEMINI_API_KEY=your_api_key_here `}/>
 
 Only with the `Agent` class we have a flow that represents a llm that receives a `prompt` and returns a `response`.
 
@@ -160,7 +177,7 @@ Now let's run the chatbot!
 
 <CodeBlock language="python" title="agent.py"
 code={`response = agent.complete(prompt="What is the capital of Germany?")
-print(response.content[0].text)`}/>
+print(response.output.content[0].text)`}/>
 
 
 You will see an output like this:
@@ -178,7 +195,9 @@ You can modify it as you want. For example, you can add tools to the agent.
 
 ## Part 2: Enhancing the Chatbot with Tools
 
-A great feature of Timbal is that you can easily add tools to your agent, allowing it to perform actions or fetch information in real time. You can use both prebuilt tools (already provided by Timbal or the community) and custom tools (functions you create yourself).
+A great feature of Timbal is that you can easily add tools to your agent, allowing it to perform actions or fetch information in real time. 
+
+You can use both <span style={{color: 'var(--timbal-purple)'}}><strong>prebuilt tools</strong></span> (already provided by Timbal or the community) and <span style={{color: 'var(--timbal-purple)'}}><strong>custom tools</strong></span> (functions you create yourself).
 
 Let's see both approaches with practical examples:
 
