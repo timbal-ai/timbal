@@ -1,7 +1,6 @@
 from typing import Any, override
 
-from ..events.base import Event
-from ..events.output import OutputEvent
+from ...types.events import Event, OutputEvent
 from .base import BaseCollector
 
 
@@ -30,4 +29,4 @@ class AgentCollector(BaseCollector):
         assert isinstance(self.last_output_event, OutputEvent), \
             f"AgentCollector expected an OutputEvent, got {type(self.last_output_event)}"
 
-        return self.last_output_event.data.output
+        return self.last_output_event.output

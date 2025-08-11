@@ -16,16 +16,18 @@ from pydantic import (
     computed_field,
     model_serializer,
 )
-from uuid_extensions import uuid7
 
+from ..core.stream import sync_to_async_gen
+from ..state import get_run_context, set_run_context
+from ..state.context import RunContext
+from ..types.events import (
+    ChunkEvent,
+    Event,
+    OutputEvent,
+    StartEvent,
+)
 from .collectors.base import BaseCollector
 from .collectors.default import DefaultCollector
-from .context import RunContext, get_run_context, set_run_context
-from .events.base import Event
-from .events.chunk import ChunkEvent, ChunkEventData
-from .events.output import OutputEvent, OutputEventData
-from .events.start import StartEvent, StartEventData
-from .utils import dump, sync_to_async_gen
 
 logger = structlog.get_logger("timbal.core_v2.runnable")
 
@@ -172,17 +174,15 @@ class Runnable(ABC, BaseModel):
 
         run_context = get_run_context()
         if not run_context:
-            run_context = RunContext(id=uuid7(as_type="str"))
+            run_context = RunContext()
             set_run_context(run_context)
 
-        start_event = StartEvent(
+        start_event = await StartEvent.build(
             run_id=run_context.id,
             path=self._path,
-            data=StartEventData(),
         )
-        start_event_dump = dump(start_event)
 
-        logger.info("start_event", **start_event_dump)
+        logger.info("start_event", **start_event.dump)
         yield start_event
 
         # At initialization, we might want to fix some parameters for the handler.
@@ -219,14 +219,13 @@ class Runnable(ABC, BaseModel):
                     if chunk is not None:
                         # If it's already a base event, it means we have already emitted it.
                         if not isinstance(chunk, Event):
-                            chunk_event = ChunkEvent(
+                            chunk_event = await ChunkEvent.build(
                                 run_id=run_context.id,
                                 path=self._path,
-                                data=ChunkEventData(chunk=chunk),
+                                chunk=chunk,
                             )
-                            chunk_event_dump = dump(chunk_event)
 
-                            logger.info("chunk_event", **chunk_event_dump)
+                            logger.info("chunk_event", **chunk_event.dump)
                             yield chunk_event
 
                         else:
@@ -244,20 +243,17 @@ class Runnable(ABC, BaseModel):
         finally:
             t1 = int(time.time() * 1000)
 
-            output_event = OutputEvent(
+            output_event = await OutputEvent.build(
                 run_id=run_context.id,
                 path=self._path,
-                data=OutputEventData(
-                    t0=t0,
-                    t1=t1,
-                    input=input,
-                    output=output,
-                    error=error,
-                    # TODO This grabs all the usage, not just the one by this runnable component
-                    usage=run_context.usage,
-                ),
+                t0=t0,
+                t1=t1,
+                input=input,
+                output=output,
+                error=error,
+                # TODO This grabs all the usage, not just the one by this runnable component
+                usage=run_context.usage,
             )
-            output_event_dump = dump(output_event)
 
-            logger.info("output_event", **output_event_dump)
+            logger.info("output_event", **output_event.dump)
             yield output_event

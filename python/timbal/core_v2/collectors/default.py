@@ -5,7 +5,7 @@ from openai.types.chat import ChatCompletionChunk
 from pydantic import Field
 
 from ...types.message import Message
-from ..context import get_run_context
+from ...state import get_run_context
 from .base import BaseCollector
 
 

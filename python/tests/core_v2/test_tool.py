@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from timbal.core_v2.context import get_run_context
+from timbal.state import get_run_context
 from timbal.core_v2.tool import Tool
 from timbal.core_v2.handlers import llm_router
 

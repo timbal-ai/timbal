@@ -13,10 +13,10 @@ from pydantic import (
 )
 
 from ..types.chat.content import ToolResultContent, ToolUseContent
+from ..types.events import OutputEvent
 from ..types.message import Message
 from .collectors.agent import AgentCollector
 from .collectors.base import BaseCollector
-from .events.output import OutputEvent
 from .handlers import llm_router
 from .runnable import Runnable
 from .tool import Tool
@@ -169,9 +169,9 @@ class Agent(Runnable):
                 **kwargs,
             ):
                 if isinstance(event, OutputEvent):
-                    assert isinstance(event.data.output, Message), \
-                        f"Expected Message, got {type(event.data.output)}"
-                    messages.append(event.data.output)
+                    assert isinstance(event.output, Message), \
+                        f"Expected Message, got {type(event.output)}"
+                    messages.append(event.output)
                 yield event
 
             tool_calls = [
@@ -187,7 +187,7 @@ class Agent(Runnable):
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
                     # We need to convert the tool output to a tool result message, for the next LLM to consume and match 
                     # ? Can we optimize this double validate?
-                    event_output = event.data.output
+                    event_output = event.output
                     if not isinstance(event_output, Message):
                         event_output = Message.validate({
                             "role": "user",

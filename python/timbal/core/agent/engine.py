@@ -10,7 +10,6 @@ from anthropic.types import Message as AnthropicMessage
 from openai.types.chat import ChatCompletion as OpenAICompletion
 from openai.types.chat import ChatCompletionMessage as OpenAIMessage
 from pydantic import BaseModel, TypeAdapter
-from uuid_extensions import uuid7
 
 from timbal.types.events.chunk import ChunkEvent
 
@@ -1031,10 +1030,8 @@ class Agent(BaseStep):
         """
         run_context = get_run_context()
         if not run_context:
-            run_context = RunContext(id=uuid7(as_type="str"))
+            run_context = RunContext()
             set_run_context(run_context)
-        if not run_context.id:
-            run_context.id = uuid7(as_type="str")
 
         if self.remote_config:
             async for event in self._run_remote(**kwargs):

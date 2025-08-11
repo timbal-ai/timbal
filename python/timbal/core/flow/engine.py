@@ -491,10 +491,8 @@ class Flow(BaseStep):
         """
         context = get_run_context()
         if not context:
-            context = RunContext(id=uuid7(as_type="str"))
+            context = RunContext()
             set_run_context(context)
-        if not context.id:
-            context.id = uuid7(as_type="str")
 
         t0 = int(time.time() * 1000)
 

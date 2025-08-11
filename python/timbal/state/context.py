@@ -2,7 +2,14 @@ from collections import UserDict
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, SecretStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    model_validator,
+)
+from uuid_extensions import uuid7
 
 from .data import BaseData, DataValue
 
@@ -106,24 +113,44 @@ class RunContextData(UserDict):
 
 class RunContext(BaseModel):
     """Context for a run.
-    This is shared between all steps in a flow (including nested subflows).
+    This is shared between all steps in an agent/workflow (including nested agents/workflows).
     """
-    # Allow for extra fields.
-    model_config = ConfigDict(extra="ignore", arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="ignore",
+    )
 
-    id: str | None = None
-    """Unique identifier for the run.
-    We allow for the id to be None so the dev has more flexibility when trying things out.
-    The existance of this field should be enforced when creating a Snapshot and using the state saver.
-    """
-    parent_id: str | None = None
-    """Whether this run is a direct child of another run.
-    Can be used to recursively retrieve all runs into a single list -> chat history.
-    Can also be used to create a new branch from a specific run -> rewind.
-    """
-    idempotency_key: str | None = None
-    """Idempotency key for the run."""
-    data: RunContextData = RunContextData()
-    """Data to be shared between steps in an agent or workflow."""
-    timbal_platform_config: TimbalPlatformConfig | None = None
-    """Platform configuration for the run."""
+    id: str = Field(
+        default_factory=lambda: uuid7(as_type="str"),
+        description="Unique identifier for the run.",
+    )
+    parent_id: str | None = Field(
+        None,
+        description="Whether this run is a direct child of another run.",
+    )
+    idempotency_key: str | None = Field(
+        None,
+        description="Idempotency key for the run."
+    )
+    data: RunContextData = Field(
+        default_factory=RunContextData,
+        description="Data to be shared between steps in an agent or workflow."
+    )
+    timbal_platform_config: TimbalPlatformConfig | None = Field(
+        None,
+        description="Platform configuration for the run."
+    )
+    usage: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Usage data for the run. Stored as key-value pairs."
+            "e.g. 'gpt-4.1:input_text_tokens': 1000"
+        ),
+    )
+
+    def update_usage(self, key: str, value: int) -> None:
+        """"""
+        if key in self.usage:
+            self.usage[key] += value
+        else:
+            self.usage[key] = value
