@@ -17,7 +17,8 @@ from pydantic import (
     model_serializer,
 )
 
-from ..core.stream import AsyncGenState, handle_event, sync_to_async_gen
+from ..collectors import get_collector_registry
+from ..collectors.utils import sync_to_async_gen
 from ..state import get_run_context, set_run_context
 from ..state.context import RunContext
 from ..types.events import (
@@ -208,33 +209,32 @@ class Runnable(ABC, BaseModel):
                 async_gen = self.handler(**input)
             
             if async_gen:
-                async_gen_state = AsyncGenState()
+                collector = None
                 async for chunk in async_gen:
-                    # Handle chunk using the stream.py logic
-                    # TODO Refactor for the types
-                    processed_chunk = handle_event(chunk, async_gen_state)
+                    # Get or create collector for this event type
+                    if collector is None:
+                        collector_type = get_collector_registry().get_collector_type(chunk)
+                        if collector_type:
+                            collector = collector_type(run_context)
                     
-                    # If the processed chunk is not None, it means we have streaming content
-                    if processed_chunk is not None:
-                        # If it's already a BaseEvent, it means we have already emitted it.
-                        if not isinstance(chunk, BaseEvent):
-                            chunk_event = await ChunkEvent.build(
-                                run_id=run_context.id,
-                                path=self._path,
-                                chunk=processed_chunk,
-                            )
-                            logger.info("chunk_event", **chunk_event.dump)
-                            yield chunk_event
-                        else:
-                            yield chunk
+                    if collector:
+                        processed_chunk = collector.process(chunk)
+                        
+                        # If the processed chunk is not None, it means we have streaming content
+                        if processed_chunk is not None:
+                            # If it's already a BaseEvent, it means we have already emitted it.
+                            if not isinstance(chunk, BaseEvent):
+                                chunk_event = await ChunkEvent.build(
+                                    run_id=run_context.id,
+                                    path=self._path,
+                                    chunk=processed_chunk,
+                                )
+                                logger.info("chunk_event", **chunk_event.dump)
+                                yield chunk_event
+                            else:
+                                yield chunk
 
-                # Update run context usage from async_gen_state
-                # TODO Review this
-                if async_gen_state.usage:
-                    for key, value in async_gen_state.usage.items():
-                        run_context.update_usage(key, value)
-                
-                output = async_gen_state.collect()
+                output = collector.collect() if collector else None
             
         except Exception as err:
             error = {

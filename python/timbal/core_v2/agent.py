@@ -164,12 +164,8 @@ class Agent(Runnable):
                 **kwargs,
             ):
                 if isinstance(event, OutputEvent):
-                    # TODO The returned event.output should already be collected as a Message
-                    output_message = Message.validate({
-                        "role": "assistant",
-                        "content": event.output,
-                    })
-                    messages.append(output_message)
+                    assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
+                    messages.append(event.output)
                 yield event
 
             tool_calls = [
