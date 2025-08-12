@@ -33,6 +33,7 @@ class AgentParams(BaseModel):
     )
 
 
+# TODO Add callbacks
 class Agent(Runnable):
     """"""
 
@@ -131,10 +132,7 @@ class Agent(Runnable):
     async def _multiplex_tools(self, tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """"""
         queue = asyncio.Queue()
-        tasks = [
-            asyncio.create_task(self._enqueue_tool_events(tc, queue))
-            for tc in tool_calls
-        ]
+        tasks = [asyncio.create_task(self._enqueue_tool_events(tc, queue)) for tc in tool_calls]
 
         remaining = len(tasks)
         while remaining > 0:
@@ -147,20 +145,19 @@ class Agent(Runnable):
         await asyncio.gather(*tasks)
 
 
-    async def handler(
-        self, 
-        **kwargs: Any,
-    ) -> Any:
+    async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """"""
         
         # TODO Think how to refactor memory from previous version
         messages = [kwargs.pop("prompt")]
 
+        i = 0
         while True:
             async for event in self._llm(
                 model=self.model,
                 messages=messages,
-                tools=self.tools,
+                # We don't pass tools to the LLM so it can't choose to call them and perform another iteration.
+                tools=self.tools if i < self.max_iter else [],
                 **kwargs,
             ):
                 if isinstance(event, OutputEvent):
@@ -197,4 +194,6 @@ class Agent(Runnable):
                     messages.append(message)
 
                 yield event
+
+            i += 1
             

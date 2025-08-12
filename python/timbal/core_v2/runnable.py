@@ -43,8 +43,6 @@ class Runnable(ABC, BaseModel):
     """"""
     description: str | None = None
     """"""
-    force_exit: bool = False
-    """"""
     params_mode: Literal["all", "required"] = "all"
     """"""
     include_params: list[str] | None = None
