@@ -32,6 +32,7 @@ from ..types.events import (
 logger = structlog.get_logger("timbal.core_v2.runnable")
 
 
+# TODO Add timeout
 class Runnable(ABC, BaseModel):
     """"""
     model_config = ConfigDict(
