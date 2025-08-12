@@ -1,98 +1,12 @@
+import inspect
 from collections import UserDict
-from enum import Enum
 from typing import Any
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    SecretStr,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field
 from uuid_extensions import uuid7
 
+from .config import TimbalPlatformConfig
 from .data import BaseData, DataValue
-
-
-class TimbalPlatformAuthType(str, Enum):
-    BEARER = "bearer"
-    CUSTOM = "custom"
-
-
-class TimbalPlatformAuth(BaseModel):
-    """Configuration for platform authentication.
-    At the moment, supports bearer tokens and custom headers.
-    """
-
-    type: TimbalPlatformAuthType
-    """Type of authentication to use."""
-    token: SecretStr
-    """Token included in the authentication header."""
-    header_name: str | None = None
-    """If type is CUSTOM, this will be the name of the header to use."""
-
-    @property
-    def header_key(self) -> str:
-        """Format header key for requests authenticating with the platform."""
-        if self.type == TimbalPlatformAuthType.BEARER:
-            return "Authorization"
-        elif self.type == TimbalPlatformAuthType.CUSTOM:
-            return self.header_name
-        else:
-            raise NotImplementedError(f"Unknown auth type: {self.type}")
-
-    @property 
-    def header_value(self) -> str:
-        """Format header value for requests authenticating with the platform."""
-        if self.type == TimbalPlatformAuthType.BEARER:
-            return f"Bearer {self.token.get_secret_value()}"
-        elif self.type == TimbalPlatformAuthType.CUSTOM:
-            return self.token.get_secret_value()
-        else:
-            raise NotImplementedError(f"Unknown auth type: {self.type}")
-
-
-class TimbalPlatformSubject(BaseModel):
-    """Contains identifiers to the platform resource the run context applies to."""
-
-    org_id: str | None = None
-    """Organization identifier."""
-    app_id: str | None = None
-    """Application identifier."""
-    version_id: str | None = None
-    """Application version identifier."""
-
-
-class TimbalPlatformConfig(BaseModel):
-    """Complete platform configuration.
-    Contains all the information needed to authenticate and identify the platform resource the run context applies to.
-    """
-
-    host: str
-    """Platform host."""
-    cdn: str = "content.timbal.ai"
-    """CDN host."""
-    auth: TimbalPlatformAuth
-    """Platform authentication configuration."""
-    subject: TimbalPlatformSubject | None = None
-    """Platform subject configuration. i.e. this is the agent/workflow platform identifiers context."""
-
-    @model_validator(mode="before")
-    @classmethod
-    def handle_aliases(cls, values):
-        # Pydantic does not natively support multiple aliases for single fields.
-        # We keep the other names for backwards compatibility.
-        if "auth_config" in values:
-            values["auth"] = values.pop("auth_config")
-
-        if "app_config" in values:
-            values["subject"] = values.pop("app_config")
-        elif "app" in values:
-            values["subject"] = values.pop("app")
-        elif "scope" in values:
-            values["subject"] = values.pop("scope")
-
-        return values
 
 
 class RunContextData(UserDict):
@@ -140,17 +54,76 @@ class RunContext(BaseModel):
         None,
         description="Platform configuration for the run."
     )
-    usage: dict[str, int] = Field(
+    traces: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description=(
-            "Usage data for the run. Stored as key-value pairs."
-            "e.g. 'gpt-4.1:input_text_tokens': 1000"
+            "Execution traces for the run, similar to run_steps in agent engine."
+            "Stores detailed execution information including input, output, error, timing, and usage."
+            "Usage data is stored within each trace entry under the 'usage' key."
         ),
     )
 
     def update_usage(self, key: str, value: int) -> None:
-        """"""
-        if key in self.usage:
-            self.usage[key] += value
-        else:
-            self.usage[key] = value
+        """Update usage statistics within traces with the runnable path from call stack inspection."""
+        print("update_usage", key, value)
+        
+        # Find the first Runnable instance in the call stack
+        runnable_path = self._get_runnable_path_from_stack()
+        
+        # Initialize trace entry if it doesn't exist
+        if runnable_path not in self.traces:
+            self.traces[runnable_path] = {"usage": {}}
+        
+        # Initialize usage within the trace if it doesn't exist
+        if "usage" not in self.traces[runnable_path]:
+            self.traces[runnable_path]["usage"] = {}
+        
+        # Update the usage value
+        current_value = self.traces[runnable_path]["usage"].get(key, 0)
+        self.traces[runnable_path]["usage"][key] = current_value + value
+
+    def _get_runnable_path_from_stack(self) -> str:
+        """Inspect the call stack to find the first Runnable instance and return its path."""
+        try:
+            # Import Runnable here to avoid circular imports
+            from ..core_v2.runnable import Runnable
+        except ImportError:
+            return "unknown"
+                    
+        runnable_path = "unknown"
+        
+        try:
+            stack_frames = inspect.stack()
+        except Exception:
+            return "unknown"
+            
+        for frame_info in stack_frames:
+            try:
+                frame = frame_info.frame
+                frame_locals = frame.f_locals
+                    
+                if "self" in frame_locals and runnable_path == "unknown":
+                    obj = frame_locals["self"]
+                    if isinstance(obj, Runnable):
+                        runnable_path = obj._path
+
+                if runnable_path == "unknown":
+                    if frame_info.function == "_next":
+                        runnable_path = frame_locals.get("_path", "unknown")
+                        _call_id = frame_locals.get("_call_id", "unknown")
+                        return f"{runnable_path}:{_call_id}"
+                    continue
+                    
+                _call_id = frame_locals.get("_call_id", None)
+                if _call_id:
+                    return f"{runnable_path}:{_call_id}"
+
+                tool_call = frame_locals.get("tool_call", None)
+                if tool_call and hasattr(tool_call, 'id'):
+                    return f"{runnable_path}:{tool_call.id}"
+                        
+            except Exception:
+                # Skip problematic frames
+                continue
+            
+        return runnable_path

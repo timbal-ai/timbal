@@ -11,6 +11,7 @@ from pydantic import (
     SkipValidation,
     computed_field,
 )
+from uuid_extensions import uuid7
 
 from ..types.chat.content import ToolResultContent, ToolUseContent
 from ..types.events import OutputEvent
@@ -122,7 +123,7 @@ class Agent(Runnable):
     async def _enqueue_tool_events(self, tool_call: ToolUseContent, queue: asyncio.Queue) -> None:
         """"""
         tool = self._tools_by_name[tool_call.name]
-        async for event in tool(**tool_call.input):
+        async for event in tool(_call_id=tool_call.id, **tool_call.input):
             await queue.put((tool_call, event))
 
         # Signal completion with a sentinel value (None)
@@ -154,6 +155,7 @@ class Agent(Runnable):
         i = 0
         while True:
             async for event in self._llm(
+                _call_id=uuid7(as_type="str").replace("-", ""),
                 model=self.model,
                 messages=messages,
                 # We don't pass tools to the LLM so it can't choose to call them and perform another iteration.

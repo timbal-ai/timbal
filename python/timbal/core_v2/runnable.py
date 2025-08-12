@@ -186,20 +186,23 @@ class Runnable(ABC, BaseModel):
         input = {**self.fixed_params, **kwargs}
         output, error = None, None
 
+        # Extract and store internal call ID for usage tracking
+        _call_id = input.pop("_call_id", None)
+
         try:
-            # ? Should we capture and raise a special timbal error?
             input = dict(self.params_model.model_validate(input))
 
             async_gen = None
             if not self._is_async_gen and not self._is_coroutine:
                 loop = asyncio.get_running_loop()
                 ctx = contextvars.copy_context()
-
                 if self._is_gen:
                     gen = self.handler(**input)
-                    async_gen = sync_to_async_gen(gen, loop, ctx)
+                    async_gen = sync_to_async_gen(gen, loop, ctx, self._path, _call_id)
                 else:
-                    output = await loop.run_in_executor(None, lambda: ctx.run(self.handler, **input))
+                    def handler_func(_call_id=_call_id):
+                        return ctx.run(self.handler, **input)
+                    output = await loop.run_in_executor(None, handler_func)
             
             elif self._is_coroutine:
                 output = await self.handler(**input)
@@ -253,8 +256,7 @@ class Runnable(ABC, BaseModel):
                 input=input,
                 output=output,
                 error=error,
-                # TODO This grabs all the usage, not just the one by this runnable component
-                usage=run_context.usage,
+                # TODO Grab specific usage of this one
             )
             logger.info("output_event", **output_event.dump)
             yield output_event
