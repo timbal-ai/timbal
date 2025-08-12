@@ -77,10 +77,7 @@ class Agent(Runnable):
                     tool = Tool(handler=tool)
             
             if tool.name in tools_by_name:
-                raise ValueError(
-                    f"Tool {tool.name} already exists. "
-                    "You can only add a tool once."
-                )
+                raise ValueError(f"Tool {tool.name} already exists. You can only add a tool once.")
             
             tool.nest(self._path)
             normalized_tools.append(tool)

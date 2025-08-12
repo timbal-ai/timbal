@@ -248,6 +248,7 @@ class Runnable(ABC, BaseModel):
         finally:
             t1 = int(time.time() * 1000)
 
+            usage = run_context.tracing.get(self._path, {}).get(_call_id, {}).get("usage", {})
             output_event = await OutputEvent.build(
                 run_id=run_context.id,
                 path=self._path,
@@ -256,7 +257,7 @@ class Runnable(ABC, BaseModel):
                 input=input,
                 output=output,
                 error=error,
-                # TODO Grab specific usage of this one
+                usage=usage,
             )
             logger.info("output_event", **output_event.dump)
             yield output_event

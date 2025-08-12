@@ -54,49 +54,53 @@ class RunContext(BaseModel):
         None,
         description="Platform configuration for the run."
     )
-    traces: dict[str, dict[str, Any]] = Field(
+    # TODO We could use a custom model for this
+    tracing: dict[str, dict[str, dict[str, Any]]] = Field(
         default_factory=dict,
         description=(
-            "Execution traces for the run, similar to run_steps in agent engine."
+            "Execution traces for the run."
             "Stores detailed execution information including input, output, error, timing, and usage."
             "Usage data is stored within each trace entry under the 'usage' key."
+            "Structure: {runnable_path: {call_id: {usage: {...}, ...}}}"
         ),
     )
 
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics within traces with the runnable path from call stack inspection."""
-        print("update_usage", key, value)
         
         # Find the first Runnable instance in the call stack
-        runnable_path = self._get_runnable_path_from_stack()
+        runnable_path, call_id = self._get_runnable_path_from_stack()
         
-        # Initialize trace entry if it doesn't exist
-        if runnable_path not in self.traces:
-            self.traces[runnable_path] = {"usage": {}}
+        # Initialize runnable_path entry if it doesn't exist
+        if runnable_path not in self.tracing:
+            self.tracing[runnable_path] = {}
+        
+        # Initialize call_id entry if it doesn't exist
+        if call_id not in self.tracing[runnable_path]:
+            self.tracing[runnable_path][call_id] = {"usage": {}}
         
         # Initialize usage within the trace if it doesn't exist
-        if "usage" not in self.traces[runnable_path]:
-            self.traces[runnable_path]["usage"] = {}
+        if "usage" not in self.tracing[runnable_path][call_id]:
+            self.tracing[runnable_path][call_id]["usage"] = {}
         
         # Update the usage value
-        current_value = self.traces[runnable_path]["usage"].get(key, 0)
-        self.traces[runnable_path]["usage"][key] = current_value + value
+        current_value = self.tracing[runnable_path][call_id]["usage"].get(key, 0)
+        self.tracing[runnable_path][call_id]["usage"][key] = current_value + value
 
-    def _get_runnable_path_from_stack(self) -> str:
-        """Inspect the call stack to find the first Runnable instance and return its path."""
+    def _get_runnable_path_from_stack(self) -> tuple[str, str]:
+        """Inspect the call stack to find the first Runnable instance and return its path and call_id."""
         try:
             # Import Runnable here to avoid circular imports
             from ..core_v2.runnable import Runnable
         except ImportError:
-            return "unknown"
-                    
-        runnable_path = "unknown"
+            return ("unknown", "unknown")
         
         try:
             stack_frames = inspect.stack()
         except Exception:
-            return "unknown"
+            return ("unknown", "unknown")
             
+        runnable_path = "unknown"
         for frame_info in stack_frames:
             try:
                 frame = frame_info.frame
@@ -111,19 +115,19 @@ class RunContext(BaseModel):
                     if frame_info.function == "_next":
                         runnable_path = frame_locals.get("_path", "unknown")
                         _call_id = frame_locals.get("_call_id", "unknown")
-                        return f"{runnable_path}:{_call_id}"
+                        return (runnable_path, _call_id)
                     continue
                     
                 _call_id = frame_locals.get("_call_id", None)
                 if _call_id:
-                    return f"{runnable_path}:{_call_id}"
+                    return (runnable_path, _call_id)
 
                 tool_call = frame_locals.get("tool_call", None)
                 if tool_call and hasattr(tool_call, 'id'):
-                    return f"{runnable_path}:{tool_call.id}"
+                    return (runnable_path, tool_call.id)
                         
             except Exception:
                 # Skip problematic frames
                 continue
             
-        return runnable_path
+        return (runnable_path, "unknown")
