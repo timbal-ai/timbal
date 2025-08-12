@@ -21,7 +21,7 @@ async def handler(
         description="Chat history containing user and LLM messages.",
     ),
     tools: list[Runnable] = Field(
-        default=[], 
+        default_factory=list, 
         description="List of tools/functions the LLM can call.",
     ),
     # TODO Add all the rest of parameters.

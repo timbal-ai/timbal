@@ -72,12 +72,16 @@ async def dump(value: Any) -> Any:
             return round(value, 10)  # 10 decimal places should be enough for most use cases
     elif isinstance(value, Path):
         return value.as_posix()
-    elif isinstance(value, Message): # Message is no longer a BaseModel.
+    elif isinstance(value, Message):
         return {
             "role": value.role,
             "content": await asyncio.gather(*[dump(c) for c in value.content]),
         }
-    elif isinstance(value, BaseModel): # Handle BaseModel instances as we handle dictionaries.
+    # Perform the check via mro to avoid circular imports between Runnable and dump
+    elif any(cls.__name__ == "Runnable" for cls in value.__class__.__mro__):
+        return value.model_dump()
+    # Handle the rest of BaseModel instances as we handle dictionaries
+    elif isinstance(value, BaseModel): 
         items = await asyncio.gather(*[dump(v) for v in value.__dict__.values()])
         return dict(zip(value.__dict__.keys(), items))
     elif isinstance(value, dict):

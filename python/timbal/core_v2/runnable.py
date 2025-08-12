@@ -161,8 +161,8 @@ class Runnable(ABC, BaseModel):
 
     @model_serializer
     def serialize(self) -> dict[str, Any]:
-        """"""
-        return self.openai_schema
+        """We use the simpler anthropic schema for serialization."""
+        return self.anthropic_schema
 
     
     async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
@@ -188,6 +188,11 @@ class Runnable(ABC, BaseModel):
 
         # Extract and store internal call ID for usage tracking
         _call_id = input.pop("_call_id", None)
+        # Make sure the path and call_id exist in the tracing dictionary
+        if self._path not in run_context.tracing:
+            run_context.tracing[self._path] = {}
+        if _call_id not in run_context.tracing[self._path]:
+            run_context.tracing[self._path][_call_id] = {}
 
         try:
             input = dict(self.params_model.model_validate(input))
@@ -247,8 +252,7 @@ class Runnable(ABC, BaseModel):
         
         finally:
             t1 = int(time.time() * 1000)
-
-            usage = run_context.tracing.get(self._path, {}).get(_call_id, {}).get("usage", {})
+            trace = run_context.tracing.get(self._path, {}).get(_call_id, {})
             output_event = await OutputEvent.build(
                 run_id=run_context.id,
                 path=self._path,
@@ -257,7 +261,15 @@ class Runnable(ABC, BaseModel):
                 input=input,
                 output=output,
                 error=error,
-                usage=usage,
+                usage=trace.get("usage", {}),
             )
+            # TODO Think where to put this
+            trace.update({
+                "t0": t0,
+                "t1": t1,
+                "input": output_event.dump["input"],
+                "output": output_event.dump["output"],
+                "error": output_event.dump["error"],
+            })
             logger.info("output_event", **output_event.dump)
             yield output_event
