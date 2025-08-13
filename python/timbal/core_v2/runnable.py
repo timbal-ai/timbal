@@ -192,7 +192,7 @@ class Runnable(ABC, BaseModel):
         if self._path not in run_context.tracing:
             run_context.tracing[self._path] = {}
         if _call_id not in run_context.tracing[self._path]:
-            run_context.tracing[self._path][_call_id] = {}
+            run_context.tracing[self._path][_call_id] = {"usage": {}}
 
         try:
             input = dict(self.params_model.model_validate(input))

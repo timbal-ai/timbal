@@ -70,18 +70,11 @@ class RunContext(BaseModel):
         
         # Find the first Runnable instance in the call stack
         runnable_path, call_id = self._get_runnable_path_from_stack()
-        
-        # Initialize runnable_path entry if it doesn't exist
-        if runnable_path not in self.tracing:
-            self.tracing[runnable_path] = {}
-        
-        # Initialize call_id entry if it doesn't exist
-        if call_id not in self.tracing[runnable_path]:
-            self.tracing[runnable_path][call_id] = {"usage": {}}
-        
-        # Initialize usage within the trace if it doesn't exist
-        if "usage" not in self.tracing[runnable_path][call_id]:
-            self.tracing[runnable_path][call_id]["usage"] = {}
+
+        # Use assertions here to catch any issues early
+        assert runnable_path in self.tracing, f"RunContext.update_usage: Runnable path {runnable_path} not found in tracing."
+        assert call_id in self.tracing[runnable_path], f"RunContext.update_usage: Call ID {call_id} not found in tracing for runnable path {runnable_path}."
+        assert "usage" in self.tracing[runnable_path][call_id], f"RunContext.update_usage: Usage not found in tracing for runnable path {runnable_path} and call ID {call_id}."
         
         # Update the usage value
         current_value = self.tracing[runnable_path][call_id]["usage"].get(key, 0)

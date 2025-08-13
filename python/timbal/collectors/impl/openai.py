@@ -94,6 +94,7 @@ class OpenAICollector(EventCollector):
         else:
             # Continue current tool call
             if not self._current_tool_call:
+                # TODO Review this
                 # ? Gemini (via openai sdk) doesn't add an id to the tool call
                 tool_use_id = f"call_{uuid7(as_type='str').replace('-', '')}"
                 self._current_tool_call = {
@@ -130,9 +131,16 @@ class OpenAICollector(EventCollector):
             })
             
         if self._tool_calls:
+            # Openai allows the use of custom IDs for tool calls. 
+            # We choose to generate our own random IDs for consistency and to make sure they don't collide
+            # (they are not transparent with the algs being used)
+            tool_calls = [
+                {**tc, "id": uuid7(as_type="str").replace("-", "")}
+                for tc in self._tool_calls
+            ]
             return Message.validate({
                 "role": "assistant",
-                "tool_calls": self._tool_calls
+                "tool_calls": tool_calls
             })
             
         return None
