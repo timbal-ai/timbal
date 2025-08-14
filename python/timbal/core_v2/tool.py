@@ -42,7 +42,7 @@ class Tool(Runnable):
     def model_post_init(self, __context: Any) -> None:
         """"""
         self._path = self.name
-
+        self._is_orchestrator = False
         self._is_coroutine = inspect.iscoroutinefunction(self.handler)
         self._is_gen = inspect.isgeneratorfunction(self.handler)
         self._is_async_gen = inspect.isasyncgenfunction(self.handler)

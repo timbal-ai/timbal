@@ -96,10 +96,10 @@ class OpenAICollector(EventCollector):
             if not self._current_tool_call:
                 # TODO Review this
                 # ? Gemini (via openai sdk) doesn't add an id to the tool call
-                tool_use_id = f"call_{uuid7(as_type='str').replace('-', '')}"
+                tool_call_id = f"tc_{uuid7(as_type='str').replace('-', '')}"
                 self._current_tool_call = {
                     "type": "tool_use",
-                    "id": tool_use_id,
+                    "id": tool_call_id,
                     "name": tool_call.function.name,
                     "input": ""
                 }

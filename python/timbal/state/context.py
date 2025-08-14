@@ -2,11 +2,14 @@ import inspect
 from collections import UserDict
 from typing import Any
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field
 from uuid_extensions import uuid7
 
 from .config import TimbalPlatformConfig
 from .data import BaseData, DataValue
+
+logger = structlog.get_logger("timbal.state.context")
 
 
 class RunContextData(UserDict):
@@ -55,72 +58,71 @@ class RunContext(BaseModel):
         description="Platform configuration for the run."
     )
     # TODO We could use a custom model for this
-    tracing: dict[str, dict[str, dict[str, Any]]] = Field(
+    tracing: dict[str, Any] = Field(
         default_factory=dict,
         description=(
             "Execution traces for the run."
             "Stores detailed execution information including input, output, error, timing, and usage."
             "Usage data is stored within each trace entry under the 'usage' key."
-            "Structure: {runnable_path: {call_id: {usage: {...}, ...}}}"
         ),
     )
 
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics within traces with the runnable path from call stack inspection."""
-        
         # Find the first Runnable instance in the call stack
-        runnable_path, call_id = self._get_runnable_path_from_stack()
-
-        # Use assertions here to catch any issues early
-        assert runnable_path in self.tracing, f"RunContext.update_usage: Runnable path {runnable_path} not found in tracing."
-        assert call_id in self.tracing[runnable_path], f"RunContext.update_usage: Call ID {call_id} not found in tracing for runnable path {runnable_path}."
-        assert "usage" in self.tracing[runnable_path][call_id], f"RunContext.update_usage: Usage not found in tracing for runnable path {runnable_path} and call ID {call_id}."
+        call_id = self._get_call_id_from_stack()
         
-        # Update the usage value
-        current_value = self.tracing[runnable_path][call_id]["usage"].get(key, 0)
-        self.tracing[runnable_path][call_id]["usage"][key] = current_value + value
+        # Update usage for all parents in the call stack
+        processed_root = False
+        while not processed_root:
+            assert call_id in self.tracing, f"RunContext.update_usage: Call ID {call_id} not found in tracing."
+            if call_id is None:
+                processed_root = True
+            trace = self.tracing[call_id]
+            current_value = trace["usage"].get(key, 0)
+            trace["usage"][key] = current_value + value
+            call_id = trace.get("parent_call_id", None)
 
-    def _get_runnable_path_from_stack(self) -> tuple[str, str]:
+    def _get_call_id_from_stack(self) -> str:
         """Inspect the call stack to find the first Runnable instance and return its path and call_id."""
-        try:
-            # Import Runnable here to avoid circular imports
-            from ..core_v2.runnable import Runnable
-        except ImportError:
-            return ("unknown", "unknown")
+        # Import Runnable here to avoid circular imports
+        from ..core_v2.runnable import Runnable
         
         try:
             stack_frames = inspect.stack()
-        except Exception:
-            return ("unknown", "unknown")
+        except Exception as e:
+            logger.error("inspect_stack_error", error=e)
+            return None
             
-        runnable_path = "unknown"
+        runnable_path = None
         for frame_info in stack_frames:
             try:
                 frame = frame_info.frame
                 frame_locals = frame.f_locals
                     
-                if "self" in frame_locals and runnable_path == "unknown":
+                if "self" in frame_locals and not runnable_path:
                     obj = frame_locals["self"]
                     if isinstance(obj, Runnable):
                         runnable_path = obj._path
 
-                if runnable_path == "unknown":
+                if not runnable_path:
                     if frame_info.function == "_next":
-                        runnable_path = frame_locals.get("_path", "unknown")
-                        _call_id = frame_locals.get("_call_id", "unknown")
-                        return (runnable_path, _call_id)
+                        runnable_path = frame_locals.get("_path", None)
+                        _call_id = frame_locals.get("_call_id", None)
+                        return _call_id
                     continue
                     
                 _call_id = frame_locals.get("_call_id", None)
                 if _call_id:
-                    return (runnable_path, _call_id)
+                    return _call_id
 
                 tool_call = frame_locals.get("tool_call", None)
                 if tool_call and hasattr(tool_call, 'id'):
-                    return (runnable_path, tool_call.id)
+                    return tool_call.id
                         
-            except Exception:
+            except Exception as e:
                 # Skip problematic frames
+                logger.error("inspect_stack_error", error=e)
                 continue
             
-        return (runnable_path, "unknown")
+        return None

@@ -87,6 +87,7 @@ class Agent(Runnable):
         self._tools_by_name = tools_by_name 
 
         # The handler for the agent is always an async generator
+        self._is_orchestrator = True
         self._is_coroutine = False
         self._is_gen = False
         self._is_async_gen = True
@@ -117,20 +118,20 @@ class Agent(Runnable):
         return Message
 
     
-    async def _enqueue_tool_events(self, tool_call: ToolUseContent, queue: asyncio.Queue) -> None:
+    async def _enqueue_tool_events(self, _parent_call_id: str | None, tool_call: ToolUseContent, queue: asyncio.Queue) -> None:
         """"""
         tool = self._tools_by_name[tool_call.name]
-        async for event in tool(_call_id=tool_call.id, **tool_call.input):
+        async for event in tool(_call_id=tool_call.id, _parent_call_id=_parent_call_id, **tool_call.input):
             await queue.put((tool_call, event))
 
         # Signal completion with a sentinel value (None)
         await queue.put((tool_call, None))
 
 
-    async def _multiplex_tools(self, tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
+    async def _multiplex_tools(self, _parent_call_id: str | None, tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """"""
         queue = asyncio.Queue()
-        tasks = [asyncio.create_task(self._enqueue_tool_events(tc, queue)) for tc in tool_calls]
+        tasks = [asyncio.create_task(self._enqueue_tool_events(_parent_call_id, tc, queue)) for tc in tool_calls]
 
         remaining = len(tasks)
         while remaining > 0:
@@ -145,6 +146,8 @@ class Agent(Runnable):
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """"""
+        # Special scenario: the Runnable passes the self.handler the caller id
+        _parent_call_id = kwargs.pop("_parent_call_id", None)
         
         # TODO Think how to refactor memory from previous version
         messages = [kwargs.pop("prompt")]
@@ -153,6 +156,7 @@ class Agent(Runnable):
         while True:
             async for event in self._llm(
                 _call_id=uuid7(as_type="str").replace("-", ""),
+                _parent_call_id=_parent_call_id,
                 model=self.model,
                 messages=messages,
                 # We don't pass tools to the LLM so it can't choose to call them and perform another iteration.
@@ -171,7 +175,7 @@ class Agent(Runnable):
             if not tool_calls:
                 break
 
-            async for tool_call, event in self._multiplex_tools(tool_calls):
+            async for tool_call, event in self._multiplex_tools(_parent_call_id, tool_calls):
                 # We'll receive a bunch of upwards streaming events from nested agents
                 # We only need to process the ones that are immediate children of this very agent
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:

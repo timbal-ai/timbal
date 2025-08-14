@@ -53,14 +53,16 @@ class Runnable(ABC, BaseModel):
     fixed_params: dict[str, Any] = {}
     """"""
 
-    _is_coroutine: bool = PrivateAttr()
-    """"""
-    _is_gen: bool = PrivateAttr()
-    """"""
-    _is_async_gen: bool = PrivateAttr()
-    """"""
     _path: str = PrivateAttr()
-    """"""
+    """The full path of the Runnable in the run context."""
+    _is_orchestrator: bool = PrivateAttr()
+    """Whether the Runnable is an orchestrator, i.e. it calls other Runnables."""
+    _is_coroutine: bool = PrivateAttr()
+    """Whether the Runnable handler is a coroutine."""
+    _is_gen: bool = PrivateAttr()
+    """Whether the Runnable handler is a generator."""
+    _is_async_gen: bool = PrivateAttr()
+    """Whether the Runnable handler is an async generator."""
 
 
     @abstractmethod
@@ -186,13 +188,14 @@ class Runnable(ABC, BaseModel):
         input = {**self.fixed_params, **kwargs}
         output, error = None, None
 
-        # Extract and store internal call ID for usage tracking
         _call_id = input.pop("_call_id", None)
-        # Make sure the path and call_id exist in the tracing dictionary
-        if self._path not in run_context.tracing:
-            run_context.tracing[self._path] = {}
-        if _call_id not in run_context.tracing[self._path]:
-            run_context.tracing[self._path][_call_id] = {"usage": {}}
+        _parent_call_id = input.pop("_parent_call_id", None)
+        assert _call_id not in run_context.tracing, f"Call ID {_call_id} already exists in tracing."
+        run_context.tracing[_call_id] = {
+            "path": self._path,
+            "parent_call_id": _parent_call_id,
+            "usage": {},
+        }
 
         try:
             input = dict(self.params_model.model_validate(input))
@@ -213,7 +216,10 @@ class Runnable(ABC, BaseModel):
                 output = await self.handler(**input)
             
             else:
-                async_gen = self.handler(**input)
+                if self._is_orchestrator:
+                    async_gen = self.handler(**input, _parent_call_id=_call_id)
+                else:
+                    async_gen = self.handler(**input)
             
             if async_gen:
                 collector = None
@@ -252,7 +258,7 @@ class Runnable(ABC, BaseModel):
         
         finally:
             t1 = int(time.time() * 1000)
-            trace = run_context.tracing.get(self._path, {}).get(_call_id, {})
+            trace = run_context.tracing[_call_id]
             output_event = await OutputEvent.build(
                 run_id=run_context.id,
                 path=self._path,
@@ -261,7 +267,7 @@ class Runnable(ABC, BaseModel):
                 input=input,
                 output=output,
                 error=error,
-                usage=trace.get("usage", {}),
+                usage=trace["usage"],
             )
             # TODO Think where to put this
             trace.update({
