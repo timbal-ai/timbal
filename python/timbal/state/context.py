@@ -3,11 +3,13 @@ from collections import UserDict
 from typing import Any
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from uuid_extensions import uuid7
 
 from .config import TimbalPlatformConfig
 from .data import BaseData, DataValue
+from .tracing import Tracing
+from .tracing.providers import InMemoryTracingProvider, TracingProvider
 
 logger = structlog.get_logger("timbal.state.context")
 
@@ -57,15 +59,26 @@ class RunContext(BaseModel):
         None,
         description="Platform configuration for the run."
     )
-    # TODO We could use a custom model for this
-    tracing: dict[str, Any] = Field(
-        default_factory=dict,
+    tracing: Tracing = Field(
+        default_factory=Tracing,
         description=(
             "Execution traces for the run."
             "Stores detailed execution information including input, output, error, timing, and usage."
             "Usage data is stored within each trace entry under the 'usage' key."
         ),
     )
+    _tracing_provider: type[TracingProvider] = PrivateAttr()
+
+    def model_post_init(self, __context: Any) -> None:
+        """"""
+        # TODO Enable custom providers
+        # TODO Enable platform provider
+        logger.warning(
+            "Neither custom tracing provider nor platform config found. "
+            "Using in-memory tracing provider.",
+            run_id=self.id,
+        )
+        self._tracing_provider = InMemoryTracingProvider
 
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics within traces with the runnable path from call stack inspection."""

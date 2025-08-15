@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
 from typing import Any, override
 
+import structlog
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -13,12 +14,15 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
+from ..state import get_run_context
 from ..types.chat.content import ToolResultContent, ToolUseContent
 from ..types.events import OutputEvent
 from ..types.message import Message
 from .handlers import llm_router
 from .runnable import Runnable
 from .tool import Tool
+
+logger = structlog.get_logger("timbal.core_v2.agent")
 
 ToolLike = Runnable | dict[str, Any] | Callable[..., Any]
 
@@ -118,6 +122,24 @@ class Agent(Runnable):
         return Message
 
     
+    async def _resolve_memory(self) -> list[Message]:
+        """"""
+        memory = []
+        run_context = get_run_context()
+        if run_context.parent_id:
+            parent_tracing = await run_context._tracing_provider.get_tracing(run_context.parent_id)
+            if parent_tracing is None:
+                logger.error("Parent tracing not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
+            else:
+                # TODO What if we have multiple call_ids for this subagent?
+                llm_tracing = parent_tracing.get_path(self._llm._path)
+                assert len(llm_tracing) >= 1, f"Agent trace does not have any records for path {self._llm._path}"
+                llm_input_messages = llm_tracing[-1]["input"]["messages"]
+                llm_output_message = llm_tracing[-1]["output"]
+                memory = [*[Message.validate(m) for m in llm_input_messages], Message.validate(llm_output_message),]
+        return memory
+
+    
     async def _enqueue_tool_events(self, _parent_call_id: str | None, tool_call: ToolUseContent, queue: asyncio.Queue) -> None:
         """"""
         tool = self._tools_by_name[tool_call.name]
@@ -146,11 +168,11 @@ class Agent(Runnable):
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """"""
-        # Special scenario: the Runnable passes the self.handler the caller id
+        # Special scenario: the Runnable passes the caller id to the handler
         _parent_call_id = kwargs.pop("_parent_call_id", None)
         
-        # TODO Think how to refactor memory from previous version
-        messages = [kwargs.pop("prompt")]
+        messages = await self._resolve_memory()
+        messages.append(kwargs.pop("prompt"))
 
         i = 0
         while True:

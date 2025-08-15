@@ -171,10 +171,21 @@ class Runnable(ABC, BaseModel):
         """"""
         t0 = int(time.time() * 1000)
 
+        _call_id = kwargs.pop("_call_id", None)
+        _parent_call_id = kwargs.pop("_parent_call_id", None)
+
+        # Generate new context or reset it if appropriate
         run_context = get_run_context()
-        if not run_context:
+        if not run_context or (not _call_id and run_context.tracing):
             run_context = RunContext()
             set_run_context(run_context)
+
+        assert _call_id not in run_context.tracing, f"Call ID {_call_id} already exists in tracing."
+        run_context.tracing[_call_id] = {
+            "path": self._path,
+            "parent_call_id": _parent_call_id,
+            "usage": {},
+        }
 
         start_event = await StartEvent.build(
             run_id=run_context.id,
@@ -187,15 +198,6 @@ class Runnable(ABC, BaseModel):
         # We'll use these fixed parameters as default values.
         input = {**self.fixed_params, **kwargs}
         output, error = None, None
-
-        _call_id = input.pop("_call_id", None)
-        _parent_call_id = input.pop("_parent_call_id", None)
-        assert _call_id not in run_context.tracing, f"Call ID {_call_id} already exists in tracing."
-        run_context.tracing[_call_id] = {
-            "path": self._path,
-            "parent_call_id": _parent_call_id,
-            "usage": {},
-        }
 
         try:
             input = dict(self.params_model.model_validate(input))
@@ -277,5 +279,7 @@ class Runnable(ABC, BaseModel):
                 "output": output_event.dump["output"],
                 "error": output_event.dump["error"],
             })
+            if _call_id is None: # root
+                await run_context._tracing_provider.put_tracing(run_context.id, run_context.tracing)
             logger.info("output_event", **output_event.dump)
             yield output_event
