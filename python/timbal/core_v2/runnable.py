@@ -176,8 +176,11 @@ class Runnable(ABC, BaseModel):
 
         # Generate new context or reset it if appropriate
         run_context = get_run_context()
-        if not run_context or (not _call_id and run_context.tracing):
+        if not run_context:
             run_context = RunContext()
+            set_run_context(run_context)
+        if not _call_id and run_context.tracing:
+            run_context = RunContext(parent_id=run_context.id)
             set_run_context(run_context)
 
         assert _call_id not in run_context.tracing, f"Call ID {_call_id} already exists in tracing."

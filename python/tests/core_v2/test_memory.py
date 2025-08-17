@@ -12,12 +12,9 @@ async def test_memory():
         model="gpt-4.1-mini",
     )
 
-    async for event in agent(prompt="Hello, my name is David"):
-        if event.type == "OUTPUT" and event.path == "agent":
-            run_id = event.run_id
+    async for _ in agent(prompt="Hello, my name is David"):
+        pass
             
-    run_context = RunContext(parent_id="...")
-    set_run_context(run_context)
-    async for event in agent(prompt="What is my name?"):
+    async for _ in agent(prompt="What is my name?"):
         pass
         
