@@ -513,7 +513,6 @@ class Runnable(ABC, BaseModel):
                     
                     if collector:
                         processed_chunk = collector.process(chunk)
-                        
                         # If the processed chunk is not None, it means we have streaming content
                         if processed_chunk is not None:
                             # If it's already a BaseEvent, it means we have already emitted it.

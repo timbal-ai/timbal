@@ -137,11 +137,9 @@ class Agent(Runnable):
                     # Assume it's a callable and wrap it
                     tool = Tool(handler=tool)
             
-            # Check for duplicate tool names
             if tool.name in tools_by_name:
                 raise ValueError(f"Tool {tool.name} already exists. You can only add a tool once.")
             
-            # Set up nested path and add to collections
             tool.nest(self._path)
             normalized_tools.append(tool)
             tools_by_name[tool.name] = tool
@@ -228,11 +226,9 @@ class Agent(Runnable):
                 # TODO: Handle multiple call_ids for this subagent
                 llm_tracing = parent_tracing.get_path(self._llm._path)
                 assert len(llm_tracing) >= 1, f"Agent trace does not have any records for path {self._llm._path}"
-                
                 # Get the most recent LLM interaction
                 llm_input_messages = llm_tracing[-1]["input"]["messages"]
                 llm_output_message = llm_tracing[-1]["output"]
-                
                 # Reconstruct conversation: input messages + LLM response
                 memory = [
                     *[Message.validate(m) for m in llm_input_messages], 
@@ -257,7 +253,6 @@ class Agent(Runnable):
         # Execute tool and enqueue all events
         async for event in tool(_call_id=tool_call.id, _parent_call_id=_parent_call_id, **tool_call.input):
             await queue.put((tool_call, event))
-
         # Signal completion with a sentinel value (None)
         await queue.put((tool_call, None))
 
@@ -279,7 +274,6 @@ class Agent(Runnable):
         queue = asyncio.Queue()
         # Start all tool executions concurrently
         tasks = [asyncio.create_task(self._enqueue_tool_events(_parent_call_id, tc, queue)) for tc in tool_calls]
-
         # Process events as they arrive from any tool
         remaining = len(tasks)
         while remaining > 0:
@@ -290,7 +284,6 @@ class Agent(Runnable):
             else:
                 # Yield event along with which tool call generated it
                 yield tool_call, event
-        
         # Ensure all tasks complete cleanly
         await asyncio.gather(*tasks)
 
@@ -343,31 +336,25 @@ class Agent(Runnable):
                     messages.append(event.output)
                 yield event
 
-            # Extract tool calls from LLM response
             tool_calls = [
                 content for content in messages[-1].content
                 if isinstance(content, ToolUseContent)
             ]
             
-            # If no tool calls, agent is done
             if not tool_calls:
                 break
 
-            # Execute all tool calls concurrently
             async for tool_call, event in self._multiplex_tools(_parent_call_id, tool_calls):
-                # Process tool completion events to add results to conversation
                 # Only process events from immediate children (not nested subagents)
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
                     # Convert tool output to Message format if needed
-                    # TODO: Can we optimize this double validate?
+                    # ? Can we optimize this double validate
                     event_output = event.output
                     if not isinstance(event_output, Message):
                         event_output = Message.validate({
                             "role": "user",
                             "content": str(event_output),
                         })
-                    
-                    # Create tool result message for LLM consumption
                     message = Message(
                         role="tool",
                         content=[ToolResultContent(
@@ -376,10 +363,6 @@ class Agent(Runnable):
                         )]
                     )
                     messages.append(message)
-
-                # Yield all events from tool executions
                 yield event
-
-            # Increment iteration counter
             i += 1
             

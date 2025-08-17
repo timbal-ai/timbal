@@ -77,9 +77,8 @@ class Tool(Runnable):
         characteristics, which are used by the base Runnable class to determine
         how to execute the handler.
         """
-        self._path = self.name  # Tools use their name as the initial path
-        self._is_orchestrator = False  # Tools don't orchestrate other runnables
-        # Introspect handler to determine execution characteristics
+        self._path = self.name
+        self._is_orchestrator = False
         self._is_coroutine = inspect.iscoroutinefunction(self.handler)
         self._is_gen = inspect.isgeneratorfunction(self.handler)
         self._is_async_gen = inspect.isasyncgenfunction(self.handler)
@@ -96,11 +95,8 @@ class Tool(Runnable):
     @cached_property
     def params_model(self) -> BaseModel:
         """See base class."""
-        # Introspect the handler function to get its signature
         handler_argspec = inspect.getfullargspec(self.handler)
-        # Generate a descriptive name for the parameter model
         params_model_name = self.name.title().replace("_", "") + "Params"
-        # Create Pydantic model from function signature
         params_model = create_model_from_argspec(
             name=params_model_name,
             argspec=handler_argspec,
@@ -113,7 +109,6 @@ class Tool(Runnable):
     @cached_property 
     def return_model(self) -> Any:
         """See base class."""
-        # Extract return type annotation from function signature
         handler_argspec = inspect.getfullargspec(self.handler)
         handler_return_annotation = handler_argspec.annotations.get("return", Any)
         return handler_return_annotation
