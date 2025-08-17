@@ -33,9 +33,7 @@ class AgentParams(BaseModel):
     """Parameter model for Agent execution.
     
     Defines the input parameters that agents accept when called.
-    Currently only supports a single prompt message, but will be
-    extended to support additional parameters like temperature,
-    max_tokens, etc.
+    Supports flexible system prompt composition through templates.
     """
     model_config = ConfigDict(extra="ignore")
 
@@ -43,9 +41,21 @@ class AgentParams(BaseModel):
         ...,
         description="Input message to send to the agent.",
     )
+    system_context: str | None = Field(
+        None,
+        description=(
+            "System prompt context. Can be used to provide additional context to the agent. "
+            "You can inject the agent instructions using the {instructions} placeholder. "
+            "This design enables:\n"
+            "- Platform Flexibility: Send different prompt structures without changing agent code\n"
+            "- Reusable Components: Agent instructions slot into any template\n"
+            "- Context Adaptation: Same agent, different contexts, different structures\n"
+            "- Clean Separation: Agent logic in code, presentation logic from platform\n\n"
+            "If not provided, agent.instructions will be used directly as system prompt."
+        ),
+    )
 
 
-# TODO Add callbacks
 class Agent(Runnable):
     """An Agent is a Runnable that orchestrates LLM interactions with tool calling.
     
@@ -76,19 +86,15 @@ class Agent(Runnable):
 
     model: str
     """The LLM model identifier (e.g., 'claude-3-sonnet', 'gpt-4')."""
-    
     instructions: str | None = None
     """Optional system instructions to provide context for the agent."""
-    
     tools: list[SkipValidation[ToolLike]] = []
     """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
-    
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
 
     _llm: Tool = PrivateAttr()
     """Internal LLM tool instance for making model calls."""
-    
     _tools_by_name: dict[str, Tool] = PrivateAttr()
     """Dictionary mapping tool names to Tool instances for fast lookup."""
 
@@ -104,6 +110,12 @@ class Agent(Runnable):
         4. Configures execution characteristics as an orchestrator
         """
         self._path = self.name
+
+        # Make sure the system_context is not exposed a stool param when using the agent as a tool
+        if self.exclude_params is None:
+            self.exclude_params = ["system_context"]
+        else:
+            self.exclude_params.append("system_context")
         
         # Create internal LLM tool for model interactions
         self._llm = Tool(
@@ -170,6 +182,29 @@ class Agent(Runnable):
         return Message
 
     
+    def _build_system_prompt(self, **kwargs) -> str | None:
+        """Build system prompt from template and instructions.
+        
+        This method implements the flexible system prompt composition pattern:
+        1. If system_context template is provided, format it with instructions
+        2. If no template but instructions exist, use instructions directly  
+        3. If neither exist, return None (no system prompt)
+        
+        Args:
+            **kwargs: Execution parameters, may contain system_context
+            
+        Returns:
+            Formatted system prompt string or None
+        """
+        system_context = kwargs.pop("system_context", None)
+        if system_context:
+            return system_context.format(instructions=self.instructions or "")
+        elif self.instructions:
+            return self.instructions
+        else:
+            return None
+
+
     async def _resolve_memory(self) -> list[Message]:
         """Resolve conversation memory from parent agent context.
         
@@ -283,12 +318,12 @@ class Agent(Runnable):
         """
         # Extract parent call ID for tracing nested execution
         _parent_call_id = kwargs.pop("_parent_call_id", None)
-        
+        # Build system prompt from template and instructions
+        system_prompt = self._build_system_prompt(**kwargs)
         # Initialize conversation with memory + user prompt
         messages = await self._resolve_memory()
         messages.append(kwargs.pop("prompt"))
 
-        # Agent iteration loop
         i = 0
         while True:
             # Call LLM with current conversation
@@ -297,9 +332,10 @@ class Agent(Runnable):
                 _parent_call_id=_parent_call_id,
                 model=self.model,
                 messages=messages,
+                system_prompt=system_prompt,
                 # Only provide tools if we haven't hit max iterations
                 tools=self.tools if i < self.max_iter else [],
-                **kwargs,
+                **kwargs, 
             ):
                 # Add LLM response to conversation for next iteration
                 if isinstance(event, OutputEvent):
