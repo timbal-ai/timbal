@@ -1,7 +1,10 @@
-from typing import override
+from typing import TYPE_CHECKING, override
 
 from ..data import Tracing
 from .base import TracingProvider
+
+if TYPE_CHECKING:
+    from ...context import RunContext
 
 
 class InMemoryTracingProvider(TracingProvider):
@@ -12,13 +15,13 @@ class InMemoryTracingProvider(TracingProvider):
     
     @classmethod
     @override
-    async def get_tracing(cls, run_id: str) -> Tracing | None:
+    async def get(cls, run_id: str) -> Tracing | None:
         """See base class."""
         return cls._storage.get(run_id)
     
     @classmethod
     @override
-    async def put_tracing(cls, run_id: str, tracing: Tracing) -> None:
+    async def put(cls, run_context: "RunContext") -> None:
         """See base class."""
-        cls._storage[run_id] = tracing
+        cls._storage[run_context.id] = run_context.tracing
     

@@ -386,6 +386,6 @@ class Runnable(ABC, BaseModel):
                 "error": output_event.dump["error"],
             })
             if _call_id is None: # root
-                await run_context._tracing_provider.put_tracing(run_context.id, run_context.tracing)
+                await run_context.save_tracing()
             logger.info("output_event", **output_event.dump)
             yield output_event

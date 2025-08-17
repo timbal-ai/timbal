@@ -1,6 +1,10 @@
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from ..data import Tracing
+
+if TYPE_CHECKING:
+    from ...context import RunContext
 
 
 class TracingProvider(ABC):
@@ -8,7 +12,7 @@ class TracingProvider(ABC):
     
     @classmethod
     @abstractmethod
-    async def get_tracing(cls, run_id: str) -> Tracing | None:
+    async def get(cls, run_id: str) -> Tracing | None:
         """Retrieve trace data for a specific run_id.
         
         Args:
@@ -21,11 +25,10 @@ class TracingProvider(ABC):
 
     @classmethod
     @abstractmethod
-    async def put_tracing(cls, run_id: str, tracing: Tracing) -> None:
-        """Store trace data for a specific run_id.
+    async def put(cls, run_context: "RunContext") -> None:
+        """Store trace data for a run.
         
         Args:
-            run_id: The run identifier to store trace data for
-            tracing: The trace data to store
+            run_context: The run context to store trace data for
         """
         pass

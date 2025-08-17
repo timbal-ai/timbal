@@ -139,3 +139,13 @@ class RunContext(BaseModel):
                 continue
             
         return None
+
+    async def get_parent_tracing(self) -> Tracing | None:
+        """Load the tracing data for the parent run."""
+        if self.parent_id:
+            return await self._tracing_provider.get(self.parent_id)
+        return None
+    
+    async def save_tracing(self) -> None:
+        """Save the tracing data for the run."""
+        await self._tracing_provider.put(self)
