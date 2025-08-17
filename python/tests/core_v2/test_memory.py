@@ -1,5 +1,4 @@
 import pytest
-
 from timbal.core_v2.agent import Agent
 
 
