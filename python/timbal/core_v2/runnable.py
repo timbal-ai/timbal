@@ -1,9 +1,10 @@
 import asyncio
 import contextvars
+import inspect
 import time
 import traceback
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from functools import cached_property, wraps
 from typing import Any, Literal
 
@@ -14,6 +15,7 @@ from pydantic import (
     PrivateAttr,
     TypeAdapter,
     computed_field,
+    field_validator,
     model_serializer,
 )
 
@@ -166,6 +168,44 @@ class Runnable(ABC, BaseModel):
     - Event streaming with collection support
     - Execution tracing and monitoring
     - Flexible parameter filtering and transformation
+    
+    Hook Patterns:
+        Both pre_hook and post_hook follow a middleware-style pattern with in-place modification.
+        
+        IMPORTANT: Hooks receive mutable references and should modify them in-place.
+        No return value is expected - all changes happen by mutating the passed objects.
+        
+        Basic patterns:
+        • Reading data: value = data['key']
+        • Modifying data: data['key'] = new_value
+        • Adding data: data['new_key'] = computed_value
+        • Removing data: del data['unwanted_key']
+        • Logging/monitoring: logger.info(f"Processing {data}")
+        
+        Advanced patterns:
+        • Access execution context: run_context = get_run_context()
+        • Store data for other hooks: run_context.data['timestamp'] = time.time()
+        • Cross-hook communication: user_id = run_context.data.get('user_id')
+        • Conditional processing: if run_context.data.get('debug_mode'): add_debug_info()
+        • Performance tracking: run_context.data['start_time'] = time.time()
+        
+        Functional-style transformations while maintaining in-place semantics:
+            # Replace entire dict contents
+            transformed = transform_data(dict(data))
+            data.clear()
+            data.update(transformed)
+            
+            # For lists/other mutables
+            if isinstance(data, list):
+                data[:] = transform_list(data)
+        
+        Common use cases:
+        • Input validation/normalization before handler execution
+        • Adding computed parameters (timestamps, user context, etc.)
+        • Output transformation and metadata addition
+        • Logging, monitoring, and debugging
+        • Conditional parameter injection based on context
+        • Data filtering and sanitization
     """
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -174,21 +214,24 @@ class Runnable(ABC, BaseModel):
 
     name: str
     """The unique identifier for this runnable component."""
-    
     description: str | None = None
     """Optional description of what this runnable does, used in LLM tool schemas."""
-    
     params_mode: Literal["all", "required"] = "all"
     """Parameter inclusion mode: 'all' includes all params, 'required' only required ones."""
-    
     include_params: list[str] | None = None
     """Specific parameter names to include in the schema (additive to params_mode)."""
-    
     exclude_params: list[str] | None = None
     """Specific parameter names to exclude from the schema."""
-    
     fixed_params: dict[str, Any] = {}
     """Parameters that are fixed at initialization and merged with runtime kwargs."""
+    pre_hook: Callable[..., Any] | None = None
+    """Pre-execution hook for input processing. See 'Hook Patterns' in class docstring.
+    Signature: async def pre_hook(input: dict[str, Any]) -> None
+    """
+    post_hook: Callable[..., Any] | None = None
+    """Post-execution hook for output processing. See 'Hook Patterns' in class docstring.
+    Signature: async def post_hook(output: Any) -> None
+    """
 
     _path: str = PrivateAttr()
     """The full path of the Runnable in the run context."""
@@ -200,6 +243,22 @@ class Runnable(ABC, BaseModel):
     """Whether the Runnable handler is a generator."""
     _is_async_gen: bool = PrivateAttr()
     """Whether the Runnable handler is an async generator."""
+
+
+    @field_validator("pre_hook", "post_hook")
+    @classmethod
+    def _validate_hooks(cls, v: Callable[..., Any] | None) -> Callable[..., Any] | None:
+        """Validate that hooks are async callables."""
+        if v is None:
+            return v
+        if not callable(v):
+            raise ValueError(f"Hook must be callable, got {type(v)}")
+        # Check for generators first since they affect the iscoroutinefunction check
+        if inspect.isgeneratorfunction(v) or inspect.isasyncgenfunction(v):
+            raise ValueError("Hook must not be a generator or async generator")
+        if not inspect.iscoroutinefunction(v):
+            raise ValueError(f"Hook must be an async function, got {type(v)}")
+        return v
 
 
     @abstractmethod
@@ -417,6 +476,9 @@ class Runnable(ABC, BaseModel):
         output, error = None, None
 
         try:
+            if self.pre_hook is not None:
+                await self.pre_hook(input)
+            
             input = dict(self.params_model.model_validate(input))
 
             async_gen = None
@@ -467,6 +529,9 @@ class Runnable(ABC, BaseModel):
                                 yield chunk
 
                 output = collector.collect() if collector else None
+            
+            if self.post_hook is not None:
+                await self.post_hook(output)
             
         except Exception as err:
             error = {

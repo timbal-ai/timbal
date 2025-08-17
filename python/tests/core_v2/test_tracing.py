@@ -293,7 +293,9 @@ class TestParallelToolCallTracing:
             
             # The response should mention multiple tasks (evidence of parallel execution)
             response_text = str(response.content).lower()
-            task_mentions = sum(1 for task in ["task_a", "task_b", "task_c"] if task in response_text)
+            # Check for task mentions with flexibility for spaces vs underscores
+            task_patterns = ["task_a", "task a", "task_b", "task b", "task_c", "task c"]
+            task_mentions = sum(1 for task in task_patterns if task in response_text)
             
             # Should mention at least 2 tasks to show parallel execution
             assert task_mentions >= 2, f"Should mention multiple tasks: {response_text}"
