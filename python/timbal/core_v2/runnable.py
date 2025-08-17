@@ -41,16 +41,22 @@ class CollectableAsyncGenerator:
     """
     
     def __init__(self, async_gen: AsyncGenerator[Event, None], runnable: 'Runnable', kwargs: dict[str, Any]):
+        """Initialize the CollectableAsyncGenerator wrapper.
+        
+        Args:
+            async_gen: The original async generator from the Runnable's __call__ method
+            runnable: Reference to the Runnable instance that created the generator
+            kwargs: Original keyword arguments passed to the __call__ method
+        """
         self._async_gen = async_gen  # The original async generator from __call__
-        self._runnable = runnable    # Reference to the Runnable instance (not used currently)
-        self._kwargs = kwargs        # Original kwargs passed to __call__ (not used currently)
+        self._runnable = runnable    # Reference to the Runnable instance
+        self._kwargs = kwargs        # Original kwargs passed to __call__
         self._collected = False      # Track if the generator has been fully consumed
         self._output_event = None    # Cache the OutputEvent when we encounter it
         self._events = []            # Cache all yielded events for later access
     
     def __aiter__(self):
-        """
-        Return the async iterator object (self).
+        """Return the async iterator object (self).
         
         In Python's async iterator protocol:
         - __aiter__() is called when you do `async for item in obj:`
@@ -59,17 +65,25 @@ class CollectableAsyncGenerator:
         
         This is equivalent to how regular iterators work:
         - __iter__() returns an iterator object with __next__()
+        
+        Returns:
+            Self as the async iterator
         """
         return self
     
     async def __anext__(self):
-        """
-        Get the next item from the async iterator.
+        """Get the next item from the async iterator.
         
         This is called by `async for` loops and is the core of the async iterator protocol.
         When the generator is exhausted, it raises StopAsyncIteration to signal completion.
         
         We intercept each event and cache it in self._events for later use by collect().
+        
+        Returns:
+            The next Event from the underlying async generator
+            
+        Raises:
+            StopAsyncIteration: When the generator is exhausted
         """
         try:
             # Get the next event from the wrapped generator
@@ -86,17 +100,20 @@ class CollectableAsyncGenerator:
             raise  # This stops the `async for` loop
     
     async def aclose(self):
-        """
-        Close the generator gracefully.
+        """Close the generator gracefully.
         
-        This is called when the generator needs to be cleaned up.
+        This is called when the generator needs to be cleaned up,
+        either explicitly or when the generator is garbage collected.
         """
         await self._async_gen.aclose()
         self._collected = True
     
     async def collect(self) -> Any:
-        """
-        Collect the final output by consuming the entire stream.
+        """Collect the final output by consuming the entire stream.
+        
+        This method consumes all remaining events from the async generator
+        and returns the final OutputEvent. It can be called multiple times
+        safely - subsequent calls return the cached result.
         
         How this works:
         1. If we already have the OutputEvent cached, return it immediately
@@ -104,7 +121,8 @@ class CollectableAsyncGenerator:
            - This calls our __anext__() method which caches the OutputEvent when found
         3. Return the cached OutputEvent
         
-        This method can be called multiple times safely.
+        Returns:
+            The final OutputEvent from the stream, or None if no OutputEvent was yielded
         """
         # If we already found and cached the OutputEvent, return it
         if self._output_event is not None:
@@ -136,24 +154,41 @@ def collectable(func):
 
 # TODO Add timeout
 class Runnable(ABC, BaseModel):
-    """"""
+    """Abstract base class for all runnable components in the Timbal framework.
+    
+    A Runnable represents an executable unit that can process inputs and produce outputs
+    through an async generator interface. Runnables can be nested to form complex
+    execution graphs and support various execution patterns (sync, async, generators).
+    
+    Key features:
+    - Parameter validation using Pydantic models
+    - Schema generation for LLM tool calling (OpenAI/Anthropic formats)
+    - Event streaming with collection support
+    - Execution tracing and monitoring
+    - Flexible parameter filtering and transformation
+    """
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         extra="forbid",
     )
 
     name: str
-    """"""
+    """The unique identifier for this runnable component."""
+    
     description: str | None = None
-    """"""
+    """Optional description of what this runnable does, used in LLM tool schemas."""
+    
     params_mode: Literal["all", "required"] = "all"
-    """"""
+    """Parameter inclusion mode: 'all' includes all params, 'required' only required ones."""
+    
     include_params: list[str] | None = None
-    """"""
+    """Specific parameter names to include in the schema (additive to params_mode)."""
+    
     exclude_params: list[str] | None = None
-    """"""
+    """Specific parameter names to exclude from the schema."""
+    
     fixed_params: dict[str, Any] = {}
-    """"""
+    """Parameters that are fixed at initialization and merged with runtime kwargs."""
 
     _path: str = PrivateAttr()
     """The full path of the Runnable in the run context."""
@@ -169,7 +204,14 @@ class Runnable(ABC, BaseModel):
 
     @abstractmethod
     def nest(self, parent_path: str) -> None:
-        """"""
+        """Set the nested path for this runnable within a parent context.
+        
+        This method is called when a runnable is nested inside another runnable
+        (e.g., tools within an agent) to establish the hierarchical path.
+        
+        Args:
+            parent_path: The path of the parent runnable
+        """
         pass
 
 
@@ -179,14 +221,27 @@ class Runnable(ABC, BaseModel):
     # @cached_property 
     @abstractmethod
     def params_model(self) -> BaseModel:
-        """"""
+        """Return the Pydantic model defining the input parameters for this runnable.
+        
+        This model is used for:
+        - Input validation when the runnable is called
+        - Schema generation for LLM tool calling
+        - Parameter filtering based on params_mode, include_params, exclude_params
+        
+        Returns:
+            A Pydantic BaseModel class defining the expected input parameters
+        """
         pass
 
     
     @computed_field 
     @cached_property 
     def params_model_schema(self) -> dict[str, Any]:
-        """"""
+        """Get the JSON schema for the params model.
+        
+        Returns:
+            The JSON schema representation of the params_model
+        """
         params_model_schema = self.params_model.model_json_schema()
         return params_model_schema
 
@@ -197,32 +252,56 @@ class Runnable(ABC, BaseModel):
     # @cached_property 
     @abstractmethod
     def return_model(self) -> Any:
-        """"""
+        """Return the type/model defining the expected output of this runnable.
+        
+        This is used for:
+        - Type checking and validation
+        - Schema generation for documentation
+        - LLM integration where output types matter
+        
+        Returns:
+            A type, Pydantic model, or other type annotation representing the output
+        """
         pass
 
     
     @computed_field 
     @cached_property 
     def return_model_schema(self) -> dict[str, Any]:
-        """"""
+        """Get the JSON schema for the return model.
+        
+        Returns:
+            The JSON schema representation of the return_model
+        """
         return_model_schema = TypeAdapter(self.return_model).json_schema()
         return return_model_schema
 
     
     def format_params_model_schema(self) -> dict[str, Any]:
-        """"""
+        """Format the parameter schema based on filtering rules.
+        
+        Applies the params_mode, include_params, and exclude_params settings
+        to filter which parameters are included in the final schema.
+        
+        Returns:
+            A filtered JSON schema containing only the selected parameters
+        """
         selected_params = set()
+        # Start with either all params or just required ones
         if self.params_mode == "required":
             selected_params = set(self.params_model_schema.get("required", []))
         else:
             selected_params = set(self.params_model_schema["properties"].keys())
         
+        # Add any explicitly included params
         if self.include_params is not None:
             selected_params.update(self.include_params)
 
+        # Remove any explicitly excluded params
         if self.exclude_params is not None:
             selected_params.difference_update(self.exclude_params)
 
+        # Filter properties to only include selected params
         properties = {
             k: v 
             for k, v in self.params_model_schema["properties"].items()
@@ -237,7 +316,11 @@ class Runnable(ABC, BaseModel):
     @computed_field
     @cached_property
     def openai_schema(self) -> dict[str, Any]:
-        """"""
+        """Generate OpenAI-compatible tool schema for this runnable.
+        
+        Returns:
+            A dictionary conforming to OpenAI's function calling schema format
+        """
         formatted_params_model_schema = self.format_params_model_schema()
         openai_schema = {
             "type": "function",
@@ -253,7 +336,11 @@ class Runnable(ABC, BaseModel):
     @computed_field
     @cached_property
     def anthropic_schema(self) -> dict[str, Any]:
-        """"""
+        """Generate Anthropic-compatible tool schema for this runnable.
+        
+        Returns:
+            A dictionary conforming to Anthropic's tool calling schema format
+        """
         formatted_params_model_schema = self.format_params_model_schema()
         anthropic_schema = {
             "name": self.name,
@@ -271,7 +358,31 @@ class Runnable(ABC, BaseModel):
     
     @collectable
     async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
-        """"""
+        """Execute the runnable with the given parameters.
+        
+        This is the main entry point for executing a runnable. It handles:
+        - Parameter validation and merging with fixed_params
+        - Run context management and tracing setup
+        - Event streaming (StartEvent, ChunkEvents, OutputEvent)
+        - Error handling and cleanup
+        - Integration with the collectors system
+        
+        The @collectable decorator wraps the returned async generator to add
+        a .collect() method for easy result collection.
+        
+        Args:
+            **kwargs: Runtime parameters for the runnable execution.
+                Special parameters:
+                - _call_id: Internal call identifier for tracing
+                - _parent_call_id: Parent call identifier for nested execution
+        
+        Returns:
+            A CollectableAsyncGenerator that yields Events and provides collect() method
+            
+        Raises:
+            ValidationError: If input parameters don't match the params_model
+            Exception: Any exception raised during handler execution (captured in OutputEvent)
+        """
         t0 = int(time.time() * 1000)
 
         _call_id = kwargs.pop("_call_id", None)

@@ -25,11 +25,18 @@ from .tool import Tool
 logger = structlog.get_logger("timbal.core_v2.agent")
 
 ToolLike = Runnable | dict[str, Any] | Callable[..., Any]
+"""Type alias for objects that can be converted to Tools: Runnable instances, dicts, or callables."""
 
 
 # TODO Add more params here
 class AgentParams(BaseModel):
-    """"""
+    """Parameter model for Agent execution.
+    
+    Defines the input parameters that agents accept when called.
+    Currently only supports a single prompt message, but will be
+    extended to support additional parameters like temperature,
+    max_tokens, etc.
+    """
     model_config = ConfigDict(extra="ignore")
 
     prompt: Message = Field(
@@ -40,49 +47,89 @@ class AgentParams(BaseModel):
 
 # TODO Add callbacks
 class Agent(Runnable):
-    """"""
+    """An Agent is a Runnable that orchestrates LLM interactions with tool calling.
+    
+    Agents implement an autonomous execution pattern where an LLM can:
+    1. Receive a prompt and generate a response
+    2. Decide to call available tools based on the context
+    3. Process tool results and continue the conversation
+    4. Repeat until no more tool calls are needed or max_iter is reached
+    
+    Agents support:
+    - Multi-turn conversations with memory across iterations
+    - Concurrent tool execution for efficiency
+    - Flexible tool definition (functions, dicts, or Runnable objects)
+    - Integration with multiple LLM providers via llm_router
+    
+    Example:
+        def get_weather(location: str) -> str:
+            return f"Weather in {location}: sunny"
+            
+        agent = Agent(
+            name="weather_agent",
+            model="claude-3-sonnet",
+            tools=[get_weather]
+        )
+        
+        result = await agent(prompt=Message(role="user", content="What's the weather in Paris?")).collect()
+    """
 
     model: str
-    """"""
+    """The LLM model identifier (e.g., 'claude-3-sonnet', 'gpt-4')."""
+    
     instructions: str | None = None
-    """"""
+    """Optional system instructions to provide context for the agent."""
+    
     tools: list[SkipValidation[ToolLike]] = []
-    """"""
+    """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
+    
     max_iter: int = 10
-    """"""
+    """Maximum number of LLM->tool call iterations before stopping."""
 
     _llm: Tool = PrivateAttr()
-    """"""
+    """Internal LLM tool instance for making model calls."""
+    
     _tools_by_name: dict[str, Tool] = PrivateAttr()
-    """"""
+    """Dictionary mapping tool names to Tool instances for fast lookup."""
 
 
     # NOTE: No need to add @override since pydantic doesn't have `model_post_init` as an abstract method.
     def model_post_init(self, __context: Any) -> None:
-        """"""
+        """Initialize agent-specific attributes after Pydantic model creation.
+        
+        This method sets up the agent's internal tools and execution characteristics:
+        1. Creates an internal LLM tool for model interactions
+        2. Normalizes user-provided tools into Tool instances
+        3. Sets up tool name mapping for fast lookup during execution
+        4. Configures execution characteristics as an orchestrator
+        """
         self._path = self.name
         
+        # Create internal LLM tool for model interactions
         self._llm = Tool(
             name="llm",
             handler=llm_router,
         )
         self._llm.nest(self._path)
 
-        # Normalized tools and tools_by_name will hold references to the same Tool instances.
-        # Modifying either will modify the other.
+        # Normalize tools: convert functions/dicts to Tool instances
+        # tools and _tools_by_name will hold references to the same Tool instances
         normalized_tools = []
         tools_by_name = {}
         for tool in self.tools:
+            # Convert non-Runnable objects to Tool instances
             if not isinstance(tool, Runnable):
                 if isinstance(tool, dict):
-                    tool = Tool(**tool)
+                    tool = Tool(**tool)  # Create from dict config
                 else:
-                    # This will error if tool is not a proper callable
+                    # Assume it's a callable and wrap it
                     tool = Tool(handler=tool)
             
+            # Check for duplicate tool names
             if tool.name in tools_by_name:
                 raise ValueError(f"Tool {tool.name} already exists. You can only add a tool once.")
             
+            # Set up nested path and add to collections
             tool.nest(self._path)
             normalized_tools.append(tool)
             tools_by_name[tool.name] = tool
@@ -90,7 +137,7 @@ class Agent(Runnable):
         self.tools = normalized_tools
         self._tools_by_name = tools_by_name 
 
-        # The handler for the agent is always an async generator
+        # Agents are always orchestrators with async generator handlers
         self._is_orchestrator = True
         self._is_coroutine = False
         self._is_gen = False
@@ -99,8 +146,9 @@ class Agent(Runnable):
 
     @override
     def nest(self, parent_path: str) -> None:
-        """"""
+        """See base class."""
         self._path = f"{parent_path}.{self.name}"
+        # Update paths for internal LLM and all tools
         self._llm.nest(self._path)
         for tool in self.tools:
             tool.nest(self._path)
@@ -110,7 +158,7 @@ class Agent(Runnable):
     @computed_field
     @cached_property
     def params_model(self) -> BaseModel:
-        """"""
+        """See base class."""
         return AgentParams
 
 
@@ -118,31 +166,60 @@ class Agent(Runnable):
     @computed_field
     @cached_property
     def return_model(self) -> Any:
-        """"""
+        """See base class."""
         return Message
 
     
     async def _resolve_memory(self) -> list[Message]:
-        """"""
+        """Resolve conversation memory from parent agent context.
+        
+        When agents are nested (e.g., subagents called by parent agents),
+        this method retrieves the conversation history from the parent's
+        tracing data to maintain context across agent calls.
+        
+        Returns:
+            List of Messages representing the conversation history,
+            or empty list if no parent context exists
+        """
         memory = []
         run_context = get_run_context()
         if run_context.parent_id:
+            # Try to get tracing data from parent execution
             parent_tracing = await run_context.get_parent_tracing()
             if parent_tracing is None:
                 logger.error("Parent tracing not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
             else:
-                # TODO What if we have multiple call_ids for this subagent?
+                # Extract conversation history from parent's LLM calls
+                # TODO: Handle multiple call_ids for this subagent
                 llm_tracing = parent_tracing.get_path(self._llm._path)
                 assert len(llm_tracing) >= 1, f"Agent trace does not have any records for path {self._llm._path}"
+                
+                # Get the most recent LLM interaction
                 llm_input_messages = llm_tracing[-1]["input"]["messages"]
                 llm_output_message = llm_tracing[-1]["output"]
-                memory = [*[Message.validate(m) for m in llm_input_messages], Message.validate(llm_output_message),]
+                
+                # Reconstruct conversation: input messages + LLM response
+                memory = [
+                    *[Message.validate(m) for m in llm_input_messages], 
+                    Message.validate(llm_output_message)
+                ]
         return memory
 
     
     async def _enqueue_tool_events(self, _parent_call_id: str | None, tool_call: ToolUseContent, queue: asyncio.Queue) -> None:
-        """"""
+        """Execute a single tool call and enqueue its events.
+        
+        This method runs a tool call asynchronously and puts all generated
+        events into a shared queue for multiplexed processing. Used by
+        _multiplex_tools to handle concurrent tool execution.
+        
+        Args:
+            _parent_call_id: Parent call ID for tracing
+            tool_call: The tool call content with name and input parameters
+            queue: Async queue to put events into
+        """
         tool = self._tools_by_name[tool_call.name]
+        # Execute tool and enqueue all events
         async for event in tool(_call_id=tool_call.id, _parent_call_id=_parent_call_id, **tool_call.input):
             await queue.put((tool_call, event))
 
@@ -151,64 +228,110 @@ class Agent(Runnable):
 
 
     async def _multiplex_tools(self, _parent_call_id: str | None, tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
-        """"""
+        """Execute multiple tool calls concurrently and multiplex their events.
+        
+        This method enables concurrent execution of multiple tool calls requested
+        by the LLM, significantly improving performance when tools can run in parallel.
+        Events from all tools are multiplexed and yielded as they become available.
+        
+        Args:
+            _parent_call_id: Parent call ID for tracing
+            tool_calls: List of tool calls to execute concurrently
+            
+        Yields:
+            Tuples of (tool_call, event) as events are generated by tools
+        """
         queue = asyncio.Queue()
+        # Start all tool executions concurrently
         tasks = [asyncio.create_task(self._enqueue_tool_events(_parent_call_id, tc, queue)) for tc in tool_calls]
 
+        # Process events as they arrive from any tool
         remaining = len(tasks)
         while remaining > 0:
             tool_call, event = await queue.get()
             if event is None:
+                # Sentinel value indicates a tool completed
                 remaining -= 1
             else:
+                # Yield event along with which tool call generated it
                 yield tool_call, event
         
+        # Ensure all tasks complete cleanly
         await asyncio.gather(*tasks)
 
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
-        """"""
-        # Special scenario: the Runnable passes the caller id to the handler
+        """Main agent execution handler implementing the autonomous agent loop.
+        
+        This is the core agent logic that implements the autonomous execution pattern:
+        1. Load conversation memory from parent context (if nested)
+        2. Add the user prompt to the conversation
+        3. Loop until no more tool calls or max_iter reached:
+           a. Call LLM with current conversation and available tools
+           b. Add LLM response to conversation
+           c. If LLM made tool calls, execute them concurrently
+           d. Add tool results to conversation and continue
+        
+        Args:
+            **kwargs: Execution parameters including:
+                - prompt: The input Message to process
+                - _parent_call_id: Parent call ID for nested execution
+                - Other parameters passed through to LLM
+                
+        Yields:
+            Events from LLM calls and tool executions
+        """
+        # Extract parent call ID for tracing nested execution
         _parent_call_id = kwargs.pop("_parent_call_id", None)
         
+        # Initialize conversation with memory + user prompt
         messages = await self._resolve_memory()
         messages.append(kwargs.pop("prompt"))
 
+        # Agent iteration loop
         i = 0
         while True:
+            # Call LLM with current conversation
             async for event in self._llm(
                 _call_id=uuid7(as_type="str").replace("-", ""),
                 _parent_call_id=_parent_call_id,
                 model=self.model,
                 messages=messages,
-                # We don't pass tools to the LLM so it can't choose to call them and perform another iteration.
+                # Only provide tools if we haven't hit max iterations
                 tools=self.tools if i < self.max_iter else [],
                 **kwargs,
             ):
+                # Add LLM response to conversation for next iteration
                 if isinstance(event, OutputEvent):
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
                     messages.append(event.output)
                 yield event
 
+            # Extract tool calls from LLM response
             tool_calls = [
                 content for content in messages[-1].content
                 if isinstance(content, ToolUseContent)
             ]
+            
+            # If no tool calls, agent is done
             if not tool_calls:
                 break
 
+            # Execute all tool calls concurrently
             async for tool_call, event in self._multiplex_tools(_parent_call_id, tool_calls):
-                # We'll receive a bunch of upwards streaming events from nested agents
-                # We only need to process the ones that are immediate children of this very agent
+                # Process tool completion events to add results to conversation
+                # Only process events from immediate children (not nested subagents)
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
-                    # We need to convert the tool output to a tool result message, for the next LLM to consume and match 
-                    # ? Can we optimize this double validate?
+                    # Convert tool output to Message format if needed
+                    # TODO: Can we optimize this double validate?
                     event_output = event.output
                     if not isinstance(event_output, Message):
                         event_output = Message.validate({
                             "role": "user",
                             "content": str(event_output),
                         })
+                    
+                    # Create tool result message for LLM consumption
                     message = Message(
                         role="tool",
                         content=[ToolResultContent(
@@ -218,7 +341,9 @@ class Agent(Runnable):
                     )
                     messages.append(message)
 
+                # Yield all events from tool executions
                 yield event
 
+            # Increment iteration counter
             i += 1
             
