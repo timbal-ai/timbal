@@ -4,7 +4,7 @@ import time
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from functools import cached_property
+from functools import cached_property, wraps
 from typing import Any, Literal
 
 import structlog
@@ -30,6 +30,108 @@ from ..types.events import (
 )
 
 logger = structlog.get_logger("timbal.core_v2.runnable")
+
+
+class CollectableAsyncGenerator:
+    """
+    Wrapper that adds collect() method to async generators.
+    
+    This class implements the async iterator protocol by wrapping an existing
+    async generator and adding the ability to collect all results.
+    """
+    
+    def __init__(self, async_gen: AsyncGenerator[Event, None], runnable: 'Runnable', kwargs: dict[str, Any]):
+        self._async_gen = async_gen  # The original async generator from __call__
+        self._runnable = runnable    # Reference to the Runnable instance (not used currently)
+        self._kwargs = kwargs        # Original kwargs passed to __call__ (not used currently)
+        self._collected = False      # Track if the generator has been fully consumed
+        self._output_event = None    # Cache the OutputEvent when we encounter it
+        self._events = []            # Cache all yielded events for later access
+    
+    def __aiter__(self):
+        """
+        Return the async iterator object (self).
+        
+        In Python's async iterator protocol:
+        - __aiter__() is called when you do `async for item in obj:`
+        - It should return an object that implements __anext__()
+        - We return `self` because this class implements __anext__()
+        
+        This is equivalent to how regular iterators work:
+        - __iter__() returns an iterator object with __next__()
+        """
+        return self
+    
+    async def __anext__(self):
+        """
+        Get the next item from the async iterator.
+        
+        This is called by `async for` loops and is the core of the async iterator protocol.
+        When the generator is exhausted, it raises StopAsyncIteration to signal completion.
+        
+        We intercept each event and cache it in self._events for later use by collect().
+        """
+        try:
+            # Get the next event from the wrapped generator
+            event = await self._async_gen.__anext__()
+            # Cache this event so collect() can access it later
+            self._events.append(event)
+            # Cache OutputEvent directly when we encounter it
+            if isinstance(event, OutputEvent) and event.path == self._runnable._path:
+                self._output_event = event
+            return event
+        except StopAsyncIteration:
+            # The generator is exhausted - mark as collected and re-raise
+            self._collected = True
+            raise  # This stops the `async for` loop
+    
+    async def aclose(self):
+        """
+        Close the generator gracefully.
+        
+        This is called when the generator needs to be cleaned up.
+        """
+        await self._async_gen.aclose()
+        self._collected = True
+    
+    async def collect(self) -> Any:
+        """
+        Collect the final output by consuming the entire stream.
+        
+        How this works:
+        1. If we already have the OutputEvent cached, return it immediately
+        2. Otherwise, consume remaining events using `async for event in self:`
+           - This calls our __anext__() method which caches the OutputEvent when found
+        3. Return the cached OutputEvent
+        
+        This method can be called multiple times safely.
+        """
+        # If we already found and cached the OutputEvent, return it
+        if self._output_event is not None:
+            return self._output_event
+        
+        # Generator not fully consumed yet - consume remaining events
+        try:
+            # This calls our __aiter__() and __anext__() methods
+            # __anext__() will cache the OutputEvent when it encounters it
+            async for _ in self:
+                # We could break early if we found the OutputEvent, but typically
+                # the OutputEvent is the last event, so we consume everything
+                pass
+        except StopAsyncIteration:
+            pass  # Expected when generator is exhausted
+        
+        # Return the cached OutputEvent (will be None if no OutputEvent was yielded)
+        return self._output_event
+
+
+def collectable(func):
+    """Decorator that wraps async generator return with CollectableAsyncGenerator."""
+    @wraps(func)
+    def wrapper(self, **kwargs) -> CollectableAsyncGenerator:
+        async_gen = func(self, **kwargs)
+        return CollectableAsyncGenerator(async_gen, self, kwargs)
+    return wrapper
 
 
 # TODO Add timeout
@@ -167,6 +269,7 @@ class Runnable(ABC, BaseModel):
         return self.anthropic_schema
 
     
+    @collectable
     async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
         """"""
         t0 = int(time.time() * 1000)

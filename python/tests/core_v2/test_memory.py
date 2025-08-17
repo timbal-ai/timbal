@@ -1,8 +1,6 @@
 import pytest
 
 from timbal.core_v2.agent import Agent
-from timbal.state.context import RunContext
-from timbal.state import set_run_context
 
 
 @pytest.mark.asyncio
@@ -12,9 +10,9 @@ async def test_memory():
         model="gpt-4.1-mini",
     )
 
-    async for _ in agent(prompt="Hello, my name is David"):
-        pass
+    await agent(prompt="Hello, my name is David").collect()
             
-    async for _ in agent(prompt="What is my name?"):
-        pass
+    async_gen = agent(prompt="What is my name?")
+    res = await async_gen.collect()
+    print(res)
         
