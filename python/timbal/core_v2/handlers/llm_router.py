@@ -4,6 +4,7 @@ from openai import AsyncOpenAI
 from pydantic import Field
 
 from ...errors import APIKeyNotFoundError
+from ...types.field import resolve_default
 from ...types.message import Message
 from ..runnable import Runnable
 
@@ -24,8 +25,14 @@ async def handler(
         default_factory=list, 
         description="List of tools/functions the LLM can call.",
     ),
+    json_schema: dict = Field(
+        default=None, 
+        description="The JSON schema that the model MUST adhere to.",
+    ),
     # TODO Add all the rest of parameters.
 ) -> Message: # type: ignore
+
+    json_schema = resolve_default("json_schema", json_schema)
 
     if not model.startswith("gpt"):
         raise NotImplementedError("Only OpenAI models are supported at the mometn.")
@@ -54,6 +61,12 @@ async def handler(
         openai_tools.append(tool.openai_schema)
     if openai_tools:
         openai_kwargs["tools"] = openai_tools
+
+    if json_schema:
+        openai_kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": json_schema,
+        }
 
     res = await client.chat.completions.create(
         model=model,

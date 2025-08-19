@@ -1,0 +1,14 @@
+tests:
+  - name: usage_test
+    description: Test with usage constraints
+    turns:
+      - input:
+          text: "Hello"
+        output:
+          validators:
+            contains: ["hello"]
+        usage:
+          - gpt-4.1-mini:
+              input_tokens:
+                max: 1000
+                min: 10
