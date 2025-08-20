@@ -1,7 +1,7 @@
 import structlog
 from pydantic import ConfigDict, field_validator, model_validator
 
-from ..validators import Validator, contains_output, not_contains_output, exact_output, regex, semantic_output
+from ..validators import Validator, contains_output, not_contains_output, exact_output, regex, semantic_output, contains_any_output
 from .input import Input
 
 logger = structlog.get_logger("timbal.eval.types.output")
@@ -68,6 +68,8 @@ class Output(Input):
                 validators.append(regex(validator_arg))
             elif validator_name == "semantic":
                 validators.append(semantic_output(validator_arg))
+            elif validator_name == "contains_any":
+                validators.append(contains_any_output(validator_arg))
             # TODO Add more validators.
             else:
                 logger.warning("unknown_validator", validator=validator_name)

@@ -330,8 +330,8 @@ async def run_turn(
     output_passed = None
     output_explanations = []
     agent_output_message = Message(role="assistant", content=[TextContent(text=agent_output)])
-    # Evaluate the output
-    if turn.output and execution_error is None:  # Only evaluate output if no execution error
+    # Evaluate the output only if it has validators (otherwise it's a fixed record for conversation history)
+    if turn.output and turn.output.validators and execution_error is None:
         output_passed, output_explanations = await eval_output(turn, agent_output_message)
         if output_passed:
             test_results.outputs_passed += 1
