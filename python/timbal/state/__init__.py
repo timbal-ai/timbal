@@ -45,6 +45,32 @@ def set_run_context(context: RunContext) -> None:
     _run_context_var.set(context)
 
 
+# INTERNAL: This variable holds the call id. Do not access directly.
+_call_id: ContextVar[str | None] = ContextVar("call_id", default=None)
+
+
+def get_call_id() -> str | None:
+    """
+    Retrieves the current call ID.
+
+    Returns:
+        The current call ID, or None if no call ID is set.
+    """
+    return _call_id.get()
+
+
+def set_call_id(call_id: str) -> None:
+    """
+    Sets the current call ID.
+
+    WARNING: This function is for advanced use cases, such as creating
+    custom `Runnable` components or execution flows. Manually setting the
+    call ID can lead to unexpected behavior if not handled correctly.
+    """
+    _call_id.set(call_id)
+
+
+# TODO Remove this method in favor of custom init in the RunContext
 def resolve_platform_config() -> TimbalPlatformConfig:
     """
     Resolves the active Timbal platform configuration for the current execution context.

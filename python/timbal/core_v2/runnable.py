@@ -18,10 +18,11 @@ from pydantic import (
     field_validator,
     model_serializer,
 )
+from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
 from ..collectors.utils import sync_to_async_gen
-from ..state import get_run_context, set_run_context
+from ..state import get_call_id, get_run_context, set_call_id, set_run_context
 from ..state.context import RunContext
 from ..types.events import (
     BaseEvent,
@@ -431,9 +432,6 @@ class Runnable(ABC, BaseModel):
         
         Args:
             **kwargs: Runtime parameters for the runnable execution.
-                Special parameters:
-                - _call_id: Internal call identifier for tracing
-                - _parent_call_id: Parent call identifier for nested execution
         
         Returns:
             A CollectableAsyncGenerator that yields Events and provides collect() method
@@ -444,15 +442,17 @@ class Runnable(ABC, BaseModel):
         """
         t0 = int(time.time() * 1000)
 
-        _call_id = kwargs.pop("_call_id", None)
-        _parent_call_id = kwargs.pop("_parent_call_id", None)
+        _parent_call_id = get_call_id()
+        _call_id = uuid7(as_type="str").replace("-", "")
+        if self._is_orchestrator:
+            set_call_id(_call_id)
 
         # Generate new context or reset it if appropriate
         run_context = get_run_context()
         if not run_context:
             run_context = RunContext()
             set_run_context(run_context)
-        if not _call_id and run_context.tracing:
+        if not _parent_call_id and run_context.tracing:
             run_context = RunContext(parent_id=run_context.id)
             set_run_context(run_context)
 
@@ -561,8 +561,10 @@ class Runnable(ABC, BaseModel):
             )
             # TODO Not a fan of storing the dumps...
             trace["output"] = output_event.dump["output"]
-            if _call_id is None: # root
+            if _parent_call_id is None:
                 await run_context.save_tracing()
+                # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
+                set_call_id(None)
             logger.info("output_event", **output_event.dump)
             yield output_event
 

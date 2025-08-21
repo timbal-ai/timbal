@@ -234,7 +234,7 @@ class Agent(Runnable):
         return memory
 
     
-    async def _enqueue_tool_events(self, _parent_call_id: str | None, tool_call: ToolUseContent, queue: asyncio.Queue) -> None:
+    async def _enqueue_tool_events(self, tool_call: ToolUseContent, queue: asyncio.Queue) -> None:
         """Execute a single tool call and enqueue its events.
         
         This method runs a tool call asynchronously and puts all generated
@@ -242,19 +242,18 @@ class Agent(Runnable):
         _multiplex_tools to handle concurrent tool execution.
         
         Args:
-            _parent_call_id: Parent call ID for tracing
             tool_call: The tool call content with name and input parameters
             queue: Async queue to put events into
         """
         tool = self._tools_by_name[tool_call.name]
         # Execute tool and enqueue all events
-        async for event in tool(_call_id=tool_call.id, _parent_call_id=_parent_call_id, **tool_call.input):
+        async for event in tool(**tool_call.input):
             await queue.put((tool_call, event))
         # Signal completion with a sentinel value (None)
         await queue.put((tool_call, None))
 
 
-    async def _multiplex_tools(self, _parent_call_id: str | None, tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
+    async def _multiplex_tools(self, tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events.
         
         This method enables concurrent execution of multiple tool calls requested
@@ -262,7 +261,6 @@ class Agent(Runnable):
         Events from all tools are multiplexed and yielded as they become available.
         
         Args:
-            _parent_call_id: Parent call ID for tracing
             tool_calls: List of tool calls to execute concurrently
             
         Yields:
@@ -270,7 +268,7 @@ class Agent(Runnable):
         """
         queue = asyncio.Queue()
         # Start all tool executions concurrently
-        tasks = [asyncio.create_task(self._enqueue_tool_events(_parent_call_id, tc, queue)) for tc in tool_calls]
+        tasks = [asyncio.create_task(self._enqueue_tool_events(tc, queue)) for tc in tool_calls]
         # Process events as they arrive from any tool
         remaining = len(tasks)
         while remaining > 0:
@@ -300,14 +298,11 @@ class Agent(Runnable):
         Args:
             **kwargs: Execution parameters including:
                 - prompt: The input Message to process
-                - _parent_call_id: Parent call ID for nested execution
                 - Other parameters passed through to LLM
                 
         Yields:
             Events from LLM calls and tool executions
         """
-        # Extract parent call ID for tracing nested execution
-        _parent_call_id = kwargs.pop("_parent_call_id", None)
         # Build system prompt from template and instructions
         system_prompt = self._build_system_prompt(**kwargs)
         # Initialize conversation with memory + user prompt
@@ -318,8 +313,6 @@ class Agent(Runnable):
         while True:
             # Call LLM with current conversation
             async for event in self._llm(
-                _call_id=uuid7(as_type="str").replace("-", ""),
-                _parent_call_id=_parent_call_id,
                 model=self.model,
                 messages=messages,
                 system_prompt=system_prompt,
@@ -327,9 +320,12 @@ class Agent(Runnable):
                 tools=self.tools if i < self.max_iter else [],
                 **kwargs, 
             ):
-                # Add LLM response to conversation for next iteration
                 if isinstance(event, OutputEvent):
+                    # If the LLM call fails, we want to propagate the error upwards
+                    if event.error is not None:
+                        raise RuntimeError(event.error)
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
+                    # Add LLM response to conversation for next iteration
                     messages.append(event.output)
                 yield event
 
@@ -341,7 +337,7 @@ class Agent(Runnable):
             if not tool_calls:
                 break
 
-            async for tool_call, event in self._multiplex_tools(_parent_call_id, tool_calls):
+            async for tool_call, event in self._multiplex_tools(tool_calls):
                 # Only process events from immediate children (not nested subagents)
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
                     # Convert tool output to Message format if needed

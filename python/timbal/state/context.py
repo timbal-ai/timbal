@@ -86,11 +86,8 @@ class RunContext(BaseModel):
         call_id = self._get_call_id_from_stack()
         
         # Update usage for all parents in the call stack
-        processed_root = False
-        while not processed_root:
+        while call_id:
             assert call_id in self.tracing, f"RunContext.update_usage: Call ID {call_id} not found in tracing."
-            if call_id is None:
-                processed_root = True
             trace = self.tracing[call_id]
             current_value = trace["usage"].get(key, 0)
             trace["usage"][key] = current_value + value
