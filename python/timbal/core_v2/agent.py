@@ -12,7 +12,6 @@ from pydantic import (
     SkipValidation,
     computed_field,
 )
-from uuid_extensions import uuid7
 
 from ..state import get_run_context
 from ..types.chat.content import ToolResultContent, ToolUseContent

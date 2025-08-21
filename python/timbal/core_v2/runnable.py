@@ -31,6 +31,7 @@ from ..types.events import (
     OutputEvent,
     StartEvent,
 )
+from ..types.models import dump
 
 logger = structlog.get_logger("timbal.core_v2.runnable")
 
@@ -459,9 +460,10 @@ class Runnable(ABC, BaseModel):
         assert _call_id not in run_context.tracing, f"Call ID {_call_id} already exists in tracing."
         trace = {
             "path": self._path,
+            "call_id": _call_id,
             "parent_call_id": _parent_call_id,
-            "usage": {},
             "t0": t0,
+            "usage": {},
         }
         run_context.tracing[_call_id] = trace
 
@@ -476,7 +478,7 @@ class Runnable(ABC, BaseModel):
         # This will ensure full replayability of the run.
         # TODO Evaluate runtime mappings
         input = {**self.fixed_params, **kwargs}
-        trace["input"] = input
+        trace["input"] = await dump(input)
 
         output, error = None, None
         try:
@@ -534,6 +536,7 @@ class Runnable(ABC, BaseModel):
                                 yield chunk
 
                 output = collector.collect() if collector else None
+                trace["output"] = await dump(output)
             
             if self.post_hook is not None:
                 await self.post_hook(output)
@@ -544,11 +547,12 @@ class Runnable(ABC, BaseModel):
                 "message": str(err),
                 "traceback": traceback.format_exc(),
             }
-            trace["error"] = error
+            trace["error"] = error # No need to model dump the error. It's already a json compatible dict
         
         finally:
             t1 = int(time.time() * 1000)
             trace["t1"] = t1
+            # TODO Refactor this. No longer need the implicit dump?
             output_event = await OutputEvent.build(
                 run_id=run_context.id,
                 path=self._path,
@@ -559,8 +563,6 @@ class Runnable(ABC, BaseModel):
                 error=error,
                 usage=trace["usage"],
             )
-            # TODO Not a fan of storing the dumps...
-            trace["output"] = output_event.dump["output"]
             if _parent_call_id is None:
                 await run_context.save_tracing()
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
