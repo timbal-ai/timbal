@@ -22,7 +22,13 @@ from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
 from ..collectors.utils import sync_to_async_gen
-from ..state import get_call_id, get_run_context, set_call_id, set_run_context
+from ..state import (
+    get_parent_call_id,
+    get_run_context, 
+    set_call_id, 
+    set_parent_call_id,
+    set_run_context,
+)
 from ..state.context import RunContext
 from ..state.tracing.trace import Trace
 from ..types.events import (
@@ -444,10 +450,11 @@ class Runnable(ABC, BaseModel):
         """
         t0 = int(time.time() * 1000)
 
-        _parent_call_id = get_call_id()
+        _parent_call_id = get_parent_call_id()
         _call_id = uuid7(as_type="str").replace("-", "")
+        set_call_id(_call_id)
         if self._is_orchestrator:
-            set_call_id(_call_id)
+            set_parent_call_id(_call_id)
 
         # Generate new context or reset it if appropriate
         run_context = get_run_context()
@@ -495,9 +502,9 @@ class Runnable(ABC, BaseModel):
                 ctx = contextvars.copy_context()
                 if self._is_gen:
                     gen = self.handler(**validated_input)
-                    async_gen = sync_to_async_gen(gen, loop, ctx, self._path, _call_id)
+                    async_gen = sync_to_async_gen(gen, loop, ctx)
                 else:
-                    def handler_func(_call_id=_call_id):
+                    def handler_func():
                         return ctx.run(self.handler, **validated_input)
                     output = await loop.run_in_executor(None, handler_func)
             
@@ -506,7 +513,7 @@ class Runnable(ABC, BaseModel):
             
             else:
                 if self._is_orchestrator:
-                    async_gen = self.handler(**validated_input, _parent_call_id=_call_id)
+                    async_gen = self.handler(**validated_input)
                 else:
                     async_gen = self.handler(**validated_input)
             
@@ -566,7 +573,7 @@ class Runnable(ABC, BaseModel):
             if _parent_call_id is None:
                 await run_context.save_tracing()
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
-                set_call_id(None)
+                set_parent_call_id(None)
             logger.info("output_event", **output_event.dump)
             yield output_event
 

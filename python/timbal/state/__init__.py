@@ -45,8 +45,9 @@ def set_run_context(context: RunContext) -> None:
     _run_context_var.set(context)
 
 
-# INTERNAL: This variable holds the call id. Do not access directly.
+# INTERNAL: This variables hold the call ids. Do not access directly.
 _call_id: ContextVar[str | None] = ContextVar("call_id", default=None)
+_parent_call_id: ContextVar[str | None] = ContextVar("parent_call_id", default=None)
 
 
 def get_call_id() -> str | None:
@@ -59,6 +60,16 @@ def get_call_id() -> str | None:
     return _call_id.get()
 
 
+def get_parent_call_id() -> str | None:
+    """
+    Retrieves the current parent call ID.
+
+    Returns:
+        The current parent call ID, or None if no parent call ID is set.
+    """
+    return _parent_call_id.get()
+
+
 def set_call_id(call_id: str) -> None:
     """
     Sets the current call ID.
@@ -68,6 +79,17 @@ def set_call_id(call_id: str) -> None:
     call ID can lead to unexpected behavior if not handled correctly.
     """
     _call_id.set(call_id)
+
+
+def set_parent_call_id(parent_call_id: str) -> None:
+    """
+    Sets the current parent call ID.
+
+    WARNING: This function is for advanced use cases, such as creating
+    custom `Runnable` components or execution flows. Manually setting the
+    parent call ID can lead to unexpected behavior if not handled correctly.
+    """
+    _parent_call_id.set(parent_call_id)
 
 
 # TODO Remove this method in favor of custom init in the RunContext

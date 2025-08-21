@@ -1,4 +1,3 @@
-import inspect
 from collections import UserDict
 from typing import Any
 
@@ -82,9 +81,8 @@ class RunContext(BaseModel):
 
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics within traces with the runnable path from call stack inspection."""
-        # Find the first Runnable instance in the call stack
-        call_id = self._get_call_id_from_stack()
-        
+        from . import get_call_id
+        call_id = get_call_id()
         # Update usage for all parents in the call stack
         while call_id:
             assert call_id in self.tracing, f"RunContext.update_usage: Call ID {call_id} not found in tracing."
@@ -93,56 +91,12 @@ class RunContext(BaseModel):
             trace.usage[key] = current_value + value
             call_id = trace.parent_call_id
 
-    def _get_call_id_from_stack(self) -> str:
-        """Inspect the call stack to find the first Runnable instance and return its path and call_id."""
-        # Import Runnable here to avoid circular imports
-        from ..core_v2.runnable import Runnable
-        
-        try:
-            stack_frames = inspect.stack()
-        except Exception as e:
-            logger.error("inspect_stack_error", error=e)
-            return None
-            
-        runnable_path = None
-        for frame_info in stack_frames:
-            try:
-                frame = frame_info.frame
-                frame_locals = frame.f_locals
-                    
-                if "self" in frame_locals and not runnable_path:
-                    obj = frame_locals["self"]
-                    if isinstance(obj, Runnable):
-                        runnable_path = obj._path
-
-                if not runnable_path:
-                    if frame_info.function == "_next":
-                        runnable_path = frame_locals.get("_path", None)
-                        _call_id = frame_locals.get("_call_id", None)
-                        return _call_id
-                    continue
-                    
-                _call_id = frame_locals.get("_call_id", None)
-                if _call_id:
-                    return _call_id
-
-                tool_call = frame_locals.get("tool_call", None)
-                if tool_call and hasattr(tool_call, 'id'):
-                    return tool_call.id
-                        
-            except Exception as e:
-                # Skip problematic frames
-                logger.error("inspect_stack_error", error=e)
-                continue
-            
-        return None
-
     async def get_parent_tracing(self) -> Tracing | None:
         """Load the tracing data for the parent run."""
         if self.parent_id:
             return await self._tracing_provider.get(self.parent_id)
         return None
-    
+
     async def save_tracing(self) -> None:
         """Save the tracing data for the run."""
         await self._tracing_provider.put(self)
