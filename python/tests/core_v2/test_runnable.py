@@ -124,9 +124,9 @@ class TestRunnableBase:
         def handler(a: int, b: str = "default", c: float = 1.0) -> str:
             return f"{a}-{b}-{c}"
         
-        # Test with different params_mode settings
-        tool_all = Tool(handler=handler, params_mode="all")
-        tool_required = Tool(handler=handler, params_mode="required")
+        # Test with different schema_params_mode settings
+        tool_all = Tool(handler=handler, schema_params_mode="all")
+        tool_required = Tool(handler=handler, schema_params_mode="required")
         
         all_props = tool_all.format_params_model_schema()['properties']
         required_props = tool_required.format_params_model_schema()['properties']
@@ -141,15 +141,15 @@ class TestRunnableBase:
         assert len(required_props) == 1  # Only 'a' is required
     
     def test_include_exclude_params(self):
-        """Test include_params and exclude_params functionality."""
+        """Test schema_include_params and schema_exclude_params functionality."""
         def handler(a: int, b: str, c: float) -> str:
             return f"{a}-{b}-{c}"
         
-        # Test include_params
+        # Test schema_include_params
         tool_include = Tool(
             handler=handler, 
-            params_mode="required",  # Would normally include only required
-            include_params=["b", "c"]  # But we explicitly include b and c
+            schema_params_mode="required",  # Would normally include only required
+            schema_include_params=["b", "c"]  # But we explicitly include b and c
         )
         
         include_props = tool_include.format_params_model_schema()['properties']
@@ -157,11 +157,11 @@ class TestRunnableBase:
         assert 'b' in include_props  # Explicitly included
         assert 'c' in include_props  # Explicitly included
         
-        # Test exclude_params
+        # Test schema_exclude_params
         tool_exclude = Tool(
             handler=handler,
-            params_mode="all",
-            exclude_params=["c"]
+            schema_params_mode="all",
+            schema_exclude_params=["c"]
         )
         
         exclude_props = tool_exclude.format_params_model_schema()['properties']
@@ -169,14 +169,14 @@ class TestRunnableBase:
         assert 'b' in exclude_props
         assert 'c' not in exclude_props  # Explicitly excluded
     
-    def test_fixed_params(self):
-        """Test fixed_params functionality."""
+    def test_default_params(self):
+        """Test default_params functionality."""
         def handler(a: str, b: str) -> str:
             return f"{a}:{b}"
         
         tool = Tool(
             handler=handler,
-            fixed_params={"b": "fixed_value"}
+            default_params={"b": "fixed_value"}
         )
         
         # Should be able to call with only 'a' parameter

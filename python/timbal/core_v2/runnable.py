@@ -225,14 +225,18 @@ class Runnable(ABC, BaseModel):
     """The unique identifier for this runnable component."""
     description: str | None = None
     """Optional description of what this runnable does, used in LLM tool schemas."""
-    params_mode: Literal["all", "required"] = "all"
+
+    schema_params_mode: Literal["all", "required"] = "all"
     """Parameter inclusion mode: 'all' includes all params, 'required' only required ones."""
-    include_params: list[str] | None = None
-    """Specific parameter names to include in the schema (additive to params_mode)."""
-    exclude_params: list[str] | None = None
+    schema_include_params: list[str] | None = None
+    """Specific parameter names to include in the schema (additive to schema_params_mode)."""
+    schema_exclude_params: list[str] | None = None
     """Specific parameter names to exclude from the schema."""
-    fixed_params: dict[str, Any] = {}
-    """Parameters that are fixed at initialization and merged with runtime kwargs."""
+
+    default_params: dict[str, Any] = {}
+    """Runtime default parameter injection.
+    These parameters are added to the handler's parameters when the handler is called."""
+
     pre_hook: Callable[..., Any] | None = None
     """Pre-execution hook for input processing. See 'Hook Patterns' in class docstring.
     Signature: async def pre_hook(input: dict[str, Any]) -> None
@@ -294,7 +298,7 @@ class Runnable(ABC, BaseModel):
         This model is used for:
         - Input validation when the runnable is called
         - Schema generation for LLM tool calling
-        - Parameter filtering based on params_mode, include_params, exclude_params
+        - Parameter filtering based on schema_params_mode, schema_include_params, schema_exclude_params
         
         Returns:
             A Pydantic BaseModel class defining the expected input parameters
@@ -348,7 +352,7 @@ class Runnable(ABC, BaseModel):
     def format_params_model_schema(self) -> dict[str, Any]:
         """Format the parameter schema based on filtering rules.
         
-        Applies the params_mode, include_params, and exclude_params settings
+        Applies the schema_params_mode, schema_include_params, and schema_exclude_params settings
         to filter which parameters are included in the final schema.
         
         Returns:
@@ -356,18 +360,18 @@ class Runnable(ABC, BaseModel):
         """
         selected_params = set()
         # Start with either all params or just required ones
-        if self.params_mode == "required":
+        if self.schema_params_mode == "required":
             selected_params = set(self.params_model_schema.get("required", []))
         else:
             selected_params = set(self.params_model_schema["properties"].keys())
         
         # Add any explicitly included params
-        if self.include_params is not None:
-            selected_params.update(self.include_params)
+        if self.schema_include_params is not None:
+            selected_params.update(self.schema_include_params)
 
         # Remove any explicitly excluded params
-        if self.exclude_params is not None:
-            selected_params.difference_update(self.exclude_params)
+        if self.schema_exclude_params is not None:
+            selected_params.difference_update(self.schema_exclude_params)
 
         # Filter properties to only include selected params
         properties = {
@@ -429,7 +433,7 @@ class Runnable(ABC, BaseModel):
         """Execute the runnable with the given parameters.
         
         This is the main entry point for executing a runnable. It handles:
-        - Parameter validation and merging with fixed_params
+        - Parameter validation and merging with default_params
         - Run context management and tracing setup
         - Event streaming (StartEvent, ChunkEvents, OutputEvent)
         - Error handling and cleanup
@@ -484,7 +488,7 @@ class Runnable(ABC, BaseModel):
         # We store the unvalidated input, as sent by the user. 
         # This will ensure full replayability of the run.
         # TODO Evaluate runtime mappings
-        input = {**self.fixed_params, **kwargs}
+        input = {**self.default_params, **kwargs}
         trace.input = await dump(input)
 
         output, error = None, None

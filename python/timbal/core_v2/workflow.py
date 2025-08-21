@@ -73,7 +73,7 @@ class Workflow(Runnable):
             raise ValueError(f"Step {step.name} already exists in the workflow.")
             
         # TODO Add more stuff to the add_step() method
-        step.fixed_params.update(kwargs)
+        step.default_params.update(kwargs)
 
         step.nest(self._path)
         self._steps.append(step)

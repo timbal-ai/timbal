@@ -175,11 +175,11 @@ class TestToolExecution:
         assert output.output is not None
     
     @pytest.mark.asyncio
-    async def test_fixed_params(self):
-        """Test that fixed_params are merged correctly."""
+    async def test_default_params(self):
+        """Test that default_params are merged correctly."""
         tool = Tool(
             handler=sync_handler,
-            fixed_params={"x": "fixed_value"}
+            default_params={"x": "fixed_value"}
         )
         
         # Should work without providing x

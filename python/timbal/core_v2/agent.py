@@ -108,10 +108,10 @@ class Agent(Runnable):
         self._path = self.name
 
         # Make sure the system_context is not exposed a stool param when using the agent as a tool
-        if self.exclude_params is None:
-            self.exclude_params = ["system_context"]
+        if self.schema_exclude_params is None:
+            self.schema_exclude_params = ["system_context"]
         else:
-            self.exclude_params.append("system_context")
+            self.schema_exclude_params.append("system_context")
         
         # Create internal LLM tool for model interactions
         self._llm = Tool(
