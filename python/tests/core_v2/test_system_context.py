@@ -24,7 +24,7 @@ class TestSystemContextSchema:
         """Test that Anthropic tool schema excludes system_context."""
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini", 
+            model="anthropic/claude-3-sonnet", 
             instructions="You are helpful"
         )
         
@@ -39,7 +39,7 @@ class TestSystemContextSchema:
         """Test that OpenAI tool schema excludes system_context."""
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             instructions="You are helpful"
         )
         
@@ -54,7 +54,7 @@ class TestSystemContextSchema:
         """Test that format_params_model_schema excludes system_context."""
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             instructions="You are helpful"
         )
         
@@ -73,7 +73,7 @@ class TestSystemPromptBuilding:
         """Test system prompt building with template."""
         agent = Agent(
             name="test_agent", 
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             instructions="You are a weather assistant"
         )
         
@@ -89,7 +89,7 @@ class TestSystemPromptBuilding:
         """Test system prompt building without template (uses instructions directly)."""
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini", 
+            model="openai/gpt-4o-mini", 
             instructions="You are a weather assistant"
         )
         
@@ -102,7 +102,7 @@ class TestSystemPromptBuilding:
         """Test system prompt building with neither instructions nor template."""
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini"
+            model="openai/gpt-4o-mini"
         )
         
         # Test without instructions or template
@@ -114,7 +114,7 @@ class TestSystemPromptBuilding:
         """Test system prompt building with template but no instructions."""
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini"
+            model="openai/gpt-4o-mini"
         )
         
         # Test with template but no instructions - should format with empty string
@@ -129,7 +129,7 @@ class TestSystemPromptBuilding:
         """Test that system_context is processed correctly without mutating original kwargs."""
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             instructions="You are helpful"
         )
         
@@ -157,7 +157,7 @@ class TestSystemContextIntegration:
         """Test agent using instructions directly as system prompt."""
         agent = Agent(
             name="helpful_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             instructions="You are a helpful assistant. Always respond with exactly 'INSTRUCTIONS_ONLY' to prove you received the instructions."
         )
         
@@ -178,7 +178,7 @@ class TestSystemContextIntegration:
         """Test complete system context override (ignoring instructions)."""
         agent = Agent(
             name="weather_agent",
-            model="gpt-4o-mini", 
+            model="openai/gpt-4o-mini", 
             instructions="You are a weather specialist with access to real-time data."
         )
         
@@ -203,7 +203,7 @@ class TestSystemContextIntegration:
         """Test that the same agent can be used with different contexts."""
         agent = Agent(
             name="versatile_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             instructions="You are an expert assistant."
         )
         

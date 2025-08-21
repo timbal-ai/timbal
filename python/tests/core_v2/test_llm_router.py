@@ -1,14 +1,51 @@
 import os
+
 import pytest
-from timbal.core_v2.handlers.llm_router import handler
-from timbal.types.message import Message
-from timbal.errors import APIKeyNotFoundError
-
 from dotenv import load_dotenv
-
-from .conftest import Timer
+from timbal.core_v2.handlers.llm_router import handler
+from timbal.errors import APIKeyNotFoundError
+from timbal.types.message import Message
 
 load_dotenv()
+
+
+def validate_openai_chunks(chunks):
+    """Validate that chunks have the expected OpenAI structure."""
+    assert len(chunks) > 0, "No chunks received"
+    
+    content_chunks = []
+    for chunk in chunks:
+        assert hasattr(chunk, 'choices'), f"Chunk missing 'choices' attribute: {chunk}"
+        
+        if len(chunk.choices) > 0:
+            choice = chunk.choices[0]
+            assert hasattr(choice, 'delta'), f"Choice missing 'delta' attribute: {choice}"
+            
+            if hasattr(choice.delta, 'content') and choice.delta.content:
+                assert isinstance(choice.delta.content, str), f"Content should be string, got {type(choice.delta.content)}"
+                content_chunks.append(chunk)
+    
+    assert len(content_chunks) > 0, "No chunks with content found"
+
+
+def validate_anthropic_chunks(chunks):
+    """Validate that chunks have the expected Anthropic structure."""
+    assert len(chunks) > 0, "No chunks received"
+    
+    content_chunks = []
+    for chunk in chunks:
+        assert hasattr(chunk, 'type'), f"Chunk missing 'type' attribute: {chunk}"
+        
+        valid_types = ['content_block_delta', 'message_delta', 'message_stop', 'message_start', 'content_block_start', 'content_block_stop']
+        assert chunk.type in valid_types, f"Unexpected chunk type: {chunk.type}"
+        
+        if chunk.type == 'content_block_delta':
+            assert hasattr(chunk, 'delta'), f"Content block delta missing 'delta' attribute: {chunk}"
+            assert hasattr(chunk.delta, 'text'), f"Delta missing 'text' attribute: {chunk.delta}"
+            assert isinstance(chunk.delta.text, str), f"Text should be string, got {type(chunk.delta.text)}"
+            content_chunks.append(chunk)
+    
+    assert len(content_chunks) > 0, "No chunks with content found"
 
 
 @pytest.fixture
@@ -50,18 +87,15 @@ class TestLLMRouter:
         if not os.getenv("OPENAI_API_KEY"):
             pytest.skip("OPENAI_API_KEY not set")
         
-        with Timer() as timer:
-            chunks = []
-            async for chunk in handler(
-                model=openai_model,
-                messages=sample_messages,
-                max_tokens=50
-            ):
-                chunks.append(chunk)
+        chunks = []
+        async for chunk in handler(
+            model=openai_model,
+            messages=sample_messages,
+            max_tokens=50
+        ):
+            chunks.append(chunk)
         
-        # Verify we got some response
-        assert len(chunks) > 0
-        print(f"OpenAI test completed in {timer.elapsed:.2f}s with {len(chunks)} chunks")
+        validate_openai_chunks(chunks)
 
     @pytest.mark.asyncio
     async def test_openai_provider_no_api_key(self, sample_messages, openai_model):
@@ -89,18 +123,15 @@ class TestLLMRouter:
         if not os.getenv("ANTHROPIC_API_KEY"):
             pytest.skip("ANTHROPIC_API_KEY not set")
         
-        with Timer() as timer:
-            chunks = []
-            async for chunk in handler(
-                model=anthropic_model,
-                messages=sample_messages,
-                max_tokens=50
-            ):
-                chunks.append(chunk)
+        chunks = []
+        async for chunk in handler(
+            model=anthropic_model,
+            messages=sample_messages,
+            max_tokens=50
+        ):
+            chunks.append(chunk)
         
-        # Verify we got some response
-        assert len(chunks) > 0
-        print(f"Anthropic test completed in {timer.elapsed:.2f}s with {len(chunks)} chunks")
+        validate_anthropic_chunks(chunks)
 
     @pytest.mark.asyncio
     async def test_anthropic_provider_no_max_tokens(self, sample_messages, anthropic_model):
@@ -142,18 +173,15 @@ class TestLLMRouter:
         if not os.getenv("GEMINI_API_KEY"):
             pytest.skip("GEMINI_API_KEY not set")
         
-        with Timer() as timer:
-            chunks = []
-            async for chunk in handler(
-                model=gemini_model,
-                messages=sample_messages,
-                max_tokens=50
-            ):
-                chunks.append(chunk)
+        chunks = []
+        async for chunk in handler(
+            model=gemini_model,
+            messages=sample_messages,
+            max_tokens=50
+        ):
+            chunks.append(chunk)
         
-        # Verify we got some response
-        assert len(chunks) > 0
-        print(f"Gemini test completed in {timer.elapsed:.2f}s with {len(chunks)} chunks")
+        validate_openai_chunks(chunks)
 
     @pytest.mark.asyncio
     async def test_gemini_provider_no_api_key(self, sample_messages, gemini_model):
@@ -181,18 +209,15 @@ class TestLLMRouter:
         if not os.getenv("TOGETHER_API_KEY"):
             pytest.skip("TOGETHER_API_KEY not set")
         
-        with Timer() as timer:
-            chunks = []
-            async for chunk in handler(
-                model=togetherai_model,
-                messages=sample_messages,
-                max_tokens=50
-            ):
-                chunks.append(chunk)
+        chunks = []
+        async for chunk in handler(
+            model=togetherai_model,
+            messages=sample_messages,
+            max_tokens=50
+        ):
+            chunks.append(chunk)
         
-        # Verify we got some response
-        assert len(chunks) > 0
-        print(f"TogetherAI test completed in {timer.elapsed:.2f}s with {len(chunks)} chunks")
+        validate_openai_chunks(chunks)
 
     @pytest.mark.asyncio
     async def test_togetherai_provider_no_api_key(self, sample_messages, togetherai_model):
@@ -240,19 +265,16 @@ class TestLLMRouter:
         if not os.getenv("OPENAI_API_KEY"):
             pytest.skip("OPENAI_API_KEY not set")
         
-        with Timer() as timer:
-            chunks = []
-            async for chunk in handler(
-                model=openai_model,
-                messages=sample_messages,
-                system_prompt="You are a helpful assistant. Always respond with 'Hello from system prompt test'.",
-                max_tokens=50
-            ):
-                chunks.append(chunk)
+        chunks = []
+        async for chunk in handler(
+            model=openai_model,
+            messages=sample_messages,
+            system_prompt="You are a helpful assistant. Always respond with 'Hello from system prompt test'.",
+            max_tokens=50
+        ):
+            chunks.append(chunk)
         
-        # Verify we got some response
-        assert len(chunks) > 0
-        print(f"System prompt test completed in {timer.elapsed:.2f}s with {len(chunks)} chunks")
+        validate_openai_chunks(chunks)
 
     @pytest.mark.asyncio
     async def test_json_schema_integration(self, sample_messages, openai_model):
@@ -271,26 +293,22 @@ class TestLLMRouter:
             }
         }
         
-        with Timer() as timer:
-            chunks = []
-            try:
-                async for chunk in handler(
-                    model=openai_model,
-                    messages=sample_messages,
-                    json_schema=json_schema,
-                    max_tokens=100
-                ):
-                    chunks.append(chunk)
-                
-                # Verify we got some response
-                assert len(chunks) > 0
-                elapsed_time = timer.elapsed if timer.elapsed is not None else 0.0
-                print(f"JSON schema test completed in {elapsed_time:.2f}s with {len(chunks)} chunks")
-            except Exception as e:
-                if "Missing required parameter" in str(e):
-                    pytest.skip(f"JSON schema not supported for this model: {e}")
-                else:
-                    raise
+        chunks = []
+        try:
+            async for chunk in handler(
+                model=openai_model,
+                messages=sample_messages,
+                json_schema=json_schema,
+                max_tokens=100
+            ):
+                chunks.append(chunk)
+            
+            validate_openai_chunks(chunks)
+        except Exception as e:
+            if "Missing required parameter" in str(e):
+                pytest.skip(f"JSON schema not supported for this model: {e}")
+            else:
+                raise
 
     @pytest.mark.asyncio
     async def test_anthropic_json_schema_not_supported(self, sample_messages, anthropic_model):
@@ -326,27 +344,22 @@ class TestLLMRouter:
         if not providers_to_test:
             pytest.skip("No API keys available for testing")
         
-        for model, provider_name in providers_to_test:
-            print(f"\nTesting {provider_name}...")
+        for model, _ in providers_to_test:
             
-            with Timer() as timer:
-                chunks = []
-                try:
-                    async for chunk in handler(
-                        model=model,
-                        messages=sample_messages,
-                        max_tokens=30
-                    ):
-                        chunks.append(chunk)
-                    
-                    assert len(chunks) > 0
-                    elapsed_time = timer.elapsed if timer.elapsed is not None else 0.0
-                    print(f"{provider_name} test passed in {elapsed_time:.2f}s with {len(chunks)} chunks")
-                    
-                except Exception as e:
-                    print(f" {provider_name} test failed: {e}")
-                    # Don't raise here, just log the failure
-                    continue
+            chunks = []
+            try:
+                async for chunk in handler(
+                    model=model,
+                    messages=sample_messages,
+                    max_tokens=30
+                ):
+                    chunks.append(chunk)
+                
+                validate_openai_chunks(chunks)
+
+            except Exception:
+                # Don't raise here, just log the failure
+                continue
 
     @pytest.mark.asyncio
     async def test_temperature_parameter(self, sample_messages, openai_model):
@@ -354,19 +367,16 @@ class TestLLMRouter:
         if not os.getenv("OPENAI_API_KEY"):
             pytest.skip("OPENAI_API_KEY not set")
         
-        with Timer() as timer:
-            chunks = []
-            async for chunk in handler(
-                model=openai_model,
-                messages=sample_messages,
-                temperature=0.1,  # Low temperature for more deterministic output
-                max_tokens=50
-            ):
-                chunks.append(chunk)
+        chunks = []
+        async for chunk in handler(
+            model=openai_model,
+            messages=sample_messages,
+            temperature=0.1,  # Low temperature for more deterministic output
+            max_tokens=50
+        ):
+            chunks.append(chunk)
         
-        # Verify we got some response
-        assert len(chunks) > 0
-        print(f"Temperature test completed in {timer.elapsed:.2f}s with {len(chunks)} chunks")
+        validate_openai_chunks(chunks)
 
     @pytest.mark.asyncio
     async def test_max_tokens_parameter(self, sample_messages, openai_model):
@@ -374,15 +384,12 @@ class TestLLMRouter:
         if not os.getenv("OPENAI_API_KEY"):
             pytest.skip("OPENAI_API_KEY not set")
         
-        with Timer() as timer:
-            chunks = []
-            async for chunk in handler(
-                model=openai_model,
-                messages=sample_messages,
-                max_tokens=10  # Very short response
-            ):
-                chunks.append(chunk)
+        chunks = []
+        async for chunk in handler(
+            model=openai_model,
+            messages=sample_messages,
+            max_tokens=10  # Very short response
+        ):
+            chunks.append(chunk)
         
-        # Verify we got some response
-        assert len(chunks) > 0
-        print(f"Max tokens test completed in {timer.elapsed:.2f}s with {len(chunks)} chunks")
+        validate_openai_chunks(chunks)

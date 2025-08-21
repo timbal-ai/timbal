@@ -93,7 +93,7 @@ def simple_agent():
     
     return Agent(
         name="simple_agent",
-        model="gpt-4o-mini",
+        model="openai/gpt-4o-mini",
         tools=[get_time]
     )
 
@@ -112,7 +112,7 @@ def multi_tool_agent():
     
     return Agent(
         name="multi_tool_agent",
-        model="gpt-4o-mini",
+        model="openai/gpt-4o-mini",
         tools=[add, multiply, greet]
     )
 
@@ -135,7 +135,7 @@ def math_agent():
     
     return Agent(
         name="math_agent",
-        model="gpt-4o-mini",
+        model="openai/gpt-4o-mini",
         tools=[calculate],
         instructions="You are a helpful math assistant. Use the calculate tool for any math operations."
     )
@@ -222,9 +222,9 @@ ERROR_SCENARIOS = [
 
 # Agent models for testing
 TEST_MODELS = [
-    "gpt-4o-mini",
-    "gpt-4",
-    "claude-3-sonnet",
+    "openai/gpt-4o-mini",
+    "openai/gpt-4",
+    "anthropic/claude-3-sonnet",
 ]
 
 # Common test prompts
