@@ -24,6 +24,7 @@ from ..collectors import get_collector_registry
 from ..collectors.utils import sync_to_async_gen
 from ..state import get_call_id, get_run_context, set_call_id, set_run_context
 from ..state.context import RunContext
+from ..state.tracing.trace import Trace
 from ..types.events import (
     BaseEvent,
     ChunkEvent,
@@ -458,13 +459,12 @@ class Runnable(ABC, BaseModel):
             set_run_context(run_context)
 
         assert _call_id not in run_context.tracing, f"Call ID {_call_id} already exists in tracing."
-        trace = {
-            "path": self._path,
-            "call_id": _call_id,
-            "parent_call_id": _parent_call_id,
-            "t0": t0,
-            "usage": {},
-        }
+        trace = Trace(
+            path=self._path,
+            call_id=_call_id,
+            parent_call_id=_parent_call_id,
+            t0=t0,
+        )
         run_context.tracing[_call_id] = trace
 
         start_event = await StartEvent.build(
@@ -478,7 +478,7 @@ class Runnable(ABC, BaseModel):
         # This will ensure full replayability of the run.
         # TODO Evaluate runtime mappings
         input = {**self.fixed_params, **kwargs}
-        trace["input"] = await dump(input)
+        trace.input = await dump(input)
 
         output, error = None, None
         try:
@@ -536,7 +536,7 @@ class Runnable(ABC, BaseModel):
                                 yield chunk
 
                 output = collector.collect() if collector else None
-                trace["output"] = await dump(output)
+                trace.output = await dump(output)
             
             if self.post_hook is not None:
                 await self.post_hook(output)
@@ -547,11 +547,11 @@ class Runnable(ABC, BaseModel):
                 "message": str(err),
                 "traceback": traceback.format_exc(),
             }
-            trace["error"] = error # No need to model dump the error. It's already a json compatible dict
+            trace.error = error # No need to model dump the error. It's already a json compatible dict
         
         finally:
             t1 = int(time.time() * 1000)
-            trace["t1"] = t1
+            trace.t1 = t1
             # TODO Refactor this. No longer need the implicit dump?
             output_event = await OutputEvent.build(
                 run_id=run_context.id,
@@ -561,7 +561,7 @@ class Runnable(ABC, BaseModel):
                 input=input,
                 output=output,
                 error=error,
-                usage=trace["usage"],
+                usage=trace.usage,
             )
             if _parent_call_id is None:
                 await run_context.save_tracing()

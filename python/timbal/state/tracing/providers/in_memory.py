@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING, override
 
-from ..data import Tracing
+from .. import Tracing
 from .base import TracingProvider
 
 if TYPE_CHECKING:

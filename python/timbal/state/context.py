@@ -89,9 +89,9 @@ class RunContext(BaseModel):
         while call_id:
             assert call_id in self.tracing, f"RunContext.update_usage: Call ID {call_id} not found in tracing."
             trace = self.tracing[call_id]
-            current_value = trace["usage"].get(key, 0)
-            trace["usage"][key] = current_value + value
-            call_id = trace.get("parent_call_id", None)
+            current_value = trace.usage.get(key, 0)
+            trace.usage[key] = current_value + value
+            call_id = trace.parent_call_id
 
     def _get_call_id_from_stack(self) -> str:
         """Inspect the call stack to find the first Runnable instance and return its path and call_id."""

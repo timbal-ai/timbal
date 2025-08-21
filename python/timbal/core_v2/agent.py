@@ -223,8 +223,8 @@ class Agent(Runnable):
                 llm_tracing = parent_tracing.get_path(self._llm._path)
                 assert len(llm_tracing) >= 1, f"Agent trace does not have any records for path {self._llm._path}"
                 # Get the most recent LLM interaction
-                llm_input_messages = llm_tracing[-1]["input"]["messages"]
-                llm_output_message = llm_tracing[-1]["output"]
+                llm_input_messages = llm_tracing[-1].input.get("messages", []) # TODO Put an assertion in here
+                llm_output_message = llm_tracing[-1].output
                 # Reconstruct conversation: input messages + LLM response
                 memory = [
                     *[Message.validate(m) for m in llm_input_messages], 

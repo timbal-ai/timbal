@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
-from ..data import Tracing
+from .. import Tracing
 
 if TYPE_CHECKING:
     from ...context import RunContext
