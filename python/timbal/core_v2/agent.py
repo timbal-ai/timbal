@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from functools import cached_property
 from typing import Any, override
 
@@ -19,13 +19,10 @@ from ..types.chat.content import ToolResultContent, ToolUseContent
 from ..types.events import OutputEvent
 from ..types.message import Message
 from .handlers import llm_router
-from .runnable import Runnable
+from .runnable import Runnable, RunnableLike
 from .tool import Tool
 
 logger = structlog.get_logger("timbal.core_v2.agent")
-
-ToolLike = Runnable | dict[str, Any] | Callable[..., Any]
-"""Type alias for objects that can be converted to Tools: Runnable instances, dicts, or callables."""
 
 
 # TODO Add more params here
@@ -88,7 +85,7 @@ class Agent(Runnable):
     """The LLM model identifier (e.g., 'claude-3-sonnet', 'gpt-4')."""
     instructions: str | None = None
     """Optional system instructions to provide context for the agent."""
-    tools: list[SkipValidation[ToolLike]] = []
+    tools: list[SkipValidation[RunnableLike]] = []
     """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""

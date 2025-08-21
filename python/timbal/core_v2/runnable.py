@@ -457,11 +457,13 @@ class Runnable(ABC, BaseModel):
             set_run_context(run_context)
 
         assert _call_id not in run_context.tracing, f"Call ID {_call_id} already exists in tracing."
-        run_context.tracing[_call_id] = {
+        trace = {
             "path": self._path,
             "parent_call_id": _parent_call_id,
             "usage": {},
+            "t0": t0,
         }
+        run_context.tracing[_call_id] = trace
 
         start_event = await StartEvent.build(
             run_id=run_context.id,
@@ -470,37 +472,41 @@ class Runnable(ABC, BaseModel):
         logger.info("start_event", **start_event.dump)
         yield start_event
 
-        # At initialization, we might want to fix some parameters for the handler.
-        # We'll use these fixed parameters as default values.
+        # We store the unvalidated input, as sent by the user. 
+        # This will ensure full replayability of the run.
+        # TODO Evaluate runtime mappings
         input = {**self.fixed_params, **kwargs}
-        output, error = None, None
+        trace["input"] = input
 
+        output, error = None, None
         try:
+            # TODO We should not mutate the input dict. If we want to modify or add new variables we should store them someplace else
             if self.pre_hook is not None:
                 await self.pre_hook(input)
             
-            input = dict(self.params_model.model_validate(input))
+            # Pydantic model_validate() does not mutate the input dict
+            validated_input = dict(self.params_model.model_validate(input))
 
             async_gen = None
             if not self._is_async_gen and not self._is_coroutine:
                 loop = asyncio.get_running_loop()
                 ctx = contextvars.copy_context()
                 if self._is_gen:
-                    gen = self.handler(**input)
+                    gen = self.handler(**validated_input)
                     async_gen = sync_to_async_gen(gen, loop, ctx, self._path, _call_id)
                 else:
                     def handler_func(_call_id=_call_id):
-                        return ctx.run(self.handler, **input)
+                        return ctx.run(self.handler, **validated_input)
                     output = await loop.run_in_executor(None, handler_func)
             
             elif self._is_coroutine:
-                output = await self.handler(**input)
+                output = await self.handler(**validated_input)
             
             else:
                 if self._is_orchestrator:
-                    async_gen = self.handler(**input, _parent_call_id=_call_id)
+                    async_gen = self.handler(**validated_input, _parent_call_id=_call_id)
                 else:
-                    async_gen = self.handler(**input)
+                    async_gen = self.handler(**validated_input)
             
             if async_gen:
                 collector = None
@@ -538,10 +544,11 @@ class Runnable(ABC, BaseModel):
                 "message": str(err),
                 "traceback": traceback.format_exc(),
             }
+            trace["error"] = error
         
         finally:
             t1 = int(time.time() * 1000)
-            trace = run_context.tracing[_call_id]
+            trace["t1"] = t1
             output_event = await OutputEvent.build(
                 run_id=run_context.id,
                 path=self._path,
@@ -552,15 +559,13 @@ class Runnable(ABC, BaseModel):
                 error=error,
                 usage=trace["usage"],
             )
-            # TODO Think where to put this
-            trace.update({
-                "t0": t0,
-                "t1": t1,
-                "input": output_event.dump["input"],
-                "output": output_event.dump["output"],
-                "error": output_event.dump["error"],
-            })
+            # TODO Not a fan of storing the dumps...
+            trace["output"] = output_event.dump["output"]
             if _call_id is None: # root
                 await run_context.save_tracing()
             logger.info("output_event", **output_event.dump)
             yield output_event
+
+
+RunnableLike = Runnable | dict[str, Any] | Callable[..., Any]
+"""Type alias for objects that can be used as tools for an agent or steps in a workflow."""
