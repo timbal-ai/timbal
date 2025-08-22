@@ -24,20 +24,20 @@ class TestAgentCreation:
         
         assert agent.name == "test_agent"
         assert agent.model == "gpt-4o-mini"
-        assert agent.instructions is None
+        assert agent.system_prompt is None
         assert len(agent.tools) == 0
         assert agent.max_iter == 10
     
-    def test_agent_with_instructions(self):
-        """Test agent with system instructions."""
-        instructions = "You are a helpful assistant specialized in math."
+    def test_agent_with_system_prompt(self):
+        """Test agent with system system_prompt."""
+        system_prompt = "You are a helpful assistant specialized in math."
         agent = Agent(
             name="math_agent",
             model="gpt-4o-mini",
-            instructions=instructions
+            system_prompt=system_prompt
         )
         
-        assert agent.instructions == instructions
+        assert agent.system_prompt == system_prompt
     
     def test_agent_with_callable_tools(self):
         """Test agent with function tools."""

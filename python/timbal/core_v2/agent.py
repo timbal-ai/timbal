@@ -37,19 +37,6 @@ class AgentParams(BaseModel):
         ...,
         description="Input message to send to the agent.",
     )
-    system_context: str | None = Field(
-        None,
-        description=(
-            "System prompt context. Can be used to provide additional context to the agent. "
-            "You can inject the agent instructions using the {instructions} placeholder. "
-            "This design enables:\n"
-            "- Platform Flexibility: Send different prompt structures without changing agent code\n"
-            "- Reusable Components: Agent instructions slot into any template\n"
-            "- Context Adaptation: Same agent, different contexts, different structures\n"
-            "- Clean Separation: Agent logic in code, presentation logic from platform\n\n"
-            "If not provided, agent.instructions will be used directly as system prompt."
-        ),
-    )
 
 
 class Agent(Runnable):
@@ -82,8 +69,8 @@ class Agent(Runnable):
 
     model: str
     """The LLM model identifier (e.g., 'claude-3-sonnet', 'gpt-4')."""
-    instructions: str | None = None
-    """Optional system instructions to provide context for the agent."""
+    system_prompt: str | None = None
+    """System prompt to provide context for the agent."""
     tools: list[SkipValidation[RunnableLike]] = []
     """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
     max_iter: int = 10
@@ -107,11 +94,6 @@ class Agent(Runnable):
         """
         self._path = self.name
 
-        # Make sure the system_context is not exposed a stool param when using the agent as a tool
-        if self.schema_exclude_params is None:
-            self.schema_exclude_params = ["system_context"]
-        else:
-            self.schema_exclude_params.append("system_context")
         
         # Create internal LLM tool for model interactions
         self._llm = Tool(
@@ -174,29 +156,6 @@ class Agent(Runnable):
     def return_model(self) -> Any:
         """See base class."""
         return Message
-
-    
-    def _build_system_prompt(self, **kwargs) -> str | None:
-        """Build system prompt from template and instructions.
-        
-        This method implements the flexible system prompt composition pattern:
-        1. If system_context template is provided, format it with instructions
-        2. If no template but instructions exist, use instructions directly  
-        3. If neither exist, return None (no system prompt)
-        
-        Args:
-            **kwargs: Execution parameters, may contain system_context
-            
-        Returns:
-            Formatted system prompt string or None
-        """
-        system_context = kwargs.pop("system_context", None)
-        if system_context:
-            return system_context.format(instructions=self.instructions or "")
-        elif self.instructions:
-            return self.instructions
-        else:
-            return None
 
 
     async def _resolve_memory(self) -> list[Message]:
@@ -302,8 +261,8 @@ class Agent(Runnable):
         Yields:
             Events from LLM calls and tool executions
         """
-        # Build system prompt from template and instructions
-        system_prompt = self._build_system_prompt(**kwargs)
+        # TODO Lazy evaluation of variables and functions
+        system_prompt = self.system_prompt
         # Initialize conversation with memory + user prompt
         messages = await self._resolve_memory()
         messages.append(kwargs.pop("prompt"))
