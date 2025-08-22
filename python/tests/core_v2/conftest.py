@@ -137,7 +137,7 @@ def math_agent():
         name="math_agent",
         model="openai/gpt-4o-mini",
         tools=[calculate],
-        instructions="You are a helpful math assistant. Use the calculate tool for any math operations."
+        system_prompt="You are a helpful math assistant. Use the calculate tool for any math operations."
     )
 
 

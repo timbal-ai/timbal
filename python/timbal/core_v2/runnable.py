@@ -18,11 +18,19 @@ from pydantic import (
     field_validator,
     model_serializer,
 )
+from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
 from ..collectors.utils import sync_to_async_gen
-from ..state import get_run_context, set_run_context
+from ..state import (
+    get_parent_call_id,
+    get_run_context, 
+    set_call_id, 
+    set_parent_call_id,
+    set_run_context,
+)
 from ..state.context import RunContext
+from ..state.tracing.trace import Trace
 from ..types.events import (
     BaseEvent,
     ChunkEvent,
@@ -30,6 +38,7 @@ from ..types.events import (
     OutputEvent,
     StartEvent,
 )
+from ..types.models import dump
 
 logger = structlog.get_logger("timbal.core_v2.runnable")
 
@@ -216,14 +225,18 @@ class Runnable(ABC, BaseModel):
     """The unique identifier for this runnable component."""
     description: str | None = None
     """Optional description of what this runnable does, used in LLM tool schemas."""
-    params_mode: Literal["all", "required"] = "all"
+
+    schema_params_mode: Literal["all", "required"] = "all"
     """Parameter inclusion mode: 'all' includes all params, 'required' only required ones."""
-    include_params: list[str] | None = None
-    """Specific parameter names to include in the schema (additive to params_mode)."""
-    exclude_params: list[str] | None = None
+    schema_include_params: list[str] | None = None
+    """Specific parameter names to include in the schema (additive to schema_params_mode)."""
+    schema_exclude_params: list[str] | None = None
     """Specific parameter names to exclude from the schema."""
-    fixed_params: dict[str, Any] = {}
-    """Parameters that are fixed at initialization and merged with runtime kwargs."""
+
+    default_params: dict[str, Any] = {}
+    """Runtime default parameter injection.
+    These parameters are added to the handler's parameters when the handler is called."""
+
     pre_hook: Callable[..., Any] | None = None
     """Pre-execution hook for input processing. See 'Hook Patterns' in class docstring.
     Signature: async def pre_hook(input: dict[str, Any]) -> None
@@ -285,7 +298,7 @@ class Runnable(ABC, BaseModel):
         This model is used for:
         - Input validation when the runnable is called
         - Schema generation for LLM tool calling
-        - Parameter filtering based on params_mode, include_params, exclude_params
+        - Parameter filtering based on schema_params_mode, schema_include_params, schema_exclude_params
         
         Returns:
             A Pydantic BaseModel class defining the expected input parameters
@@ -339,7 +352,7 @@ class Runnable(ABC, BaseModel):
     def format_params_model_schema(self) -> dict[str, Any]:
         """Format the parameter schema based on filtering rules.
         
-        Applies the params_mode, include_params, and exclude_params settings
+        Applies the schema_params_mode, schema_include_params, and schema_exclude_params settings
         to filter which parameters are included in the final schema.
         
         Returns:
@@ -347,18 +360,18 @@ class Runnable(ABC, BaseModel):
         """
         selected_params = set()
         # Start with either all params or just required ones
-        if self.params_mode == "required":
+        if self.schema_params_mode == "required":
             selected_params = set(self.params_model_schema.get("required", []))
         else:
             selected_params = set(self.params_model_schema["properties"].keys())
         
         # Add any explicitly included params
-        if self.include_params is not None:
-            selected_params.update(self.include_params)
+        if self.schema_include_params is not None:
+            selected_params.update(self.schema_include_params)
 
         # Remove any explicitly excluded params
-        if self.exclude_params is not None:
-            selected_params.difference_update(self.exclude_params)
+        if self.schema_exclude_params is not None:
+            selected_params.difference_update(self.schema_exclude_params)
 
         # Filter properties to only include selected params
         properties = {
@@ -420,7 +433,7 @@ class Runnable(ABC, BaseModel):
         """Execute the runnable with the given parameters.
         
         This is the main entry point for executing a runnable. It handles:
-        - Parameter validation and merging with fixed_params
+        - Parameter validation and merging with default_params
         - Run context management and tracing setup
         - Event streaming (StartEvent, ChunkEvents, OutputEvent)
         - Error handling and cleanup
@@ -431,9 +444,6 @@ class Runnable(ABC, BaseModel):
         
         Args:
             **kwargs: Runtime parameters for the runnable execution.
-                Special parameters:
-                - _call_id: Internal call identifier for tracing
-                - _parent_call_id: Parent call identifier for nested execution
         
         Returns:
             A CollectableAsyncGenerator that yields Events and provides collect() method
@@ -444,24 +454,29 @@ class Runnable(ABC, BaseModel):
         """
         t0 = int(time.time() * 1000)
 
-        _call_id = kwargs.pop("_call_id", None)
-        _parent_call_id = kwargs.pop("_parent_call_id", None)
+        _parent_call_id = get_parent_call_id()
+        _call_id = uuid7(as_type="str").replace("-", "")
+        set_call_id(_call_id)
+        if self._is_orchestrator:
+            set_parent_call_id(_call_id)
 
         # Generate new context or reset it if appropriate
         run_context = get_run_context()
         if not run_context:
             run_context = RunContext()
             set_run_context(run_context)
-        if not _call_id and run_context.tracing:
+        if not _parent_call_id and run_context.tracing:
             run_context = RunContext(parent_id=run_context.id)
             set_run_context(run_context)
 
         assert _call_id not in run_context.tracing, f"Call ID {_call_id} already exists in tracing."
-        run_context.tracing[_call_id] = {
-            "path": self._path,
-            "parent_call_id": _parent_call_id,
-            "usage": {},
-        }
+        trace = Trace(
+            path=self._path,
+            call_id=_call_id,
+            parent_call_id=_parent_call_id,
+            t0=t0,
+        )
+        run_context.tracing[_call_id] = trace
 
         start_event = await StartEvent.build(
             run_id=run_context.id,
@@ -470,37 +485,41 @@ class Runnable(ABC, BaseModel):
         logger.info("start_event", **start_event.dump)
         yield start_event
 
-        # At initialization, we might want to fix some parameters for the handler.
-        # We'll use these fixed parameters as default values.
-        input = {**self.fixed_params, **kwargs}
-        output, error = None, None
+        # We store the unvalidated input, as sent by the user. 
+        # This will ensure full replayability of the run.
+        # TODO Evaluate runtime mappings
+        input = {**self.default_params, **kwargs}
+        trace.input = await dump(input)
 
+        output, error = None, None
         try:
+            # TODO We should not mutate the input dict. If we want to modify or add new variables we should store them someplace else
             if self.pre_hook is not None:
                 await self.pre_hook(input)
             
-            input = dict(self.params_model.model_validate(input))
+            # Pydantic model_validate() does not mutate the input dict
+            validated_input = dict(self.params_model.model_validate(input))
 
             async_gen = None
             if not self._is_async_gen and not self._is_coroutine:
                 loop = asyncio.get_running_loop()
                 ctx = contextvars.copy_context()
                 if self._is_gen:
-                    gen = self.handler(**input)
-                    async_gen = sync_to_async_gen(gen, loop, ctx, self._path, _call_id)
+                    gen = self.handler(**validated_input)
+                    async_gen = sync_to_async_gen(gen, loop, ctx)
                 else:
-                    def handler_func(_call_id=_call_id):
-                        return ctx.run(self.handler, **input)
+                    def handler_func():
+                        return ctx.run(self.handler, **validated_input)
                     output = await loop.run_in_executor(None, handler_func)
             
             elif self._is_coroutine:
-                output = await self.handler(**input)
+                output = await self.handler(**validated_input)
             
             else:
                 if self._is_orchestrator:
-                    async_gen = self.handler(**input, _parent_call_id=_call_id)
+                    async_gen = self.handler(**validated_input)
                 else:
-                    async_gen = self.handler(**input)
+                    async_gen = self.handler(**validated_input)
             
             if async_gen:
                 collector = None
@@ -528,6 +547,7 @@ class Runnable(ABC, BaseModel):
                                 yield chunk
 
                 output = collector.collect() if collector else None
+                trace.output = await dump(output)
             
             if self.post_hook is not None:
                 await self.post_hook(output)
@@ -538,10 +558,12 @@ class Runnable(ABC, BaseModel):
                 "message": str(err),
                 "traceback": traceback.format_exc(),
             }
+            trace.error = error # No need to model dump the error. It's already a json compatible dict
         
         finally:
             t1 = int(time.time() * 1000)
-            trace = run_context.tracing[_call_id]
+            trace.t1 = t1
+            # TODO Refactor this. No longer need the implicit dump?
             output_event = await OutputEvent.build(
                 run_id=run_context.id,
                 path=self._path,
@@ -550,17 +572,15 @@ class Runnable(ABC, BaseModel):
                 input=input,
                 output=output,
                 error=error,
-                usage=trace["usage"],
+                usage=trace.usage,
             )
-            # TODO Think where to put this
-            trace.update({
-                "t0": t0,
-                "t1": t1,
-                "input": output_event.dump["input"],
-                "output": output_event.dump["output"],
-                "error": output_event.dump["error"],
-            })
-            if _call_id is None: # root
+            if _parent_call_id is None:
                 await run_context.save_tracing()
+                # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
+                set_parent_call_id(None)
             logger.info("output_event", **output_event.dump)
             yield output_event
+
+
+RunnableLike = Runnable | dict[str, Any] | Callable[..., Any]
+"""Type alias for objects that can be used as tools for an agent or steps in a workflow."""

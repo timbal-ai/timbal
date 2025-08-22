@@ -49,7 +49,7 @@ class TestCallIDGeneration:
             name="test_agent",
             model="openai/gpt-4o-mini",
             tools=[helper_tool],
-            instructions="Use the helper tool to complete tasks"
+            system_prompt="Use the helper tool to complete tasks"
         )
         
         prompt = Message.validate({
@@ -153,7 +153,7 @@ class TestNestedAgentTracing:
             name="coordinator",
             model="openai/gpt-4o-mini", 
             tools=[math_agent],
-            instructions="Use the math specialist to solve problems"
+            system_prompt="Use the math specialist to solve problems"
         )
         
         prompt = Message.validate({
@@ -214,7 +214,7 @@ class TestNestedAgentTracing:
             name="root_agent",
             model="openai/gpt-4o-mini",
             tools=[level2_agent],
-            instructions="Coordinate multi-level processing"
+            system_prompt="Coordinate multi-level processing"
         )
         
         prompt = Message.validate({
@@ -271,7 +271,7 @@ class TestParallelToolCallTracing:
             name="parallel_agent",
             model="openai/gpt-4o-mini",
             tools=[slow_task_a, slow_task_b, slow_task_c],
-            instructions="Execute multiple tasks concurrently when requested"
+            system_prompt="Execute multiple tasks concurrently when requested"
         )
         
         prompt = Message.validate({
@@ -317,7 +317,7 @@ class TestParallelToolCallTracing:
             name="nested_execution_agent",
             model="openai/gpt-4o-mini",
             tools=[data_processor],
-            instructions="Process the provided data using the data_processor tool"
+            system_prompt="Process the provided data using the data_processor tool"
         )
         
         prompt = Message.validate({
@@ -376,7 +376,7 @@ class TestParallelToolCallTracing:
             name="workflow_agent",
             model="openai/gpt-4o-mini",
             tools=[prepare_data, process_chunk_a, process_chunk_b, finalize_results],
-            instructions="Execute a workflow: prepare data, then process chunks A and B in parallel, then finalize"
+            system_prompt="Execute a workflow: prepare data, then process chunks A and B in parallel, then finalize"
         )
         
         prompt = Message.validate({
@@ -432,7 +432,7 @@ class TestTracingContextPropagation:
             name="context_agent",
             model="openai/gpt-4o-mini", 
             tools=[context_inspector],
-            instructions="Use the context inspector tool to examine the execution context"
+            system_prompt="Use the context inspector tool to examine the execution context"
         )
         
         prompt = Message.validate({
@@ -474,7 +474,7 @@ class TestTracingContextPropagation:
             name="parent_context_agent",
             model="openai/gpt-4o-mini",
             tools=[child_agent],
-            instructions="Use the child agent to inspect execution context"
+            system_prompt="Use the child agent to inspect execution context"
         )
         
         prompt = Message.validate({
@@ -520,7 +520,7 @@ class TestErrorTracingPropagation:
             name="error_tracing_agent",
             model="openai/gpt-4o-mini",
             tools=[failing_tool, working_tool],
-            instructions="Try using both tools - one will fail, one will succeed"
+            system_prompt="Try using both tools - one will fail, one will succeed"
         )
         
         prompt = Message.validate({
@@ -562,7 +562,7 @@ class TestErrorTracingPropagation:
             name="error_coordinator", 
             model="openai/gpt-4o-mini",
             tools=[child_agent],
-            instructions="Use the child agent for operations, handle any failures gracefully"
+            system_prompt="Use the child agent for operations, handle any failures gracefully"
         )
         
         prompt = Message.validate({
@@ -622,7 +622,7 @@ class TestEventSequenceValidation:
             name="sequence_agent",
             model="openai/gpt-4o-mini",
             tools=[quick_task],
-            instructions="Execute the requested task quickly"
+            system_prompt="Execute the requested task quickly"
         )
         
         prompt = Message.validate({

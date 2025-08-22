@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from functools import cached_property
 from typing import Any, override
 
@@ -12,7 +12,6 @@ from pydantic import (
     SkipValidation,
     computed_field,
 )
-from uuid_extensions import uuid7
 
 from ..state import get_run_context
 from ..types.chat.content import ToolResultContent, ToolUseContent
@@ -20,12 +19,11 @@ from ..types.events import OutputEvent
 from ..types.message import Message
 from .handlers import Model, llm_router
 from .runnable import Runnable
+from .handlers import llm_router
+from .runnable import Runnable, RunnableLike
 from .tool import Tool
 
 logger = structlog.get_logger("timbal.core_v2.agent")
-
-ToolLike = Runnable | dict[str, Any] | Callable[..., Any]
-"""Type alias for objects that can be converted to Tools: Runnable instances, dicts, or callables."""
 
 
 # TODO Add more params here
@@ -40,19 +38,6 @@ class AgentParams(BaseModel):
     prompt: Message = Field(
         ...,
         description="Input message to send to the agent.",
-    )
-    system_context: str | None = Field(
-        None,
-        description=(
-            "System prompt context. Can be used to provide additional context to the agent. "
-            "You can inject the agent instructions using the {instructions} placeholder. "
-            "This design enables:\n"
-            "- Platform Flexibility: Send different prompt structures without changing agent code\n"
-            "- Reusable Components: Agent instructions slot into any template\n"
-            "- Context Adaptation: Same agent, different contexts, different structures\n"
-            "- Clean Separation: Agent logic in code, presentation logic from platform\n\n"
-            "If not provided, agent.instructions will be used directly as system prompt."
-        ),
     )
 
 
@@ -89,6 +74,11 @@ class Agent(Runnable):
     instructions: str | None = None
     """Optional system instructions to provide context for the agent."""
     tools: list[SkipValidation[ToolLike]] = []
+    model: str
+    """The LLM model identifier (e.g., 'claude-3-sonnet', 'gpt-4')."""
+    system_prompt: str | None = None
+    """System prompt to provide context for the agent."""
+    tools: list[SkipValidation[RunnableLike]] = []
     """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
@@ -111,11 +101,6 @@ class Agent(Runnable):
         """
         self._path = self.name
 
-        # Make sure the system_context is not exposed a stool param when using the agent as a tool
-        if self.exclude_params is None:
-            self.exclude_params = ["system_context"]
-        else:
-            self.exclude_params.append("system_context")
         
         # Create internal LLM tool for model interactions
         self._llm = Tool(
@@ -179,29 +164,6 @@ class Agent(Runnable):
         """See base class."""
         return Message
 
-    
-    def _build_system_prompt(self, **kwargs) -> str | None:
-        """Build system prompt from template and instructions.
-        
-        This method implements the flexible system prompt composition pattern:
-        1. If system_context template is provided, format it with instructions
-        2. If no template but instructions exist, use instructions directly  
-        3. If neither exist, return None (no system prompt)
-        
-        Args:
-            **kwargs: Execution parameters, may contain system_context
-            
-        Returns:
-            Formatted system prompt string or None
-        """
-        system_context = kwargs.pop("system_context", None)
-        if system_context:
-            return system_context.format(instructions=self.instructions or "")
-        elif self.instructions:
-            return self.instructions
-        else:
-            return None
-
 
     async def _resolve_memory(self) -> list[Message]:
         """Resolve conversation memory from parent agent context.
@@ -227,8 +189,8 @@ class Agent(Runnable):
                 llm_tracing = parent_tracing.get_path(self._llm._path)
                 assert len(llm_tracing) >= 1, f"Agent trace does not have any records for path {self._llm._path}"
                 # Get the most recent LLM interaction
-                llm_input_messages = llm_tracing[-1]["input"]["messages"]
-                llm_output_message = llm_tracing[-1]["output"]
+                llm_input_messages = llm_tracing[-1].input.get("messages", []) # TODO Put an assertion in here
+                llm_output_message = llm_tracing[-1].output
                 # Reconstruct conversation: input messages + LLM response
                 memory = [
                     *[Message.validate(m) for m in llm_input_messages], 
@@ -237,7 +199,7 @@ class Agent(Runnable):
         return memory
 
     
-    async def _enqueue_tool_events(self, _parent_call_id: str | None, tool_call: ToolUseContent, queue: asyncio.Queue) -> None:
+    async def _enqueue_tool_events(self, tool_call: ToolUseContent, queue: asyncio.Queue) -> None:
         """Execute a single tool call and enqueue its events.
         
         This method runs a tool call asynchronously and puts all generated
@@ -245,19 +207,18 @@ class Agent(Runnable):
         _multiplex_tools to handle concurrent tool execution.
         
         Args:
-            _parent_call_id: Parent call ID for tracing
             tool_call: The tool call content with name and input parameters
             queue: Async queue to put events into
         """
         tool = self._tools_by_name[tool_call.name]
         # Execute tool and enqueue all events
-        async for event in tool(_call_id=tool_call.id, _parent_call_id=_parent_call_id, **tool_call.input):
+        async for event in tool(**tool_call.input):
             await queue.put((tool_call, event))
         # Signal completion with a sentinel value (None)
         await queue.put((tool_call, None))
 
 
-    async def _multiplex_tools(self, _parent_call_id: str | None, tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
+    async def _multiplex_tools(self, tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events.
         
         This method enables concurrent execution of multiple tool calls requested
@@ -265,7 +226,6 @@ class Agent(Runnable):
         Events from all tools are multiplexed and yielded as they become available.
         
         Args:
-            _parent_call_id: Parent call ID for tracing
             tool_calls: List of tool calls to execute concurrently
             
         Yields:
@@ -273,7 +233,7 @@ class Agent(Runnable):
         """
         queue = asyncio.Queue()
         # Start all tool executions concurrently
-        tasks = [asyncio.create_task(self._enqueue_tool_events(_parent_call_id, tc, queue)) for tc in tool_calls]
+        tasks = [asyncio.create_task(self._enqueue_tool_events(tc, queue)) for tc in tool_calls]
         # Process events as they arrive from any tool
         remaining = len(tasks)
         while remaining > 0:
@@ -303,16 +263,13 @@ class Agent(Runnable):
         Args:
             **kwargs: Execution parameters including:
                 - prompt: The input Message to process
-                - _parent_call_id: Parent call ID for nested execution
                 - Other parameters passed through to LLM
                 
         Yields:
             Events from LLM calls and tool executions
         """
-        # Extract parent call ID for tracing nested execution
-        _parent_call_id = kwargs.pop("_parent_call_id", None)
-        # Build system prompt from template and instructions
-        system_prompt = self._build_system_prompt(**kwargs)
+        # TODO Lazy evaluation of variables and functions
+        system_prompt = self.system_prompt
         # Initialize conversation with memory + user prompt
         messages = await self._resolve_memory()
         messages.append(kwargs.pop("prompt"))
@@ -321,8 +278,6 @@ class Agent(Runnable):
         while True:
             # Call LLM with current conversation
             async for event in self._llm(
-                _call_id=uuid7(as_type="str").replace("-", ""),
-                _parent_call_id=_parent_call_id,
                 model=self.model,
                 messages=messages,
                 system_prompt=system_prompt,
@@ -330,9 +285,12 @@ class Agent(Runnable):
                 tools=self.tools if i < self.max_iter else [],
                 **kwargs, 
             ):
-                # Add LLM response to conversation for next iteration
                 if isinstance(event, OutputEvent):
+                    # If the LLM call fails, we want to propagate the error upwards
+                    if event.error is not None:
+                        raise RuntimeError(event.error)
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
+                    # Add LLM response to conversation for next iteration
                     messages.append(event.output)
                 yield event
 
@@ -344,7 +302,7 @@ class Agent(Runnable):
             if not tool_calls:
                 break
 
-            async for tool_call, event in self._multiplex_tools(_parent_call_id, tool_calls):
+            async for tool_call, event in self._multiplex_tools(tool_calls):
                 # Only process events from immediate children (not nested subagents)
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
                     # Convert tool output to Message format if needed
