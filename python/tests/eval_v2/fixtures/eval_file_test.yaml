@@ -1,0 +1,11 @@
+tests:
+  - name: file_reading_test
+    description: Test that agent can read and process files
+    turns:
+      - input:
+          text: "What is the answer?"
+          files:
+            - "/Users/estherfanyanasropero/Desktop/timbal-ai/timbal/python/tests/eval_v2/fixtures/math_question.md"
+        output:
+          validators:
+            contains: ["4"]

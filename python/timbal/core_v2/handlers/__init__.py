@@ -1,2 +1,2 @@
 # ruff: noqa: F401
-from .llm_router import handler as llm_router
+from .llm_router import Model, handler as llm_router

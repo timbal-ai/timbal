@@ -19,10 +19,12 @@ class TestAgentCreation:
         """Test creating agent with minimal configuration."""
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini"
+            model="openai/gpt-4o-mini"
         )
         
         assert agent.name == "test_agent"
+        assert agent.model == "openai/gpt-4o-mini"
+        assert agent.instructions is None
         assert agent.model == "gpt-4o-mini"
         assert agent.system_prompt is None
         assert len(agent.tools) == 0
@@ -33,6 +35,8 @@ class TestAgentCreation:
         system_prompt = "You are a helpful assistant specialized in math."
         agent = Agent(
             name="math_agent",
+            model="openai/gpt-4o-mini",
+            instructions=instructions
             model="gpt-4o-mini",
             system_prompt=system_prompt
         )
@@ -49,7 +53,7 @@ class TestAgentCreation:
         
         agent = Agent(
             name="math_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[add, multiply]
         )
         
@@ -68,7 +72,7 @@ class TestAgentCreation:
         
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[tool_config]
         )
         
@@ -84,7 +88,7 @@ class TestAgentCreation:
         
         weather_agent = Agent(
             name="weather_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[get_weather],
             description="Provides weather information"
         )
@@ -92,7 +96,7 @@ class TestAgentCreation:
         # Create main agent with weather agent as tool
         main_agent = Agent(
             name="main_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[weather_agent]
         )
         
@@ -114,7 +118,7 @@ class TestAgentCreation:
         with pytest.raises(ValueError, match="Tool tool1 already exists"):
             Agent(
                 name="test_agent",
-                model="gpt-4o-mini",
+                model="openai/gpt-4o-mini",
                 tools=[tool1, tool2]
             )
     
@@ -122,7 +126,7 @@ class TestAgentCreation:
         """Test that agents correctly set their execution characteristics."""
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini"
+            model="openai/gpt-4o-mini"
         )
         
         # Agents are always orchestrators with async generators
@@ -135,7 +139,7 @@ class TestAgentCreation:
         """Test agent parameter and return model definitions."""
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini"
+            model="openai/gpt-4o-mini"
         )
         
         # Should use AgentParams and return Message
@@ -151,7 +155,7 @@ class TestAgentExecution:
         """Test basic agent conversation without tools."""
         agent = Agent(
             name="simple_agent",
-            model="gpt-4o-mini"
+            model="openai/gpt-4o-mini"
         )
         
         prompt = Message.validate({"role": "user", "content": "Hello, how are you?"})
@@ -203,7 +207,7 @@ class TestAgentExecution:
         
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[infinite_tool],
             max_iter=2  # Limit to 2 iterations
         )
@@ -234,7 +238,7 @@ class TestAgentExecution:
         
         agent = Agent(
             name="concurrent_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[slow_tool_1, slow_tool_2]
         )
         
@@ -254,7 +258,7 @@ class TestAgentExecution:
         """Test that agent events are streamed properly."""
         agent = Agent(
             name="streaming_agent", 
-            model="gpt-4o-mini"
+            model="openai/gpt-4o-mini"
         )
         
         prompt = Message.validate({"role": "user", "content": "Hello!"})
@@ -283,7 +287,7 @@ class TestAgentNesting:
         
         agent = Agent(
             name="child_agent",
-            model="gpt-4o-mini", 
+            model="openai/gpt-4o-mini", 
             tools=[helper_tool]
         )
         
@@ -308,14 +312,14 @@ class TestAgentNesting:
         
         specialist_agent = Agent(
             name="specialist",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[specialist_tool],
             description="A specialist agent that completes tasks"
         )
         
         main_agent = Agent(
             name="main_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[specialist_agent]
         )
         
@@ -341,7 +345,7 @@ class TestAgentErrorHandling:
         
         agent = Agent(
             name="error_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[error_tool, working_tool]
         )
         
@@ -362,7 +366,7 @@ class TestAgentErrorHandling:
         
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[valid_tool]
         )
         
@@ -383,7 +387,7 @@ class TestAgentMemory:
         """Test that agents maintain conversation memory."""
         agent = Agent(
             name="memory_agent",
-            model="gpt-4o-mini"
+            model="openai/gpt-4o-mini"
         )
         
         # First interaction
@@ -411,7 +415,7 @@ class TestAgentPerformance:
         """Test that collect() method works efficiently."""
         agent = Agent(
             name="perf_agent",
-            model="gpt-4o-mini"
+            model="openai/gpt-4o-mini"
         )
         
         prompt = Message.validate({"role": "user", "content": "Hello!"})
@@ -428,7 +432,7 @@ class TestAgentPerformance:
         """Test that collect() can be called multiple times."""
         agent = Agent(
             name="multi_collect_agent",
-            model="gpt-4o-mini"
+            model="openai/gpt-4o-mini"
         )
         
         prompt = Message.validate({"role": "user", "content": "Hello!"})
@@ -447,7 +451,7 @@ class TestAgentPerformance:
 class TestAgentIntegration:
     """Test Agent integration with different components."""
     
-    @pytest.mark.parametrize("model", ["gpt-4o-mini", "gpt-4"])
+    @pytest.mark.parametrize("model", ["openai/gpt-4o-mini", "openai/gpt-4"])
     @pytest.mark.asyncio
     async def test_different_models(self, model):
         """Test agent with different LLM models."""
@@ -472,7 +476,7 @@ class TestAgentIntegration:
         
         agent = Agent(
             name="calc_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[calculator],
             description="A calculator agent"
         )

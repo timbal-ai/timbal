@@ -405,7 +405,7 @@ class TestLLMIntegration:
             "content": "Hello, how are you?"
         })
         
-        result = tool(model="gpt-4o-mini", messages=[message])
+        result = tool(model="openai/gpt-4o-mini", messages=[message])
         output = await result.collect()
         
         assert isinstance(output, OutputEvent)

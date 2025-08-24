@@ -1,0 +1,61 @@
+tests:
+  - name: time_test
+    description: Test time functionality
+    turns:
+      - input:
+          text: "What time is it?"
+        output:
+          validators:
+            contains: ["2024"]
+        steps:
+          validators:
+            contains:
+              - name: get_current_time
+
+  - name: math_test
+    description: Test mathematical operations
+    turns:
+      - input:
+          text: "What is 5 + 3?"
+        output:
+          validators:
+            contains: ["8"]
+        steps:
+          validators:
+            contains:
+              - name: add_numbers
+                input:
+                  a: "5"
+                  b: "3"
+
+  - name: greeting_test
+    description: Test greeting functionality
+    turns:
+      - input:
+          text: "Please greet Charlie"
+        output:
+          validators:
+            contains: ["Charlie"]
+        steps:
+          validators:
+            contains:
+              - name: greet_person
+                input:
+                  name: "Charlie"
+
+  - name: conversation_test
+    description: Test multi-turn conversation
+    turns:
+      - input:
+          text: "Hi, my name is Alice"
+        output:
+          text: "Hello Alice! Nice to meet you."
+      - input:
+          text: "Can you greet me properly?"
+        output:
+          validators:
+            contains: ["Alice"]
+        steps:
+          validators:
+            contains:
+              - name: greet_person

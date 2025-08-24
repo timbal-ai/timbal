@@ -21,6 +21,8 @@ from ..state import get_run_context
 from ..types.chat.content import ToolResultContent, ToolUseContent
 from ..types.events import OutputEvent
 from ..types.message import Message
+from .handlers import Model, llm_router
+from .runnable import Runnable
 from .handlers import llm_router
 from .runnable import Runnable, RunnableLike
 from .tool import Tool
@@ -74,6 +76,11 @@ class Agent(Runnable):
         result = await agent(prompt=Message(role="user", content="What's the weather in Paris?")).collect()
     """
 
+    model: str | Model
+    """The LLM model identifier with provider prefix (e.g., 'anthropic/claude-3-sonnet-20240229', 'openai/gpt-4o')."""
+    instructions: str | None = None
+    """Optional system instructions to provide context for the agent."""
+    tools: list[SkipValidation[ToolLike]] = []
     model: str
     """The LLM model identifier (e.g., 'claude-3-sonnet', 'gpt-4')."""
     system_prompt: str | None = None

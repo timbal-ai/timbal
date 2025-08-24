@@ -47,7 +47,7 @@ class TestCallIDGeneration:
         
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[helper_tool],
             system_prompt="Use the helper tool to complete tasks"
         )
@@ -94,7 +94,7 @@ class TestCallIDGeneration:
         
         agent = Agent(
             name="test_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[helper_tool]
         )
         
@@ -143,7 +143,7 @@ class TestNestedAgentTracing:
         # Child agent - specialist in math
         math_agent = Agent(
             name="math_specialist", 
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[math_operation],
             description="A specialist agent for mathematical operations"
         )
@@ -151,7 +151,7 @@ class TestNestedAgentTracing:
         # Parent agent - uses the math specialist
         coordinator = Agent(
             name="coordinator",
-            model="gpt-4o-mini", 
+            model="openai/gpt-4o-mini", 
             tools=[math_agent],
             system_prompt="Use the math specialist to solve problems"
         )
@@ -196,7 +196,7 @@ class TestNestedAgentTracing:
         # Level 3 agent
         level3_agent = Agent(
             name="level3_agent",
-            model="gpt-4o-mini", 
+            model="openai/gpt-4o-mini", 
             tools=[level3_task],
             description="Level 3 processing agent"
         )
@@ -204,7 +204,7 @@ class TestNestedAgentTracing:
         # Level 2 agent
         level2_agent = Agent(
             name="level2_agent", 
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[level2_task, level3_agent],
             description="Level 2 processing agent"
         )
@@ -212,7 +212,7 @@ class TestNestedAgentTracing:
         # Level 1 agent (root)
         root_agent = Agent(
             name="root_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[level2_agent],
             system_prompt="Coordinate multi-level processing"
         )
@@ -269,7 +269,7 @@ class TestParallelToolCallTracing:
         
         agent = Agent(
             name="parallel_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[slow_task_a, slow_task_b, slow_task_c],
             system_prompt="Execute multiple tasks concurrently when requested"
         )
@@ -315,7 +315,7 @@ class TestParallelToolCallTracing:
         
         agent = Agent(
             name="nested_execution_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[data_processor],
             system_prompt="Process the provided data using the data_processor tool"
         )
@@ -374,7 +374,7 @@ class TestParallelToolCallTracing:
         
         workflow_agent = Agent(
             name="workflow_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[prepare_data, process_chunk_a, process_chunk_b, finalize_results],
             system_prompt="Execute a workflow: prepare data, then process chunks A and B in parallel, then finalize"
         )
@@ -430,7 +430,7 @@ class TestTracingContextPropagation:
         
         agent = Agent(
             name="context_agent",
-            model="gpt-4o-mini", 
+            model="openai/gpt-4o-mini", 
             tools=[context_inspector],
             system_prompt="Use the context inspector tool to examine the execution context"
         )
@@ -464,7 +464,7 @@ class TestTracingContextPropagation:
         # Child agent
         child_agent = Agent(
             name="child_context_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[get_context_info],
             description="Child agent that inspects context"
         )
@@ -472,7 +472,7 @@ class TestTracingContextPropagation:
         # Parent agent  
         parent_agent = Agent(
             name="parent_context_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[child_agent],
             system_prompt="Use the child agent to inspect execution context"
         )
@@ -518,7 +518,7 @@ class TestErrorTracingPropagation:
         
         agent = Agent(
             name="error_tracing_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[failing_tool, working_tool],
             system_prompt="Try using both tools - one will fail, one will succeed"
         )
@@ -552,7 +552,7 @@ class TestErrorTracingPropagation:
         # Unreliable child agent
         child_agent = Agent(
             name="unreliable_child",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[unreliable_operation],
             description="Child agent with unreliable operations"
         )
@@ -560,7 +560,7 @@ class TestErrorTracingPropagation:
         # Parent coordinator
         parent_agent = Agent(
             name="error_coordinator", 
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[child_agent],
             system_prompt="Use the child agent for operations, handle any failures gracefully"
         )
@@ -620,7 +620,7 @@ class TestEventSequenceValidation:
         
         agent = Agent(
             name="sequence_agent",
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[quick_task],
             system_prompt="Execute the requested task quickly"
         )

@@ -1,0 +1,9 @@
+tests:
+  - name: simple_test
+    description: A basic test case
+    turns:
+      - input:
+          text: "Hello"
+        output:
+          validators:
+            contains: ["hello"]

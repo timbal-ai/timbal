@@ -28,7 +28,7 @@ def load_module(module_spec: ModuleSpec) -> Any:
             else:
                 raise ValueError(f"Module {path} has no object {object_name}")
         else:
-            raise NotImplementedError("? support loading entire module")
+            raise NotImplementedError("Does not support loading entire module")
     else:
         raise ValueError(f"Failed to load module {path}")
 
