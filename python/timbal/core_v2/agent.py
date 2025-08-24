@@ -91,7 +91,6 @@ class Agent(Runnable):
     """Dictionary mapping template patterns to their callable functions and metadata."""
 
 
-    # NOTE: No need to add @override since pydantic doesn't have `model_post_init` as an abstract method.
     def model_post_init(self, __context: Any) -> None:
         """Initialize agent-specific attributes after Pydantic model creation.
         
@@ -106,6 +105,7 @@ class Agent(Runnable):
         for patterns like {namespace::function} and dynamically importing the callable
         from either packages or files relative to the Agent constructor's caller.
         """
+        super().model_post_init(__context)
         self._path = self.name
 
         if self.system_prompt:

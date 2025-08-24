@@ -69,7 +69,6 @@ class Tool(Runnable):
         return values
 
     
-    # NOTE: No need to add @override since pydantic doesn't have `model_post_init` as an abstract method.
     def model_post_init(self, __context: Any) -> None:
         """Initialize tool-specific attributes after Pydantic model creation.
         
@@ -77,7 +76,9 @@ class Tool(Runnable):
         characteristics, which are used by the base Runnable class to determine
         how to execute the handler.
         """
+        super().model_post_init(__context)
         self._path = self.name
+        
         self._is_orchestrator = False
         self._is_coroutine = inspect.iscoroutinefunction(self.handler)
         self._is_gen = inspect.isgeneratorfunction(self.handler)

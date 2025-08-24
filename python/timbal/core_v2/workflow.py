@@ -22,9 +22,9 @@ class Workflow(Runnable):
     """List of steps to execute in the workflow."""
 
 
-    # NOTE: No need to add @override since pydantic doesn't have `model_post_init` as an abstract method.
     def model_post_init(self, __context: Any) -> None:
         """"""
+        super().model_post_init(__context)
         self._path = self.name
 
         # Workflows are always orchestrators with async generator handlers

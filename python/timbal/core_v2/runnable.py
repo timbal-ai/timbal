@@ -210,14 +210,10 @@ class Runnable(ABC, BaseModel):
     """Pre-execution hook for runtime processing. Must be a parameterless callable.
     Use get_run_context() to access execution state and data.
     """
-    _pre_hook_is_coroutine: bool | None = PrivateAttr()
-    """Whether the pre_hook is a coroutine."""
     post_hook: Callable[..., Any] | None = None
     """Post-execution hook for runtime processing. Must be a parameterless callable.
     Use get_run_context() to access execution state and output data.
     """
-    _post_hook_is_coroutine: bool | None = PrivateAttr()
-    """Whether the post_hook is a coroutine."""
 
     _path: str = PrivateAttr()
     """The full path of the Runnable in the run context."""
@@ -229,18 +225,14 @@ class Runnable(ABC, BaseModel):
     """Whether the Runnable handler is a generator."""
     _is_async_gen: bool = PrivateAttr()
     """Whether the Runnable handler is an async generator."""
-
-
-    async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
-        """Execute a runtime callable handling async context automatically."""
-        if is_coroutine:
-            return await fn()
-        else:
-            loop = asyncio.get_running_loop()
-            ctx = contextvars.copy_context()
-            def fn_with_ctx():
-                return ctx.run(fn)
-            return await loop.run_in_executor(None, fn_with_ctx)
+    _default_fixed_params: dict[str, Any] = PrivateAttr(default_factory=dict)
+    """Dictionary of static default parameters."""
+    _default_runtime_params: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
+    """Dictionary mapping parameter names to their callable functions and metadata."""
+    _pre_hook_is_coroutine: bool | None = PrivateAttr()
+    """Whether the pre_hook is a coroutine."""
+    _post_hook_is_coroutine: bool | None = PrivateAttr()
+    """Whether the post_hook is a coroutine."""
 
 
     @classmethod
@@ -277,6 +269,26 @@ class Runnable(ABC, BaseModel):
         elif info.field_name == "post_hook":
             cls._post_hook_is_coroutine = is_coroutine
         return v
+
+
+    def model_post_init(self, __context: Any) -> None:
+        """Initialize the Runnable after Pydantic model creation.
+        
+        Separates default_params into fixed (static) and runtime (callable) parameters
+        and validates any callable parameters.
+        """
+        # Split default_params into fixed and runtime parameters
+        for param_name, param_value in self.default_params.items():
+            if callable(param_value):
+                # Validate and store callable parameter
+                is_coroutine = self._validate_runtime_callable(param_value)
+                self._default_runtime_params[param_name] = {
+                    "callable": param_value,
+                    "is_coroutine": is_coroutine,
+                }
+            else:
+                # Store static parameter
+                self._default_fixed_params[param_name] = param_value
 
 
     @abstractmethod
@@ -433,6 +445,43 @@ class Runnable(ABC, BaseModel):
         return self.anthropic_schema
 
 
+    async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
+        """Execute a runtime callable handling async context automatically."""
+        if is_coroutine:
+            return await fn()
+        else:
+            loop = asyncio.get_running_loop()
+            ctx = contextvars.copy_context()
+            def fn_with_ctx():
+                return ctx.run(fn)
+            return await loop.run_in_executor(None, fn_with_ctx)
+
+
+    async def _resolve_default_params(self) -> dict[str, Any]:
+        """Resolve default parameters by executing any callable values.
+        
+        Merges static default parameters with the results of executing
+        runtime callable parameters in parallel.
+        
+        Returns:
+            Dictionary containing resolved default parameters
+        """
+        resolved_params = dict(self._default_fixed_params)
+        if not self._default_runtime_params:
+            return resolved_params
+        
+        tasks = []
+        callable_param_names = []
+        for param_name, callable_info in self._default_runtime_params.items():
+            tasks.append(self._execute_runtime_callable(callable_info["callable"], callable_info["is_coroutine"]))
+            callable_param_names.append(param_name)
+        
+        results = await asyncio.gather(*tasks)
+        for param_name, result in zip(callable_param_names, results):
+            resolved_params[param_name] = result
+        return resolved_params
+
+
     @collectable
     async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
         """Execute the runnable with the given parameters.
@@ -492,8 +541,9 @@ class Runnable(ABC, BaseModel):
 
         # We store the unvalidated input, as sent by the user. 
         # This will ensure full replayability of the run.
-        # TODO Evaluate runtime mappings
-        input = {**self.default_params, **kwargs}
+        # Resolve default params (executing any callable values)
+        resolved_default_params = await self._resolve_default_params()
+        input = {**resolved_default_params, **kwargs}
         trace.input = await dump(input)
 
         output, error = None, None
