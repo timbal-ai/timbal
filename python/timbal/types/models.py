@@ -15,12 +15,12 @@ from typing import (
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     create_model,
     model_validator,
 )
 from pydantic.fields import FieldInfo
 
-from .field import Field
 from .file import File
 from .message import Message
 
@@ -137,7 +137,7 @@ def create_model_from_argspec(name: str, argspec: NamedTuple) -> BaseModel:
     for field_name in argspec.args:
         field_default = defaults.get(field_name, ...) # Pydantic will use ... to mark this field as required.
         if not isinstance(field_default, FieldInfo):
-            field_default = Field(default=field_default)
+            field_default = Field(field_default)
 
         json_schema_extra = getattr(field_default, "json_schema_extra", None) or {}
         if json_schema_extra.get("private", False):

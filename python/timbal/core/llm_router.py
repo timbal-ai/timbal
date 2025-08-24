@@ -1,12 +1,13 @@
 import os
-from typing import Any, Literal
+from typing import Literal
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
+from pydantic import Field
 
 from ..errors import APIKeyNotFoundError
-from ..types.field import Field, resolve_default
 from ..types.message import Message
+from ..utils import resolve_default
 from .runnable import Runnable
 
 # Model type with provider prefixes
@@ -60,137 +61,54 @@ Model = Literal[
 ]
 
 
+# TODO Add more parameters
 async def llm_router(
-    model: str | Model = Field(
-        default="openai/gpt-4.1-mini", 
+    model: Model = Field(
+        ...,
         description="Provider/Name of the LLM model to use.",
     ),
     system_prompt: str | None = Field(
-        default=None, 
+        None,
         description="System prompt to guide the LLM's behavior and role.",
     ),
     messages: list[Message] = Field(
+        default_factory=list,
         description="Chat history containing user and LLM messages.",
     ),
     tools: list[Runnable] = Field(
-        default=[], 
+        default_factory=list,
         description="List of tools/functions the LLM can call.",
     ),
-    tool_choice: dict[str, Any] | str = Field(
-        default={"type": "auto"},
-        description="How the model should use the provided tools"
-    ),
     max_tokens: int | None = Field(
-        default=None,
+        None,
         description="Maximum number of tokens to generate.",
     ),
-    temperature: float = Field(
-        default=1,
-        description=(
-            "Sampling temperature (0-2 except for Anthropic which is 0-1). "
-            "Higher values increase randomness, lower values increase determinism."
-        )
-    ),
-    frequency_penalty: float = Field(
-        default=0,
-        description=(
-            "Positive values penalize token frequency to reduce repetition. "
-            "Ranges from -2.0 to 2.0."
-        )
-    ),
-    presence_penalty: float = Field(
-        default=0,
-        description=(
-            "Positive values penalize tokens based on presence to encourage new topics. "
-            "Ranges from -2.0 to 2.0."
-        )
-    ),
-    top_p: float = Field(
-        default=1,
-        description=(
-            "Nucleus sampling parameter. Only tokens with cumulative probability "
-            "mass up to top_p are considered."
-        )
-    ),
-    top_k: int = Field(
-        default=None,
-        description="Only sample from the top K options for each subsequent token."
-    ),
-    logprobs: bool = Field(
-        default=False,
-        description="Whether to return logprobs with the returned text."
-    ),
-    top_logprobs: int = Field(
-        default=None,
-        description=(
-            "Return log probabilities of the top N tokens (0-20). "
-            "Requires logprobs=true."
-        )
-    ),
-    seed: int = Field(
-        default=None,
-        description=(
-            "Beta feature for deterministic sampling. Same seed and parameters "
-            "should return same result."
-        )
-    ),
-    stop: str | list[str] = Field(
-        default=None,
-        description="Where the model will stop generating."
-    ),
-    parallel_tool_calls: bool = Field(
-        default=True,
-        description="Whether to execute tool calls in parallel or sequentially."
-    ),
-    json_schema: dict = Field(
-        default=None, 
-        description="The JSON schema that the model MUST adhere to.",
-    ),
 ) -> Message: # type: ignore
-    """Route requests to appropriate LLM providers based on model name prefix.
+    """Route LLM requests to appropriate providers based on model prefix.
 
-    This gateway function handles routing to different LLM providers (OpenAI, Anthropic,
-    Gemini, TogetherAI) based on the model name prefix.
+    Handles automatic provider detection and client initialization for OpenAI, Anthropic,
+    Gemini, and TogetherAI models. Converts messages and tools to provider-specific formats
+    and streams responses back as async chunks.
 
     Args:
-        model: Name of the LLM model to use.
-        system_prompt: Instructions for the LLM to follow.
-        messages: Chat history containing user and LLM messages.
-        tools: List of available tool functions.
-        tool_choice: Specification for tool selection.
-        max_tokens: Maximum number of tokens in the response.
-        temperature: Sampling temperature.
-        frequency_penalty: Penalty for token frequency.
-        presence_penalty: Penalty for token presence.
-        top_p: Nucleus sampling parameter.
-        top_k: Only sample from the top K options for each subsequent token.
-        logprobs: Whether to return logprobs with the returned text.
-        top_logprobs: Return log probabilities of the top N tokens.
-        seed: Deterministic sampling parameter.
-        stop: Up to 4 sequences where the model will stop generating.
-        parallel_tool_calls: Whether to execute tool calls in parallel.
-        json_schema: JSON schema for structured output.
+        model: Provider-prefixed model name (e.g., 'openai/gpt-4o', 'anthropic/claude-3-5-sonnet')
+        system_prompt: Optional system instructions to guide model behavior
+        messages: Conversation history as Message objects
+        tools: Available Runnable tools for function calling
+        max_tokens: Response length limit (required for Anthropic models)
 
-    Yields:
-        Any: Response chunks from the LLM provider
+    Returns:
+        Message: Streaming response chunks from the selected provider
+
+    Raises:
+        ValueError: If model format is invalid or required parameters are missing
+        APIKeyNotFoundError: If required API key environment variable is not set
     """
     model = resolve_default("model", model)
     system_prompt = resolve_default("system_prompt", system_prompt)
     messages = resolve_default("messages", messages)
     tools = resolve_default("tools", tools)
-    tool_choice = resolve_default("tool_choice", tool_choice)
     max_tokens = resolve_default("max_tokens", max_tokens)
-    temperature = resolve_default("temperature", temperature)
-    frequency_penalty = resolve_default("frequency_penalty", frequency_penalty)
-    presence_penalty = resolve_default("presence_penalty", presence_penalty)
-    top_p = resolve_default("top_p", top_p)
-    top_k = resolve_default("top_k", top_k)
-    logprobs = resolve_default("logprobs", logprobs)
-    top_logprobs = resolve_default("top_logprobs", top_logprobs)
-    seed = resolve_default("seed", seed)
-    stop = resolve_default("stop", stop)
-    parallel_tool_calls = resolve_default("parallel_tool_calls", parallel_tool_calls)
-    json_schema = resolve_default("json_schema", json_schema)
 
     if "/" not in model:
         raise ValueError("Model must be in format 'provider/model_name'")
@@ -232,6 +150,7 @@ async def llm_router(
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
+    # TODO Probably we'll move to google ai sdk
     if provider in ["openai", "gemini", "togetherai"]:
         openai_messages = []
         if system_prompt:
@@ -256,15 +175,7 @@ async def llm_router(
         if max_tokens:
             openai_kwargs["max_completion_tokens"] = max_tokens
 
-        if json_schema:
-            openai_kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": json_schema,
-            }
-
-        res = await client.chat.completions.create(
-            **openai_kwargs,
-        )
+        res = await client.chat.completions.create(**openai_kwargs)
 
         async for res_chunk in res:
             yield res_chunk
@@ -291,13 +202,7 @@ async def llm_router(
         if anthropic_tools:
             anthropic_kwargs["tools"] = anthropic_tools
 
-        if json_schema:
-            # TODO Anthropic doesn't have a direct json schema param... we could implement this with tool use.
-            raise NotImplementedError("JSON schema validation is not supported for claude models.")
-
-        res = await client.messages.create(
-            **anthropic_kwargs,
-        )
+        res = await client.messages.create(**anthropic_kwargs)
 
         async for res_chunk in res:
             yield res_chunk

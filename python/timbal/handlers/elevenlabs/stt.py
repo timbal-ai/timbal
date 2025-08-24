@@ -1,31 +1,31 @@
 import os
+from typing import Literal
 
 import httpx
+from pydantic import Field
 
 from ...errors import APIKeyNotFoundError
-from ...types.field import Field
 from ...types.file import File
+from ...utils import resolve_default
 
 
 async def stt(
     audio_file: File = Field(
+        ...,
         description=(
             "The audio file to transcribe. "
             "All major audio and video formats are supported. "
             "The file size must be less than 1GB."
         ),
     ),
-    model_id: str = Field(
-        default="scribe_v1", 
+    model_id: Literal["scribe_v1", "scribe_v1_experimental"] = Field(
+        "scribe_v1", 
         description="The elevenlabs model to use for the STT.",
-        choices=["scribe_v1", "scribe_v1_experimental"],
     ),
     # TODO Add more fields.
 ) -> str: # ? Should we return the other elements.
-
-    # Enable calling this step without pydantic model_validate()
-    audio_file = audio_file.default if hasattr(audio_file, "default") else audio_file
-    model_id = model_id.default if hasattr(model_id, "default") else model_id
+    audio_file = resolve_default("audio_file", audio_file)
+    model_id = resolve_default("model_id", model_id)
 
     if not audio_file.__content_type__.startswith("audio"):
         raise ValueError(f"STT expected an audio file content type. Got {audio_file.__content_type__}")

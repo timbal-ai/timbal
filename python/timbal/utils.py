@@ -4,11 +4,25 @@ from typing import Any, Literal
 
 import httpx
 import structlog
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
 
 from .errors import PlatformError
 from .state import resolve_platform_config
 
 logger = structlog.get_logger("timbal.utils")
+
+
+# TODO We might implement a decorator to wrap all handlers to handle this automatically
+def resolve_default(key: str, value: Any) -> Any:
+    """Resolve the default value of a field.
+    Use this function to resolve default kwargs when calling a function that uses Field defaults.
+    """
+    if isinstance(value, FieldInfo):
+        if value.default == PydanticUndefined:
+            raise ValueError(f"{key} is required")
+        return value.default
+    return value
 
 
 async def _platform_api_call(

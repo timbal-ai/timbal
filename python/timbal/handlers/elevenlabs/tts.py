@@ -1,31 +1,32 @@
 import os
+from typing import Literal
 
 import httpx
+from pydantic import Field
 
 from ...errors import APIKeyNotFoundError
-from ...types.field import Field
 from ...types.file import File
+from ...utils import resolve_default
 
 
 async def tts(
     text: str = Field(
+        ...,
         description="The text to convert to speech.",
     ),
     voice_id: str = Field(
+        ...,
         description="The voice ID to use for text-to-speech.",
     ),
-    model_id: str = Field(
-        default="eleven_flash_v2_5",
+    model_id: Literal["eleven_flash_v2_5", "eleven_multilingual_v2"] = Field(
+        "eleven_flash_v2_5",
         description="The model to use for text-to-speech.",
-        choices=["eleven_flash_v2_5", "eleven_multilingual_v2"],
     ),
     # TODO Add more fields.
 ) -> File:
-
-    # Enable calling this step without pydantic model_validate()
-    text = text.default if hasattr(text, "default") else text
-    voice_id = voice_id.default if hasattr(voice_id, "default") else voice_id
-    model_id = model_id.default if hasattr(model_id, "default") else model_id
+    text = resolve_default("text", text)
+    voice_id = resolve_default("voice_id", voice_id)
+    model_id = resolve_default("model_id", model_id)
 
     api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:

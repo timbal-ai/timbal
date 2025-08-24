@@ -7,10 +7,10 @@ from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.shared import OxmlElement, qn
 from docx.shared import Inches
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from ...types.field import Field, resolve_default
 from ...types.file import File
+from ...utils import resolve_default
 
 # Alignment mappings
 PARAGRAPH_ALIGNMENTS = {
@@ -205,11 +205,11 @@ def add_table(doc, table_data: DocxTable):
 
 def create_docx(
     title: str | None = Field(
-        default=None,
+        None,
         description="Title for the document",
     ),
     sections: list[DocxSection] = Field(
-        default=[],
+        ...,
         description="List of sections in the document",
     )
 ) -> File:

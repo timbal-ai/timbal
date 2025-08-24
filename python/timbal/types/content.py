@@ -22,8 +22,8 @@ from pydantic import BaseModel
 
 # TODO This shouldn't happen magically. We should error and prompt the user to include this in a pre_hook or to use a different model
 from ..handlers.openai import stt
-# from ...handlers.elevenlabs import stt
 
+# from ...handlers.elevenlabs import stt
 from ..handlers.pdfs import convert_pdf_to_images
 from .file import File
 

@@ -1,28 +1,29 @@
 import os
-from typing import Any
+from typing import Any, Literal
 
 from openai import AsyncOpenAI
+from pydantic import Field
 
 from ...errors import APIKeyNotFoundError
-from ...types.field import Field
 from ...types.file import File
+from ...utils import resolve_default
 
 
 async def stt(
     audio_file: File = Field(
+        ...,
         description=(
             "The audio file to transcribe. "
             "All major audio and video formats are supported. "
             "The file size must be less than 1GB."
         ),
     ),
-    model_id: str = Field(
-        default="gpt-4o-mini-transcribe",
+    model_id: Literal["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"] = Field(
+        "gpt-4o-mini-transcribe",
         description="The OpenAI model to use for the STT.",
-        choices=["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"],
     ),
     chunking_strategy: str | dict[str, Any] | None = Field(
-        default=None,
+        None,
         description=(
             "Controls how the audio is cut into chunks."
             "- set to 'auto' automatically set chunking parameters based on the audio."
@@ -34,56 +35,54 @@ async def stt(
         ),
     ),
     include: list[str] | None = Field(
-        default=None,
+        None,
         description="A list of additional information to include in the response. e.g. logprobs -  only works with response_format set to json, and models gpt-4o-transcribe and gpt-4o-mini-transcribe.",
     ),
     language: str | None = Field(
-        default=None,
+        None,
         description="The language of the input audio. Supplying the input language in ISO-639-1 (e.g. en) format will improve accuracy and latency.",
     ),
     prompt: str | None = Field(
-        default=None,
+        None,
         description="An optional text to guide the model's style or continue a previous audio segment. The prompt should match the audio language.",
     ),
     response_format: str = Field(
-        default="json",
+        "json",
         description="The format of the response. For gpt-4o-transcribe and gpt-4o-mini-transcribe, the only supported format is json.",
         choices=["json", "text", "srt", "verbose_json", "vtt"],
     ),
     stream: bool | None= Field(
-        default=False,
+        False,
         description=(
             "Whether to stream the response or not."
             "Streaming is not supported for the whisper-1 model and will be ignored.",
         ),
     ),
     temperature: float | None = Field(
-        default=0,
+        0,
         description=(
             "The sampling temperature between 0 and 1. Higher values make the output more random."
             "If set to 0, the model will use log probability to automatically increase the temperature until certain thresholds are hit."
         ),
     ),
     timestamp_granularities: list[str] | None = Field(
-        default=["segment"],
+        ["segment"],
         description=(
             "The timestamp granularities to populate for this transcription. 'response_format' must be set to 'verbose_json'."
             "Either or both of these options are supported: word, or segment"
         ),
     ),
 ) -> str: # ? Should we return the other elements.
-
-    # Enable calling this step without pydantic model_validate()
-    audio_file = audio_file.default if hasattr(audio_file, "default") else audio_file
-    model_id = model_id.default if hasattr(model_id, "default") else model_id
-    chunking_strategy = chunking_strategy.default if hasattr(chunking_strategy, "default") else chunking_strategy
-    include = include.default if hasattr(include, "default") else include
-    language = language.default if hasattr(language, "default") else language
-    prompt = prompt.default if hasattr(prompt, "default") else prompt
-    response_format = response_format.default if hasattr(response_format, "default") else response_format
-    stream = stream.default if hasattr(stream, "default") else stream
-    temperature = temperature.default if hasattr(temperature, "default") else temperature
-    timestamp_granularities = timestamp_granularities.default if hasattr(timestamp_granularities, "default") else timestamp_granularities
+    audio_file = resolve_default("audio_file", audio_file)
+    model_id = resolve_default("model_id", model_id)
+    chunking_strategy = resolve_default("chunking_strategy", chunking_strategy)
+    include = resolve_default("include", include)
+    language = resolve_default("language", language)
+    prompt = resolve_default("prompt", prompt)
+    response_format = resolve_default("response_format", response_format)
+    stream = resolve_default("stream", stream)
+    temperature = resolve_default("temperature", temperature)
+    timestamp_granularities = resolve_default("timestamp_granularities", timestamp_granularities)
 
     args = {}
     if chunking_strategy:

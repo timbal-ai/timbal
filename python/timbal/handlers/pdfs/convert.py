@@ -2,15 +2,24 @@ import tempfile
 from pathlib import Path
 
 import fitz
+from pydantic import Field
 
-from ...types.field import Field
 from ...types.file import File
+from ...utils import resolve_default
 
 
 def convert_pdf_to_images(
-    pdf: File = Field(description="The PDF file to convert to images."),
-    dpi: int = 200,
+    pdf: File = Field(
+        ...,
+        description="The PDF file to convert to images.",
+    ),
+    dpi: int = Field(
+        200,
+        description="The DPI to use for the conversion.",
+    ),
 ) -> list[File]:
+    pdf = resolve_default("pdf", pdf)
+    dpi = resolve_default("dpi", dpi)
 
     pdf.seek(0)
     doc = fitz.Document(stream=pdf.read())

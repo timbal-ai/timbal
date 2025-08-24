@@ -2,23 +2,27 @@ import asyncio
 import os
 
 import httpx
+from pydantic import Field
 
 from ...errors import APIKeyNotFoundError
-from ...types.field import Field
 from ...types.file import File
+from ...utils import resolve_default
 
 
 async def gen_images(
+    # TODO Add enums
     model: str = Field(
-        # TODO Add enums.
-        default="fal-ai/flux-pro/v1.1-ultra", # 0.06 x image
+        ...,
         description="Model to use for image generation.",
     ),
     prompt: str = Field(
+        ...,
         description="The prompt to generate an image",
     ),
     # TODO Add more parameters.
 ) -> list[File]:
+    model = resolve_default("model", model)
+    prompt = resolve_default("prompt", prompt)
 
     fal_key = os.getenv("FAL_KEY")
     if not fal_key:
