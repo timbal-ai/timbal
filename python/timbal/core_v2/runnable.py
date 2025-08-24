@@ -14,6 +14,7 @@ from pydantic import (
     ConfigDict,
     PrivateAttr,
     TypeAdapter,
+    ValidationInfo,
     computed_field,
     field_validator,
     model_serializer,
@@ -24,8 +25,8 @@ from ..collectors import get_collector_registry
 from ..collectors.utils import sync_to_async_gen
 from ..state import (
     get_parent_call_id,
-    get_run_context, 
-    set_call_id, 
+    get_run_context,
+    set_call_id,
     set_parent_call_id,
     set_run_context,
 )
@@ -174,47 +175,15 @@ class Runnable(ABC, BaseModel):
     Key features:
     - Parameter validation using Pydantic models
     - Schema generation for LLM tool calling (OpenAI/Anthropic formats)
-    - Event streaming with collection support
-    - Execution tracing and monitoring
+    - Event streaming with collection support for real-time processing
+    - Comprehensive execution tracing and monitoring
     - Flexible parameter filtering and transformation
-    
-    Hook Patterns:
-        Both pre_hook and post_hook follow a middleware-style pattern with in-place modification.
-        
-        IMPORTANT: Hooks receive mutable references and should modify them in-place.
-        No return value is expected - all changes happen by mutating the passed objects.
-        
-        Basic patterns:
-        • Reading data: value = data['key']
-        • Modifying data: data['key'] = new_value
-        • Adding data: data['new_key'] = computed_value
-        • Removing data: del data['unwanted_key']
-        • Logging/monitoring: logger.info(f"Processing {data}")
-        
-        Advanced patterns:
-        • Access execution context: run_context = get_run_context()
-        • Store data for other hooks: run_context.data['timestamp'] = time.time()
-        • Cross-hook communication: user_id = run_context.data.get('user_id')
-        • Conditional processing: if run_context.data.get('debug_mode'): add_debug_info()
-        • Performance tracking: run_context.data['start_time'] = time.time()
-        
-        Functional-style transformations while maintaining in-place semantics:
-            # Replace entire dict contents
-            transformed = transform_data(dict(data))
-            data.clear()
-            data.update(transformed)
-            
-            # For lists/other mutables
-            if isinstance(data, list):
-                data[:] = transform_list(data)
-        
-        Common use cases:
-        • Input validation/normalization before handler execution
-        • Adding computed parameters (timestamps, user context, etc.)
-        • Output transformation and metadata addition
-        • Logging, monitoring, and debugging
-        • Conditional parameter injection based on context
-        • Data filtering and sanitization
+    - Runtime hooks (pre_hook/post_hook) for cross-cutting concerns
+    - Context-aware execution with state management
+    - Support for sync/async handlers with automatic context propagation
+    - Nested execution patterns for complex workflows
+    - Automatic error handling and recovery
+    - Integration with collectors system for output processing
     """
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -238,13 +207,17 @@ class Runnable(ABC, BaseModel):
     These parameters are added to the handler's parameters when the handler is called."""
 
     pre_hook: Callable[..., Any] | None = None
-    """Pre-execution hook for input processing. See 'Hook Patterns' in class docstring.
-    Signature: async def pre_hook(input: dict[str, Any]) -> None
+    """Pre-execution hook for runtime processing. Must be a parameterless callable.
+    Use get_run_context() to access execution state and data.
     """
+    _pre_hook_is_coroutine: bool | None = PrivateAttr()
+    """Whether the pre_hook is a coroutine."""
     post_hook: Callable[..., Any] | None = None
-    """Post-execution hook for output processing. See 'Hook Patterns' in class docstring.
-    Signature: async def post_hook(output: Any) -> None
+    """Post-execution hook for runtime processing. Must be a parameterless callable.
+    Use get_run_context() to access execution state and output data.
     """
+    _post_hook_is_coroutine: bool | None = PrivateAttr()
+    """Whether the post_hook is a coroutine."""
 
     _path: str = PrivateAttr()
     """The full path of the Runnable in the run context."""
@@ -258,19 +231,51 @@ class Runnable(ABC, BaseModel):
     """Whether the Runnable handler is an async generator."""
 
 
+    async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
+        """Execute a runtime callable handling async context automatically."""
+        if is_coroutine:
+            return await fn()
+        else:
+            loop = asyncio.get_running_loop()
+            ctx = contextvars.copy_context()
+            def fn_with_ctx():
+                return ctx.run(fn)
+            return await loop.run_in_executor(None, fn_with_ctx)
+
+
+    @classmethod
+    def _validate_runtime_callable(cls, fn: Any) -> bool:
+        """Validate a runtime callable, return if the callable is a coroutine."""
+        if not callable(fn):
+            raise ValueError(f"fn must be a callable, got {type(fn)}")
+        
+        if inspect.isgeneratorfunction(fn):
+            raise NotImplementedError("Generator functions are not supported for runtime callables yet.")
+        if inspect.isasyncgenfunction(fn):
+            raise NotImplementedError("Async generator functions are not supported for runtime callables yet.")
+        
+        sig = inspect.signature(fn)
+        required_params = [
+            name for name, param in sig.parameters.items()
+            if param.default is inspect.Parameter.empty and param.kind != inspect.Parameter.VAR_POSITIONAL and param.kind != inspect.Parameter.VAR_KEYWORD
+        ]
+        if required_params:
+            raise ValueError(f"Callable must not have any required parameters, got required: {required_params}")
+
+        return inspect.iscoroutinefunction(fn)
+
+
     @field_validator("pre_hook", "post_hook")
     @classmethod
-    def _validate_hooks(cls, v: Callable[..., Any] | None) -> Callable[..., Any] | None:
-        """Validate that hooks are async callables."""
+    def _validate_hooks(cls, v: Any, info: ValidationInfo) -> Callable[..., Any] | None:
+        """Validate a hook, raise ValueError if invalid."""
         if v is None:
             return v
-        if not callable(v):
-            raise ValueError(f"Hook must be callable, got {type(v)}")
-        # Check for generators first since they affect the iscoroutinefunction check
-        if inspect.isgeneratorfunction(v) or inspect.isasyncgenfunction(v):
-            raise ValueError("Hook must not be a generator or async generator")
-        if not inspect.iscoroutinefunction(v):
-            raise ValueError(f"Hook must be an async function, got {type(v)}")
+        is_coroutine = cls._validate_runtime_callable(v)
+        if info.field_name == "pre_hook":
+            cls._pre_hook_is_coroutine = is_coroutine
+        elif info.field_name == "post_hook":
+            cls._post_hook_is_coroutine = is_coroutine
         return v
 
 
@@ -427,7 +432,7 @@ class Runnable(ABC, BaseModel):
         """We use the simpler anthropic schema for serialization."""
         return self.anthropic_schema
 
-    
+
     @collectable
     async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
         """Execute the runnable with the given parameters.
@@ -493,9 +498,8 @@ class Runnable(ABC, BaseModel):
 
         output, error = None, None
         try:
-            # TODO We should not mutate the input dict. If we want to modify or add new variables we should store them someplace else
             if self.pre_hook is not None:
-                await self.pre_hook(input)
+                await self._execute_runtime_callable(self.pre_hook, self._pre_hook_is_coroutine)
             
             # Pydantic model_validate() does not mutate the input dict
             validated_input = dict(self.params_model.model_validate(input))
@@ -550,7 +554,7 @@ class Runnable(ABC, BaseModel):
                 trace.output = await dump(output)
             
             if self.post_hook is not None:
-                await self.post_hook(output)
+                await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
             
         except Exception as err:
             error = {

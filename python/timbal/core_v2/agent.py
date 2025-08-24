@@ -1,6 +1,10 @@
 import asyncio
+import importlib
+import inspect
+import re
 from collections.abc import AsyncGenerator
 from functools import cached_property
+from pathlib import Path
 from typing import Any, override
 
 import structlog
@@ -22,6 +26,9 @@ from .runnable import Runnable, RunnableLike
 from .tool import Tool
 
 logger = structlog.get_logger("timbal.core_v2.agent")
+
+
+SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)*\}")
 
 
 # TODO Add more params here
@@ -80,6 +87,8 @@ class Agent(Runnable):
     """Internal LLM tool instance for making model calls."""
     _tools_by_name: dict[str, Tool] = PrivateAttr()
     """Dictionary mapping tool names to Tool instances for fast lookup."""
+    _system_prompt_callables: dict[str, Any] = PrivateAttr(default_factory=dict)
+    """Dictionary mapping template patterns to their callable functions and metadata."""
 
 
     # NOTE: No need to add @override since pydantic doesn't have `model_post_init` as an abstract method.
@@ -87,13 +96,70 @@ class Agent(Runnable):
         """Initialize agent-specific attributes after Pydantic model creation.
         
         This method sets up the agent's internal tools and execution characteristics:
-        1. Creates an internal LLM tool for model interactions
-        2. Normalizes user-provided tools into Tool instances
-        3. Sets up tool name mapping for fast lookup during execution
-        4. Configures execution characteristics as an orchestrator
+        1. Parses and loads system prompt template functions if present
+        2. Creates an internal LLM tool for model interactions
+        3. Normalizes user-provided tools into Tool instances
+        4. Sets up tool name mapping for fast lookup during execution
+        5. Configures execution characteristics as an orchestrator
+        
+        System prompt template functions are discovered by parsing the system_prompt
+        for patterns like {namespace::function} and dynamically importing the callable
+        from either packages or files relative to the Agent constructor's caller.
         """
         self._path = self.name
 
+        if self.system_prompt:
+            for match in SYSTEM_PROMPT_FN_PATTERN.finditer(self.system_prompt):
+                text = match.group()
+                path = text[1:-1]  # Remove { and }
+                path_parts = path.split("::")
+                assert len(path_parts) >= 2, f"Invalid path format for system prompt: {path}. Review the SYSTEM_PROMPT_FN_PATTERN regex."
+                module, fn_i = None, None
+                if path_parts[0] == "":
+                    frame = inspect.currentframe()
+                    caller_file = None
+                    while frame:
+                        frame = frame.f_back
+                        if frame is None:
+                            break
+                        frame_file = frame.f_globals.get("__file__", "")
+                        frame_self = frame.f_locals.get("self")
+                        if not isinstance(frame_self, Agent):
+                            caller_file = Path(frame_file)
+                            break
+                    assert caller_file is not None, "Could not determine caller file for Agent constructor."
+                    agent_path = Path(caller_file).expanduser().resolve()
+                    for fn_i in range(1, len(path_parts)):
+                        module_path = agent_path / "/".join(path_parts[:-fn_i])
+                        try:
+                            module_spec = importlib.util.spec_from_file_location(module_path.stem, module_path.as_posix())
+                            if not module_spec or not module_spec.loader:
+                                raise ValueError(f"Failed to load module {module_path}")
+                            module = importlib.util.module_from_spec(module_spec)
+                            module_spec.loader.exec_module(module)
+                            logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
+                            break
+                        except Exception:
+                            pass
+                else:
+                    for fn_i in range(1, len(path_parts)):
+                        module_path = ".".join(path_parts[:-fn_i])
+                        try:
+                            module = importlib.import_module(module_path)
+                            logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
+                            break
+                        except Exception:
+                            pass
+                fn = module
+                for j in path_parts[-fn_i:]:
+                    fn = getattr(fn, j)
+                self._validate_runtime_callable(fn)
+                self._system_prompt_callables[text] = {
+                    "start": match.start(),
+                    "end": match.end(),
+                    "callable": fn,
+                    "is_coroutine": inspect.iscoroutinefunction(fn),
+                }
         
         # Create internal LLM tool for model interactions
         self._llm = Tool(
@@ -107,12 +173,10 @@ class Agent(Runnable):
         normalized_tools = []
         tools_by_name = {}
         for tool in self.tools:
-            # Convert non-Runnable objects to Tool instances
             if not isinstance(tool, Runnable):
                 if isinstance(tool, dict):
-                    tool = Tool(**tool)  # Create from dict config
+                    tool = Tool(**tool)
                 else:
-                    # Assume it's a callable and wrap it
                     tool = Tool(handler=tool)
             
             if tool.name in tools_by_name:
@@ -156,6 +220,35 @@ class Agent(Runnable):
     def return_model(self) -> Any:
         """See base class."""
         return Message
+
+
+    async def _resolve_system_prompt(self) -> str | None:
+        """Resolve system prompt by executing embedded template functions.
+        
+        Parses the system prompt for function calls in the format {namespace::function}
+        and executes them in parallel, substituting the results back into the prompt.
+        
+        Returns:
+            The resolved system prompt with function calls replaced by their results,
+            or None if no system prompt is configured.
+        """
+        if not self.system_prompt:
+            return None
+        if not self._system_prompt_callables:
+            return self.system_prompt
+
+        system_prompt_tasks = []
+        for _, v in self._system_prompt_callables.items():
+            callable_fn = v["callable"]
+            system_prompt_tasks.append(self._execute_runtime_callable(callable_fn, v["is_coroutine"]))
+        results = await asyncio.gather(*system_prompt_tasks)
+        
+        # TODO: Optimize with single-pass substitution using stored positions
+        system_prompt = self.system_prompt
+        for (k, _), result in zip(self._system_prompt_callables.items(), results, strict=False):
+            system_prompt = system_prompt.replace(k, str(result) if result is not None else "")
+        
+        return system_prompt
 
 
     async def _resolve_memory(self) -> list[Message]:
@@ -261,8 +354,7 @@ class Agent(Runnable):
         Yields:
             Events from LLM calls and tool executions
         """
-        # TODO Lazy evaluation of variables and functions
-        system_prompt = self.system_prompt
+        system_prompt = await self._resolve_system_prompt()
         # Initialize conversation with memory + user prompt
         messages = await self._resolve_memory()
         messages.append(kwargs.pop("prompt"))
