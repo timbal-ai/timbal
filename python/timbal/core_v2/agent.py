@@ -266,7 +266,7 @@ class Agent(Runnable):
         run_context = get_run_context()
         if run_context.parent_id:
             # Try to get tracing data from parent execution
-            parent_tracing = await run_context.get_parent_tracing()
+            parent_tracing = await run_context._get_parent_tracing()
             if parent_tracing is None:
                 logger.error("Parent tracing not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
             else:

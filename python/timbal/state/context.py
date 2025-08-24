@@ -30,8 +30,17 @@ class RunContextData(UserDict):
 
 
 class RunContext(BaseModel):
-    """Context for a run.
-    This is shared between all steps in an agent/workflow (including nested agents/workflows).
+    """Runtime execution context shared across all components in a run.
+    
+    The RunContext provides a centralized location for:
+    - Execution tracing and monitoring
+    - Data sharing between steps and components
+    - Usage tracking and statistics
+    - Parent-child run relationships
+    
+    This context is automatically created and managed by the framework and is
+    accessible through get_run_context() in runtime callables like system prompt
+    functions and hooks.
     """
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -68,8 +77,13 @@ class RunContext(BaseModel):
     )
     _tracing_provider: type[TracingProvider] = PrivateAttr()
 
+
     def model_post_init(self, __context: Any) -> None:
-        """"""
+        """Initialize the RunContext after Pydantic model creation.
+        
+        Sets up the tracing provider based on available configuration.
+        Defaults to in-memory tracing if no custom provider is configured.
+        """
         # TODO Enable custom providers
         # TODO Enable platform provider
         logger.warning(
@@ -79,8 +93,44 @@ class RunContext(BaseModel):
         )
         self._tracing_provider = InMemoryTracingProvider
 
+
+    async def _get_parent_tracing(self) -> Tracing | None:
+        """Load the tracing data for the parent run.
+        
+        INTERNAL METHOD: This method is intended for internal framework use.
+        Use with caution as it involves async I/O operations and direct
+        interaction with the tracing provider.
+        
+        Returns:
+            The parent run's tracing data, or None if this is a root run.
+        """
+        if self.parent_id:
+            return await self._tracing_provider.get(self.parent_id)
+        return None
+
+
+    async def _save_tracing(self) -> None:
+        """Save the tracing data for the run.
+        
+        INTERNAL METHOD: This method is intended for internal framework use.
+        It persists the current run's tracing data using the configured
+        tracing provider. Manual calls to this method may interfere with
+        the framework's automatic tracing lifecycle.
+        """
+        await self._tracing_provider.put(self)
+
+
     def update_usage(self, key: str, value: int) -> None:
-        """Update usage statistics within traces with the runnable path from call stack inspection."""
+        """Update usage statistics for the current call and all parent calls.
+        
+        This method propagates usage statistics up the call stack, ensuring
+        that parent components can track cumulative usage from their children.
+        Commonly used for tracking token usage, API calls, or other metrics.
+        
+        Args:
+            key: The usage metric key (e.g., 'tokens', 'api_calls')
+            value: The value to add to the current usage for this key
+        """
         from . import get_call_id
         call_id = get_call_id()
         # Update usage for all parents in the call stack
@@ -91,12 +141,21 @@ class RunContext(BaseModel):
             trace.usage[key] = current_value + value
             call_id = trace.parent_call_id
 
-    async def get_parent_tracing(self) -> Tracing | None:
-        """Load the tracing data for the parent run."""
-        if self.parent_id:
-            return await self._tracing_provider.get(self.parent_id)
-        return None
 
-    async def save_tracing(self) -> None:
-        """Save the tracing data for the run."""
-        await self._tracing_provider.put(self)
+    def get_current_input(self) -> dict[str, Any] | None:
+        """Get the input parameters for the currently executing component.
+        
+        This method retrieves the input parameters that were passed to the
+        component currently being executed. Useful in system prompt functions
+        and hooks to access the original input data.
+        
+        Returns:
+            Dictionary containing the input parameters, or None if no current call
+        """
+        from . import get_call_id
+        call_id = get_call_id()
+        if not call_id: 
+            return None
+        assert call_id in self.tracing, f"RunContext.get_current_input: Call ID {call_id} not found in tracing."
+        trace = self.tracing[call_id]
+        return trace.input

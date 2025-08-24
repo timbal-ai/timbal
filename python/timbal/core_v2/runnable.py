@@ -579,7 +579,7 @@ class Runnable(ABC, BaseModel):
                 usage=trace.usage,
             )
             if _parent_call_id is None:
-                await run_context.save_tracing()
+                await run_context._save_tracing()
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
                 set_parent_call_id(None)
             logger.info("output_event", **output_event.dump)
