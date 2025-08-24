@@ -83,11 +83,11 @@ async def dump(value: Any) -> Any:
     # Handle the rest of BaseModel instances as we handle dictionaries
     elif isinstance(value, BaseModel): 
         items = await asyncio.gather(*[dump(v) for v in value.__dict__.values()])
-        return dict(zip(value.__dict__.keys(), items))
+        return dict(zip(value.__dict__.keys(), items, strict=False))
     elif isinstance(value, dict):
-        keys, values = zip(*value.items()) if value else ([], [])
+        keys, values = zip(*value.items(), strict=False) if value else ([], [])
         dumped_values = await asyncio.gather(*[dump(v) for v in values])
-        return dict(zip(keys, dumped_values))
+        return dict(zip(keys, dumped_values, strict=False))
     elif isinstance(value, (list, tuple)): # noqa: UP038
         dumped_items = await asyncio.gather(*[dump(v) for v in value])
         return dumped_items if isinstance(value, list) else tuple(dumped_items)

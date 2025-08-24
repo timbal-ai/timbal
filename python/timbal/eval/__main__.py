@@ -12,14 +12,20 @@ from ..logs import setup_logging
 
 # TODO This shouldn't be in just the server 'module'.
 from ..server.utils import ModuleSpec, load_module
+from ..types.models import dump
 from .engine import eval_file
-from .types.models import dump
 from .types.result import EvalTestSuiteResult
 from .utils import discover_files
 
 logger = structlog.get_logger("timbal.eval")
 
-
+async def run_evals(files, agent, test_results, test_name=None):
+    for file in files:
+        await eval_file(file, agent, test_results, test_name=test_name)
+    
+    # Save all summaries to JSON
+    dumped = await dump(test_results)
+    return dumped
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Timbal evals.")
@@ -70,9 +76,6 @@ if __name__ == "__main__":
 
     agent = load_module(module_spec)
 
-    from timbal.state.savers import JSONLSaver
-    agent.state_saver = JSONLSaver(path=Path("state.jsonl"))
-
     tests_path = args.tests
     if not tests_path:
         print("No tests path provided.") # noqa: T201
@@ -97,11 +100,8 @@ if __name__ == "__main__":
 
     # TODO Improve this.
     test_results = EvalTestSuiteResult()
-    for file in files:
-        test_results.total_tests += 1
-        asyncio.run(eval_file(file, agent, test_results, test_name=test_name))
-
-    # Save all summaries to JSON
+    
+    # Run all evals in single event loop to avoid cleanup issues
+    dumped = asyncio.run(run_evals(files, agent, test_results, test_name))
     with open("summary.json", "w") as f:
-        dumped = asyncio.run(dump(test_results))
         json.dump(dumped, f, indent=2, ensure_ascii=False)

@@ -7,6 +7,11 @@ def discover_files(path: Path) -> list[Path]:
     If the path is a file, it'll simply check the file is .yaml and return it.
     """
     files = []
+    
+    # If path doesn't exist, return empty list
+    if not path.exists():
+        return files
+    
     if path.is_dir():
         for file in path.rglob("eval*.yaml"):
             files.append(file)

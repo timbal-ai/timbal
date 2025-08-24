@@ -3,7 +3,6 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from ..models import dump
-from ...state.context import RunContext
 
 
 class BaseEvent(BaseModel):

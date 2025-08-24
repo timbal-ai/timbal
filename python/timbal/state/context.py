@@ -1,4 +1,3 @@
-from collections import UserDict
 from typing import Any
 
 import structlog
@@ -6,27 +5,10 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from uuid_extensions import uuid7
 
 from .config import TimbalPlatformConfig
-from .data import BaseData, DataValue
 from .tracing import Tracing
 from .tracing.providers import InMemoryTracingProvider, TracingProvider
 
 logger = structlog.get_logger("timbal.state.context")
-
-
-class RunContextData(UserDict):
-
-    # TODO We should call get_data_key internally for this.
-    def __getitem__(self, key: str):
-        return super().__getitem__(key).resolve()
-
-    def __setitem__(self, key: str, value: Any):
-        if isinstance(value, BaseData):
-            super().__setitem__(key, value)
-        else:
-            super().__setitem__(key, DataValue(value=value))
-
-    def as_dict(self) -> dict[str, BaseData]:
-        return dict(self.data)
 
 
 class RunContext(BaseModel):
@@ -58,10 +40,6 @@ class RunContext(BaseModel):
     idempotency_key: str | None = Field(
         None,
         description="Idempotency key for the run."
-    )
-    data: RunContextData = Field(
-        default_factory=RunContextData,
-        description="Data to be shared between steps in an agent or workflow."
     )
     timbal_platform_config: TimbalPlatformConfig | None = Field(
         None,

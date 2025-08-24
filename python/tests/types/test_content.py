@@ -1,5 +1,6 @@
 import base64
 import pathlib
+from json.decoder import JSONDecodeError
 
 import pytest
 from anthropic.types import (
@@ -8,10 +9,12 @@ from anthropic.types import (
 from anthropic.types import (
     ToolUseBlock as AnthropicToolUseBlock,
 )
-from json.decoder import JSONDecodeError
+
 try:
     # In newer OpenAI SDK versions, use the concrete function tool call type
-    from openai.types.chat.chat_completion_message_function_tool_call import ChatCompletionMessageFunctionToolCall as OpenAIToolCall
+    from openai.types.chat.chat_completion_message_function_tool_call import (
+        ChatCompletionMessageFunctionToolCall as OpenAIToolCall,
+    )
     from openai.types.chat.chat_completion_message_function_tool_call import Function as OpenAIFunction
 except ImportError:
     # Fallback for older versions

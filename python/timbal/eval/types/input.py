@@ -31,9 +31,20 @@ class Input(BaseModel):
     @field_validator("text", mode="before")
     def validate_text(cls, v):
         """Stringify the value to enable passing this to an LLM."""
+        if v is None:
+            return None
         if not isinstance(v, str):
             return str(v)
         return v
+
+    @model_validator(mode="after")
+    def validate_at_least_one_field(self):
+        """Ensure at least text or files is provided."""
+        # Only validate if this is actually an Input class, not a subclass like Output
+        if type(self).__name__ == "Input":
+            if self.text is None and (self.files is None or len(self.files) == 0):
+                raise ValueError("Input must have either text or files")
+        return self
 
 
     def to_message(self, role: str = "user") -> Message:

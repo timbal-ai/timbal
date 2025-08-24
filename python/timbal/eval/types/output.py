@@ -1,7 +1,15 @@
 import structlog
 from pydantic import ConfigDict, field_validator
 
-from ..validators import Validator, contains_output, not_contains_output, regex, semantic_output
+from ..validators import (
+    Validator,
+    contains_any_output,
+    contains_output,
+    exact_output,
+    not_contains_output,
+    regex,
+    semantic_output,
+)
 from .input import Input
 
 logger = structlog.get_logger("timbal.eval.types.output")
@@ -30,7 +38,7 @@ class Output(Input):
     """
     model_config = ConfigDict(extra="ignore", arbitrary_types_allowed=True)
 
-    validators: list[Validator] = []
+    validators: list[Validator] | None = None
     """A list of `Validator` instances to apply to the agent's actual output.
     If this list is empty, the `Output` instance is treated as a fixed record
     rather than an expected output to be validated.
@@ -40,8 +48,21 @@ class Output(Input):
     @field_validator("validators", mode="before")
     def validate_validators(cls, v):
         """Converts validator specifications from a dictionary (e.g., YAML) into `Validator` instances."""
+        # Handle None case
+        if v is None:
+            return None
+            
+        # Handle empty list case
+        if isinstance(v, list) and len(v) == 0:
+            return []
+            
+        # Handle case where validators are already Validator objects (direct instantiation)
+        if isinstance(v, list) and all(isinstance(item, Validator) for item in v):
+            return v
+            
+        # Handle case where validators come from dict (e.g., YAML)
         if not isinstance(v, dict):
-            raise ValueError("validators must be a dict")
+            raise ValueError("validators must be a dict or list of Validator objects")
         
         validators = []
         for validator_name, validator_arg in v.items():
@@ -49,10 +70,14 @@ class Output(Input):
                 validators.append(contains_output(validator_arg))
             elif validator_name == "not_contains":
                 validators.append(not_contains_output(validator_arg))
+            elif validator_name == "exact_output":
+                validators.append(exact_output(validator_arg))
             elif validator_name == "regex":
                 validators.append(regex(validator_arg))
             elif validator_name == "semantic":
                 validators.append(semantic_output(validator_arg))
+            elif validator_name == "contains_any":
+                validators.append(contains_any_output(validator_arg))
             # TODO Add more validators.
             else:
                 logger.warning("unknown_validator", validator=validator_name)

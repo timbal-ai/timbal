@@ -2,9 +2,12 @@ import functools
 import json
 import re
 
+from ..core.llm_router import llm_router
+from ..core.tool import Tool
 from ..errors import EvalError
-from ..steps.llms.router import llm_router
 from ..types.message import Message
+
+llm_router = Tool(name="llm_router", handler=llm_router)
 
 
 class Validator:
@@ -115,11 +118,11 @@ def not_contains_steps(ref: list[dict]):
     return Validator(validator, "not_contains_steps", ref)
 
 
-def contains_output(ref: list[str]):
+def contains_output(ref: str | list[str]):
     """Validate that the message contains the given substrings."""
     if not isinstance(ref, list):
-        raise ValueError(f"Invalid contains validator: expected list, got {type(ref)}")
-
+        ref = [ref]
+    
     ref = [str(v) for v in ref]
 
     def validator(message: Message):
@@ -134,11 +137,11 @@ def contains_output(ref: list[str]):
     return Validator(validator, "contains", ref)
 
 
-def not_contains_output(ref: list[str]):
-    """Validate that the message contains the given substrings."""
+def not_contains_output(ref: str | list[str]):
+    """Validate that the message does not contain the given substrings."""
     if not isinstance(ref, list):
-        raise ValueError(f"Invalid contains validator: expected list, got {type(ref)}")
-
+        ref = [ref]
+    
     ref = [str(v) for v in ref]
 
     def validator(message: Message):
@@ -151,6 +154,22 @@ def not_contains_output(ref: list[str]):
                 raise EvalError(f"Message contains '{v}'.")
 
     return Validator(validator, "not_contains", ref)
+
+
+def exact_output(ref: str):
+    """Validate that the message exactly matches the given text."""
+    if not isinstance(ref, str):
+        raise ValueError(f"Invalid exact_output validator: expected str, got {type(ref)}")
+
+    def validator(message: Message):
+        message_text = message.collect_text()
+        if not message_text:
+            raise EvalError("Message does not contain any text to validate.")
+        
+        if message_text.strip() != ref.strip():
+            raise EvalError(f"Message does not exactly match expected output. Expected: '{ref}', Got: '{message_text}'")
+
+    return Validator(validator, "exact_output", ref)
 
 
 def regex(ref: str):
@@ -213,14 +232,74 @@ Only mark as incorrect if the response is irrelevant, unhelpful, or fails to add
             system_prompt=system_prompt,
             messages=messages,
             json_schema=json_schema,
-        )
-        res = res.choices[0].message.content
+        ).collect()
+        res = res.output.content[0].text
         res = json.loads(res)
 
         if not res["is_valid"]:
             raise EvalError(res["explanation"])
 
     return Validator(validator, "semantic", ref)
+
+
+def contains_any_output(ref: str | list[str]):
+    """Validate that the message contains any of the given substrings (OR logic)."""
+    if not isinstance(ref, list):
+        ref = [ref]
+    
+    ref = [str(v) for v in ref]
+
+    def validator(message: Message):
+        message_text = message.collect_text()
+        if not message_text:
+            raise EvalError("Message does not contain any text to validate.")
+
+        for v in ref:
+            if v in message_text:
+                return  # Found at least one, validation passes
+
+        # If we get here, none were found
+        ref_str = "', '".join(ref)
+        raise EvalError(f"Message does not contain any of: '{ref_str}'.")
+
+    return Validator(validator, "contains_any", ref)
+
+
+def contains_any_steps(ref: list[dict]):
+    """
+    Validate that the steps contain any of the given tool names and, optionally, input key-value substrings (OR logic).
+    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input substrings).
+    """
+    if not isinstance(ref, list):
+        raise ValueError(f"Invalid contains_any_steps validator: expected list, got {type(ref)}")
+
+    def validator(steps: list[dict]):
+        for expected in ref:
+            tool_name = expected.get("name")
+            input_dict = expected.get("input", {})
+            
+            for step in steps:
+                if step.get("tool") == tool_name:
+                    # If no input dict specified, just match tool
+                    if not input_dict:
+                        return  # Found a match, validation passes
+                    # Otherwise, check all input keys/values
+                    step_input = step.get("input", {})
+                    all_match = True
+                    for k, v in input_dict.items():
+                        step_val = step_input.get(k)
+                        if step_val is None or str(v) not in str(step_val):
+                            all_match = False
+                            break
+                    if all_match:
+                        return  # Found a match, validation passes
+        
+        # If we get here, none were found
+        tool_names = [expected.get("name") for expected in ref]
+        tools_str = "', '".join(tool_names)
+        raise EvalError(f"No step found with any of the tools: '{tools_str}'.")
+    
+    return Validator(validator, "contains_any_steps", ref)
 
 
 def semantic_steps(ref: str | list[str]):
@@ -268,8 +347,8 @@ Only mark as incorrect if the steps are missing key actions, are irrelevant, or 
             system_prompt=system_prompt,
             messages=messages,
             json_schema=json_schema,
-        )
-        res = res.choices[0].message.content
+        ).collect()
+        res = res.output.content[0].text
         res = json.loads(res)
 
         if not res["is_valid"]:

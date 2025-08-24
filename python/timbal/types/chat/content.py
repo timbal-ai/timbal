@@ -33,18 +33,22 @@ import structlog
 from anthropic.types import TextBlock as AnthropicTextBlock
 from anthropic.types import ToolUseBlock as AnthropicToolUseBlock
 from docx import Document
+
 try:
     # In newer OpenAI SDK versions, use the concrete function tool call type
-    from openai.types.chat.chat_completion_message_function_tool_call import ChatCompletionMessageFunctionToolCall as OpenAIToolCall
+    from openai.types.chat.chat_completion_message_function_tool_call import (
+        ChatCompletionMessageFunctionToolCall as OpenAIToolCall,
+    )
 except ImportError:
     # Fallback for older versions
     from openai.types.chat import ChatCompletionMessageToolCall as OpenAIToolCall
 from pydantic import BaseModel
 
 # TODO Add a param in the Agent.__init__() where we can customize this.
-from ...steps.openai import stt
-# from ...steps.elevenlabs import stt
-from ...steps.pdfs import convert_pdf_to_images
+from ...handlers.openai import stt
+
+# from ...handlers.elevenlabs import stt
+from ...handlers.pdfs import convert_pdf_to_images
 from ..file import File
 
 logger = structlog.get_logger("timbal.types.chat.content")
