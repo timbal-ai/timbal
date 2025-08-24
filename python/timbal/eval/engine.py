@@ -9,7 +9,7 @@ import yaml
 from ..core.agent import Agent
 from ..errors import EvalError
 from ..state import RunContext, get_run_context, set_run_context
-from ..types.chat.content import TextContent
+from ..types.content import TextContent
 from ..types.message import Message
 from .types.result import EvalResult, EvalTestSuiteResult
 from .types.test import Test

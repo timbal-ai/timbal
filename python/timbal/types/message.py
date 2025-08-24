@@ -19,7 +19,7 @@ from pydantic import (
 )
 from pydantic_core import CoreSchema, core_schema
 
-from .chat.content import Content, TextContent, ToolResultContent, ToolUseContent
+from .content import Content, TextContent, ToolResultContent, ToolUseContent
 
 
 class Message:

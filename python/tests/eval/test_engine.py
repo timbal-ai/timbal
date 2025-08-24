@@ -317,7 +317,7 @@ class TestRunTurn:
         def get_current_time() -> str:
             return "2024-01-01 12:00:00"
         
-        agent = Agent(name="time_agent", model="gpt-4o-mini", tools=[get_current_time])
+        agent = Agent(name="time_agent", model="openai/gpt-4o-mini", tools=[get_current_time])
         conversation_history = []
         test_results = EvalTestSuiteResult()
         
@@ -343,7 +343,7 @@ class TestRunTurn:
         def get_time() -> str:
             return "2024-01-01 12:00:00"
         
-        agent = Agent(name="memory_agent", model="gpt-4o-mini", tools=[get_time])
+        agent = Agent(name="memory_agent", model="openai/gpt-4o-mini", tools=[get_time])
         
         conversation_history = [
             Message.validate({"role": "user", "content": [{"type": "text", "text": "My name is Bob"}]}),
@@ -372,7 +372,7 @@ class TestRunTurn:
         def failing_add(a: int, b: int) -> int:
             raise ValueError("Tool failed")
         
-        agent = Agent(name="failing_agent", model="gpt-4o-mini", tools=[failing_add])
+        agent = Agent(name="failing_agent", model="openai/gpt-4o-mini", tools=[failing_add])
         conversation_history = []
         test_results = EvalTestSuiteResult()
         
@@ -394,7 +394,7 @@ class TestEngineIntegration:
         def recall_name() -> str:
             return "I remember you told me your name earlier"
         
-        agent = Agent(name="memory_agent", model="gpt-4o-mini", tools=[remember_name, recall_name])
+        agent = Agent(name="memory_agent", model="openai/gpt-4o-mini", tools=[remember_name, recall_name])
         test_file = FIXTURES_DIR / "eval_multi_turn_test.yaml"
         
         test_results = EvalTestSuiteResult()
@@ -409,7 +409,7 @@ class TestEngineIntegration:
         def get_time() -> str:
             return "2024-01-01 12:00:00"
         
-        agent = Agent(name="simple_agent", model="gpt-4o-mini", tools=[get_time])
+        agent = Agent(name="simple_agent", model="openai/gpt-4o-mini", tools=[get_time])
         test_file = FIXTURES_DIR / "eval_usage_test.yaml"
         
         test_results = EvalTestSuiteResult()
@@ -430,15 +430,15 @@ class TestNestedAgentValidation:
         
         math_helper_agent = Agent(
             name="math_helper_agent", 
-            model="gpt-4o-mini",
+            model="openai/gpt-4o-mini",
             tools=[add]
         )
         
         outer_agent = Agent(
             name="coordinator_agent",
-            model="gpt-4o-mini", 
+            model="openai/gpt-4o-mini", 
             tools=[math_helper_agent],
-            instructions="You are a coordinator agent that uses the math_helper_agent for calculations."
+            system_prompt="You are a coordinator agent that uses the math_helper_agent for calculations."
         )
         
         test_file = FIXTURES_DIR / "eval_nested_agent_test.yaml"
@@ -458,7 +458,7 @@ class TestEngineEdgeCases:
         def get_time() -> str:
             return "2024-01-01 12:00:00"
         
-        agent = Agent(name="simple_agent", model="gpt-4o-mini", tools=[get_time])
+        agent = Agent(name="simple_agent", model="openai/gpt-4o-mini", tools=[get_time])
         test_file = FIXTURES_DIR / "eval_invalid.yaml"
         
         test_results = EvalTestSuiteResult()
@@ -471,7 +471,7 @@ class TestEngineEdgeCases:
         def get_time() -> str:
             return "2024-01-01 12:00:00"
         
-        agent = Agent(name="simple_agent", model="gpt-4o-mini", tools=[get_time])
+        agent = Agent(name="simple_agent", model="openai/gpt-4o-mini", tools=[get_time])
         test_file = FIXTURES_DIR / "eval_empty_test.yaml"
         
         test_results = EvalTestSuiteResult()
@@ -485,7 +485,7 @@ class TestEngineEdgeCases:
         """Test that agent properly reads files specified in YAML."""
         agent = Agent(
             name="file_agent",
-            model="gpt-4.1-mini",
+            model="openai/gpt-4.1-mini",
         )
         test_file = FIXTURES_DIR / "eval_file_test.yaml"
         

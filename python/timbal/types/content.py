@@ -1,27 +1,3 @@
-"""
-Defines the content types for chat messages in Timbal.
-
-Types:
-- TextContent: Plain text messages
-- FileContent: File attachments
-- ToolUseContent: Request to use a specific tool
-- ToolResultContent: Result returned by a tool
-
-All message content must be an instance of one of these types.
-
-Usage:
-
-1. Validating a content:
-   >>> text_content = Content.model_validate(text_block)
-   >>> tool_use_content = Content.model_validate(tool_use_block)
-
-2. Converting a content to the input format required by OpenAI and Anthropic:
-   >>> file_content = FileContent(file=File.validate(data_url))
-   >>> file_content.to_openai_input()
-   >>> file_content.to_anthropic_input()
-
-"""
-
 import base64
 import io
 import json
@@ -44,14 +20,14 @@ except ImportError:
     from openai.types.chat import ChatCompletionMessageToolCall as OpenAIToolCall
 from pydantic import BaseModel
 
-# TODO Add a param in the Agent.__init__() where we can customize this.
-from ...handlers.openai import stt
-
+# TODO This shouldn't happen magically. We should error and prompt the user to include this in a pre_hook or to use a different model
+from ..handlers.openai import stt
 # from ...handlers.elevenlabs import stt
-from ...handlers.pdfs import convert_pdf_to_images
-from ..file import File
 
-logger = structlog.get_logger("timbal.types.chat.content")
+from ..handlers.pdfs import convert_pdf_to_images
+from .file import File
+
+logger = structlog.get_logger("timbal.types.content")
 
 
 AVAILABLE_ENCODINGS = [
@@ -182,6 +158,32 @@ class Content(BaseModel):
         
         # By default try to convert whatever python object we have into a string. 
         return TextContent(text=str(value))
+
+
+class TextContent(Content):
+    """
+    This class represents a text content in a chat message.
+    It also provides methods to convert the text content to the input format required by OpenAI and Anthropic.
+    """
+
+    type: Literal["text"] = "text"
+    text: str 
+
+
+    async def to_openai_input(self, model: str | None = None) -> dict[str, Any]:
+        """Convert the text content to the input format required by OpenAI."""
+        return {
+            "type": "text", 
+            "text": self.text
+        }
+
+
+    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any]:
+        """Convert the text content to the input format required by Anthropic."""
+        return {
+            "type": "text", 
+            "text": self.text
+        }
 
 
 class FileContent(Content):
@@ -499,30 +501,7 @@ class FileContent(Content):
         raise ValueError(f"Unsupported file {self.file}.")
 
 
-class TextContent(Content):
-    """
-    This class represents a text content in a chat message.
-    It also provides methods to convert the text content to the input format required by OpenAI and Anthropic.
-    """
 
-    type: Literal["text"] = "text"
-    text: str 
-
-
-    async def to_openai_input(self, model: str | None = None) -> dict[str, Any]:
-        """Convert the text content to the input format required by OpenAI."""
-        return {
-            "type": "text", 
-            "text": self.text
-        }
-
-
-    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any]:
-        """Convert the text content to the input format required by Anthropic."""
-        return {
-            "type": "text", 
-            "text": self.text
-        }
 
 
 class ToolUseContent(Content):
