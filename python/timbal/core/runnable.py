@@ -22,7 +22,6 @@ from pydantic import (
 from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
-from ..collectors.utils import sync_to_async_gen
 from ..state import (
     get_parent_call_id,
     get_run_context,
@@ -40,6 +39,7 @@ from ..types.events import (
     StartEvent,
 )
 from ..types.models import dump
+from ..utils import sync_to_async_gen
 
 logger = structlog.get_logger("timbal.core.runnable")
 
