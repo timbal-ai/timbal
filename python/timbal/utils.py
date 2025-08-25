@@ -29,7 +29,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from .errors import PlatformError
-from .state import resolve_platform_config
+from .state import get_or_create_run_context
 
 logger = structlog.get_logger("timbal.utils")
 
@@ -250,7 +250,10 @@ async def _platform_api_call(
     files: dict[str, tuple[str, bytes, str]] | None = None,
 ) -> Any:
     """Utility function for making platform API calls."""
-    platform_config = resolve_platform_config()
+    run_context = get_or_create_run_context()
+    if not run_context.platform_config:
+        raise ValueError("No platform config available for platform API calls.")
+    platform_config = run_context.platform_config
 
     url = f"https://{platform_config.host}/{path}"
     headers = {
@@ -299,7 +302,10 @@ async def _platform_api_stream_call(
     files: dict[str, tuple[str, bytes, str]] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Utility function for making streaming platform API calls and handling Server-Sent Events (SSE)."""
-    platform_config = resolve_platform_config()
+    run_context = get_or_create_run_context()
+    if not run_context.platform_config:
+        raise ValueError("No platform config available for platform API calls.")
+    platform_config = run_context.platform_config
 
     url = f"https://{platform_config.host}/{path}"
     headers = {

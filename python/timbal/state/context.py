@@ -1,3 +1,4 @@
+import os
 from typing import Any
 
 import structlog
@@ -62,7 +63,23 @@ class RunContext(BaseModel):
         
         Sets up the tracing provider based on available configuration.
         Defaults to in-memory tracing if no custom provider is configured.
+        
+        If no platform_config is provided, attempts to resolve it from the environment.
         """
+        # Resolve platform config from environment if not provided
+        if not self.platform_config:
+            host = os.getenv("TIMBAL_API_HOST")
+            if host:
+                token = os.getenv("TIMBAL_API_KEY") or os.getenv("TIMBAL_API_TOKEN")
+                if token:
+                    self.platform_config = PlatformConfig.model_validate({
+                        "host": host,
+                        "auth": {
+                            "type": "bearer",
+                            "token": token
+                        }
+                    })
+        
         # TODO Enable custom providers
         # TODO Enable platform provider
         logger.warning(

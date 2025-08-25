@@ -23,8 +23,8 @@ from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
 from ..state import (
+    get_or_create_run_context,
     get_parent_call_id,
-    get_run_context,
     set_call_id,
     set_parent_call_id,
     set_run_context,
@@ -514,10 +514,7 @@ class Runnable(ABC, BaseModel):
             set_parent_call_id(_call_id)
 
         # Generate new context or reset it if appropriate
-        run_context = get_run_context()
-        if not run_context:
-            run_context = RunContext()
-            set_run_context(run_context)
+        run_context = get_or_create_run_context()
         if not _parent_call_id and run_context.tracing:
             run_context = RunContext(parent_id=run_context.id)
             set_run_context(run_context)
