@@ -1,34 +1,3 @@
-"""
-This module provides a File class that wraps various types of file sources,
-including local files, URLs, enabling uniform interaction through
-a file-like interface.
-
-It is inspired by and based on the design found in the Replicate Cog project.
-See original implementation at:
-https://github.com/replicate/cog/blob/main/python/cog/types.py
-
-Usage:
-
-1. Validating and opening a local file:
-   >>> file_instance = File.validate('path/to/local/file.txt')
-   >>> print(file_instance.read())
-
-2. Validating and opening a data url:
-   >>> file_instance = File.validate('data:text/plain;base64,SGVsbG8sIFdvcmxkIQ%3D%3D')
-   >>> print(file_instance.read()) # b'Hello, World!'
-
-3. Opening a file from a URL:
-   >>> from PIL import Image
-   >>> file_instance = File.validate('https://example.com/image.png')
-   >>> image = Image.open(file_instance)
-   >>> image.show()
-
-4. Opening a file-like object:
-   >>> from io import BytesIO
-   >>> file_instance = File.validate(BytesIO(b'Hello, World!'))
-   >>> print(file_instance.read())
-"""
-
 import base64
 import io
 import mimetypes
@@ -367,7 +336,7 @@ class File(io.IOBase):
         # ? Add more resource specifiers
     ) -> str | None:
         """Persist the file to some storage.
-        If there's no context or no timbal_platform_config, the file will be persisted to local disk.
+        If there's no context or no platform_config, the file will be persisted to local disk.
         If there's a platform configuration, the file will be uploaded to the platform.
         If the file is already persisted, it will be returned as is.
         """
@@ -378,13 +347,13 @@ class File(io.IOBase):
 
         if self.__source_scheme__ == "url":
             url = str(self)
-            if not context or not context.timbal_platform_config:
+            if not context or not context.platform_config:
                 return url
-            elif url.startswith(f"https://{context.timbal_platform_config.cdn}"):
+            elif url.startswith(f"https://{context.platform_config.cdn}"):
                 object.__setattr__(self, "__persisted__", url)
                 return url
 
-        if not context or not context.timbal_platform_config:
+        if not context or not context.platform_config:
             if self.__source_scheme__ == "local_path":
                 local_path = str(self)
                 object.__setattr__(self, "__persisted__", local_path)
@@ -400,7 +369,7 @@ class File(io.IOBase):
             object.__setattr__(self, "__persisted__", temp_path)
             return temp_path
 
-        subject = context.timbal_platform_config.subject
+        subject = context.platform_config.subject
         org_id = org_id or subject.org_id
         # ? We could add more subject info here
 
@@ -421,8 +390,8 @@ class File(io.IOBase):
     def serialize(
         cls, 
         value: Any, 
-        *args,
-        **kwargs,
+        *args,  # noqa: ARG003
+        **kwargs,  # noqa: ARG003
     ) -> str:
         """Serialize the file to a data url string. Bytes-like files are not supported will have octet-stream as content type."""
         # When creating a model with fields with File type that are nullable,

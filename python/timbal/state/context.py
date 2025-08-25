@@ -4,7 +4,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from uuid_extensions import uuid7
 
-from .config import TimbalPlatformConfig
+from .config import PlatformConfig
 from .tracing import Tracing
 from .tracing.providers import InMemoryTracingProvider, TracingProvider
 
@@ -39,11 +39,12 @@ class RunContext(BaseModel):
     )
     idempotency_key: str | None = Field(
         None,
-        description="Idempotency key for the run."
+        description="Idempotency key for the run.",
     )
-    timbal_platform_config: TimbalPlatformConfig | None = Field(
+    platform_config: PlatformConfig | None = Field(
         None,
-        description="Platform configuration for the run."
+        description="Platform configuration for the run.",
+        validation_alias="timbal_platform_config", # Legacy
     )
     tracing: Tracing = Field(
         default_factory=Tracing,

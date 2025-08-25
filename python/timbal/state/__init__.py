@@ -16,7 +16,7 @@ See the function docstrings for usage details and warnings.
 import os
 from contextvars import ContextVar
 
-from .context import RunContext, TimbalPlatformConfig
+from .context import PlatformConfig, RunContext
 
 # INTERNAL: This variable holds the context. Do not access directly.
 _run_context_var: ContextVar[RunContext | None] = ContextVar("run_context", default=None)
@@ -93,11 +93,11 @@ def set_parent_call_id(parent_call_id: str) -> None:
 
 
 # TODO Remove this method in favor of custom init in the RunContext
-def resolve_platform_config() -> TimbalPlatformConfig:
+def resolve_platform_config() -> PlatformConfig:
     """
     Resolves the active Timbal platform configuration for the current execution context.
 
-    This function provides a unified way to obtain the TimbalPlatformConfig used for authentication
+    This function provides a unified way to obtain the PlatformConfig used for authentication
     and resource identification in Timbal's agentic and workflow runs. It first attempts to retrieve
     the platform configuration from the current RunContext (if one is set via contextvars). If no
     RunContext is active, it falls back to constructing a configuration from environment variables:
@@ -108,7 +108,7 @@ def resolve_platform_config() -> TimbalPlatformConfig:
         ValueError: If neither a RunContext nor the required environment variables are available.
 
     Returns:
-        TimbalPlatformConfig: The resolved platform configuration, ready for use in API calls,
+        PlatformConfig: The resolved platform configuration, ready for use in API calls,
         resource resolution, and authentication.
 
     Usage:
@@ -117,8 +117,8 @@ def resolve_platform_config() -> TimbalPlatformConfig:
     """
     current_context = get_run_context()
 
-    if current_context and current_context.timbal_platform_config:
-        return current_context.timbal_platform_config
+    if current_context and current_context.platform_config:
+        return current_context.platform_config
     else:
         host = os.getenv("TIMBAL_API_HOST")
         if not host:
@@ -126,7 +126,7 @@ def resolve_platform_config() -> TimbalPlatformConfig:
         token = os.getenv("TIMBAL_API_KEY") or os.getenv("TIMBAL_API_TOKEN")
         if not token:
             raise ValueError("Missing TIMBAL_API_KEY environment variable.")
-        return TimbalPlatformConfig.model_validate({
+        return PlatformConfig.model_validate({
             "host": host,
             "auth": {
                 "type": "bearer",
