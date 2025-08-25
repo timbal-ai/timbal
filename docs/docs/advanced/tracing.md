@@ -2,6 +2,7 @@
 title: Tracing and Events
 sidebar: 'docsSidebar'
 ---
+import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Tracing and Events
 
@@ -17,7 +18,7 @@ Events are the foundation of the tracing system. Each execution generates a sequ
 - **ChunkEvent**: Captures response fragments (especially useful for streaming)
 - **OutputEvent**: Contains the final result and execution metadata
 
-```python
+<CodeBlock language="python" code={`
 from timbal.types.events import StartEvent, ChunkEvent, OutputEvent
 
 # Events are automatically generated during execution
@@ -27,8 +28,7 @@ async for event in agent(prompt="Hello"):
     elif isinstance(event, ChunkEvent):
         print(f"Chunk: {event.content}")
     elif isinstance(event, OutputEvent):
-        print(f"Final result: {event.output}")
-```
+`}/>
 
 ## Collectors
 
@@ -38,43 +38,43 @@ Collectors process and transform events according to specific needs. Timbal incl
 
 Processes native Timbal events and extracts the final result:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.collectors.impl.timbal import TimbalCollector
 
 # Automatically used for Timbal events
 collector = TimbalCollector(run_context)
 result = collector.collect()  # Returns the final result
-```
+`}/>
 
 ### OpenAICollector
 
 Manages OpenAI streaming events, accumulating content and tool calls:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.collectors.impl.openai import OpenAICollector
 
 collector = OpenAICollector(run_context)
 # Processes OpenAI streaming events
 # Accumulates content and tool calls
-```
+`}/>
 
 ### DefaultCollector
 
 Fallback collector that handles any event type:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.collectors.impl.default import DefaultCollector
 
 collector = DefaultCollector(run_context)
 # Captures all events in an array
 events = collector.collect()
-```
+`}/>
 
 ### Custom Collectors
 
 You can create custom collectors by inheriting from `EventCollector`:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.collectors.base import EventCollector
 from timbal.collectors import register_collector
 
@@ -95,7 +95,7 @@ class CustomCollector(EventCollector):
     
     def collect(self):
         return self._processed_events
-```
+`}/>
 
 ## Tracing Savers
 
@@ -105,18 +105,18 @@ Tracing savers manage the storage and retrieval of execution traces:
 
 Default provider that stores traces in memory:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
 
 # Automatically used when no specific configuration is provided
 provider = InMemoryTracingProvider()
-```
+`}/>
 
 ### Custom Providers
 
 You can implement custom providers by inheriting from `TracingProvider`:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.state.tracing.providers.base import TracingProvider
 
 class DatabaseTracingProvider(TracingProvider):
@@ -128,14 +128,13 @@ class DatabaseTracingProvider(TracingProvider):
     @classmethod
     async def put(cls, run_context):
         # Store traces in database
-        pass
-```
+`}/>
 
 ## Run Context and Tracing
 
 The `RunContext` manages the global execution state and traces:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.state import RunContext, get_run_context
 
 # Create an execution context
@@ -150,11 +149,11 @@ if current_context:
     
     # Save traces
     await current_context.save_tracing()
-```
+`}/>
 
 ## Complete Example: Tracing System
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent
 from timbal.state import RunContext
 from timbal.collectors import get_collector_registry
@@ -179,7 +178,7 @@ result = await agent(
 # Traces are automatically saved
 print(f"Execution ID: {context.id}")
 print(f"Traces: {len(context.tracing)}")
-```
+`}/>
 
 ## Monitoring and Debugging
 
@@ -190,7 +189,7 @@ The tracing system enables:
 - **Auditing**: Complete execution history
 - **Optimization**: Bottleneck identification
 
-```python
+<CodeBlock language="python" code={`
 # Analyze traces from an execution
 for call_id, trace in context.tracing.items():
     print(f"Step: {trace.path}")
@@ -198,4 +197,4 @@ for call_id, trace in context.tracing.items():
     print(f"Usage: {trace.usage}")
     if trace.error:
         print(f"Error: {trace.error}")
-```
+`}/>

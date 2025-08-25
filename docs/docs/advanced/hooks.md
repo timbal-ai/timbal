@@ -3,6 +3,8 @@ title: Pre and Post Hooks
 sidebar: 'docsSidebar'
 ---
 
+import CodeBlock from '@site/src/theme/CodeBlock';
+
 # Pre and Post Hooks
 
 Pre and post hooks in Timbal provide powerful middleware-style functionality that allows you to intercept and modify inputs and outputs during execution. These hooks follow an in-place modification pattern and are essential for building adaptive and context-aware systems.
@@ -15,8 +17,7 @@ Hooks are functions that receive mutable references and modify them in-place. No
 
 Pre-hooks execute before the main handler and can modify input parameters:
 
-```python
-from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core_v2 import Tool
 from timbal.state import get_run_context
 
 async def pre_hook_example(input_dict):
@@ -46,15 +47,13 @@ tool = Tool(
 
 # Execute - pre-hook will modify the input
 result = await tool(text="Hello world").collect()
-# Output: "Processed: Enhanced: Hello world at 2024-01-01T00:00:00Z"
-```
+# Output: "Processed: Enhanced: Hello world at 2024-01-01T00:00:00Z"`}/>
 
 ### Post-hook
 
 Post-hooks execute after the main handler and can modify the output:
 
-```python
-from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core_v2 import Tool
 
 async def post_hook_example(output):
     """Post-hook that modifies the output."""
@@ -81,15 +80,13 @@ tool = Tool(
 
 # Execute - post-hook will modify the output
 result = await tool().collect()
-# Output: {"data": "sample", "count": 42, "processed_at": "2024-01-01T00:00:00Z", "status": "completed"}
-```
+# Output: {"data": "sample", "count": 42, "processed_at": "2024-01-01T00:00:00Z", "status": "completed"}`}/>
 
 ## Context Access in Hooks
 
 Hooks can access the run context to share data and make decisions:
 
-```python
-from timbal.core_v2 import Agent
+<CodeBlock language="python" code={`from timbal.core_v2 import Agent
 from timbal.state import get_run_context, RunContext
 
 async def context_aware_pre_hook(input_dict):
@@ -146,15 +143,13 @@ context.data['user_preferences'] = {'detailed_mode': True}
 result = await agent(
     prompt="Explain machine learning",
     context=context
-).collect()
-```
+).collect()`}/>
 
 ## Input Validation and Sanitization
 
 Pre-hooks are perfect for input validation and sanitization:
 
-```python
-from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core_v2 import Tool
 import re
 
 async def validate_and_sanitize(input_dict):
@@ -201,15 +196,13 @@ result = await tool(
     email="john@example.com",
     text="<script>alert('xss')</script>Hello world!",
     age="25"
-).collect()
-```
+).collect()`}/>
 
 ## Output Transformation
 
 Post-hooks are ideal for output transformation and formatting:
 
-```python
-from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core_v2 import Tool
 import json
 
 async def format_output(output):
@@ -249,15 +242,13 @@ tool = Tool(
 )
 
 # Output will be formatted
-result = await tool(query="test").collect()
-```
+result = await tool(query="test").collect()`}/>
 
 ## Performance Monitoring
 
 Hooks can be used for performance monitoring and logging:
 
-```python
-from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core_v2 import Tool
 from timbal.state import get_run_context
 import time
 
@@ -298,15 +289,13 @@ tool = Tool(
 )
 
 # Performance will be monitored
-result = await tool(data="large dataset").collect()
-```
+result = await tool(data="large dataset").collect()`}/>
 
 ## Conditional Processing
 
 Hooks can implement conditional logic based on input or context:
 
-```python
-from timbal.core_v2 import Agent
+<CodeBlock language="python" code={`from timbal.core_v2 import Agent
 from timbal.state import get_run_context
 
 async def conditional_pre_hook(input_dict):
@@ -363,15 +352,13 @@ context.data['user_role'] = 'admin'
 result = await agent(
     prompt="Write a Python function for data analysis",
     context=context
-).collect()
-```
+).collect()`}/>
 
 ## Error Handling in Hooks
 
 Hooks can implement custom error handling:
 
-```python
-from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core_v2 import Tool
 
 async def error_handling_pre_hook(input_dict):
     """Pre-hook with error handling."""
@@ -420,13 +407,11 @@ tool = Tool(
 result = await tool(
     endpoint="/data",
     api_key="invalid"
-).collect()
-```
+).collect()`}/>
 
 ## Complete Example: Advanced Hook System
 
-```python
-from timbal.core_v2 import Agent, Tool
+<CodeBlock language="python" code={`from timbal.core_v2 import Agent, Tool
 from timbal.state import RunContext, get_run_context
 import time
 import json
@@ -507,7 +492,6 @@ context.data['user_preferences'] = {'detailed_mode': True}
 result = await agent(
     prompt="Explain quantum computing in detail",
     context=context
-).collect()
-```
+).collect()`}/>
 
 Hooks provide a powerful way to add middleware functionality to your Timbal components, enabling input/output transformation, validation, monitoring, and context-aware behavior.

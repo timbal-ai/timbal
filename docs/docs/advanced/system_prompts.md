@@ -2,6 +2,7 @@
 title: Dynamic System Prompts
 sidebar: 'docsSidebar'
 ---
+import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Dynamic System Prompts
 
@@ -11,7 +12,7 @@ Dynamic system prompts allow you to adapt LLM behavior based on context, input d
 
 System prompts can include variables that are resolved dynamically:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent
 from timbal.types import Field
 
@@ -36,13 +37,13 @@ agent = create_dynamic_agent(
     user_role="data analyst",
     company_context="We are a fintech startup working with AI"
 )
-```
+`}/>
 
 ## Data-Driven System Prompts
 
 Prompts can be generated dynamically based on input data:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent
 from timbal.types import Field
 
@@ -77,13 +78,13 @@ async def analyze_data_agent(data_type: str, data_sample: str):
         model="gpt-4o-mini",
         system_prompt=system_prompt
     )
-```
+`}/>
 
 ## Conditional Prompts with Hooks
 
 Hooks allow you to modify system prompts based on execution context:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent
 from timbal.state import get_run_context
 
@@ -131,13 +132,13 @@ result = await agent(
     prompt="Explain machine learning",
     context=context
 ).collect()
-```
+`}/>
 
 ## Prompt Templates
 
 Create reusable templates for different use cases:
 
-```python
+<CodeBlock language="python" code={`
 from string import Template
 
 class PromptTemplates:
@@ -191,13 +192,13 @@ agent = create_analyst_agent(
     objective="Analyze customer purchase behavior",
     context="We have 6 months of online sales data"
 )
-```
+`}/>
 
 ## Multi-language Prompts
 
 Manage system prompts in multiple languages:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent
 
 class MultilingualPrompts:
@@ -236,13 +237,13 @@ def create_multilingual_agent(language: str, role: str):
 english_analyst = create_multilingual_agent('english', 'analyst')
 spanish_teacher = create_multilingual_agent('spanish', 'teacher')
 french_creative = create_multilingual_agent('french', 'creative')
-```
+`}/>
 
 ## Context-Aware Prompts
 
 Prompts can adapt based on conversation history or current state:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent
 from timbal.state import get_run_context
 
@@ -274,11 +275,11 @@ agent = Agent(
     system_prompt="You are a helpful and friendly assistant.",
     pre_hook=context_aware_prompt
 )
-```
+`}/>
 
 ## Complete Example: Adaptive Prompt System
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent
 from timbal.state import RunContext
 from timbal.types import Field
@@ -327,6 +328,6 @@ result = await agent(
     prompt="Explain how machine learning works",
     context=context
 ).collect()
-```
+`}/>
 
 These examples show how dynamic system prompts enable the creation of more intelligent and adaptive agents that behave according to the specific context of each interaction.

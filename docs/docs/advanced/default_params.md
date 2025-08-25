@@ -3,6 +3,8 @@ title: Default Parameters
 sidebar: 'docsSidebar'
 ---
 
+import CodeBlock from '@site/src/theme/CodeBlock';
+
 # Default Parameters
 
 Default parameters in Timbal allow you to set predefined values that are automatically injected into your runnable components, providing flexibility and reducing boilerplate code.
@@ -11,7 +13,7 @@ Default parameters in Timbal allow you to set predefined values that are automat
 
 Default parameters are defined when creating a runnable and are merged with runtime parameters:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Tool
 
 def analyze_data(data: str, method: str = "standard", threshold: float = 0.5):
@@ -35,13 +37,13 @@ result = await tool(data="sample_data").collect()
 # Override default parameters
 result = await tool(data="sample_data", method="simple").collect()
 # Uses: method="simple" (overridden), threshold=0.8 (from defaults)
-```
+`}/>
 
 ## Parameter Precedence
 
 Runtime parameters always override default parameters:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent
 
 # Agent with default parameters
@@ -61,13 +63,13 @@ result = await agent(
     temperature=0.7,  # Overrides default 0.3
     max_tokens=1000   # Overrides default 500
 ).collect()
-```
+`}/>
 
 ## Dynamic Default Parameters
 
 Default parameters can be computed dynamically using functions:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Tool
 from datetime import datetime
 
@@ -89,13 +91,13 @@ tool = Tool(
 
 # The timestamp will be computed at execution time
 result = await tool(data="important_data").collect()
-```
+`}/>
 
 ## Context-Aware Default Parameters
 
 Default parameters can be adapted based on execution context:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent
 from timbal.state import get_run_context
 
@@ -136,13 +138,13 @@ result = await agent(
     prompt="Explain quantum computing",
     context=context
 ).collect()
-```
+`}/>
 
 ## Environment-Based Defaults
 
 Default parameters can be set based on environment variables:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Tool
 import os
 
@@ -161,13 +163,13 @@ tool = Tool(
 
 # Uses environment variables or fallback values
 result = await tool(endpoint="/data").collect()
-```
+`}/>
 
 ## Conditional Default Parameters
 
 Default parameters can be set conditionally based on input:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Tool
 
 def process_image(image_data: str, format: str, quality: int = 90):
@@ -197,13 +199,13 @@ tool = Tool(
 
 # Defaults will be set based on image data
 result = await tool(image_data="data:image/jpeg;base64,...").collect()
-```
+`}/>
 
 ## Nested Default Parameters
 
 Default parameters work with nested runnables:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent, Tool
 
 def search_tool(query: str, limit: int = 10, source: str = "web"):
@@ -240,13 +242,13 @@ agent = Agent(
 result = await agent(
     prompt="Research machine learning trends"
 ).collect()
-```
+`}/>
 
 ## Validation with Default Parameters
 
 Default parameters are validated against the handler's parameter model:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Tool
 from timbal.types import Field
 
@@ -273,11 +275,11 @@ tool = Tool(
 #     handler=validated_function,
 #     default_params={"max_length": 2000}  # Would fail validation
 # )
-```
+`}/>
 
 ## Complete Example: Smart Default System
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent, Tool
 from timbal.state import RunContext, get_run_context
 import os
@@ -337,6 +339,6 @@ result = await agent(
     prompt="Explain artificial intelligence",
     context=context
 ).collect()
-```
+`}/>
 
 Default parameters provide a powerful way to configure your runnables with sensible defaults while maintaining the flexibility to override them when needed.

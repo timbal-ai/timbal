@@ -3,6 +3,8 @@ title: Run Context and Data Sharing
 sidebar: 'docsSidebar'
 ---
 
+import CodeBlock from '@site/src/theme/CodeBlock';
+
 # Run Context and Data Sharing
 
 The Run Context in Timbal provides a powerful mechanism for sharing data across the execution of agents and workflows. It enables state management, data persistence, and communication between different components in your AI system.
@@ -11,7 +13,7 @@ The Run Context in Timbal provides a powerful mechanism for sharing data across 
 
 The `RunContext` is a shared data container that persists throughout the execution of a runnable and is accessible to all nested components:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.state import RunContext, get_run_context
 
 # Create a run context
@@ -23,13 +25,13 @@ print(f"Parent ID: {context.parent_id}")
 current_context = get_run_context()
 if current_context:
     print(f"Current context ID: {current_context.id}")
-```
+`}/>
 
 ## Basic Data Sharing
 
 The run context provides a simple key-value store for sharing data:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent, Tool
 from timbal.state import RunContext, get_run_context
 
@@ -73,13 +75,13 @@ result = await agent(
 
 # Data persists in context
 print(f"Context data: {context.data}")
-```
+`}/>
 
 ## Context Inheritance
 
 Run contexts can be nested, with child contexts inheriting from parent contexts:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.state import RunContext, get_run_context
 
 # Create parent context
@@ -94,13 +96,13 @@ child_context.data['child_data'] = "Specific to child"
 # In a nested execution, the child context would have access to parent data
 print(f"Parent data: {parent_context.data}")
 print(f"Child data: {child_context.data}")
-```
+`}/>
 
 ## Cross-Component Communication
 
 The run context enables communication between different components:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent, Tool
 from timbal.state import get_run_context
 
@@ -165,13 +167,13 @@ result = await agent(
 # Context contains authentication state
 print(f"User role: {context.data.get('user_role')}")
 print(f"Permissions: {context.data.get('permissions')}")
-```
+`}/>
 
 ## State Management
 
 The run context is ideal for managing application state:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent, Tool
 from timbal.state import get_run_context
 import time
@@ -245,13 +247,13 @@ result = await agent(
 # Session state is maintained in context
 print(f"Session ID: {context.data.get('session_id')}")
 print(f"Interaction count: {context.data.get('interaction_count')}")
-```
+`}/>
 
 ## Configuration Management
 
 The run context can store configuration that affects behavior:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent, Tool
 from timbal.state import get_run_context
 
@@ -318,13 +320,13 @@ result = await agent(
 # Configuration is stored in context
 print(f"Language: {context.data.get('config.language')}")
 print(f"Detail level: {context.data.get('config.detail_level')}")
-```
+`}/>
 
 ## Performance Tracking
 
 The run context can track performance metrics across components:
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent, Tool
 from timbal.state import get_run_context
 import time
@@ -395,11 +397,11 @@ result = await agent(
 
 # Performance data is available in context
 print(f"Total execution time: {context.data.get('total_execution_time', 0):.3f}s")
-```
+`}/>
 
 ## Complete Example: Advanced Context System
 
-```python
+<CodeBlock language="python" code={`
 from timbal.core_v2 import Agent, Tool
 from timbal.state import RunContext, get_run_context
 import time
@@ -525,7 +527,6 @@ result = await agent(
 
 # Comprehensive context data is available
 print("Context Report:")
-print(json.dumps(context.data, indent=2, default=str))
-```
+`}/>
 
 The Run Context provides a powerful foundation for building complex, stateful AI applications with proper data sharing, configuration management, and performance tracking capabilities.
