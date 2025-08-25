@@ -9,7 +9,7 @@ from timbal import Agent
 from timbal.eval.__main__ import run_evals
 from timbal.eval.engine import eval_file
 from timbal.eval.types.result import EvalTestSuiteResult
-from timbal.server.utils import ModuleSpec, load_module
+from timbal.utils import ImportSpec
 
 
 class TestMainWorkflow:
@@ -77,39 +77,39 @@ class TestMainErrorHandling:
     async def test_nonexistent_agent_file(self, fixtures_dir):
         """Test error when agent file doesn't exist."""
         nonexistent_file = fixtures_dir / "nonexistent_agent.py"
-        module_spec = ModuleSpec(
+        import_spec = ImportSpec(
             path=nonexistent_file,
-            object_name="agent"
+            target="agent"
         )
         
         with pytest.raises(Exception):  # Should raise import/file error
-            load_module(module_spec)
+            import_spec.load()
 
     @pytest.mark.asyncio
     async def test_invalid_agent_object(self, fixtures_dir):
         """Test error when specified agent object doesn't exist in file."""
         agent_file = fixtures_dir / "sample_agent.py"
-        module_spec = ModuleSpec(
+        import_spec = ImportSpec(
             path=agent_file,
-            object_name="nonexistent_agent"  # This object doesn't exist
+            target="nonexistent_agent"  # This object doesn't exist
         )
         
         with pytest.raises(Exception):  # Should raise attribute error
-            load_module(module_spec)
+            import_spec.load()
 
     @pytest.mark.asyncio
     async def test_agent_without_object_name(self, fixtures_dir):
         """Test loading agent file without specifying object name."""
         # This simulates --fqn sample_agent.py (without ::agent)
         agent_file = fixtures_dir / "sample_agent.py"
-        module_spec = ModuleSpec(
+        import_spec = ImportSpec(
             path=agent_file,
-            object_name=None  # No specific object specified
+            target=None  # No specific object specified
         )
         
         # This should fail because load_module doesn't support loading entire modules
         with pytest.raises(NotImplementedError, match="Does not support loading entire module"):
-            load_module(module_spec)
+            import_spec.load()
 
     @pytest.mark.asyncio
     async def test_nonexistent_test_file(self, sample_agent, fixtures_dir):

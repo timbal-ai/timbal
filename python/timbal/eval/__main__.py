@@ -8,16 +8,16 @@ import structlog
 from dotenv import find_dotenv, load_dotenv
 
 from .. import __version__
+from ..core.agent import Agent
+from ..core.runnable import Runnable
 from ..logs import setup_logging
-
-# TODO This shouldn't be in just the server 'module'.
-from ..server.utils import ModuleSpec, load_module
-from ..utils import dump
+from ..utils import ImportSpec, dump
 from .engine import eval_file
 from .types.result import EvalTestSuiteResult
 from .utils import discover_files
 
 logger = structlog.get_logger("timbal.eval")
+
 
 async def run_evals(files, agent, test_results, test_name=None):
     for file in files:
@@ -59,22 +59,24 @@ if __name__ == "__main__":
         sys.exit(1)
 
     fqn_parts = fqn.split("::")
-    if len(fqn_parts) > 2:
+    if len(fqn_parts) != 2:
         print("Invalid timbal app Fully Qualified Name (FQN) format. Use 'path/to/file.py::object_name' or 'path/to/file.py'") # noqa: T201
         sys.exit(1)
-    elif len(fqn_parts) == 2:
-        module_path, module_name = fqn_parts
-        module_spec = ModuleSpec(
-            path=Path(module_path).expanduser().resolve(), 
-            object_name=module_name,
-        )
-    else:
-        module_spec = ModuleSpec(
-            path=Path(fqn_parts[0]).expanduser().resolve(), 
-            object_name=None,
-        )
+    import_path, import_target = fqn_parts
+    import_spec = ImportSpec(
+        path=Path(import_path).expanduser().resolve(), 
+        target=import_target,
+    )
 
-    agent = load_module(module_spec)
+    runnable = import_spec.load()
+
+    if not isinstance(runnable, Runnable):
+        raise ValueError("The loaded module is not a valid Runnable instance.")
+    
+    if not isinstance(runnable, Agent):
+        raise NotImplementedError("Only Agents are supported for evaluation at the moment.")
+
+    agent = runnable
 
     tests_path = args.tests
     if not tests_path:

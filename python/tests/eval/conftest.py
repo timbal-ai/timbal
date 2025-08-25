@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from dotenv import load_dotenv
-from timbal.server.utils import ModuleSpec, load_module
+from timbal.utils import ImportSpec
 
 load_dotenv()
 
@@ -39,11 +39,11 @@ def fixtures_dir():
 def sample_agent(fixtures_dir):
     """Load the sample agent from fixtures."""
     agent_file = fixtures_dir / "sample_agent.py"
-    module_spec = ModuleSpec(
+    import_spec = ImportSpec(
         path=agent_file,
-        object_name="agent"
+        target="agent"
     )
-    return load_module(module_spec)
+    return import_spec.load()
 
 
 @pytest.fixture
