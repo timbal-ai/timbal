@@ -22,35 +22,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Core Framework Structure
 This is an AI agent framework called Timbal that provides two main execution patterns:
 
-1. **Agent Pattern** (`python/timbal/core/agent/`): LLMs autonomously decide execution paths and tool usage
-2. **Flow Pattern** (`python/timbal/core/flow/`): Explicit step-by-step workflow definition with data mapping
-
-There's another directory in `python/timbal/core_v2` that is not being used yet. It is a refactoring of the core framework to make it more modular and easier to extend. It is in the works, do not focus on this for now unless instructed otherwise.
+1. **Agent Pattern** (`python/timbal/core/agent.py`): LLMs autonomously decide execution paths and tool usage
+2. **Workflow Pattern** (`python/timbal/core/workflow.py`): Explicit step-by-step workflow definition with data mapping (early work)
 
 ### Key Components
 
 #### Core Engine (`python/timbal/core/`)
-- `agent/engine.py`: Agent execution engine with autonomous tool selection
-- `flow/engine.py`: Flow execution engine with explicit step orchestration  
-- `base.py`: Base classes for all runnable components
-- `step.py`: Individual step definitions
-- `stream.py`: Event streaming and async handling
+- `runnable.py`: Base class for all executable components with event streaming, tracing, and async execution
+- `agent.py`: Agent execution engine with autonomous tool selection and LLM orchestration
+- `workflow.py`: Workflow execution engine with explicit step orchestration (early development stage)
+- `tool.py`: Tool wrapper for function-based components
+- `llm_router.py`: Multi-provider LLM routing logic
 
 #### State Management (`python/timbal/state/`)
-- `context.py`: Runtime execution context
-- `data.py`: Data flow and mapping between steps
-- `savers/`: Persistence layer (InMemory, JSONL, Platform)
+- `context.py`: Runtime execution context and state persistence
+- `tracing/`: Execution tracing and monitoring system
 
-#### LLM Integration (`python/timbal/steps/llms/`)
-- `anthropic_llm.py`: Anthropic Claude integration
-- `openai_llm.py`: OpenAI GPT integration  
-- `gemini_llm.py`: Google Gemini integration
-- `router.py`: Multi-provider routing logic
-
-#### Tool Ecosystem (`python/timbal/steps/`)
-- Modular tools organized by provider (elevenlabs, fal, gmail, etc.)
-- Each tool directory contains focused functionality
-- Tools auto-register with agents based on function signatures
+#### Handler Ecosystem (`python/timbal/handlers/`)
+- Modular handlers organized by provider (elevenlabs, fal, gmail, etc.)
+- Each handler directory contains focused functionality
+- Handlers auto-register with agents based on function signatures
 
 #### Type System (`python/timbal/types/`)
 - `message.py`: Unified message format across LLM providers
@@ -58,10 +49,15 @@ There's another directory in `python/timbal/core_v2` that is not being used yet.
 - `events/`: Event system for streaming responses
 - Strong typing with Pydantic models throughout
 
+#### Collectors (`python/timbal/collectors/`)
+- Output processing and collection system
+- Provider-specific collectors (anthropic, openai, etc.)
+- Registry system for automatic collector selection
+
 ### Data Flow Architecture
 - **Agents**: Messages → Tool Selection → LLM → Tool Execution → Response
-- **Flows**: Input → Step Chain → Data Mapping → Output
-- Both patterns support streaming, state persistence, and event handling
+- **Workflows**: Input → Step Chain → Data Mapping → Output (early stage)
+- Both patterns support streaming, state persistence, and event handling via the Runnable base class
 
 ### Testing Strategy
 - Core tests in `python/tests/core/` mirror the main package structure
@@ -70,5 +66,4 @@ There's another directory in `python/timbal/core_v2` that is not being used yet.
 
 ### Configuration
 - `pyproject.toml`: Python packaging, dependencies, and tool config
-- `timbal.yaml`: Project-specific configuration files in examples/sandbox
 - Ruff for linting/formatting with 120 char line length

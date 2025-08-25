@@ -1,7 +1,9 @@
 import asyncio
 import contextvars
+import importlib.util
 import json as json_lib
 import math
+import socket
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Callable, Generator
 from pathlib import Path
@@ -30,6 +32,35 @@ from .errors import PlatformError
 from .state import resolve_platform_config
 
 logger = structlog.get_logger("timbal.utils")
+
+
+class ImportSpec(BaseModel):
+    """Specification for importing an object from a Python module."""
+    path: Path
+    target: str | None = None
+
+    def load(self) -> Any:
+        """Load and return the target object from the module."""
+        spec = importlib.util.spec_from_file_location(self.path.stem, self.path.as_posix())
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if self.target:
+                if hasattr(module, self.target):
+                    obj = getattr(module, self.target)
+                    return obj
+                else:
+                    raise ValueError(f"Module {self.path} has no target {self.target}")
+            else:
+                raise NotImplementedError("Does not support loading entire module")
+        else:
+            raise ValueError(f"Failed to load module {self.path}")
+
+
+def is_port_in_use(port: int) -> bool:
+    """Check if a TCP port is currently in use on localhost."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        return sock.connect_ex(("localhost", port)) == 0
 
 
 def safe_is_nan(value: Any) -> bool:

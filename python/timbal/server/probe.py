@@ -9,9 +9,10 @@ from pathlib import Path
 import structlog
 from dotenv import load_dotenv
 
-from .. import Agent, Flow, __version__
+from .. import __version__
+from ..core.runnable import Runnable
 from ..logs import setup_logging
-from .utils import ModuleSpec, load_module
+from ..utils import ImportSpec
 
 logger = structlog.get_logger("timbal.server.probe")
 
@@ -25,57 +26,54 @@ if __name__ == "__main__":
         help="Show version and exit."
     )
     parser.add_argument(
-        "--module_spec",
-        dest="module_spec",
+        "--import_spec",
+        dest="import_spec",
         type=str,
         help="Path to a python module and optional object (format: path/to/file.py::object_name)",
     )
     args = parser.parse_args()
 
     if args.version:
-        print(f"timbal.servers.http {__version__}", file=sys.stderr) # noqa: T201
+        print(f"timbal.server.http {__version__}", file=sys.stderr) # noqa: T201
         sys.exit(0)
 
-    # We can overwrite the env TIMBAL_FLOW variable with the --module_spec flag.
-    module_spec = args.module_spec
-    if not module_spec:
-        module_spec = os.getenv("TIMBAL_FLOW")
+    # We can overwrite the env configuration with the --import_spec flag
+    import_spec = args.import_spec
+    if not import_spec:
+        import_spec = os.getenv("TIMBAL_RUNNABLE")
+        if not import_spec:
+            import_spec = os.getenv("TIMBAL_FLOW") # Legacy
+            if import_spec:
+                logger.warning("TIMBAL_FLOW environment variable is deprecated. Please use TIMBAL_RUNNABLE instead.")
 
-    if not module_spec:
-        print("No module spec provided. Set TIMBAL_FLOW env variable or use --module_spec to specify a module to load.", file=sys.stderr) # noqa: T201
+    if not import_spec:
+        print("No import spec provided. Set TIMBAL_RUNNABLE env variable or use --import_spec to specify a module to load.", file=sys.stderr) # noqa: T201
         sys.exit(1)
 
-    module_parts = module_spec.split(":")
-    if len(module_parts) > 2:
-        print("Invalid module spec format. Use 'path/to/file.py:object_name' or 'path/to/file.py'", file=sys.stderr) # noqa: T201
+    import_parts = import_spec.split("::")
+    if len(import_parts) != 2:
+        print("Invalid import spec format. Use 'path/to/file.py::object_name' or 'path/to/file.py'", file=sys.stderr) # noqa: T201
         sys.exit(1)
-    elif len(module_parts) == 2:
-        module_path, module_name = module_parts
-        module_spec = ModuleSpec(
-            path=Path(module_path).expanduser().resolve(), 
-            object_name=module_name,
-        )
-    else:
-        module_spec = ModuleSpec(
-            path=Path(module_parts[0]).expanduser().resolve(), 
-            object_name=None,
-        )
+    import_path, import_target = import_parts
+    import_spec = ImportSpec(
+        path=Path(import_path).expanduser().resolve(), 
+        target=import_target,
+    )
 
     load_dotenv()
     setup_logging()
 
     redirect = io.StringIO()
     with contextlib.redirect_stdout(redirect):
-        flow = load_module(module_spec)
+        runnable = import_spec.load()
 
-    if not isinstance(flow, (Agent, Flow)):
-        raise ValueError("The loaded module is not a valid Agent or Flow instance.")
-
-    params_model_schema = flow.params_model_schema()
-    return_model_schema = flow.return_model_schema()
+    if not isinstance(runnable, Runnable):
+        raise ValueError("The loaded module is not a valid Runnable instance.")
 
     output = {
-        "params_model_schema": params_model_schema,
-        "return_model_schema": return_model_schema
+        "version": __version__,
+        "type": runnable.__class__.__name__,
+        "params_model_schema": runnable.params_model_schema,
+        "return_model_schema": runnable.return_model_schema,
     }
     print(json.dumps(output)) # noqa: T201
