@@ -1,0 +1,69 @@
+---
+sidebar_position: 3
+sidebar: 'docsSidebar'
+title: Model Capabilities
+---
+import IconCheck from '@site/src/components/IconCheck';
+import IconX from '@site/src/components/IconX';
+
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Understand what different AI models can and cannot do.
+</h2>
+
+---
+
+Not all AI models can do the same things. Some can use tools, handle images, or return structured results—others can't.
+
+Here's a quick look at what popular models can and can't do:
+
+| Provider  | Model                  | Image Input | Object Generation | Tool Usage | Tool Streaming |
+|-----------|------------------------|:-----------:|:-----------------:|:----------:|:--------------:|
+| <span class="provider">xAI Grok</span> | <span class="model-badge">grok-3</span>             | <IconX />             | <IconCheck />                 | <IconCheck />         | <IconCheck />             |
+| <span class="provider">xAI Grok</span> | <span class="model-badge">grok-3-fast</span>        | <IconX />             | <IconCheck />                 | <IconCheck />         | <IconCheck />             |
+| <span class="provider">xAI Grok</span> | <span class="model-badge">grok-3-mini</span>        | <IconX />             | <IconCheck />                 | <IconCheck />          | <IconCheck />            |
+| <span class="provider">xAI Grok</span> | <span class="model-badge">grok-3-mini-fast</span>   | <IconX />            | <IconCheck />                 | <IconCheck />          | <IconCheck />             |
+| <span class="provider">xAI Grok</span> | <span class="model-badge">grok-2-1212</span>        | <IconX />           | <IconCheck />                 | <IconCheck />          | <IconCheck />             |
+| <span class="provider">xAI Grok</span> | <span class="model-badge">grok-2-vision-1212</span> | <IconCheck />            | <IconCheck />                 | <IconCheck />         | <IconCheck />            |
+| <span class="provider">xAI Grok</span> | <span class="model-badge">grok-beta</span>          | <IconX />             | <IconCheck />                 | <IconCheck />         | <IconCheck />              |
+| <span class="provider">xAI Grok</span> | <span class="model-badge">grok-vision-beta</span>   | <IconCheck />         | <IconX />                     | <IconX />             | <IconX />                 |
+| <span class="provider">OpenAI</span> | <span class="model-badge">gpt-4.1</span>            | <IconCheck />         | <IconCheck />                 | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">gpt-4.1-mini</span>       | <IconCheck />         | <IconCheck />                 | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">gpt-4.1-nano</span>       | <IconCheck />         | <IconCheck />                 | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">gpt-4o</span>             | <IconCheck />         | <IconCheck />                 | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">gpt-4o-mini</span>        | <IconCheck />         | <IconCheck />                 | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">gpt-4-turbo</span>        | <IconCheck />         | <IconCheck />                 | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">gpt-4</span>              | <IconX />             | <IconCheck />                 | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">o3-mini</span>            | <IconX />             | <IconX />                     | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">o3</span>                 | <IconX />             | <IconX />                     | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">o4-mini</span>            | <IconX />             | <IconX />                     | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">o1</span>                 | <IconCheck />         | <IconX />                     | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">o1-mini</span>            | <IconCheck />         | <IconX />                     | <IconCheck />         | <IconCheck />             |
+| <span class="provider">OpenAI</span> | <span class="model-badge">o1-preview</span>         | <IconX />             | <IconX />                     | <IconX />             | <IconX />                 |
+| <span class="provider">Anthropic</span> | <span class="model-badge">claude-3-7-sonnet-20250219</span> | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Anthropic</span> | <span class="model-badge">claude-3-5-sonnet-20241022</span> | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Anthropic</span> | <span class="model-badge">claude-3-5-sonnet-20240620</span> | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Anthropic</span> | <span class="model-badge">claude-3-5-haiku-20241022</span> | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Mistral</span> | <span class="model-badge">pixtral-large-latest</span> | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Mistral</span> | <span class="model-badge">mistral-large-latest</span> | <IconX /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Mistral</span> | <span class="model-badge">mistral-small-latest</span> | <IconX /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Mistral</span> | <span class="model-badge">pixtral-12b-2409</span> | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Google Generative AI</span> | <span class="model-badge">gemini-2.0-flash-exp</span> | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Google Generative AI</span> | <span class="model-badge">gemini-1.5-flash</span>     | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Google Generative AI</span> | <span class="model-badge">gemini-1.5-pro</span>       | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Google Vertex</span>        | <span class="model-badge">gemini-2.0-flash-exp</span> | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Google Vertex</span>        | <span class="model-badge">gemini-1.5-flash</span>     | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Google Vertex</span>        | <span class="model-badge">gemini-1.5-pro</span>       | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">DeepSeek</span>           | <span class="model-badge">deepseek-chat</span>        | <IconX />     | <IconX />     | <IconCheck /> | <IconCheck /> |
+| <span class="provider">DeepSeek</span>           | <span class="model-badge">deepseek-reasoner</span>    | <IconX />     | <IconX />     | <IconX />     | <IconX />     |
+| <span class="provider">Cerebras</span>           | <span class="model-badge">llama3.1-8b</span>          | <IconX />     | <IconX />     | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Cerebras</span>           | <span class="model-badge">llama3.1-70b</span>         | <IconX />     | <IconX />     | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Cerebras</span>           | <span class="model-badge">llama3.3-70b</span>         | <IconX />     | <IconX />     | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Groq</span>                   | <span class="model-badge">meta-llama/llama-4-scout-17b-16e-instruct</span> | <IconCheck /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Groq</span>                   | <span class="model-badge">llama-3.3-70b-versatile</span> | <IconX />  | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Groq</span>                   | <span class="model-badge">llama-3.1-8b-instant</span> | <IconX />     | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Groq</span> | <span class="model-badge">mixtral-8x7b-32768</span> | <IconX /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+| <span class="provider">Groq</span> | <span class="model-badge">gemma2-9b-it</span>      | <IconX /> | <IconCheck /> | <IconCheck /> | <IconCheck /> |
+
+<sub>Source: [Model capabilities documentation](https://ai-sdk.dev/docs/foundations/providers-and-models#model-capabilities)</sub>
+
+

@@ -1,0 +1,49 @@
+---
+title: Healthcare
+sidebar: examplesSidebar
+hide_title: true
+---
+import React from 'react';
+import Link from '@docusaurus/Link';
+import styles from '../../src/css/examples.module.css';
+
+<div style={{
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  marginTop: '2rem',
+  marginBottom: '2rem'
+}}>
+  <span className="timbal-category-icon">
+    <svg width="40" height="40" fill="#5012cb" viewBox="0 0 640 512">
+      <path d="M192 48c0-26.5 21.5-48 48-48L400 0c26.5 0 48 21.5 48 48l0 464-80 0 0-80c0-26.5-21.5-48-48-48s-48 21.5-48 48l0 80-80 0 0-464zM48 96l112 0 0 416L48 512c-26.5 0-48-21.5-48-48L0 320l80 0c8.8 0 16-7.2 16-16s-7.2-16-16-16L0 288l0-64 80 0c8.8 0 16-7.2 16-16s-7.2-16-16-16L0 192l0-48c0-26.5 21.5-48 48-48zm544 0c26.5 0 48 21.5 48 48l0 48-80 0c-8.8 0-16 7.2-16 16s7.2 16 16 16l80 0 0 64-80 0c-8.8 0-16 7.2-16 16s7.2 16 16 16l80 0 0 144c0 26.5-21.5 48-48 48l-112 0 0-416 112 0zM312 64c-8.8 0-16 7.2-16 16l0 24-24 0c-8.8 0-16 7.2-16 16l0 16c0 8.8 7.2 16 16 16l24 0 0 24c0 8.8 7.2 16 16 16l16 0c8.8 0 16-7.2 16-16l0-24 24 0c8.8 0 16-7.2 16-16l0-16c0-8.8-7.2-16-16-16l-24 0 0-24c0-8.8-7.2-16-16-16l-16 0z"/>
+    </svg>
+  </span>
+  <h1 style={{ margin: 0, fontSize: '2rem' }}>Healthcare Examples</h1>
+</div>
+
+<div className={styles.grid}>
+  <Link className={styles.card} href="https://github.com/your-repo/marketing-strategy" target="_blank">
+    <span className={styles.icon}></span>
+    <h4>Medical Assistant Agent ↗</h4>
+    <p>Create a medical assistant agent with Timbal.</p>
+  </Link>
+
+  <Link className={styles.card} href="https://github.com/your-repo/surprise-trip" target="_blank">
+    <span className={styles.icon}></span>
+    <h4>Patient Monitoring System ↗</h4>
+    <p>Create a patient monitoring system with Timbal.</p>
+  </Link>
+
+  <Link className={styles.card} href="https://github.com/your-repo/healthcare" target="_blank">
+    <span className={styles.icon}></span>
+    <h4>Medication Management ↗</h4>
+    <p>Create a medication management system with Timbal.</p>
+  </Link>
+
+  <Link className={styles.card} href="https://github.com/your-repo/healthcare" target="_blank">
+    <span className={styles.icon}></span>
+    <h4>Telemedicine Platform ↗</h4>
+    <p>Create a telemedicine platform with Timbal.</p>
+  </Link>
+</div> 

@@ -1,0 +1,49 @@
+---
+title: Industry
+sidebar: examplesSidebar
+hide_title: true
+---
+import React from 'react';
+import Link from '@docusaurus/Link';
+import styles from '../../src/css/examples.module.css';
+
+<div style={{
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  marginTop: '2rem',
+  marginBottom: '2rem'
+}}>
+  <span className="timbal-category-icon">
+    <svg width="40" height="40" fill="#5012cb" viewBox="0 0 576 512">
+      <path d="M64 32C46.3 32 32 46.3 32 64l0 240 0 48 0 80c0 26.5 21.5 48 48 48l416 0c26.5 0 48-21.5 48-48l0-128 0-151.8c0-18.2-19.4-29.7-35.4-21.1L352 215.4l0-63.2c0-18.2-19.4-29.7-35.4-21.1L160 215.4 160 64c0-17.7-14.3-32-32-32L64 32z"/>
+    </svg>
+  </span>
+  <h1 style={{ margin: 0, fontSize: '2rem' }}>Industry Examples</h1>
+</div>
+
+<div className={styles.grid}>
+  <Link className={styles.card} href="https://github.com/your-repo/quality-control" target="_blank">
+    <span className={styles.icon}></span>
+    <h4>Quality Control System ↗</h4>
+    <p>Create an AI-powered quality control system with Timbal.</p>
+  </Link>
+
+  <Link className={styles.card} href="https://github.com/your-repo/production-optimization" target="_blank">
+    <span className={styles.icon}></span>
+    <h4>Production Optimization ↗</h4>
+    <p>Create a production optimization system with Timbal.</p>
+  </Link>
+
+  <Link className={styles.card} href="https://github.com/your-repo/predictive-maintenance" target="_blank">
+    <span className={styles.icon}></span>
+    <h4>Predictive Maintenance ↗</h4>
+    <p>Create a predictive maintenance system with Timbal.</p>
+  </Link>
+
+  <Link className={styles.card} href="https://github.com/your-repo/supply-chain" target="_blank">
+    <span className={styles.icon}></span>
+    <h4>Supply Chain Management ↗</h4>
+    <p>Create an intelligent supply chain management system with Timbal.</p>
+  </Link>
+</div> 
