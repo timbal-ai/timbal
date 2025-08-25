@@ -39,7 +39,7 @@ Agent handles memory through two primary mechanisms:
 
 **Solution:** Persistent conversation memory with user context
 
-```python
+<CodeBlock language="python" code ={`
 from timbal.core_v2 import Agent
 from timbal.state import RunContext
 from timbal.types.message import Message
@@ -78,7 +78,7 @@ async def handle_customer_request(user_id: str, message: str):
 response1 = await handle_customer_request("user123", "My name is Alice and I'm having trouble with my account")
 response2 = await handle_customer_request("user123", "Can you help me reset my password?")
 # The agent remembers Alice's name and account issues from the previous interaction
-```
+`}/>
 
 ### Problem 2: Multi-Step Workflow Context
 
@@ -86,7 +86,7 @@ response2 = await handle_customer_request("user123", "Can you help me reset my p
 
 **Solution:** Workflow state management with automatic context passing
 
-```python
+<CodeBlock language="python" code ={`
 from timbal.core_v2 import Agent, Flow
 from timbal.state import RunContext
 
@@ -135,7 +135,7 @@ async def run_analysis_workflow(data_file: str, user_preferences: dict):
         'analysis': analysis_result.output.content[0].text,
         'report': report_result.output.content[0].text
     }
-```
+`}/>
 
 ### Problem 3: User Preference Management
 
@@ -143,7 +143,7 @@ async def run_analysis_workflow(data_file: str, user_preferences: dict):
 
 **Solution:** Context-aware default parameters with user preferences
 
-```python
+<CodeBlock language="python" code ={`
 from timbal.core_v2 import Agent
 from timbal.state import RunContext
 
@@ -192,13 +192,13 @@ async def handle_user_request(user_id: str, message: str):
     ).collect()
     
     return result.output.content[0].text
-```
+`}/>
 
 ## Automatic Memory Resolution
 
 The most powerful feature of Agent is automatic memory resolution for nested agents:
 
-```python
+<CodeBlock language="python" code ={`
 from timbal.core_v2 import Agent
 from timbal.types.message import Message
 
@@ -224,7 +224,7 @@ result = await parent_agent(
 
 # The child agent automatically receives the full conversation context
 # including the original user request and any previous exchanges
-```
+`}/>
 
 ### How Automatic Memory Works
 
@@ -234,20 +234,20 @@ When a child agent is called as a tool:
 2. **Memory Reconstruction**: All previous messages (user inputs, assistant responses, tool calls) are included
 3. **Seamless Continuation**: The child agent responds with full context awareness
 
-```python
+<CodeBlock language="python" code ={`
 # Behind the scenes, the child agent receives:
 # [
 #   Message(role="user", content="I have sales data for Q1. Please analyze it."),
 #   Message(role="assistant", content="I'll analyze that data for you.", tool_calls=[...]),
 #   Message(role="tool", content="Analysis results: ...")
 # ]
-```
+`}/>
 
 ## Explicit State Management
 
 For persistent memory across separate sessions, use RunContext:
 
-```python
+<CodeBlock language="python" code ={`
 from timbal.core_v2 import Agent
 from timbal.state import RunContext
 from timbal.types.message import Message
@@ -273,7 +273,7 @@ result2 = await agent(
 ).collect()
 
 print(result2.output)  # Should remember Alice lives in Paris
-```
+`}/>
 
 ## Advanced Memory Patterns
 
@@ -283,7 +283,7 @@ print(result2.output)  # Should remember Alice lives in Paris
 
 **Solution:** Conversation summarization and context compression
 
-```python
+<CodeBlock language="python" code ={`
 from timbal.core_v2 import Agent
 from timbal.state import RunContext
 
@@ -313,7 +313,7 @@ long_conversation_agent = Agent(
     model="anthropic/claude-3-sonnet",
     pre_hook=summarize_conversation_hook
 )
-```
+`}/>
 
 ### Problem 5: Multi-User Session Management
 
@@ -321,7 +321,7 @@ long_conversation_agent = Agent(
 
 **Solution:** Session-based context management
 
-```python
+<CodeBlock language="python" code ={`
 from timbal.core_v2 import Agent
 from timbal.state import RunContext
 import asyncio
@@ -379,13 +379,13 @@ async def handle_concurrent_users():
     
     results = await asyncio.gather(*tasks)
     return results
-```
+`}/>
 
 ## Memory with System Prompts
 
 Agent's system prompt works seamlessly with memory:
 
-```python
+<CodeBlock language="python" code ={`
 agent = Agent(
     name="context_aware_agent",
     model="anthropic/claude-3-sonnet",
@@ -403,7 +403,7 @@ result2 = await agent(
 ).collect()
 
 # The agent remembers the Python project context from the system prompt
-```
+`}/>
 
 ## Best Practices
 
