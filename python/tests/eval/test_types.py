@@ -72,6 +72,35 @@ class TestInput:
         assert str(input_obj.files[0]) == str(TEST_FILE)
         assert str(input_obj.files[1]) == str(TEST_FILE)
 
+    def test_input_relative_path_resolution(self):
+        """Test that relative paths are resolved correctly."""
+        # Create an input with a relative path string
+        input_obj = Input(text="Process this file", files=["./math_question.md"])
+        
+        # Test without test_file_dir (should fail validation)
+        with pytest.raises(ValueError):
+            input_obj.to_message(role="user")
+        
+        # Test with test_file_dir (should resolve)
+        test_file_dir = Path(__file__).parent / "fixtures"
+        message = input_obj.to_message(role="user", test_file_dir=test_file_dir)
+        assert len(message.content) == 2  # text + file
+        file_content = [c for c in message.content if hasattr(c, 'file')][0]
+        expected_path = (test_file_dir / "math_question.md").resolve()
+        assert str(file_content.file) == str(expected_path)
+        
+    def test_input_absolute_path_no_resolution(self):
+        """Test that absolute paths are not modified."""
+        # Create an input with an absolute path
+        input_obj = Input(text="Process this file", files=[str(TEST_FILE)])
+        
+        # Test with test_file_dir (should not change absolute path)
+        test_file_dir = Path(__file__).parent / "fixtures"
+        message = input_obj.to_message(role="user", test_file_dir=test_file_dir)
+        assert len(message.content) == 2  # text + file
+        file_content = [c for c in message.content if hasattr(c, 'file')][0]
+        assert str(file_content.file) == str(TEST_FILE)
+
 
 class TestOutput:
     """Test the Output model."""
@@ -517,9 +546,9 @@ class TestTypeValidation:
 
     def test_input_validation_errors(self):
         """Test various input validation errors."""
-        # Invalid file type
+        # Invalid file type - test with a non-string, non-File object
         with pytest.raises(ValidationError):
-            Input(text="Hello", files=["not_a_file_object"])
+            Input(text="Hello", files=[123])  # Should be File object or string, not int
 
     def test_turn_validation_errors(self):
         """Test turn validation errors."""

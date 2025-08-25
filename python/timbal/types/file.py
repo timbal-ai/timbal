@@ -353,7 +353,7 @@ class File(io.IOBase):
                 object.__setattr__(self, "__persisted__", url)
                 return url
 
-        if not run_context.platform_config:
+        if not run_context.platform_config or not run_context.platform_config.subject:
             if self.__source_scheme__ == "local_path":
                 local_path = str(self)
                 object.__setattr__(self, "__persisted__", local_path)

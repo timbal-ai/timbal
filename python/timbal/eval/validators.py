@@ -204,8 +204,13 @@ def semantic_output(ref: str | list[str]):
 
         system_prompt = """You are a helpful assistant that evaluates if an output is semantically correct w.r.t. a set of valid responses.
 The output should be considered correct if it is a helpful, relevant, and contextually appropriate reply to the user's request, and if it covers the key information or question present in the reference answer.
+Be generous in your evaluation - if the output reasonably addresses the reference, even if it's not a perfect match, consider it valid.
 Do not penalize for paraphrasing, extra detail, or reasonable conversational steps if they help address the user's need.
-Only mark as incorrect if the response is irrelevant, unhelpful, or fails to address the user's request.
+Only mark as incorrect if the response is clearly irrelevant, unhelpful, or fails to address the user's request.
+
+You must respond with a valid JSON object containing:
+- "is_valid": boolean indicating if the output is correct
+- "explanation": string explaining your reasoning
 """
 
         prompt = f"""<output>
@@ -228,7 +233,7 @@ Only mark as incorrect if the response is irrelevant, unhelpful, or fails to add
         }
 
         res = await llm_router(
-            model="gpt-4.1",
+            model="openai/gpt-4.1-mini",
             system_prompt=system_prompt,
             messages=messages,
             json_schema=json_schema,
@@ -321,6 +326,10 @@ The steps should be considered correct if they are relevant, logically ordered, 
 Do not penalize for reasonable variations, extra helpful steps, or minor differences in order, as long as the essential actions are present and the user's need is addressed.
 Note that no steps can be correct if the reference indicates no tools should be used.
 Only mark as incorrect if the steps are missing key actions, are irrelevant, or fail to address the user's request as described in the reference.
+
+You must respond with a valid JSON object containing:
+- "is_valid": boolean indicating if the steps are correct
+- "explanation": string explaining your reasoning
 """
 
         prompt = f"""<steps>
@@ -343,7 +352,7 @@ Only mark as incorrect if the steps are missing key actions, are irrelevant, or 
         }
 
         res = await llm_router(
-            model="gpt-4.1",
+            model="openai/gpt-4.1-mini",
             system_prompt=system_prompt,
             messages=messages,
             json_schema=json_schema,

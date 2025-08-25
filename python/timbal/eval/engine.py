@@ -9,8 +9,11 @@ import yaml
 from ..core.agent import Agent
 from ..errors import EvalError
 from ..state import RunContext, get_run_context, set_run_context
+from ..state.tracing import Tracing
+from ..state.tracing.trace import Trace
 from ..types.content import TextContent
 from ..types.message import Message
+from ..utils import dump
 from .types.result import EvalResult, EvalTestSuiteResult
 from .types.test import Test
 from .types.test_suite import TestSuite
@@ -35,7 +38,7 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
         # Extract tool calls from tracing data
         actual_steps = []
         for call_id, trace in run_context.tracing.items():
-            path = trace.get("path", "")
+            path = trace.path
             # Skip the root agent call (call_id=None or no path separators)
             if call_id is None or not path or "." not in path:
                 continue
@@ -49,7 +52,7 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
                 if tool_name == "llm":
                     continue
                 
-                tool_input = trace.get("input", {})
+                tool_input = trace.input or {}
                 actual_steps.append({
                     "tool": tool_name,
                     "input": tool_input
@@ -260,7 +263,8 @@ async def run_turn(
     test: Test,
     conversation_history: list[Message],
     test_results: EvalTestSuiteResult,
-    test_file_name: str
+    test_file_name: str,
+    test_file_dir: Path
 ) -> None:
     """"""
     test_results.total_turns += 1
@@ -270,13 +274,35 @@ async def run_turn(
     
     run_context = RunContext()
     if conversation_history:
-        run_context.data["memory"] = conversation_history
+        fake_parent_id = "fake-parent-conversation-123"
+        run_context.parent_id = fake_parent_id
+        parent_tracing = Tracing()
+        
+        msg_dicts = [await dump(msg) for msg in conversation_history]
+        
+        trace = Trace(
+            path="fake_agent",
+            call_id="fake_call_conversation",
+            parent_call_id=None,
+            t0=1000,  # Fake timestamp
+            input={"messages": msg_dicts},
+            t1=1500,
+            output=msg_dicts[-1] if msg_dicts else {},
+            usage={}
+        )
+        parent_tracing["fake_call_conversation"] = trace
+        
+        # Store the fake parent tracing in the provider
+        await run_context._tracing_provider.put(
+            RunContext(id=fake_parent_id, tracing=parent_tracing)
+        )
+        
     set_run_context(run_context)
 
     # Run the agent
     try:
         # Convert Input to Message to properly handle files
-        user_message = user_input.to_message(role="user")
+        user_message = user_input.to_message(role="user", test_file_dir=test_file_dir)
         
         if conversation_history:
             history_text = "\n".join([
@@ -384,6 +410,8 @@ async def eval_file(
     test_suite = TestSuite.model_validate(test_suite)
     
     test_results.total_files += 1
+
+    test_file_dir = path.parent
     
     for test in test_suite.tests:
         if test_name is not None and test.name != test_name:
@@ -391,10 +419,10 @@ async def eval_file(
         test_results.total_tests += 1
         conversation_history = []
         for turn in test.turns:
-            await run_turn(_agent, turn, test, conversation_history, test_results, str(path.name))
+            await run_turn(_agent, turn, test, conversation_history, test_results, str(path.name), test_file_dir)
             # Add to conversation history after processing
-            conversation_history.append(turn.input.to_message(role="user"))
+            conversation_history.append(turn.input.to_message(role="user", test_file_dir=test_file_dir))
             if turn.output:
-                conversation_history.append(turn.output.to_message(role="assistant"))
+                conversation_history.append(turn.output.to_message(role="assistant", test_file_dir=test_file_dir))
     
     return test_results

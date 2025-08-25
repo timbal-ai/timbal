@@ -321,7 +321,7 @@ class TestRunTurn:
         conversation_history = []
         test_results = EvalTestSuiteResult()
         
-        await run_turn(agent, turn, test, conversation_history, test_results, str(yaml_path))
+        await run_turn(agent, turn, test, conversation_history, test_results, str(yaml_path.name), yaml_path.parent)
         
         assert test_results.total_turns == 1
 
@@ -351,7 +351,7 @@ class TestRunTurn:
         ]
         test_results = EvalTestSuiteResult()
         
-        await run_turn(agent, second_turn, test, conversation_history, test_results, str(yaml_path))
+        await run_turn(agent, second_turn, test, conversation_history, test_results, str(yaml_path.name), yaml_path.parent)
         
         assert test_results.total_turns == 1
 
@@ -376,7 +376,7 @@ class TestRunTurn:
         conversation_history = []
         test_results = EvalTestSuiteResult()
         
-        await run_turn(agent, turn, test, conversation_history, test_results, str(yaml_path))
+        await run_turn(agent, turn, test, conversation_history, test_results, str(yaml_path.name), yaml_path.parent)
         
         assert test_results.total_turns == 1
         assert test_results.execution_errors >= 0  # Should handle the error gracefully
