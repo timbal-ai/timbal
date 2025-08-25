@@ -239,7 +239,7 @@ async def main():
 You can chain multiple steps, use memory for context, and connect LLMs to external tools for even more powerful workflows.
 :::
 
-For more, see the [Advanced documentation](/flows/advanced)
+For more, see the [Advanced documentation](/workflows/advanced)
 
 ---
 
@@ -283,7 +283,7 @@ print(result.output["result"])`}/>
 
 ---
 
-For more, see the [Flows documentation](/flows), [Advanced Flow Concepts](/flows/advanced), and [Examples](/examples).
+For more, see the [Flows documentation](/workflows), [Advanced Flow Concepts](/workflows/advanced), and [Examples](/examples).
 
 <style>{`
 .cards-container {

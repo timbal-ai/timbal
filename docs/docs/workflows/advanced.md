@@ -203,4 +203,4 @@ You can inspect the execution graph, step outputs, and data mappings to understa
 
 ---
 
-For more, see the [Flows Overview](/flows) and [Examples](/examples).
+For more, see the [Flows Overview](/workflows) and [Examples](/examples).

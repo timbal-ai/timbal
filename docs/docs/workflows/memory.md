@@ -73,4 +73,4 @@ State savers (state_saver) control whether the entire flow (including LLM memory
 
 ---
 
-For more, see the [Flows Overview](/flows) and [Advanced Flow Concepts](/flows/advanced).
+For more, see the [Flows Overview](/workflows) and [Advanced Flow Concepts](/workflows/advanced).
