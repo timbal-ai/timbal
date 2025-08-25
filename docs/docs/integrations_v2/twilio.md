@@ -73,17 +73,21 @@ await send_whatsapp_template(
 
 <CodeBlock language="python" code ={`from timbal.steps.twilio.whatsapp import send_whatsapp_message
 from timbal import Agent
+from timbal.types.message import Message
 
 agent = Agent(
+    name="twilio_agent",
+    model="gemini/gemini-2.5-pro-preview-03-25",
     tools=[send_whatsapp_message]
 )
 
-response = await agent.complete(
-                prompt={
-                    "to": "+1234567890", 
-                    "message": "Hello from Agent!"
-                }
-        )`}/>
+prompt = Message.validate({
+            "to": "+1234567890", 
+            "message": "Hello from Agent!"
+        })
+response = await agent(
+        prompt=prompt
+)`}/>
 
 ## Notes
 - For more advanced usage, see the [Twilio WhatsApp API documentation](https://www.twilio.com/docs/whatsapp/api).

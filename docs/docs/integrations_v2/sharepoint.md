@@ -180,17 +180,22 @@ success = await download_file(
 
 <CodeBlock language="python" code ={`from timbal.steps.sharepoint.directories import list_directory
 from timbal import Agent
+from timbal.types.message import Message
 
 agent = Agent(
+    name="sharepoint_agent",
+    model="openai/gpt-4.1-mini",
     tools=[list_directory]
 )
 
-response = await agent.complete(
-    prompt={
+prompt = Message.validate({
         "folder": "Projects/2024",
         "scope": "my-files"
-    }
-)`}/>
+    })
+
+response = await agent(
+    prompt=prompt
+).collect()`}/>
 
 ## Notes
 - Make sure your Microsoft 365 tenant and app registration are properly configured

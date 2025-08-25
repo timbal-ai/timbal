@@ -87,17 +87,21 @@ image = images[0]`}/>
 
 <CodeBlock language="python" code ={`from timbal.steps.fal.text_to_image import gen_images
 from timbal import Agent
+from timbal.types.message import Message
 
 agent = Agent(
+    name="fal_agent",
+    model="openai/gpt-5",
     tools=[gen_images]
 )
 
-response = await agent.complete(
-    prompt={
+prompt = Message.validate({
         "prompt": "a futuristic cityscape at night",
         "model": "fal-ai/flux-pro/v1.1-ultra"
-    }
-)`}/>
+    })
+response = await agent(
+    prompt=prompt
+).collect()`}/>
 
 ## Notes
 - Make sure your Fal.ai API key is properly set in the environment variables

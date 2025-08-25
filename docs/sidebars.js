@@ -47,6 +47,13 @@
         'workflows/advanced',
     ],
     },
+
+    {
+      type: 'category',
+      collapsed: false,
+      label: 'State',
+      items: ['state/index'],
+    },
     {
       type: 'category',
       label: 'Knowledge Bases',

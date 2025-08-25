@@ -6,7 +6,7 @@ sidebar: 'docsSidebar'
 import CodeBlock from '@site/src/theme/CodeBlock';
 
 
-# Introduction
+# Introduction to Timbal
 <h3 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
 Build, orchestrate, and deploy AI solutions with ease.
 </h3>
@@ -31,7 +31,8 @@ Timbal provides two main patterns for building AI applications:
     <CodeBlock language="python" code ={`from timbal import Agent
 
     agent = Agent(
-        model="gpt-4.1",
+        name="my_agent",
+        model="openai/gpt-4.1",
         tools=[search_web],
     )`}
     />

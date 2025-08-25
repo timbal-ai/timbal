@@ -68,11 +68,13 @@ from timbal.steps.elevenlabs import stt
 from timbal.types import File
 
 agent = Agent(
+    name="agent",
+    model="openai/gpt-5",
     tools=[stt]
 )
 
 audio_file = File.validate("https://cdn.openai.com/API/docs/audio/alloy.wav")
-response = await agent.complete(prompt=audio_file)
+response = await agent(prompt=audio_file).collect()
 print(response.output.content[0].text)`}/>
 
 ---
@@ -85,17 +87,16 @@ You can build agents that both understand and respond in audio. For example, an 
 from timbal.steps.elevenlabs import stt, tts
 
 agent = Agent(
-    tools=[{
-        "runnable": tts,
-        "force_exit": True
-    }],
+    name="agent",
+    model="openai/gpt-4.1-mini",
+    tools=[tts],
     system_prompt=(
-        "You are a helpful assistant and you must always respond in audio format."
+        "You are a helpful assistant and you must always respond in audio format. "
         "Always use '56AoDkrOh6qfVPDXZ7Pt' as the voice_id for the TTS model."
     )
 )
 
-response = await agent.complete(prompt="How are you?")
+response = await agent(prompt="How are you?").collect()
 # response.output will be a File (audio) if TTS is used`}/>
 
 

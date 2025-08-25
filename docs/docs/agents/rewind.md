@@ -4,90 +4,79 @@ sidebar: 'docsSidebar'
 ---
 import CodeBlock from '@site/src/theme/CodeBlock';
 
-# Rewind in Agent
+# Rewind
 
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-Branch conversations and rewind Agent memory to any previous point using the enhanced tracing and context system.
+Branch conversations and rewind agent memory to any previous point in the conversation.
 </h2>
 
 ---
 
-The <span style={{color: 'var(--timbal-purple)'}}><strong>rewind</strong></span> feature in Agent V2 builds upon the robust tracing system to allow sophisticated conversation branching and memory manipulation. With the enhanced architecture, you can rewind to any point in nested agent conversations and create complex branching scenarios.
+The <span style={{color: 'var(--timbal-purple)'}}><strong>rewind</strong></span> and feature in Timbal allows you to branch or "rewind" the memory of an agent or flow by changing the `parent_id` in the `RunContext`. This is useful when you want to continue a conversation from a previous point, ignoring any newer context that was added after that point.
 
 ## How Rewind Works
 
-Agent's rewind functionality leverages the enhanced tracing system and automatic memory resolution:
+Normally, when you pass a `parent_id` to a new `RunContext`, the agent loads the memory up to that point. If you change the `parent_id` to an earlier run, the agent will only have access to the memory up to that run, and **not** any of the memory added after.
 
-1. **Tracing-Based Memory**: Every interaction is traced with detailed path information
-2. **Nested Context Support**: Rewind works across nested agent calls and tool executions
-3. **Automatic Resolution**: Memory is automatically resolved based on the specified parent context
-4. **Enhanced Branching**: Create complex conversation trees with multiple branches
+This allows you to:
+- Branch the conversation from any previous point.
+- Ignore or overwrite later context by starting from an earlier memory state.
 
-## Basic Rewind Example
+## Example
 
-<CodeBlock language="python" code ={`from timbal.core_v2 import Agent
-from timbal.state import RunContext, set_run_context
-from timbal.types.message import Message
+Let's see a practical example:
 
-# Initialize agent and state saver
+<CodeBlock language="python" code ={`from timbal import Agent
+from timbal.state import RunContext
+from timbal.state.savers import InMemorySaver
+
 agent = Agent(
-    name="conversation_agent",
-    model="openai/gpt-4"
+    model="gpt-4o-mini",
+    state_saver=InMemorySaver(),
 )
 
 # Step 1: Start the conversation
-context1 = RunContext()
-set_run_context(context1)
+run1 = await agent.complete(prompt="Hello")
+# Memory: ["Hello"]
 
-result1 = await agent(
-    prompt="Hello, I'm a software engineer"
-).collect()
+# Step 2: Add a name
+run2 = await agent.complete(
+    context=RunContext(parent_id=run1.run_id),
+    prompt="My name is David"
+)
+# Memory: ["Hello", "My name is David"]
 
-# Step 2: Add more information
-result2 = await agent(
-    prompt="I work with Python and Django"
-).collect()
+# Step 3: Ask for the name (normal forward memory)
+run3 = await agent.complete(
+    context=RunContext(parent_id=run2.run_id),
+    prompt="What is my name?"
+)
+print(run3.output.content[0].text)
+# Output: "Your name is David!"
 
-# Step 3: Continue the conversation
-result3 = await agent(
-    prompt="What technologies do I work with?"
-).collect()
+# Step 4: REWIND - branch from the first message, ignoring the 'David' memory
+run4 = await agent.complete(
+    context=RunContext(parent_id=run1.run_id),
+    prompt="What is my name?"
+)
+print(run4.output.content[0].text)
+# The agent does NOT know your name, because it only sees the memory up to "Hello"`}/>
 
-print("Normal flow result:", result3.output.content[0].text)
-# Expected: "You work with Python and Django"
+## What happens under the hood?
 
-# Step 4: REWIND - Branch from step 1, ignoring the Python/Django information
-context_rewind = RunContext(parent_id=result1.run_id)
-set_run_context(context_rewind)
+- When you set `parent_id` to an earlier run, the agent loads only the memory up to that run.
+- Any context added after that run is ignored for this new branch.
+- This is like "rewinding" the conversation and starting a new path from that point.
 
-result_rewind = await agent(
-    prompt="What technologies do I work with?"
-).collect()
+**Visual Diagram**
 
-print("Rewound result:", result_rewind.output.content[0].text)
-# Expected: "I don't have information about specific technologies you work with"`}/>
+<CodeBlock language="bash" code ={`Start ──▶ "My name is David" ──▶ "What is my name?" (→ "Your name is David!")
+      │
+      └───▶ (rewind) "What is my name?" (→ Agent does NOT know your name)`}/>
 
-## Rewind Visualization
-
-<CodeBlock language="bash" code ={`Conversation Tree Visualization:
-
-Root: "Hello, I'm a software engineer"
-├──▶ Branch A: "I work with Python and Django"
-│    └── Sub-A1: "What technologies do I work with?"
-│        └── Response: "You work with Python and Django"
-└──▶ Branch B: (Rewind to Root) "What technologies do I work with?"
-       └── Response: "I don't have information about specific technologies you work with"
-
-Each branch maintains memory only up to its parent node.`}/>
 
 ## Summary
 
-Agent's rewind capabilities provide:
-
-- **Enhanced Tracing**: Detailed path-based tracing for precise rewind points
-- **Nested Support**: Rewind works across nested agent calls and tool executions
-- **Flexible Branching**: Create complex conversation trees with multiple paths
-- **Context Integration**: System context works seamlessly with rewind
-- **Advanced Patterns**: Conditional rewind, content filtering, and smart memory management
-
-The architecture makes rewind more powerful and reliable while providing advanced customization options for sophisticated conversation management.
+- **Rewind** lets you branch or restart the conversation from any previous point by changing the `parent_id`.
+- The agent will only see the memory up to the specified `parent_id`.
+- This is useful for "what if" scenarios, testing, or branching conversations.

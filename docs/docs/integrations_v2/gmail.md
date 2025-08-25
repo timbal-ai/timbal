@@ -311,18 +311,21 @@ retrieved_thread = await get_thread(thread_id="your-thread-id")`}/>
 
 <CodeBlock language="python" code ={`from timbal.steps.gmail.messages import send_message
 from timbal import Agent
+from timbal.types.message import Message
 
 agent = Agent(
+    name="gmail_agent",
+    model="anthropic/claude-3-5-sonnet-20241022"
     tools=[send_message]
 )
-
-response = await agent.complete(
-    prompt={
+prompt = Message.validate({
         "to": ["recipient@example.com"],
         "subject": "Hello from Agent!",
         "body": "This is a test email sent by Agent."
-    }
-)`}/>
+    })
+response = await agent(
+    prompt=prompt
+).collect()`}/>
 
 ## Notes
 - Make sure your Google Cloud project is properly configured and credentials are in place.

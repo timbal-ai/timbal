@@ -7,106 +7,89 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Understanding Agents
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-Master proven strategies for designing advanced, specialized AI agents using an architecture that work together seamlessly to tackle complex challenges.
+Master proven strategies for designing advanced, specialized AI agents that work together seamlessly to tackle complex challenges.
 </h2>
 
 ---
 
 ## What is an Agent?
 
-An <span style={{color: 'var(--timbal-purple)'}}><strong>Agent</strong></span> is an AI system that can autonomously reason, make decisions, and take actions to achieve specific goals. Unlike simple chatbots, agents can:
+An <span style={{color: 'var(--timbal-purple)'}}><strong>Agent</strong></span> is like having your own AI-powered teammate—one that can understand your goals, reason about the best way to achieve them, and take actions on your behalf. Powered by advanced Large Language Models (LLMs), Agents go far beyond simple chatbots or assistants.
 
-- **Analyze complex problems** and break them down into manageable steps
-- **Choose appropriate tools** from their available toolkit based on the task
-- **Execute multiple actions** in sequence or parallel to solve problems
-- **Learn from interactions** and adapt their approach over time
-- **Maintain context** across multiple conversations and sessions
+Think of an Agent as:
 
-<CodeBlock language="python" code ={`from timbal import Agent
+- A digital coworker that can read, write, and analyze information.
+- A problem-solver that can break down complex tasks into steps and execute them.
+- A connector that can use tools, access APIs, search the web, or interact with other software to get things done.
 
-agent = Agent(
-    name="my_agent",
-    model="anthropic/claude-3-sonnet"
-)  # That's it! You've created your first agent!`}/>
+<CodeBlock language="python" code ={`Agent()  # That's it! You've created your first agent!`}/>
 
-The `name` parameter is required and provides a unique identifier for your agent. The `model` parameter specifies the provider and model to use for the agent.
+**Note:** Make sure to define all required environment variables—such as your OpenAI API key, your Gemini API key, the API key model that you need—in your `.env` file.
 
-**Note:** Make sure to define all required environment variables—such as the API key model that you need—in your `.env` file.
-
-<CodeBlock language="bash" title=".env" code ={`ANTHROPIC_API_KEY=your_api_key_here`}/>
+<CodeBlock language="bash" title=".env" code ={`OPENAI_API_KEY=your_api_key_here`}/>
 
 ## Quick Example
 
-Here's an example of an Agent that solves a real business problem - customer support automation:
+Here's an example of an agent that uses a tool to get weather information:
 
-<CodeBlock language="python" code ={`from timbal import Agent
-from timbal.types.message import Message
+<CodeBlock language="python" code ={`from timbal import Agent, Tool
 
-# Define tools for customer support
-def search_knowledge_base(query: str) -> str:
-    """Search company knowledge base for relevant information."""
-    # Implementation would connect to your knowledge base
-    return f"Found information about: {query}"
+# Define a weather tool
+def get_weather(location: str) -> str:
+    # This is a simplified example - in practice, you'd use a real weather API
+    return "The weather is sunny"
 
-def create_support_ticket(issue: str, user_email: str) -> str:
-    """Create a support ticket for complex issues."""
-    # Implementation would integrate with your ticketing system
-    return f"Created ticket for {user_email}: {issue}"
-
-def escalate_to_human(user_email: str, reason: str) -> str:
-    """Escalate complex issues to human agents."""
-    return f"Escalated {user_email} to human agent: {reason}"
-
-# Create a customer support agent
+# Create an agent with the weather tool
 agent = Agent(
-    name="customer_support_agent",
-    model="anthropic/claude-3-sonnet",
-    tools=[search_knowledge_base, create_support_ticket, escalate_to_human],
-    system_prompt="""You are a customer support agent. Your goal is to help customers efficiently:
-    1. First, try to answer their question using the knowledge base
-    2. If you can't find an answer, create a support ticket
-    3. For complex technical issues, escalate to a human agent
-    4. Always be polite and professional"""
+    model="gemini-2.5-pro-preview-03-25",
+    tools=[
+        Tool(
+            runnable=get_weather,
+            description="Get the weather for a specific location",
+        )
+    ]
 )
 
-# Use the agent to handle a customer request
-response = await agent("I can't log into my account and I've tried resetting my password").collect()`}/>
+# Use the agent to get weather information
+response = await agent.complete(
+    prompt="What's the weather like in New York?"
+)`}/>
 
-**What happens behind the scenes:**
+ **Agent Execution Logs**:
 
 <div className="log-step-static">
-  StartEvent(..., path='customer_support_agent, ...)
+  StartEvent(..., path='agent, ...)
 </div>
 
 <details className="log-step-collapsible">
 <summary>
-  OutputEvent(..., path='customer_support_agent.llm-0', ...)
+  OutputEvent(..., path='agent.llm-0', ...)
 </summary>
 <CodeBlock language="bash" code={`OutputEvent(...,
-    path='customer_support_agent.llm-0', 
+    path='agent.llm-0', 
     input={
       'messages': [
         Message(
           role=user,
           content=[TextContent(
             type='text', 
-            text="I can't log into my account and I've tried resetting my password"
+            text="What's the weather like in New York?"
           )]
         )
       ], 
       'tools': [{
         'type': 'function', 
         'function': {
-          'name': 'search_knowledge_base',
-          'description': 'Search company knowledge base for relevant information',
+          'name': 'get_weather',
+          'description': 'Get the weather for a specific location',
           'parameters': {
-            'properties': {'query': {'title': 'Query', 'type': 'string'}}, 
-            'required': ['query'],
+            'properties': {'location': {'title': 'Location', 'type': 'string'}}, 
+            'required': ['location'],
             ...
           }
         }
       }], 
-      'model': 'claude-3-sonnet',
+      'model': 'gpt-4',
       ...
     },
     output=Message(
@@ -114,47 +97,47 @@ response = await agent("I can't log into my account and I've tried resetting my 
       content=[ToolUseContent(
         type='tool_use', 
         id='...', 
-        name='search_knowledge_base', 
-        input={'query': 'login password reset troubleshooting'}
+        name='get_weather', 
+        input={'location': 'New York'}
       )]
     ), ...)
 `}/>
 </details>
 
 <div className="log-step-static">
-  StartEvent(..., path='customer_support_agent.search_knowledge_base-call_...', ...)
+  StartEvent(..., path='agent.get_weather-call_...', ...)
 </div>
 
 <details className="log-step-collapsible">
 <summary>
-  OutputEvent(..., path='customer_support_agent.search_knowledge_base-...)
+  OutputEvent(..., path='agent.get_weather-...)
 </summary>
 <CodeBlock language="bash" code={`OutputEvent(...,
-    path='customer_support_agent.search_knowledge_base-...',
-    input={'query': 'login password reset troubleshooting'},
+    path='agent.get_weather-...',
+    input={'location': 'New York'},
     output=Message(
       role=user,
-      content=[TextContent(type='text', text='Found information about: login password reset troubleshooting')]
+      content=[TextContent(type='text', text='The weather is sunny')]
     ), ...)`}/>
 </details>
 
 <div className="log-step-static">
-  StartEvent(..., path='customer_support_agent.llm-1', ...)
+  StartEvent(..., path='agent.llm-1', ...)
 </div>
 
 <details className="log-step-collapsible">
 <summary>
-  OutputEvent(..., path='customer_support_agent.llm-1', ...)
+  OutputEvent(..., path='agent.llm-1', ...)
 </summary>
 <CodeBlock language="bash" code={`OutputEvent(...,
-    path='customer_support_agent.llm-1', 
+    path='agent.llm-1', 
     input={
       'messages': [
         Message(
           role=user, 
           content=[TextContent(
             type='text',
-            text="I can't log into my account and I've tried resetting my password"
+            text="What's the weather like in New York?"
           )]
         ), 
         Message(
@@ -162,8 +145,8 @@ response = await agent("I can't log into my account and I've tried resetting my 
           content=[ToolUseContent(
             type='tool_use',
             id='...',
-            name='search_knowledge_base',
-            input={'query': 'login password reset troubleshooting'}
+            name='get_weather',
+            input={'location': 'New York'}
           )]
         ),
         Message(
@@ -171,54 +154,46 @@ response = await agent("I can't log into my account and I've tried resetting my 
           content=[ToolResultContent(
             type='tool_result', 
             id='call_...', 
-            content=[TextContent(type='text', text='Found information about: login password reset troubleshooting')]
+            content=[TextContent(type='text', text='The weather is sunny')]
           )]
         )
       ],
       'tools': [{
         'type': 'function', 
         'function': {
-          'name': 'create_support_ticket',
-          'description': 'Create a support ticket for complex issues',
+          'name': 'get_weather',
+          'description': 'Get the weather for a specific location',
           'parameters': {
-            'properties': {
-              'issue': {'title': 'Issue', 'type': 'string'},
-              'user_email': {'title': 'User Email', 'type': 'string'}
-            },
-            'required': ['issue', 'user_email'],
+            'properties': {'location': {'title': 'Location', 'type': 'string'}},
+            'required': ['location'],
             ...
           }
         }
       }], 
-      'model': 'claude-3-sonnet',
+      'model': 'gpt-4',
       ...
     },
     output=Message(
       role=assistant, 
-      content=[ToolUseContent(
-        type='tool_use',
-        id='...',
-        name='create_support_ticket',
-        input={
-          'issue': 'User cannot log in despite password reset attempts',
-          'user_email': 'user@example.com'
-        }
+      content=[TextContent(
+        type='text',
+        text='The weather in New York is sunny.'
       )]
     ),...)`}/>
 </details>
 
 <details className="log-step-collapsible">
 <summary>
-  OutputEvent(..., path='customer_support_agent', ...)
+  OutputEvent(..., path='agent', ...)
 </summary>
 <CodeBlock language="bash" code={`OutputEvent(...,
-    path='customer_support_agent',
+    path='agent',
     input={
       'prompt': {
         'role': 'user', 
         'content': [{
           'type': 'text',
-          'text': "I can't log into my account and I've tried resetting my password"
+          'text': "What's the weather like in New York?"
         }]
       }
     },
@@ -226,14 +201,14 @@ response = await agent("I can't log into my account and I've tried resetting my 
       role=assistant, 
       content=[TextContent(
         type='text',
-        text='I understand you\'re having trouble logging in even after trying to reset your password. This sounds like a more complex issue that requires technical investigation. I\'ve created a support ticket for you, and our technical team will investigate this issue. You should receive an email confirmation shortly with your ticket number.'
+        text='The weather in New York is sunny.'
       )]
     ), ...)
 `}/>
 </details>
 
 <div style={{marginTop: '2rem'}}>
-This example shows how an agent can autonomously handle complex customer support scenarios by reasoning about the problem, searching for solutions, and taking appropriate actions.
+This example shows how to create an agent with a custom tool. The agent can now use the weather tool to fetch real-time weather data when needed. You can add multiple tools to make your agent even more powerful!
 </div>
 
 ## Key Capabilities of an Agent
@@ -245,7 +220,7 @@ Let's break down how an Agent thinks and works:
 <div className="timeline-content">
 
 <h4>Autonomous Reasoning</h4>
-Agents can analyze complex problems, break them down into steps, and decide the best approach to solve them.
+Agents can decide what to do next based on your instructions and the current situation.
 
 </div>
 </div>
@@ -253,8 +228,8 @@ Agents can analyze complex problems, break them down into steps, and decide the 
 <div className="timeline-item">
 <div className="timeline-content">
 
-<h4>Tool Selection</h4>
-They can choose the most appropriate tools from their available toolkit based on the current situation and requirements.
+<h4>Tool Use</h4>
+They can use built-in or custom tools (like searching the internet, fetching data, or running code) to accomplish tasks.
 
 </div>
 </div>
@@ -262,8 +237,8 @@ They can choose the most appropriate tools from their available toolkit based on
 <div className="timeline-item">
 <div className="timeline-content">
 
-<h4>Multi-Step Execution</h4>
-Agents can execute multiple actions in sequence, making decisions based on the results of previous steps.
+<h4>Memory</h4>
+Agents can remember previous interactions, decisions, or data, allowing them to work on long-term or multi-step projects.
 
 </div>
 </div>
@@ -271,8 +246,8 @@ Agents can execute multiple actions in sequence, making decisions based on the r
 <div className="timeline-item">
 <div className="timeline-content">
 
-<h4>Context Awareness</h4>
-They maintain awareness of the current situation, user preferences, and conversation history to provide relevant responses.
+<h4>Adaptability</h4>
+They can handle a wide range of tasks, from answering questions to automating workflows.
 
 </div>
 </div>
@@ -337,118 +312,40 @@ They maintain awareness of the current situation, user preferences, and conversa
 }
 `}</style>
 
-## Key Features
-
-### Autonomous Execution Loop
-
-Agent implements a sophisticated autonomous execution pattern:
-
-1. **Receive Input**: Accept a user promp
-2. **Memory Resolution**: Load conversation history from parent context if nested
-3. **LLM Interaction**: Call the LLM with available tools and conversation history
-4. **Tool Execution**: Execute tool calls concurrently for better performance
-5. **Iteration**: Continue until no more tool calls or max_iter is reached
-
-### Enhanced Tool Management
-
-<CodeBlock language="python" code ={`# Tools can be defined in multiple ways
-agent = Agent(
-    name="multi_tool_agent",
-    model="openai/gpt-4",
-    tools=[
-        # 1. Direct function
-        search_web,
-        
-        # 2. Tool instance with custom config
-        Tool(
-            handler=query_database,
-            description="Query the customer database",
-            exclude_params=["connection_string"]
-        ),
-        
-        # 3. Dictionary configuration
-        {
-            "handler": send_notification,
-            "description": "Send notification to user",
-            "params_mode": "required"
-        }
-    ]
-)`}/>
-
-Learn more about creating and using tools in the [Tools guide](/agents/tools).
-
-### System Prompt Configuration
-
-Agent uses a `system_prompt` parameter to provide context and instructions:
-
-<CodeBlock language="python" code ={`agent = Agent(
-    name="specialized_agent",
-    model="anthropic/claude-3-sonnet",
-    system_prompt="""You are a data analyst specialized in financial data. 
-    Your role is to:
-    1. Analyze financial data accurately
-    2. Provide clear explanations of trends
-    3. Identify potential risks and opportunities
-    4. Present findings in a professional manner""",
-    tools=[analyze_financial_data, generate_charts, create_reports]
-)
-
-# Use the agent with the configured system prompt
-result = await agent(
-    prompt=Message(role="user", content="Analyze this quarterly financial data")
-).collect()`}/>
 
 ## Running an Agent
 
-Agent provides a streamlined execution interface:
+To execute an Agent, there are 2 possibilities depending on the synchronisation.
 
 ### Get a Complete Answer
 
-<CodeBlock language="python" code ={`result = await agent(
-    prompt="What's the current market trend for renewable energy stocks?"
-).collect()`}/>
+For when the agent returns a complete response after processing. We will use the `complete()` function:
+
+<CodeBlock language="python" code ={`response = await agent.complete(prompt="What time is it?")`}/>
 
 ### Real-Time (Streaming) Output
 
-<CodeBlock language="python" code ={`async for event in agent(
-    prompt="What's the current market trend for renewable energy stocks?"
-):
-    print(event)`}/>
+Otherwise, when we want to know specific information on each event we can find the response asynchrounsly by running `run()`:
 
-Here you can see the actual output from running this example:
+<CodeBlock language="python" code ={`response = async for event in agent.run(prompt="What time is it?"):
+    print(event) `}/>
 
-<div className="log-step-static">
-  type='START' run_id='068a74bf-8b16-7de3-8000-614f2c07a86e' path='specialized_agent' status_text=None
-</div>
+Events tell you what's happening in your agent. Here's what you can do with them:
 
-<details className="log-step-collapsible">
-<summary>
-  type='OUTPUT' run_id='068a74bf-8b16-7de3-8000-614f2c07a86e' path='specialized_agent'
-</summary>
-<CodeBlock language="bash" code={`type='OUTPUT' run_id='068a74bf-8b16-7de3-8000-614f2c07a86e' path='specialized_agent' 
-input={'prompt': 'What\'s the current market trend for renewable energy stocks?'} 
-output=Message(role=assistant, content=[TextContent(type='text', text="I don't have access to real-time market data, but I can provide general insights about renewable energy stock trends based on recent developments in the sector.")]) 
-error=None 
-t0=1755794424693 t1=1755794425981 
-usage={'claude-3-sonnet:input_text_tokens': 45, 'claude-3-sonnet:output_text_tokens': 35}`}/>
-</details>
+<CodeBlock language="python" code ={`async for event in agent.run(prompt="What time is it?"):
+    if event.type == "START":
+        print(f"Starting Agent: {event.step_id}")`}/>
 
-## Parameter Validation
+<CodeBlock language="python" code ={`async for event in agent.run(prompt="What time is it?"):
+    if event.type == "OUTPUT":
+        print(f"Agent finished in {event.elapsed_time}ms")
+        print(f"Outputs: {event.outputs}")`}/>
 
-Agent uses Pydantic models for robust parameter validation:
-
-<CodeBlock language="python" code ={`from timbal.types.message import Message
-
-# Input is automatically validated
-result = await agent(
-    prompt=Message.validate("Hello"),  # Must be a Message
-).collect()`}/>
 
 ## Next Steps
 
 - Try creating your own Agent with different tools
-- Experiment with system prompt templates
-- Explore concurrent tool execution patterns
-- See examples in [Examples](/examples)
+- Experiment with different configurations
+- See an example agent in [Examples](/examples)
 
 Remember: The more you practice, the better you'll become at creating powerful Agents!

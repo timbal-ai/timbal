@@ -162,11 +162,14 @@ audio_file = await tts(
 
 <CodeBlock language="python" code ={`from timbal.steps.elevenlabs import tts
 from timbal import Agent
+from timbal.types.message import Message
 
 # Create an agent that responds with audio
 agent = Agent(
+      name="audio_agent",
+      model="openai/gpt-4o",
       system_prompt="Answer always with an audio."
       tools=[tts]
 )
 
-response = await agent.complete(prompt="What is 2+2?")`}/>
+response = await agent(prompt="What is 2+2?").collect()`}/>

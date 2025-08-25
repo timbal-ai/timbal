@@ -58,12 +58,15 @@ result = await search(query="What is the capital of France?")`}/>
 
 <CodeBlock language="python" code ={`from timbal.steps.perplexity import search
 from timbal import Agent
+from timbal.types.message import Message
 
 agent = Agent(
+    name="search_agent",
+    model="togetherai/deepseek-ai/DeepSeek-V3"",
     tools=[search]
 )
 
-response = await agent.complete(prompt="What are the latest AI trends?")`}/>
+response = await agent(prompt="What are the latest AI trends?").collect()`}/>
 
 ## Notes
 - For more advanced usage, see the [Perplexity API documentation](https://docs.perplexity.ai/api-reference/chat-completions).
