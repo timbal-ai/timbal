@@ -38,8 +38,7 @@ from ..types.events import (
     OutputEvent,
     StartEvent,
 )
-from ..types.models import dump
-from ..utils import sync_to_async_gen
+from ..utils import dump, sync_to_async_gen
 
 logger = structlog.get_logger("timbal.core.runnable")
 

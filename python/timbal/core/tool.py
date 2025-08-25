@@ -5,7 +5,7 @@ from typing import Any, override
 
 from pydantic import BaseModel, computed_field, model_validator
 
-from ..types.models import create_model_from_argspec
+from ..utils import create_model_from_argspec
 from .runnable import Runnable
 
 

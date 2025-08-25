@@ -12,7 +12,7 @@ from ..logs import setup_logging
 
 # TODO This shouldn't be in just the server 'module'.
 from ..server.utils import ModuleSpec, load_module
-from ..types.models import dump
+from ..utils import dump
 from .engine import eval_file
 from .types.result import EvalTestSuiteResult
 from .utils import discover_files

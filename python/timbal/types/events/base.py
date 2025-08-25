@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from ..models import dump
+from ...utils import dump
 
 
 class BaseEvent(BaseModel):
