@@ -154,7 +154,7 @@ if current_context:
 ## Complete Example: Tracing System
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent
+from timbal.core import Agent
 from timbal.state import RunContext
 from timbal.collectors import get_collector_registry
 

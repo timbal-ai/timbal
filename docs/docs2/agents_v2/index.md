@@ -62,7 +62,8 @@ agent = Agent(
     name="customer_support_agent",
     model="anthropic/claude-3-sonnet",
     tools=[search_knowledge_base, create_support_ticket, escalate_to_human],
-    system_prompt="""You are a customer support agent. Your goal is to help customers efficiently:
+    system_prompt="""You are a customer support agent.
+    Your goal is to help customers efficiently:
     1. First, try to answer their question using the knowledge base
     2. If you can't find an answer, create a support ticket
     3. For complex technical issues, escalate to a human agent
@@ -70,7 +71,9 @@ agent = Agent(
 )
 
 # Use the agent to handle a customer request
-response = await agent("I can't log into my account and I've tried resetting my password").collect()`}/>
+response = await agent(
+    "I can't log into my account and I've tried resetting my password"
+  ).collect()`}/>
 
 **What happens behind the scenes:**
 
@@ -394,9 +397,7 @@ Agent uses a `system_prompt` parameter to provide context and instructions:
 )
 
 # Use the agent with the configured system prompt
-result = await agent(
-    prompt=Message(role="user", content="Analyze this quarterly financial data")
-).collect()`}/>
+result = await agent("Analyze this quarterly financial data").collect()`}/>
 
 ## Running an Agent
 

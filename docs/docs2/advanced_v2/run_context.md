@@ -32,7 +32,7 @@ if current_context:
 The run context provides a simple key-value store for sharing data:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent, Tool
+from timbal.core import Agent, Tool
 from timbal.state import RunContext, get_run_context
 
 def data_collector(query: str):
@@ -103,7 +103,7 @@ print(f"Child data: {child_context.data}")
 The run context enables communication between different components:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent, Tool
+from timbal.core import Agent, Tool
 from timbal.state import get_run_context
 
 def authentication_tool(user_id: str):
@@ -174,7 +174,7 @@ print(f"Permissions: {context.data.get('permissions')}")
 The run context is ideal for managing application state:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent, Tool
+from timbal.core import Agent, Tool
 from timbal.state import get_run_context
 import time
 
@@ -254,7 +254,7 @@ print(f"Interaction count: {context.data.get('interaction_count')}")
 The run context can store configuration that affects behavior:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent, Tool
+from timbal.core import Agent, Tool
 from timbal.state import get_run_context
 
 def set_config_tool(config_type: str, value: str):
@@ -327,7 +327,7 @@ print(f"Detail level: {context.data.get('config.detail_level')}")
 The run context can track performance metrics across components:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent, Tool
+from timbal.core import Agent, Tool
 from timbal.state import get_run_context
 import time
 
@@ -402,7 +402,7 @@ print(f"Total execution time: {context.data.get('total_execution_time', 0):.3f}s
 ## Complete Example: Advanced Context System
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent, Tool
+from timbal.core import Agent, Tool
 from timbal.state import RunContext, get_run_context
 import time
 import json

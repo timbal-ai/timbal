@@ -50,6 +50,9 @@ const highlightMap = {
   BaseSaver: 'custom-highlight-green',
   Snapshot: 'custom-highlight-green',
   query: 'custom-highlight-orange',
+  issue: 'custom-highlight-orange',
+  user_email: 'custom-highlight-orange',
+  reason: 'custom-highlight-orange',
   system_context: 'custom-highlight-orange',
   instructions: 'custom-highlight-orange',
   tools: 'custom-highlight-orange',
@@ -107,11 +110,16 @@ const highlightMap = {
   get_first_name: 'custom-highlight-green-fn',
   get_last_name: 'custom-highlight-green-fn',
   check_full_name: 'custom-highlight-green-fn',
+  search_knowledge_base: 'custom-highlight-green-fn',
+  core: 'custom-highlight-green',
   abstractmethod: 'custom-highlight-green-fn',
+  handle_customer_request: 'custom-highlight-green-fn',
   analyze_financial_data: 'custom-highlight-green-fn',
   generate_charts: 'custom-highlight-green-fn',
   create_reports: 'custom-highlight-green-fn',
   main: 'custom-highlight-green-fn',
+  create_support_ticket: 'custom-highlight-green-fn',
+  escalate_to_human: 'custom-highlight-green-fn',
   gen_images: 'custom-highlight-green-fn',
   download_file: 'custom-highlight-green-fn',
   send_email: 'custom-highlight-green-fn',
@@ -176,6 +184,8 @@ const highlightMap = {
   compile: 'custom-highlight-green-fn',
   str: 'custom-highlight-blue',
   name: 'custom-highlight-orange',
+  user_id: 'custom-highlight-orange',
+  user_message: 'custom-highlight-orange',
   message: 'custom-highlight-green',
   Message: 'custom-highlight-green',
   f: 'custom-highlight-blue',
@@ -371,6 +381,7 @@ export default function CodeBlock(props) {
                         {line.map((token, key) => {
                           const tokenProps = getTokenProps({ token });
                           let content = tokenProps.children;
+                          console.log('🔍 DEBUG: Processing token', key, ':', content);
                           // For bash blocks, just return the content in white
                           if (props.language === 'bash') {
                             return (
@@ -385,51 +396,122 @@ export default function CodeBlock(props) {
                           // Handle 'f' and 'f"' to keep f blue (very early)
                           if (typeof content === 'string' && (content.trim() === 'f' || content.startsWith('f"'))) {
                             if (content.startsWith('f"')) {
-                              // Split f" into f (blue) and " (yellow)
-                              return (
-                                <span key={key}>
-                                  <span className="custom-highlight-blue">f</span>
-                                  <span className="custom-highlight-yellow">{content.substring(1)}</span>
-                                </span>
-                              );
+                              console.log('🎯 DEBUG: Found f-string token:', content);
+                              // Split f" into f (blue) and process the string content
+                              const stringContent = content.substring(1); // Remove the f
+                              console.log('🎯 DEBUG: stringContent:', stringContent);
+                              
+                              // Check if there are variables in the f-string
+                              console.log('🎯 DEBUG: Checking for variables in:', stringContent);
+                              console.log('🎯 DEBUG: Has {:', stringContent.includes('{'));
+                              console.log('🎯 DEBUG: Has }:', stringContent.includes('}'));
+                              if (stringContent.includes('{') && stringContent.includes('}')) {
+                                console.log('🎯 DEBUG: Found variables in f-string!');
+                                const parts = [];
+                                let lastIndex = 0;
+                                
+                                // Find all {variable} patterns
+                                const variableRegex = /\{([^}]+)\}/g;
+                                let match;
+                                
+                                while ((match = variableRegex.exec(stringContent)) !== null) {
+                                  console.log('🎯 DEBUG: Found variable match:', match[0], 'with content:', match[1]);
+                                  // Add text before the variable in yellow
+                                  if (match.index > lastIndex) {
+                                    const beforeText = stringContent.slice(lastIndex, match.index);
+                                    console.log('🎯 DEBUG: Adding beforeText:', beforeText);
+                                    parts.push(`<span class="custom-highlight-yellow">${beforeText}</span>`);
+                                  }
+                                  // Add the variable with yellow highlighting
+                                  console.log('🎯 DEBUG: Adding variable:', `{${match[1]}}`);
+                                  parts.push(`<span class="custom-highlight-yellow">{${match[1]}}</span>`);
+                                  lastIndex = match.index + match[0].length;
+                                }
+                                
+                                // Add remaining text in yellow
+                                if (lastIndex < stringContent.length) {
+                                  const remainingText = stringContent.slice(lastIndex);
+                                  console.log('🎯 DEBUG: Adding remainingText:', remainingText);
+                                  parts.push(`<span class="custom-highlight-yellow">${remainingText}</span>`);
+                                }
+                                
+                                console.log('🎯 DEBUG: Final parts array:', parts);
+                                console.log('🎯 DEBUG: Final HTML:', parts.join(''));
+                                return (
+                                  <span key={key}>
+                                    <span className="custom-highlight-blue">f</span>
+                                    <span dangerouslySetInnerHTML={{ __html: parts.join('') }} />
+                                  </span>
+                                );
+                              } else {
+                                // No variables in this token, but check if we're in an f-string context
+                                // Look at the entire line to see if there are variables in other tokens
+                                const lineContent = line.map(token => getTokenProps({ token }).children).join('');
+                                console.log('🎯 DEBUG: Full line content:', lineContent);
+                                
+                                if (lineContent.includes('{') && lineContent.includes('}')) {
+                                  console.log('🎯 DEBUG: Variables found in line, highlighting this part in yellow');
+                                  return (
+                                    <span key={key}>
+                                      <span className="custom-highlight-blue">f</span>
+                                      <span className="custom-highlight-yellow">{stringContent}</span>
+                                    </span>
+                                  );
+                                } else {
+                                  // No variables, just highlight the string in yellow
+                                  return (
+                                    <span key={key}>
+                                      <span className="custom-highlight-blue">f</span>
+                                      <span className="custom-highlight-yellow">{stringContent}</span>
+                                    </span>
+                                  );
+                                }
+                              }
                             } else {
                               return <span key={key} className="custom-highlight-blue">{content}</span>;
                             }
                           }
 
+                          // --- Handle f-string variables in separate tokens ---
+                          // Check if this token contains variables that are part of an f-string
+                          if (typeof content === 'string' && (content.includes('{') || content.includes('}'))) {
+                            // Check if we're in an f-string context by looking at the line
+                            const lineContent = line.map(token => getTokenProps({ token }).children).join('');
+                            console.log('🎯 DEBUG: Checking variable token:', content, 'in line:', lineContent);
+                            if (lineContent.includes('f"') || lineContent.includes("f'")) {
+                              console.log('🎯 DEBUG: Found variable token in f-string:', content);
+                              // Highlight the variable in yellow
+                              return <span key={key} className="custom-highlight-yellow">{content}</span>;
+                            }
+                          }
+
                           // --- Triple quote state management (highest priority) ---
                           if (typeof content === 'string') {
-                            // Check if this token contains opening triple quotes
-                            if (content.includes('"""') && !inTripleQuote) {
-                              inTripleQuote = true;
-                              // Split at the opening triple quotes
-                              const parts = content.split('"""');
-                              if (parts.length > 1) {
-                                const result = [];
-                                result.push(parts[0]); // Text before triple quotes
-                                result.push(`<span class="custom-highlight-yellow">"""${parts[1]}</span>`); // Opening quotes + content
+                            // Check if this token contains triple quotes
+                            if (content.includes('"""')) {
+                              // Count triple quotes in this token
+                              const tripleQuoteCount = (content.match(/"""/g) || []).length;
+                              
+                              // If we have an odd number of triple quotes, toggle the state
+                              if (tripleQuoteCount % 2 === 1) {
+                                inTripleQuote = !inTripleQuote;
+                              }
+                              
+                              // If we're inside a triple quote or this token contains triple quotes, highlight in yellow
+                              if (inTripleQuote || tripleQuoteCount > 0) {
                                 return (
-                                  <span key={key} dangerouslySetInnerHTML={{ __html: result.join('') }} />
+                                  <span key={key} style={{ color: '#E6DB74' }}>
+                                    {content}
+                                  </span>
                                 );
                               }
-                            }
-                            // Check if this token contains closing triple quotes
-                            else if (content.includes('"""') && inTripleQuote) {
-                              inTripleQuote = false;
-                              // Split at the closing triple quotes
-                              const parts = content.split('"""');
-                              if (parts.length > 1) {
-                                const result = [];
-                                result.push(`<span class="custom-highlight-yellow">${parts[0]}"""</span>`); // Content + closing quotes
-                                result.push(parts[1]); // Text after triple quotes
-                                return (
-                                  <span key={key} dangerouslySetInnerHTML={{ __html: result.join('') }} />
-                                );
-                              }
-                            }
-                            // If we're inside a triple-quoted string, make everything yellow
-                            else if (inTripleQuote) {
-                              return <span key={key} className="custom-highlight-yellow">{content}</span>;
+                            } else if (inTripleQuote) {
+                              // We're inside a triple quote but this token doesn't contain triple quotes
+                              return (
+                                <span key={key} style={{ color: '#E6DB74' }}>
+                                  {content}
+                                </span>
+                              );
                             }
                           }
                           
@@ -473,9 +555,56 @@ export default function CodeBlock(props) {
                           // --- f-string context check (early) ---
                           // Check if we're in an f-string context by looking at the entire line
                           const lineContent = line.map(token => getTokenProps({ token }).children).join('');
-                          if (lineContent.includes('f"') && typeof content === 'string' && content.includes('"') && content.trim() !== 'f') {
-                            // This is part of an f-string (but not the 'f' itself), make it yellow
-                            return <span key={key} className="custom-highlight-yellow">{content}</span>;
+                          // Try different f-string detection approaches
+                          const hasFString = lineContent.includes('f"') || lineContent.includes("f'") || 
+                                           (line.some(token => getTokenProps({ token }).children === 'f') && 
+                                            line.some(token => getTokenProps({ token }).children.includes('"')));
+                          
+                          // Check if this specific token contains f-string content
+                          const isFStringToken = hasFString && typeof content === 'string' && content.includes('"') && content.trim() !== 'f';
+
+                          if (isFStringToken) {
+                            // This is part of an f-string, process it to handle variables
+                            const stringContent = content.substring(1, content.length - 1); // Remove quotes
+                            
+                            // Check if there are any variables in the f-string
+                            if (stringContent.includes('{') && stringContent.includes('}')) {
+                              // There are variables, so we need to split and highlight appropriately
+                              const parts = [];
+                              let lastIndex = 0;
+                              
+                              // Find all {variable} patterns
+                              const variableRegex = /\{([^}]+)\}/g;
+                              let match;
+                              
+                              while ((match = variableRegex.exec(stringContent)) !== null) {
+                                console.log('🎯 DEBUG: Found variable match:', match[0], 'with content:', match[1]);
+                                // Add text before the variable in yellow
+                                if (match.index > lastIndex) {
+                                  const beforeText = stringContent.slice(lastIndex, match.index);
+                                  console.log('🎯 DEBUG: Adding beforeText:', beforeText);
+                                  parts.push(`<span class="custom-highlight-yellow">${beforeText}</span>`);
+                                }
+                                // Add the variable with yellow highlighting
+                                console.log('🎯 DEBUG: Adding variable:', `{${match[1]}}`);
+                                parts.push(`<span class="custom-highlight-yellow">{${match[1]}}</span>`);
+                                lastIndex = match.index + match[0].length;
+                              }
+                              
+                              // Add remaining text in yellow
+                              if (lastIndex < stringContent.length) {
+                                const remainingText = stringContent.slice(lastIndex);
+                                console.log('🎯 DEBUG: Adding remainingText:', remainingText);
+                                parts.push(`<span class="custom-highlight-yellow">${remainingText}</span>`);
+                              }
+                              
+                              return (
+                                <span key={key} dangerouslySetInnerHTML={{ __html: parts.join('') }} />
+                              );
+                            } else {
+                              // No variables, make the entire content yellow
+                              return <span key={key} className="custom-highlight-yellow">{content}</span>;
+                            }
                           }
                           // --- Regular string with variables logic ---
                           if (typeof content === 'string' && content.startsWith('"') && content.endsWith('"') && !lineContent.includes('f"')) {
@@ -738,7 +867,6 @@ export default function CodeBlock(props) {
                                   // Stop when we reach our current token
                                   if (lineIndex === i && tokenIndex === key) {
                                     if (openCount > closeCount) {
-                                      console.log('DEBUG: Making word orange:', content);
                                       return <span key={key} className="custom-highlight-orange">{content}</span>;
                                     }
                                     break;
@@ -756,7 +884,6 @@ export default function CodeBlock(props) {
                             const prevToken = key > 0 ? line[key - 1] : null;
                             const prevContent = prevToken ? getTokenProps({ token: prevToken }).children : '';
                             const fullParam = prevContent + content;
-                            console.log('DEBUG: Found =, checking if', fullParam, 'is inside parentheses');
                             
                             // Check if we're inside parentheses by looking at all tokens before this one
                             let openCount = 0;
@@ -770,9 +897,7 @@ export default function CodeBlock(props) {
                                 
                                 // Stop when we reach our current token
                                 if (lineIndex === i && tokenIndex === key) {
-                                  console.log('DEBUG: Reached current token, openCount:', openCount, 'closeCount:', closeCount);
                                   if (openCount > closeCount) {
-                                    console.log('DEBUG: Making orange:', fullParam);
                                     // Make the = pink (from highlight map) and return it
                                     return <span key={key} className="custom-highlight-pink">{content}</span>;
                                   }

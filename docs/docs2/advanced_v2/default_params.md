@@ -14,7 +14,7 @@ Default parameters in Timbal allow you to set predefined values that are automat
 Default parameters are defined when creating a runnable and are merged with runtime parameters:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Tool
+from timbal.core import Tool
 
 def analyze_data(data: str, method: str = "standard", threshold: float = 0.5):
     return f"Analyzed {data} using {method} with threshold {threshold}"
@@ -44,7 +44,7 @@ result = await tool(data="sample_data", method="simple").collect()
 Runtime parameters always override default parameters:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent
+from timbal.core import Agent
 
 # Agent with default parameters
 agent = Agent(
@@ -70,7 +70,7 @@ result = await agent(
 Default parameters can be computed dynamically using functions:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Tool
+from timbal.core import Tool
 from datetime import datetime
 
 def get_current_timestamp():
@@ -98,7 +98,7 @@ result = await tool(data="important_data").collect()
 Default parameters can be adapted based on execution context:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent
+from timbal.core import Agent
 from timbal.state import get_run_context
 
 async def context_aware_defaults(input_dict):
@@ -145,7 +145,7 @@ result = await agent(
 Default parameters can be set based on environment variables:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Tool
+from timbal.core import Tool
 import os
 
 def api_call(endpoint: str, api_key: str, timeout: int = 30):
@@ -170,7 +170,7 @@ result = await tool(endpoint="/data").collect()
 Default parameters can be set conditionally based on input:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Tool
+from timbal.core import Tool
 
 def process_image(image_data: str, format: str, quality: int = 90):
     return f"Processed image in {format} format with quality {quality}"
@@ -206,7 +206,7 @@ result = await tool(image_data="data:image/jpeg;base64,...").collect()
 Default parameters work with nested runnables:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent, Tool
+from timbal.core import Agent, Tool
 
 def search_tool(query: str, limit: int = 10, source: str = "web"):
     return f"Searching for '{query}' with limit {limit} from {source}"
@@ -249,7 +249,7 @@ result = await agent(
 Default parameters are validated against the handler's parameter model:
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Tool
+from timbal.core import Tool
 from timbal.types import Field
 
 def validated_function(
@@ -280,7 +280,7 @@ tool = Tool(
 ## Complete Example: Smart Default System
 
 <CodeBlock language="python" code={`
-from timbal.core_v2 import Agent, Tool
+from timbal.core import Agent, Tool
 from timbal.state import RunContext, get_run_context
 import os
 from datetime import datetime

@@ -17,7 +17,7 @@ Hooks are functions that receive mutable references and modify them in-place. No
 
 Pre-hooks execute before the main handler and can modify input parameters:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core import Tool
 from timbal.state import get_run_context
 
 async def pre_hook_example(input_dict):
@@ -53,7 +53,7 @@ result = await tool(text="Hello world").collect()
 
 Post-hooks execute after the main handler and can modify the output:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core import Tool
 
 async def post_hook_example(output):
     """Post-hook that modifies the output."""
@@ -86,7 +86,7 @@ result = await tool().collect()
 
 Hooks can access the run context to share data and make decisions:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Agent
+<CodeBlock language="python" code={`from timbal.core import Agent
 from timbal.state import get_run_context, RunContext
 
 async def context_aware_pre_hook(input_dict):
@@ -149,7 +149,7 @@ result = await agent(
 
 Pre-hooks are perfect for input validation and sanitization:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core import Tool
 import re
 
 async def validate_and_sanitize(input_dict):
@@ -202,7 +202,7 @@ result = await tool(
 
 Post-hooks are ideal for output transformation and formatting:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core import Tool
 import json
 
 async def format_output(output):
@@ -248,7 +248,7 @@ result = await tool(query="test").collect()`}/>
 
 Hooks can be used for performance monitoring and logging:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core import Tool
 from timbal.state import get_run_context
 import time
 
@@ -295,7 +295,7 @@ result = await tool(data="large dataset").collect()`}/>
 
 Hooks can implement conditional logic based on input or context:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Agent
+<CodeBlock language="python" code={`from timbal.core import Agent
 from timbal.state import get_run_context
 
 async def conditional_pre_hook(input_dict):
@@ -358,7 +358,7 @@ result = await agent(
 
 Hooks can implement custom error handling:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Tool
+<CodeBlock language="python" code={`from timbal.core import Tool
 
 async def error_handling_pre_hook(input_dict):
     """Pre-hook with error handling."""
@@ -411,7 +411,7 @@ result = await tool(
 
 ## Complete Example: Advanced Hook System
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Agent, Tool
+<CodeBlock language="python" code={`from timbal.core import Agent, Tool
 from timbal.state import RunContext, get_run_context
 import time
 import json

@@ -25,7 +25,7 @@ Agent's rewind functionality leverages the enhanced tracing system and automatic
 
 ## Basic Rewind Example
 
-<CodeBlock language="python" code ={`from timbal.core_v2 import Agent
+<CodeBlock language="python" code ={`from timbal.core import Agent
 from timbal.state import RunContext, set_run_context
 from timbal.types.message import Message
 

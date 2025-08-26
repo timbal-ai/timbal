@@ -46,7 +46,7 @@ Once you have your functions, you can use them in three ways:
 
 Functions are automatically wrapped as Tool instances:
 
-<CodeBlock language="python" code ={`from timbal.core_v2 import Agent
+<CodeBlock language="python" code ={`from timbal.core import Agent
 
 agent = Agent(
     name="helper_agent",
@@ -61,7 +61,7 @@ agent = Agent(
 
 For more control over tool behavior, create Tool instances explicitly:
 
-<CodeBlock language="python" code ={`from timbal.core_v2 import Tool
+<CodeBlock language="python" code ={`from timbal.core import Tool
 
 weather_tool = Tool(
     name="get_weather",  # Optional: auto-generated from function name if not provided

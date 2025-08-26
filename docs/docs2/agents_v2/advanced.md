@@ -18,7 +18,7 @@ Agent is built on the powerful Runnable base class, which provides a unified int
 
 ### Understanding Runnables
 
-<CodeBlock language="python" code ={`from timbal.core_v2 import Runnable, Agent, Tool
+<CodeBlock language="python" code ={`from timbal.core import Runnable, Agent, Tool
 
 # All of these are Runnables:
 agent = Agent(name="my_agent", model="gpt-4")
@@ -319,7 +319,7 @@ class ProfilingAgent(Agent):
 
 ### Custom LLM Routers
 
-<CodeBlock language="python" code ={`from timbal.core_v2.handlers.llm_router import llm_router
+<CodeBlock language="python" code ={`from timbal.core.handlers.llm_router import llm_router
 
 class CustomAgent(Agent):
     def model_post_init(self, __context):
@@ -407,7 +407,7 @@ content_agent = SpecializedAgent(
 ### Agent Testing
 
 <CodeBlock language="python" code ={`import pytest
-from timbal.core_v2 import Agent, Tool
+from timbal.core import Agent, Tool
 from timbal.types.message import Message
 
 @pytest.mark.asyncio

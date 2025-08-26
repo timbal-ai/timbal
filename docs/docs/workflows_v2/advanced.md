@@ -24,7 +24,7 @@ You can use a workflow as a step inside another workflow, enabling modular, reus
 
 Suppose you want to process incoming orders by first validating them and then confirming them. You can define a reusable subworkflow for validation and use it in your main workflow.
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 
 def validate_order(order: dict) -> dict:
     # Simulate checking if the order is valid
@@ -66,7 +66,7 @@ Workflows can integrate with tools (functions or APIs) as part of their executio
 
 ### Example: Workflow with External API Tools
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow, Tool
+<CodeBlock language="python" code={`from timbal.core import Workflow, Tool
 
 def get_weather(city: str) -> str:
     # Simulate a weather API call 

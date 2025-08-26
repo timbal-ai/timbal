@@ -20,7 +20,7 @@ The Workflow class is currently under development and not fully implemented. The
 
 A **Workflow** is a programmable pipeline that lets you chain together steps—functions, LLMs, or even other workflows—while controlling how data moves between them. Workflows enable you to build complex, intelligent pipelines with clear logic, memory, and branching.
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 
 workflow = Workflow(name="my_workflow")`}/>
 
@@ -78,7 +78,7 @@ Workflows use the `.add_step()` method to add steps. Each step can be:
 
 ### Adding Function Steps
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 
 def celsius_to_fahrenheit(celsius: float) -> float:
     return celsius * 9 / 5 + 32
@@ -97,7 +97,7 @@ workflow = (
 
 ### Adding Tool Steps
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow, Tool
+<CodeBlock language="python" code={`from timbal.core import Workflow, Tool
 
 def get_weather(city: str) -> str:
     return f"The weather in {city} is sunny and 25°C."
@@ -163,8 +163,8 @@ You can override automatic data flow with fixed parameters:
 
 You can add LLMs as steps in your workflow using the LLM handlers:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
-from timbal.core_v2.handlers import llm_router
+<CodeBlock language="python" code={`from timbal.core import Workflow
+from timbal.core.handlers import llm_router
 
 def get_email() -> str:
     return "Hi team, let's meet tomorrow at 10am to discuss the project. Best, Alice"
@@ -193,7 +193,7 @@ print(result.output)`}/>
 
 ## Example: Complete Temperature Alert Workflow
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 
 def get_temperature() -> float:
     return 35.0

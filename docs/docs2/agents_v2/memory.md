@@ -31,111 +31,48 @@ Agent handles memory through two primary mechanisms:
 1. **Automatic Memory Resolution**: When agents are nested (used as tools by other agents), they automatically inherit conversation history
 2. **Explicit State Management**: Memory is persistent across agent calls within the same execution session.
 
-## Real-World Problem Solutions
+### Example 1: Simple conversation memory
 
-### Problem 1: Customer Support Context Loss
+<CodeBlock language="python" code ={`from timbal.core import Agent
 
-**Challenge:** Customer support agents need to remember previous interactions, user preferences, and issue history.
-
-**Solution:** Persistent conversation memory with user context
-
-<CodeBlock language="python" code ={`
-from timbal.core_v2 import Agent
-from timbal.state import RunContext
-from timbal.types.message import Message
-
-# Create a customer support agent with memory
-support_agent = Agent(
-    name="customer_support",
+# Agents automatically maintain conversation memory
+agent = Agent(
+    name="chatbot",
     model="anthropic/claude-3-sonnet",
-    system_prompt="""You are a customer support agent. Remember customer information and conversation history.
-    Always refer to previous interactions when relevant."""
 )
 
-async def handle_customer_request(user_id: str, message: str):
-    # Create or retrieve user context
-    context = RunContext()
-    context.data['user_id'] = user_id
-    context.data['session_start'] = datetime.now().isoformat()
-    
-    # Load previous conversation history for this user
-    previous_history = load_user_conversation_history(user_id)
-    if previous_history:
-        context.data['conversation_history'] = previous_history
-    
-    # Process the request with full context
-    result = await support_agent(
-        prompt=Message(role="user", content=message),
-        context=context
-    ).collect()
-    
-    # Save the updated conversation history
-    save_user_conversation_history(user_id, result.messages)
-    
-    return result.output.content[0].text
+# First message
+result1 = await agent("My name is John").collect()
 
-# Example usage
-response1 = await handle_customer_request("user123", "My name is Alice and I'm having trouble with my account")
-response2 = await handle_customer_request("user123", "Can you help me reset my password?")
-# The agent remembers Alice's name and account issues from the previous interaction
-`}/>
+# Second message - agent remembers John's name
+result2 = await agent("What's my name?").collect()
 
-### Problem 2: Multi-Step Workflow Context
+# Agent responds: "Your name is John"`}/>
 
-**Challenge:** Complex workflows require maintaining state across multiple steps and agent interactions.
+Complex workflows require maintaining state across multiple steps and agent interactions. -> Workflow state management with automatic context passing
 
-**Solution:** Workflow state management with automatic context passing
+### Example 2: Multi-Step Workflow Context
 
-<CodeBlock language="python" code ={`
-from timbal.core_v2 import Agent, Flow
-from timbal.state import RunContext
+<CodeBlock language="python" code ={`from timbal.core import Agent
 
-# Define specialized agents for different workflow steps
-data_analyst = Agent(
-    name="data_analyst",
+# Specialized agent for code review with development tools
+code_reviewer = Agent(
+    name="code_reviewer",
     model="anthropic/claude-3-sonnet",
-    system_prompt="You are a data analyst. Use previous analysis results when available."
+    tools=["git", "linter", "security_scanner"],
+    system_prompt="You are a senior developer. Review code for quality, security, and best practices."
 )
 
-report_writer = Agent(
-    name="report_writer", 
-    model="openai/gpt-4",
-    system_prompt="You are a report writer. Build on previous analysis and maintain consistency."
-)
-
-# Coordinator agent that manages the workflow
-coordinator = Agent(
-    name="workflow_coordinator",
+# General AI assistant with code reviewer as a tool
+assistant = Agent(
+    name="assistant",
     model="anthropic/claude-3-sonnet",
-    tools=[data_analyst, report_writer],
-    system_prompt="Coordinate analysis and reporting workflows. Maintain context across steps."
+    tools=[code_reviewer, "web_search", "file_reader"],
+    system_prompt="You are a helpful AI assistant. Use specialized agents for complex tasks."
 )
 
-async def run_analysis_workflow(data_file: str, user_preferences: dict):
-    # Create workflow context
-    context = RunContext()
-    context.data['workflow_type'] = 'data_analysis'
-    context.data['data_file'] = data_file
-    context.data['user_preferences'] = user_preferences
-    context.data['workflow_start'] = datetime.now().isoformat()
-    
-    # Step 1: Data analysis
-    analysis_result = await coordinator(
-        prompt=f"Analyze the data in {data_file} according to user preferences: {user_preferences}",
-        context=context
-    ).collect()
-    
-    # Step 2: Report generation (context automatically passed)
-    report_result = await coordinator(
-        prompt="Generate a comprehensive report based on the analysis",
-        context=context
-    ).collect()
-    
-    return {
-        'analysis': analysis_result.output.content[0].text,
-        'report': report_result.output.content[0].text
-    }
-`}/>
+# Assistant delegates code review to specialized agent
+result = await assistant("Review this Python code for security vulnerabilities and suggest improvements").collect()`}/>
 
 ### Problem 3: User Preference Management
 
@@ -144,7 +81,7 @@ async def run_analysis_workflow(data_file: str, user_preferences: dict):
 **Solution:** Context-aware default parameters with user preferences
 
 <CodeBlock language="python" code ={`
-from timbal.core_v2 import Agent
+from timbal.core import Agent
 from timbal.state import RunContext
 
 async def user_preference_hook(input_dict):
@@ -199,7 +136,7 @@ async def handle_user_request(user_id: str, message: str):
 The most powerful feature of Agent is automatic memory resolution for nested agents:
 
 <CodeBlock language="python" code ={`
-from timbal.core_v2 import Agent
+from timbal.core import Agent
 from timbal.types.message import Message
 
 # Define a child agent that analyzes data
@@ -248,7 +185,7 @@ When a child agent is called as a tool:
 For persistent memory across separate sessions, use RunContext:
 
 <CodeBlock language="python" code ={`
-from timbal.core_v2 import Agent
+from timbal.core import Agent
 from timbal.state import RunContext
 from timbal.types.message import Message
 
@@ -284,7 +221,7 @@ print(result2.output)  # Should remember Alice lives in Paris
 **Solution:** Conversation summarization and context compression
 
 <CodeBlock language="python" code ={`
-from timbal.core_v2 import Agent
+from timbal.core import Agent
 from timbal.state import RunContext
 
 async def summarize_conversation_hook(input_dict):
@@ -322,7 +259,7 @@ long_conversation_agent = Agent(
 **Solution:** Session-based context management
 
 <CodeBlock language="python" code ={`
-from timbal.core_v2 import Agent
+from timbal.core import Agent
 from timbal.state import RunContext
 import asyncio
 from typing import Dict

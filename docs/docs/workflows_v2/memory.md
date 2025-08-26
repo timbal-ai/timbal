@@ -31,7 +31,7 @@ Workflows can maintain state across executions using the state management system
 
 The primary way to manage state in workflows is through the run context, which is automatically available to all steps.
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 from timbal.state import get_run_context
 
 def counter_step() -> int:
@@ -65,7 +65,7 @@ For more advanced state management, you can use state savers to persist workflow
 
 ### In-Memory State Saver
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 from timbal.state.savers import InMemorySaver
 
 def user_preference_step() -> str:
@@ -91,7 +91,7 @@ async def main():
 
 ### File-Based State Saver
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 from timbal.state.savers import JSONLSaver
 
 def session_tracker() -> dict:
@@ -117,7 +117,7 @@ async def main():
 
 For conversational workflows, you can maintain conversation history and context:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 from timbal.state import get_run_context
 
 def chat_step(user_message: str) -> str:
@@ -158,7 +158,7 @@ async def main():
 
 You can create isolated state contexts for different workflow instances:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 from timbal.state import get_run_context
 
 def user_session_step(user_id: str) -> dict:
@@ -189,7 +189,7 @@ async def main():
 
 State management also helps with debugging workflows:
 
-<CodeBlock language="python" code={`from timbal.core_v2 import Workflow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 from timbal.state import get_run_context
 
 def debug_step(data: dict) -> dict:
