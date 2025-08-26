@@ -44,5 +44,6 @@ class PlatformTracingProvider(TracingProvider):
         res_json = res.json()
         # We'll need to update the run_context id with the one returned by the platform,
         # so we can link run ids with parent ids in subsequent runs
+        # ? We'll have the logs with the auto-generated ids, but they will be persisted with different ones
         if "run_id" in res_json:
             run_context.id = res_json["run_id"]

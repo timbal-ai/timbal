@@ -6,16 +6,11 @@ import os
 import sys
 from pathlib import Path
 
-import structlog
 from dotenv import load_dotenv
 
 from .. import __version__
 from ..core.runnable import Runnable
-from ..logs import setup_logging
 from ..utils import ImportSpec
-
-logger = structlog.get_logger("timbal.server.probe")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Timbal probe script.")
@@ -37,6 +32,7 @@ if __name__ == "__main__":
         print(f"timbal.server.http {__version__}", file=sys.stderr) # noqa: T201
         sys.exit(0)
 
+    load_dotenv()
     # We can overwrite the env configuration with the --import_spec flag
     import_spec = args.import_spec
     if not import_spec:
@@ -44,7 +40,7 @@ if __name__ == "__main__":
         if not import_spec:
             import_spec = os.getenv("TIMBAL_FLOW") # Legacy
             if import_spec:
-                logger.warning("TIMBAL_FLOW environment variable is deprecated. Please use TIMBAL_RUNNABLE instead.")
+                print("TIMBAL_FLOW environment variable is deprecated. Please use TIMBAL_RUNNABLE instead.", file=sys.stderr) # noqa: T201
 
     if not import_spec:
         print("No import spec provided. Set TIMBAL_RUNNABLE env variable or use --import_spec to specify a module to load.", file=sys.stderr) # noqa: T201
@@ -59,9 +55,6 @@ if __name__ == "__main__":
         path=Path(import_path).expanduser().resolve(), 
         target=import_target,
     )
-
-    load_dotenv()
-    setup_logging()
 
     redirect = io.StringIO()
     with contextlib.redirect_stdout(redirect):
