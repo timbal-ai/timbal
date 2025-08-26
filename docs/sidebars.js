@@ -1,7 +1,5 @@
 // @ts-check
 
-// This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
-
 /**
  * Creating a sidebar enables you to:
  - create an ordered group of docs
@@ -14,14 +12,19 @@
 
  @type {import('@docusaurus/plugin-content-docs').SidebarsConfig}
  */
- const sidebars = {
+const sidebars = {
   docsSidebar: [
     'introduction/index',
     {
       type: 'category',
       collapsed: false,
       label: 'Getting Started',
-      items: ['getting-started/installation', 'getting-started/quickstart', 'getting-started/cursor', 'getting-started/model_capabilities'],
+      items: [
+        'getting-started/installation',
+        'getting-started/quickstart',
+        'getting-started/cursor',
+        'getting-started/model_capabilities',
+      ],
     },
     {
       type: 'category',
@@ -35,7 +38,7 @@
         'agents/voice',
         'agents/evals',
         'agents/advanced',
-    ],
+      ],
     },
     {
       type: 'category',
@@ -45,9 +48,8 @@
         'workflows/index',
         'workflows/memory',
         'workflows/advanced',
-    ],
+      ],
     },
-
     {
       type: 'category',
       collapsed: false,
@@ -62,24 +64,50 @@
         'kb/index',
         'kb/tables',
         'kb/indexes',
-        'kb/embeddings'
-    ],
+        'kb/embeddings',
+      ],
     },
     {
       type: 'category',
       collapsed: false,
       label: 'Integrations',
-      items: ['integrations/index', 'integrations/elevenlabs', 'integrations/perplexity', 'integrations/twilio', 'integrations/gmail', 'integrations/sharepoint', 'integrations/fal'],
-    }
-  ],
-  examplesSidebar: [
+      items: [
+        'integrations/index',
+        'integrations/elevenlabs',
+        'integrations/perplexity',
+        'integrations/twilio',
+        'integrations/gmail',
+        'integrations/sharepoint',
+        'integrations/fal',
+      ],
+    },
     {
       type: 'category',
       collapsed: false,
-      label: 'Timbal Examples',
-      items: ['examples/index', 'examples/healthcare', 'examples/automotive', 'examples/design', 'examples/tourism', 'examples/financials', 'examples/ecommerce', 'examples/industry', 'examples/real-estate', 'examples/education', 'examples/legal', 'examples/transport', 'examples/media'],
-    }
+      label: 'Examples',
+      items: [
+        'examples/index',
+        'examples/healthcare',
+        'examples/automotive',
+        'examples/design',
+        'examples/tourism',
+        'examples/financials',
+        'examples/ecommerce',
+        'examples/industry',
+        'examples/real-estate',
+        'examples/education',
+        'examples/legal',
+        'examples/transport',
+        'examples/media',
+      ],
+    },
+    {
+      type: 'category',
+      collapsed: false,
+      label: 'Releases',
+      items: ['releases/index'],
+    },
   ],
 };
 
-export default sidebars;
+module.exports = sidebars;

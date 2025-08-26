@@ -1,6 +1,6 @@
 ---
 title: ElevenLabs
-sidebar: 'docsSidebar'
+sidebar: 'docsSidebar_v2'
 description: 'Integrate ElevenLabs speech-to-text and text-to-speech capabilities into your Timbal workflows'
 ---
 

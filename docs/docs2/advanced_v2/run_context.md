@@ -1,6 +1,6 @@
 ---
 title: Run Context and Data Sharing
-sidebar: 'docsSidebar'
+sidebar: 'docsSidebar_v2'
 ---
 
 import CodeBlock from '@site/src/theme/CodeBlock';

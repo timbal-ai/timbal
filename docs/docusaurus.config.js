@@ -64,6 +64,17 @@ const config = {
       }),
     ],
   ],
+  plugins: [
+    [
+      '@docusaurus/plugin-content-docs',
+      {
+        id: 'docs2',  // Second docs section
+        path: 'docs2',
+        routeBasePath: 'docs2',
+        sidebarPath: './sidebars-v2.js',
+      },
+    ],
+  ],
 
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
@@ -81,6 +92,7 @@ const config = {
         },
         items: [
           { to: '/introduction', label: 'Docs', position: 'left' },
+          { to: '/docs2/introduction_v2', label: 'Docs v2', position: 'left' },
           //{ to: '/platform', label: 'Platform', position: 'left' },
           // { to: '/examples', label: 'Examples', position: 'left' },
           // { to: '/releases', label: 'Releases', position: 'left' },

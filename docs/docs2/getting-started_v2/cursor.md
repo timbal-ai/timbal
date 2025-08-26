@@ -1,5 +1,5 @@
 ---
 title: Using with Cursor/Windsurf
-sidebar: 'docsSidebar'
+sidebar: 'docsSidebar_v2'
 draft: true
 ---

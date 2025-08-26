@@ -1,6 +1,6 @@
 ---
 title: Gmail
-sidebar: 'docsSidebar'
+sidebar: 'docsSidebar_v2'
 ---
 
 import CodeBlock from '@site/src/theme/CodeBlock';
