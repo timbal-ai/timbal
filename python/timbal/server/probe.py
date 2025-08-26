@@ -29,10 +29,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.version:
-        print(f"timbal.server.http {__version__}", file=sys.stderr) # noqa: T201
+        print(f"timbal.server.probe {__version__}", file=sys.stderr) # noqa: T201
         sys.exit(0)
 
     load_dotenv()
+
     # We can overwrite the env configuration with the --import_spec flag
     import_spec = args.import_spec
     if not import_spec:

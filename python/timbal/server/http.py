@@ -10,14 +10,14 @@ from pathlib import Path
 
 import structlog
 import uvicorn
-from dotenv import find_dotenv, load_dotenv
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
 from ..logs import setup_logging
 from ..state import RunContext, set_run_context
-from .utils import ModuleSpec, is_port_in_use, load_module
+from ..utils import ImportSpec, is_port_in_use
 
 logger = structlog.get_logger("timbal.server.http")
 
@@ -25,28 +25,27 @@ logger = structlog.get_logger("timbal.server.http")
 @asynccontextmanager
 async def lifespan(
     app: FastAPI,
-    module_spec: ModuleSpec,
+    import_spec: ImportSpec,
 ) -> AsyncGenerator[None, None]:
     """Manages the lifecycle of the FastAPI application.
 
     This context manager handles the setup and teardown of the application,
-    including loading the specified Python module and its object.
+    including loading the specified Python module and its runnable object.
 
     Args:
         app: The FastAPI application instance.
-        module_spec: A tuple containing (Path to Python module, Optional object name).
-                     If object name is provided, it will be loaded from the module
-                     and set as app.state.flow.
+        import_spec: ImportSpec containing the path to Python module and target object name.
+                     The loaded object will be set as app.state.runnable.
 
     Raises:
         ValueError: If the module or specified object cannot be loaded.
-        NotImplementedError: If no object name is specified (currently unsupported).
+        ImportError: If the module cannot be imported.
+        AttributeError: If the target object does not exist in the module.
     """
     # ? Any additional setup
 
-    logger.info("loading_module", module_spec=module_spec)
-    
-    app.state.flow = load_module(module_spec)
+    logger.info("loading_runnable", import_spec=import_spec)
+    app.state.runnable = import_spec.load()
     
     yield
     
@@ -54,19 +53,23 @@ async def lifespan(
 
 
 def create_app(
-    module_spec: ModuleSpec, 
+    import_spec: ImportSpec, 
     shutdown_event: asyncio.Event,
 ) -> FastAPI:
-    """HTTP server implementation for Timbal.
+    """Creates a FastAPI application for the Timbal HTTP server.
 
-    This module provides the HTTP server implementation for running Timbal flows over a REST API.
-    It handles module loading, parameter validation, and flow execution.
+    This function creates a FastAPI application with endpoints for running Timbal
+    runnables (tools, agents, workflows) over a REST API. It handles module loading,
+    parameter validation, runnable execution, and streaming responses.
 
     Args:
-        module_spec: Path to the flow module and object name.
-        shutdown_event: Event to signal shutdown.
+        import_spec: ImportSpec containing the path to Python module and target object name.
+        shutdown_event: Asyncio event to signal graceful shutdown.
+
+    Returns:
+        FastAPI: Configured FastAPI application with all endpoints.
     """
-    app = FastAPI(lifespan=lambda app: lifespan(app, module_spec))
+    app = FastAPI(lifespan=lambda app: lifespan(app, import_spec))
 
 
     @app.get("/healthcheck")
@@ -82,7 +85,7 @@ def create_app(
 
     @app.get("/params_model_schema")
     async def params_model_schema() -> Response:
-        params_model_schema = app.state.flow.params_model_schema()
+        params_model_schema = app.state.runnable.params_model_schema
         return JSONResponse(
             status_code=200,
             content=params_model_schema,
@@ -91,7 +94,7 @@ def create_app(
 
     @app.get("/return_model_schema")
     async def return_model_schema() -> Response:
-        return_model_schema = app.state.flow.return_model_schema()
+        return_model_schema = app.state.runnable.return_model_schema
         return JSONResponse(
             status_code=200,
             content=return_model_schema,
@@ -101,15 +104,14 @@ def create_app(
     @app.post("/run")
     async def run(req: Request) -> Response:
         req_data = await req.json()
-        req_context = req_data.pop("context", None)
-        if req_context is not None:
-            req_context = RunContext.model_validate(req_context)
-        else:
-            req_context = RunContext()
-        set_run_context(req_context)
+        run_context = req_data.pop("context", None)
+        if run_context is None:
+            run_context = req_data.pop("run_context", None)
+        if run_context is not None:
+            run_context = RunContext.model_validate(run_context)
+            set_run_context(run_context)
 
-        res_content = await app.state.flow.complete(**req_data)
-
+        res_content = await app.state.runnable(**req_data).collect()
         return JSONResponse(
             status_code=200,
             content=res_content.dump,
@@ -119,16 +121,16 @@ def create_app(
     @app.post("/stream")
     async def stream(req: Request) -> Response:
         req_data = await req.json()
-        req_context = req_data.pop("context", None)
-        if req_context is not None:
-            req_context = RunContext.model_validate(req_context)
-        else:
-            req_context = RunContext()
-        set_run_context(req_context)
+        run_context = req_data.pop("context", None)
+        if run_context is None:
+            run_context = req_data.pop("run_context", None)
+        if run_context is not None:
+            run_context = RunContext.model_validate(run_context)
+            set_run_context(run_context)
 
         # TODO Study if we need to filter these. Or if we need to add something to indicate chunks are for the response.
         async def event_streamer() -> AsyncGenerator[str, None]:
-            async for event in app.state.flow.run(**req_data):
+            async for event in app.state.runnable(**req_data):
                 # Format as SSE message: data: <json_string>\n\n
                 yield f"data: {json.dumps(event.dump)}\n\n"
 
@@ -142,24 +144,27 @@ async def main(
     host: str,
     port: int,
     workers: int,
-    module_spec: ModuleSpec,
+    import_spec: ImportSpec,
 ) -> None:
     """Runs the HTTP server with the specified configuration.
 
-    Sets up a FastAPI application with healthcheck, shutdown, and run endpoints.
-    Handles graceful shutdown on SIGTERM and SIGINT signals.
+    Sets up a FastAPI application with healthcheck, shutdown, run, and stream endpoints.
+    Handles graceful shutdown on SIGTERM and SIGINT signals. Optionally enables
+    ngrok tunneling for public access.
 
     Args:
-        host: The hostname to bind the server to.
+        host: The hostname to bind the server to (e.g., '0.0.0.0', '127.0.0.1').
         port: The port number to listen on.
         workers: Number of worker processes to spawn.
-        module_spec: A tuple containing (Path to Python module, Optional object name).
-                     If object name is provided, it will be loaded from the module
-                     and set as app.state.flow.
+        import_spec: ImportSpec containing the path to Python module and target object name.
+                     The loaded object will be set as app.state.runnable.
+
+    Raises:
+        Exception: If server startup fails or runnable loading fails.
     """
     shutdown_event = asyncio.Event()
 
-    app = create_app(module_spec, shutdown_event)
+    app = create_app(import_spec, shutdown_event)
 
     if os.getenv("TIMBAL_ENABLE_NGROK", "false").lower() == "true":
         from pyngrok import ngrok
@@ -197,8 +202,8 @@ if __name__ == "__main__":
         help="Show version and exit."
     )
     parser.add_argument(
-        "--module_spec",
-        dest="module_spec",
+        "--import_spec",
+        dest="import_spec",
         type=str,
         help="Path to a python module and optional object (format: path/to/file.py::object_name)",
     )
@@ -226,41 +231,38 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.version:
-        print(f"timbal.servers.http {__version__}") # noqa: T201
+        print(f"timbal.server.http {__version__}") # noqa: T201
         sys.exit(0)
 
-    # We can overwrite the env TIMBAL_FLOW variable with the --module_spec flag.
-    module_spec = args.module_spec
-    if not module_spec:
-        module_spec = os.getenv("TIMBAL_FLOW")
+    load_dotenv()
+    setup_logging()
 
-    if not module_spec:
-        print("No module spec provided. Set TIMBAL_FLOW env variable or use --module_spec to specify a module to load.") # noqa: T201
+    # We can overwrite the env configuration with the --import_spec flag
+    import_spec = args.import_spec
+    if not import_spec:
+        import_spec = os.getenv("TIMBAL_RUNNABLE")
+        if not import_spec:
+            import_spec = os.getenv("TIMBAL_FLOW") # Legacy
+            if import_spec:
+                print("TIMBAL_FLOW environment variable is deprecated. Please use TIMBAL_RUNNABLE instead.", file=sys.stderr) # noqa: T201
+
+    if not import_spec:
+        print("No import spec provided. Set TIMBAL_RUNNABLE env variable or use --import_spec to specify a module to load.", file=sys.stderr) # noqa: T201
         sys.exit(1)
 
-    module_parts = module_spec.split(":")
-    if len(module_parts) > 2:
-        print("Invalid module spec format. Use 'path/to/file.py:object_name' or 'path/to/file.py'") # noqa: T201
+    import_parts = import_spec.split("::")
+    if len(import_parts) != 2:
+        print("Invalid import spec format. Use 'path/to/file.py::object_name' or 'path/to/file.py'", file=sys.stderr) # noqa: T201
         sys.exit(1)
-    elif len(module_parts) == 2:
-        module_path, module_name = module_parts
-        module_spec = ModuleSpec(
-            path=Path(module_path).expanduser().resolve(), 
-            object_name=module_name,
-        )
-    else:
-        module_spec = ModuleSpec(
-            path=Path(module_parts[0]).expanduser().resolve(), 
-            object_name=None,
-        )
+    import_path, import_target = import_parts
+    import_spec = ImportSpec(
+        path=Path(import_path).expanduser().resolve(), 
+        target=import_target,
+    )
 
     if is_port_in_use(args.port):
         print(f"Port {args.port} is already in use. Please use a different port.") # noqa: T201
         sys.exit(1)
-
-    logger.info("loading_dotenv", path=find_dotenv())
-    load_dotenv(override=True)
-    setup_logging()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -270,7 +272,7 @@ if __name__ == "__main__":
             host=args.host, 
             port=args.port,
             workers=args.workers,
-            module_spec=module_spec,
+            import_spec=import_spec,
         ))
     except Exception as e:
         logger.error("server_stopped", error=str(e))
