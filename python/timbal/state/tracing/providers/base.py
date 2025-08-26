@@ -12,11 +12,11 @@ class TracingProvider(ABC):
     
     @classmethod
     @abstractmethod
-    async def get(cls, run_id: str) -> Tracing | None:
-        """Retrieve trace data for a specific run_id.
+    async def get(cls, run_context: "RunContext") -> Tracing | None:
+        """Retrieve the parent run's tracing data.
         
         Args:
-            run_id: The run identifier to retrieve trace data for
+            run_context: The run context to retrieve tracing data for
 
         Returns:
             Tracing data or None if not found
@@ -26,9 +26,9 @@ class TracingProvider(ABC):
     @classmethod
     @abstractmethod
     async def put(cls, run_context: "RunContext") -> None:
-        """Store trace data for a run.
+        """Store the tracing data for a run.
         
         Args:
-            run_context: The run context to store trace data for
+            run_context: The run context to store tracing data for
         """
         pass

@@ -44,9 +44,9 @@ class PlatformAuth(BaseModel):
 class PlatformSubject(BaseModel):
     """Contains identifiers to the platform resource the run context applies to."""
 
-    org_id: str | None = None
+    org_id: str
     """Organization identifier."""
-    app_id: str | None = None
+    app_id: str
     """Application identifier."""
     version_id: str | None = None
     """Application version identifier."""

@@ -7,7 +7,7 @@ from uuid_extensions import uuid7
 
 from .config import PlatformConfig
 from .tracing import Tracing
-from .tracing.providers import InMemoryTracingProvider, TracingProvider
+from .tracing.providers import InMemoryTracingProvider, PlatformTracingProvider, TracingProvider
 
 logger = structlog.get_logger("timbal.state.context")
 
@@ -38,10 +38,6 @@ class RunContext(BaseModel):
         None,
         description="Whether this run is a direct child of another run.",
     )
-    idempotency_key: str | None = Field(
-        None,
-        description="Idempotency key for the run.",
-    )
     platform_config: PlatformConfig | None = Field(
         None,
         description="Platform configuration for the run.",
@@ -66,26 +62,50 @@ class RunContext(BaseModel):
         
         If no platform_config is provided, attempts to resolve it from the environment.
         """
-        # Resolve platform config from environment if not provided
+        # Resolve platform config from environment if not provided at initialization
         if not self.platform_config:
             host = os.getenv("TIMBAL_API_HOST")
             if host:
                 token = os.getenv("TIMBAL_API_KEY") or os.getenv("TIMBAL_API_TOKEN")
                 if token:
+                    auth = {
+                        "type": "bearer",
+                        "token": token
+                    }
+                    subject = None
+                    org_id = os.getenv("TIMBAL_ORG_ID")
+                    app_id = os.getenv("TIMBAL_APP_ID")
+                    if org_id and app_id:
+                        version_id = os.getenv("TIMBAL_VERSION_ID")
+                        subject = {
+                            "org_id": org_id,
+                            "app_id": app_id,
+                            "version_id": version_id
+                        }
                     self.platform_config = PlatformConfig.model_validate({
                         "host": host,
-                        "auth": {
-                            "type": "bearer",
-                            "token": token
-                        }
+                        "auth": auth,
+                        "subject": subject
                     })
-        
         # TODO Enable custom providers
-        # TODO Enable platform provider
-        logger.warning(
-            "Neither custom tracing provider nor platform config found. "
-            "Using in-memory tracing provider.",
-            run_id=self.id,
+        if self.platform_config:
+            if not self.platform_config.subject:
+                logger.warning(
+                    "Platform configuration found but no subject. "
+                    "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID environment variables to enable platform tracing.", 
+                    run_id=self.id,
+                )
+            else:
+                logger.info(
+                    f"Platform configuration found (subject: {self.platform_config.subject}). "
+                    "Using platform tracing provider.", 
+                    run_id=self.id
+                )
+                self._tracing_provider = PlatformTracingProvider
+                return
+        logger.info(
+            "Using in-memory tracing provider.", 
+            run_id=self.id
         )
         self._tracing_provider = InMemoryTracingProvider
 
@@ -101,7 +121,7 @@ class RunContext(BaseModel):
             The parent run's tracing data, or None if this is a root run.
         """
         if self.parent_id:
-            return await self._tracing_provider.get(self.parent_id)
+            return await self._tracing_provider.get(self)
         return None
 
 

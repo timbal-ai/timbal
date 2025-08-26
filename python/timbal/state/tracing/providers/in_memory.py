@@ -15,9 +15,9 @@ class InMemoryTracingProvider(TracingProvider):
     
     @classmethod
     @override
-    async def get(cls, run_id: str) -> Tracing | None:
+    async def get(cls, run_context: "RunContext") -> Tracing | None:
         """See base class."""
-        return cls._storage.get(run_id)
+        return cls._storage.get(run_context.parent_id)
     
     @classmethod
     @override

@@ -44,6 +44,10 @@ class Tracing(UserDict):
 
         super().__setitem__(key, value)
 
+    def model_dump(self) -> list[dict[str, Any]]:
+        """Returns a list of tracing record references ready for serialization."""
+        return [trace.model_dump() for trace in self.data.values()]
+
     def as_records(self) -> list[Trace]:
         """Returns a list of tracing record references."""
         return list(self.data.values())
