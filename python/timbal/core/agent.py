@@ -70,6 +70,8 @@ class Agent(Runnable):
     """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
+    model_params: dict[str, Any] = {}
+    """Model parameters to pass to the agent."""
 
     _llm: Tool = PrivateAttr()
     """Internal LLM tool instance for making model calls."""
@@ -149,10 +151,14 @@ class Agent(Runnable):
                     "is_coroutine": inspect.iscoroutinefunction(fn),
                 }
         
+        if self.model.startswith("anthropic"):
+            if not self.model_params.get("max_tokens"):
+                raise ValueError("'max_tokens' is required for claude models.")
         # Create internal LLM tool for model interactions
         self._llm = Tool(
             name="llm",
             handler=llm_router,
+            default_params=self.model_params,
         )
         self._llm.nest(self._path)
 

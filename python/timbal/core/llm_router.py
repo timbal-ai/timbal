@@ -13,51 +13,54 @@ from .runnable import Runnable
 # Model type with provider prefixes
 Model = Literal[
     # OpenAI models
+    "openai/gpt-5",
+    "openai/gpt-5-mini",
+    "openai/gpt-5-nano",
     "openai/gpt-4.1",
     "openai/gpt-4.1-mini",
     "openai/gpt-4.1-nano",
     "openai/gpt-4o",
-    "openai/gpt-4o-mini", 
+    "openai/gpt-4o-mini",
+    "openai/gpt-4-turbo",
     "openai/o1",
-    "openai/o1-mini",
+    "openai/o1-pro",
+    "openai/o3",
     "openai/o3-mini",
-    "openai/gpt-5",
-    "openai/gpt-5-mini",
-    "openai/gpt-5-nano",
+    "openai/o3-pro",
+    "openai/o3-deep-research",
+    "openai/o4-mini",
+    "openai/o4-mini-deep-research",
+    "openai/gpt-4o-audio-preview",
+    "openai/gpt-4o-mini-audio-preview",
     # Anthropic models
-    "anthropic/claude-sonnet-4-20250514",
-    "anthropic/claude-opus-4-20250514",
-    "anthropic/claude-opus-4-1-20250805",
-    "anthropic/claude-3-5-sonnet-20241022",
-    "anthropic/claude-3-5-haiku-20241022", 
-    "anthropic/claude-3-opus-20240229",
-    "anthropic/claude-3-sonnet-20240229",
-    "anthropic/claude-3-haiku-20240307",
+    "anthropic/claude-opus-4-latest",
+    "anthropic/claude-sonnet-4-latest",
+    "anthropic/claude-3-7-sonnet-latest",
+    "anthropic/claude-3-5-sonnet-latest",
+    "anthropic/claude-3-5-haiku-latest",
     # TogetherAI models
-    "togetherai/deepseek-ai/DeepSeek-R1",
-    "togetherai/deepseek-ai/DeepSeek-V3",
-    "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    "togetherai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
-    "togetherai/meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo",
-    "togetherai/meta-llama/Meta-Llama-3.2-3B-Instruct-Turbo",
-    "togetherai/Qwen/Qwen2.5-Coder-32B-Instruct",
-    "togetherai/Qwen/Qwen2-VL-72B-Instruct",
     "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",
     "togetherai/mistralai/Mistral-7B-Instruct-v0.3",
-    "togetherai/mistralai/Mixtral-8x22B-Instruct-v0.1",
+    "togetherai/Qwen/Qwen2.5-VL-72B-Instruct",
+    "togetherai/Qwen/Qwen2.5-Coder-32B-Instruct",
     "togetherai/meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo",
+    "togetherai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+    "togetherai/meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo",
+    "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "togetherai/deepseek-ai/DeepSeek-V3.1",
+    "togetherai/deepseek-ai/DeepSeek-R1",
     # Gemini models
     "gemini/gemini-2.5-pro",
     "gemini/gemini-2.5-flash",
     "gemini/gemini-2.5-flash-lite",
-    "gemini/gemini-live-2.5-flash-preview",
     "gemini/gemini-2.5-flash-preview-native-audio-dialog",
     "gemini/gemini-2.5-flash-exp-native-audio-thinking-dialog",
+    "gemini/gemini-2.5-flash-image-preview",
     "gemini/gemini-2.5-flash-preview-tts",
     "gemini/gemini-2.5-pro-preview-tts",
     "gemini/gemini-2.0-flash-preview-image-generation",
     "gemini/gemini-2.0-flash",
-    "gemini/gemini-2.0-flash-lite-preview-02-05",
+    "gemini/gemini-2.0-flash-lite",
 ]
 
 
@@ -198,7 +201,7 @@ async def llm_router(
 
         anthropic_tools = []
         for tool in tools:
-            anthropic_tools.append(tool.to_anthropic_tool())
+            anthropic_tools.append(tool.anthropic_schema)
         if anthropic_tools:
             anthropic_kwargs["tools"] = anthropic_tools
 
