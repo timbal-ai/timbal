@@ -1,14 +1,5 @@
 from typing import Any
 
-from anthropic.types import (
-    Message as AnthropicMessage,
-)
-from openai.types.chat import (
-    ChatCompletion as OpenAICompletion,
-)
-from openai.types.chat import (
-    ChatCompletionMessage as OpenAIMessage,
-)
 from pydantic import (
     GetCoreSchemaHandler,
     GetJsonSchemaHandler,
@@ -122,53 +113,16 @@ class Message:
         if isinstance(value, Message):
             return value
 
-        elif isinstance(value, OpenAICompletion):
-            message = value.choices[0].message
-            return cls.validate(message)
-
-        elif isinstance(value, OpenAIMessage):
-            role = value.role
-            tool_calls = value.tool_calls
-            # If there are tool calls in the message, for us it will be ToolUseContent
-            if tool_calls:
-                content = [Content.model_validate(item) for item in tool_calls]
-                return cls(role=role, content=content)
-            content = value.content
-            if not isinstance(content, list):
-                content = [content]
-            content = [Content.model_validate(item) for item in content]
-            return cls(role=role, content=content)
- 
-        elif isinstance(value, AnthropicMessage):
-            role = value.role
-            content = value.content
-            if not isinstance(content, list):
-                raise ValueError(f"Invalid content: {content}")
-            content = [Content.model_validate(item) for item in content]
-            return cls(role=role, content=content)
-
-        elif isinstance(value, dict):
+        if isinstance(value, dict):
             role = value.get("role", None)
-            content = value.get("content", None)
-            tool_calls = value.get("tool_calls", None)
-            # If there are tool calls in the message, for us it will be ToolUseContent
+            tool_calls = value.get("tool_calls", [])
             if tool_calls:
                 content = [Content.model_validate(item) for item in tool_calls]
-                return cls(role=role, content=content)
-            # If the role is "tool", for us it will be a ToolResultContent
-            if role == "tool":
-                if isinstance(content, list):
-                    content_list = content
-                else:
-                    content_list = [content]
-                content = ToolResultContent(
-                    id=value.get("tool_call_id"), 
-                    content=[Content.model_validate(item) for item in content_list],
-                )
-                return cls(role="user", content=[content])
-            if not isinstance(content, list):
-                content = [content]
-            content = [Content.model_validate(item) for item in content]
+            else:
+                content = value.get("content", None)
+                if not isinstance(content, list):
+                    content = [content]
+                content = [Content.model_validate(item) for item in content]
             return cls(role=role, content=content)
         
         return cls.validate({
@@ -204,7 +158,7 @@ class Message:
             "properties": {
                 "role": {
                     "type": "string",
-                    "enum": ["user", "assistant", "system"],
+                    "enum": ["user", "assistant", "tool", "system"],
                 },
                 "content": {
                     "type": "array",

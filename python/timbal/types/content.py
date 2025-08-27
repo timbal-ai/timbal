@@ -6,18 +6,7 @@ from typing import Any, Literal
 
 import pandas as pd
 import structlog
-from anthropic.types import TextBlock as AnthropicTextBlock
-from anthropic.types import ToolUseBlock as AnthropicToolUseBlock
 from docx import Document
-
-try:
-    # In newer OpenAI SDK versions, use the concrete function tool call type
-    from openai.types.chat.chat_completion_message_function_tool_call import (
-        ChatCompletionMessageFunctionToolCall as OpenAIToolCall,
-    )
-except ImportError:
-    # Fallback for older versions
-    from openai.types.chat import ChatCompletionMessageToolCall as OpenAIToolCall
 from pydantic import BaseModel
 
 # TODO This shouldn't happen magically. We should error and prompt the user to include this in a pre_hook or to use a different model
@@ -47,115 +36,57 @@ class Content(BaseModel):
 
 
     @staticmethod
-    def _parse_openai_function_arguments(arguments: Any) -> dict[str, Any]:
-        """Aux function to parse openai tool use arguments into python objects."""
+    def _parse_tool_use_input(input: Any) -> dict[str, Any]:
+        """Aux function to parse tool use input into python objects."""
         input_arguments = {}
-
-        if isinstance(arguments, dict):
-            input_arguments = arguments
+        if isinstance(input, dict):
+            input_arguments = input
         else:
             try:
-                input_arguments = json.loads(arguments)
+                input_arguments = json.loads(input)
             except Exception:
                 try:
-                    input_arguments = literal_eval(arguments)
+                    input_arguments = literal_eval(input)
                 except Exception:
                     logger.error(
-                        "Both json.loads and literal_eval failed on OpenAI function arguments", 
+                        f"Both json.loads and literal_eval failed when parsing tool_use input: {input}", 
                         exc_info=True
                     )
-        
         return input_arguments
         
 
     @classmethod 
     def model_validate(cls, value: Any, *args: Any, **kwargs: Any) -> "Content":
         """Validate and convert input formats into a Content instance."""
-        # Don't recurse if we're already dealing with a Content instance
         if isinstance(value, Content):
             return value
-        
-        # cls will be diferent from Content when we call model_validate on one of the subclasses
-        if cls is not Content:
+        elif cls is not Content:
+            # cls will be diferent from Content when we call model_validate on one of the subclasses
             return super().model_validate(value, *args, **kwargs)
-        
-        if isinstance(value, str):
+        elif isinstance(value, str):
             return TextContent(text=value)
-
-        if isinstance(value, File):
+        elif isinstance(value, File):
             return FileContent(file=value)
-        
-        if isinstance(value, AnthropicTextBlock):
-            return TextContent(text=value.text)
-
-        if isinstance(value, AnthropicToolUseBlock):
-            return ToolUseContent(
-                id=value.id,
-                name=value.name,
-                input=value.input,
-            )
-
-        if isinstance(value, OpenAIToolCall):
-            arguments = value.function.arguments
-            input_arguments = Content._parse_openai_function_arguments(arguments)
-            return ToolUseContent(
-                id=value.id,
-                name=value.function.name,
-                input=input_arguments
-            )
-        
-        # TODO Review
-        if isinstance(value, dict):
+        elif isinstance(value, dict):
             content_type = value.get("type", None)
-
             if content_type == "text":
                 return TextContent(text=value.get("text"))
-            
-            # Anthropic's file content type.
-            if content_type == "file":
+            elif content_type == "file":
                 return FileContent(file=File.validate(value.get("file")))
-            
-            # OpenAI's file content type.
-            if content_type == "image_url":
-                return FileContent(file=File.validate(value.get("image_url")['url']))
-            
-            if content_type == "input_audio":
-                return FileContent(file=File.validate(value.get("input_audio")['data']))
-
-            # Anthropic's tool use content.
-            if content_type == "tool_use":
-                input_value = value.get("input") 
-                if isinstance(input_value, str):
-                    if input_value != "":
-                        input_value = json.loads(input_value)
-                    else:
-                        input_value = {}
+            elif content_type == "tool_use":
                 return ToolUseContent(
                     id=value.get("id"), 
                     name=value.get("name"), 
-                    input=input_value,
+                    input=cls._parse_tool_use_input(value.get("input")),
                 )
-            
-            # OpenAI's tool use content.
-            if content_type == "function":
-                arguments = value["function"]["arguments"]
-                input_arguments = Content._parse_openai_function_arguments(arguments)
-                return ToolUseContent(
-                    id=value.get("id"),  
-                    name=value["function"]["name"],
-                    input=input_arguments,
-                )
-            
-            # Anthropic's tool result content.
-            if content_type == "tool_result":
-                tool_result_content = value.get("content", [])
+            elif content_type == "tool_result":
+                tool_result_content = value.get("content")
                 if not isinstance(tool_result_content, list):
                     tool_result_content = [tool_result_content]
                 return ToolResultContent(
-                    id=value.get("tool_use_id") or value.get("id"), 
+                    id=value.get("id"), 
                     content=[cls.model_validate(item) for item in tool_result_content],
                 )
-        
         # By default try to convert whatever python object we have into a string. 
         return TextContent(text=str(value))
 

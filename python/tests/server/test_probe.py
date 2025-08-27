@@ -36,7 +36,7 @@ class TestProbeScript:
         )
         
         assert result.returncode == 0
-        assert f"timbal.server.http {__version__}" in result.stderr
+        assert f"timbal.server.probe {__version__}" in result.stderr
 
     def test_no_import_spec_error(self, probe_script_path):
         """Test error when no import spec is provided."""

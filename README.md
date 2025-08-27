@@ -59,13 +59,13 @@ Agents are autonomous execution units that orchestrate LLM interactions with too
 from datetime import datetime
 
 from timbal import Agent
-from timbal.steps.docx import create_docx
+from timbal.handlers.docx import create_docx
 
 def get_datetime() -> str:
     return datetime.now().isoformat()
 
 agent = Agent(
-    name="datetime_agent",
+    name="demo_agent",
     model="openai/gpt-5-mini",
     tools=[get_datetime, create_docx]
 )
