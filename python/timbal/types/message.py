@@ -23,15 +23,9 @@ class Message:
         role: The role of the message sender
         content: The content of the message, which can include text and tool interactions
     """
-
     __slots__ = ("role", "content")
 
-
-    def __init__(
-        self,
-        role: Any,
-        content: Any,
-    ) -> None:
+    def __init__(self, role: Any, content: Any) -> None:
         """Initialize a Message instance.
         
         Args:
@@ -41,62 +35,52 @@ class Message:
         object.__setattr__(self, "role", role)
         object.__setattr__(self, "content", content)
 
-
     def __str__(self) -> str:
         return f"Message(role={self.role}, content={self.content})"
-
 
     def __repr__(self) -> str:
         return f"Message(role={self.role}, content={self.content})"
 
-
-    async def to_openai_input(self, model: str | None = None) -> dict[str, Any]:
+    def to_openai_input(self) -> dict[str, Any]:
         """Convert the message to OpenAI's expected input format."""
         role = self.role
-        
         # OpenAI expects tool calls to be in a separate field in the message
         content = []
         tool_calls = []
         for content_item in self.content:
             if isinstance(content_item, ToolUseContent):
-                tool_calls.append(await content_item.to_openai_input(model=model))
+                tool_calls.append(content_item.to_openai_input())
             elif isinstance(content_item, ToolResultContent):
-                return await content_item.to_openai_input(model=model)
+                return content_item.to_openai_input()
             else:
-                openai_input = await content_item.to_openai_input(model=model) 
+                openai_input = content_item.to_openai_input() 
                 # Enabling splitting files into multiple pages or chunks.
                 if isinstance(openai_input, list):
                     content.extend(openai_input)
                 else:
                     content.append(openai_input)
-
         openai_input = {"role": role,}
         if len(content):
             openai_input["content"] = content 
         if len(tool_calls): 
             openai_input["tool_calls"] = tool_calls
-
         return openai_input
     
-
-    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any]:
+    def to_anthropic_input(self) -> dict[str, Any]:
         """Convert the message to Anthropic's expected input format."""
-
         content = []
         for content_item in self.content:
-            anthropic_input = await content_item.to_anthropic_input(model=model)
+            anthropic_input = content_item.to_anthropic_input()
             # Enabling splitting files into multiple pages or chunks.
             if isinstance(anthropic_input, list):
                 content.extend(anthropic_input)
             else:
                 content.append(anthropic_input)
-
         return {
             "role": self.role,
             "content": content,
         }
 
-    
     def collect_text(self) -> str:
         """Collect all text from the message content."""
         message_text = ""
@@ -105,14 +89,12 @@ class Message:
                 message_text += content.text + "\n\n"
         return message_text
 
-
     @classmethod
     def validate(cls, value: ValidatorFunctionWrapHandler, _info: dict | ValidationInfo | None = None) -> "Message":
         """Validate and convert inputs into a Message instance."""
         # Don't recurse if we're already dealing with a Message instance
         if isinstance(value, Message):
             return value
-
         if isinstance(value, dict):
             role = value.get("role", None)
             tool_calls = value.get("tool_calls", [])
@@ -124,12 +106,10 @@ class Message:
                     content = [content]
                 content = [Content.model_validate(item) for item in content]
             return cls(role=role, content=content)
-        
         return cls.validate({
             "role": "user",
             "content": value,
         })
-
 
     @classmethod
     def serialize(cls, value: Any, _info: dict | SerializationInfo | None = None) -> str:
@@ -138,15 +118,12 @@ class Message:
         # pydantic will pass None as the value to File.serialize.
         if value is None:
             return None
-
         if not isinstance(value, cls):
             raise ValueError("Cannot serialize a non-message object.")
-
         return {
             "role": value.role,
             "content": value.content,
         }
-
 
     @classmethod
     def __get_pydantic_json_schema__(cls, _core_schema: CoreSchema, _handler: GetJsonSchemaHandler) -> dict[str, Any]:
@@ -167,7 +144,6 @@ class Message:
             },
         }
         return json_schema
-
 
     @classmethod
     def __get_pydantic_core_schema__(cls, _source: type[Any], _handler: GetCoreSchemaHandler) -> core_schema.CoreSchema:

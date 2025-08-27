@@ -9,10 +9,6 @@ import structlog
 from docx import Document
 from pydantic import BaseModel
 
-# TODO This shouldn't happen magically. We should error and prompt the user to include this in a pre_hook or to use a different model
-from ..handlers.openai import stt
-
-# from ...handlers.elevenlabs import stt
 from ..handlers.pdfs import convert_pdf_to_images
 from .file import File
 
@@ -101,7 +97,7 @@ class TextContent(Content):
     text: str 
 
 
-    async def to_openai_input(self, model: str | None = None) -> dict[str, Any]:
+    def to_openai_input(self) -> dict[str, Any]:
         """Convert the text content to the input format required by OpenAI."""
         return {
             "type": "text", 
@@ -109,7 +105,7 @@ class TextContent(Content):
         }
 
 
-    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any]:
+    def to_anthropic_input(self) -> dict[str, Any]:
         """Convert the text content to the input format required by Anthropic."""
         return {
             "type": "text", 
@@ -129,7 +125,7 @@ class FileContent(Content):
     _cached_anthropic_input: Any | None = None
 
 
-    async def to_openai_input(self, model: str | None = None) -> dict[str, Any] | list[dict[str, Any]]:
+    def to_openai_input(self) -> dict[str, Any] | list[dict[str, Any]]:
         """Convert the file content to the input format required by OpenAI."""
         if self._cached_openai_input is not None:
             return self._cached_openai_input
@@ -148,7 +144,6 @@ class FileContent(Content):
         ):
             # Attempt to decode the binary content into a string guessing the encoding.
             raw_bytes = self.file.read()
-
             content = None
             for encoding in AVAILABLE_ENCODINGS:
                 try:
@@ -156,41 +151,31 @@ class FileContent(Content):
                     break
                 except UnicodeDecodeError:
                     continue
-            
             if content is None:
                 raise ValueError(f"Could not decode file {self.file} with any of: {AVAILABLE_ENCODINGS}")
-
             openai_input = {
                 "type": "text",
                 "text": content,
             }
-
             self._cached_openai_input = openai_input
             return openai_input
-        
         elif self.file.__source_extension__ == ".xlsx":
             df = pd.read_excel(io.BytesIO(self.file.read()))
-
             openai_input = {
                 "type": "text",
                 "text": df.to_csv(index=False, header=True, sep=","),
             }
-
             self._cached_openai_input = openai_input
             return openai_input
-
         elif self.file.__source_extension__ == ".docx":
             doc = Document(io.BytesIO(self.file.read()))
             text_content = []
-            
             # Process document elements in order to maintain structure
             for element in doc.element.body:
-
                 if element.tag.endswith("p"):
                     paragraph = doc.paragraphs[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith("p")])]
                     if paragraph.text.strip():
                         text_content.append(paragraph.text.strip())
-
                 elif element.tag.endswith("tbl"):
                     table = doc.tables[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('tbl')])]
                     table_content = []
@@ -199,38 +184,21 @@ class FileContent(Content):
                         if row_text:
                             table_content.append(",".join(row_text))
                     text_content.append("\n".join(table_content))
-
             text_content = "\n".join(text_content)
-
             openai_input = {
                 "type": "text",
                 "text": text_content,
             }
-            
             self._cached_openai_input = openai_input
             return openai_input
-
         elif mime and mime.startswith("image/"):
             url = self.file.to_data_url()
             return {
                 "type": "image_url", 
                 "image_url": {"url": url},
             }
-
         elif mime == "application/pdf":
-            # ! OpenAI API is broken. They state you can upload pdfs as base64 encoded data, however 
-            # it errors with missing_required_parameter 'file_id'. We don't want to upload the files to 
-            # the openai platform (as of yet), since we don't want to control org limits and storage.
-            # # We need the base64 data of the pdf.
-            # data_url = self.file.to_data_url()
-            # base64_data = data_url.split(",", 1)[1]
-            # return {
-            #     "type": "file",
-            #     "file": {
-            #         "file_name": f"{uuid7()}.pdf",
-            #         "file_data": base64_data,
-            #     },
-            # }
+            # TODO Review openai sdk "file" type
             # OpenAI internally gets an image of each page and complements it with the extracted text.
             # ? For all the use cases we've used, extracting just the images has worked well.
             pages = convert_pdf_to_images(self.file)
@@ -246,50 +214,27 @@ class FileContent(Content):
                     "type": "image_url", 
                     "image_url": {"url": url},
                 })
-
             self._cached_openai_input = pages_input
             return pages_input
-
         elif mime and mime.startswith("audio/"):
-            gpt_audio_models = [
-                "gpt-4o-audio-preview", "gpt-4o-mini-audio-preview", 
-                "gpt-4o-realtime-preview", "gpt-4o-mini-realtime-preview",
-            ]
-            if model in gpt_audio_models or model.startswith("gemini"):
-                if self.file.__source_scheme__ == "data":
-                    base64_data = self.file.__source__.split(",", 1)[1]
-                else:
-                    base64_data = base64.b64encode(self.file.read()).decode("utf-8")
-
-                if "mp3" not in mime and "wav" not in mime:
-                    raise ValueError(f"Unsupported audio format: {mime}. Must be one of: mp3, wav")
-
-                return {
-                    "type": "input_audio",
-                    "input_audio": {
-                        "data": base64_data, 
-                        "format": "wav" if "wav" in mime else "mp3",
-                    },
-                }
+            # Some gpt models accept audio files as input. If the user is using a model that doesn't have this capability, the sdk will raise an error
+            if self.file.__source_scheme__ == "data":
+                base64_data = self.file.__source__.split(",", 1)[1]
             else:
-                # TODO Add the cost of this operation.
-                transcription = await stt(audio_file=self.file)
-                logger.info(
-                    "stt", 
-                    transcription=transcription,
-                    description=".to_openai_input() implicitly transcribed audio to text..."
-                )
-                openai_input = {
-                    "type": "text",
-                    "text": transcription
-                }
-                self._cached_openai_input = openai_input
-                return openai_input
-
+                base64_data = base64.b64encode(self.file.read()).decode("utf-8")
+            if "mp3" not in mime and "wav" not in mime:
+                raise ValueError(f"Unsupported audio format: {mime}. Must be one of: mp3, wav")
+            return {
+                "type": "input_audio",
+                "input_audio": {
+                    "data": base64_data, 
+                    "format": "wav" if "wav" in mime else "mp3",
+                },
+            }
         raise ValueError(f"Unsupported file {self.file}.")
 
 
-    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any] | list[dict[str, Any]]:
+    def to_anthropic_input(self) -> dict[str, Any] | list[dict[str, Any]]:
         """Convert the file content to the input format required by Anthropic."""
         if self._cached_anthropic_input is not None:
             return self._cached_anthropic_input
@@ -308,7 +253,6 @@ class FileContent(Content):
         ):
             # Attempt to decode the binary content into a string guessing the encoding.
             raw_bytes = self.file.read()
-
             content = None
             for encoding in AVAILABLE_ENCODINGS:
                 try:
@@ -316,41 +260,31 @@ class FileContent(Content):
                     break
                 except UnicodeDecodeError:
                     continue
-            
             if content is None:
                 raise ValueError(f"Could not decode file {self.file} with any of: {AVAILABLE_ENCODINGS}")
-
             anthropic_input = {
                 "type": "text",
                 "text": content,
             }
-
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
-        
         elif self.file.__source_extension__ == ".xlsx":
             df = pd.read_excel(io.BytesIO(self.file.read()))
-
             anthropic_input = {
                 "type": "text",
                 "text": df.to_csv(index=False, header=True, sep=","),
             }
-
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
-
         elif self.file.__source_extension__ == ".docx":
             doc = Document(io.BytesIO(self.file.read()))
             text_content = []
-            
             # Process document elements in order to maintain structure
             for element in doc.element.body:
-
                 if element.tag.endswith("p"):
                     paragraph = doc.paragraphs[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('p')])]
                     if paragraph.text.strip():
                         text_content.append(paragraph.text.strip())
-
                 elif element.tag.endswith("tbl"):
                     table = doc.tables[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('tbl')])]
                     table_content = []
@@ -359,17 +293,13 @@ class FileContent(Content):
                         if row_text:
                             table_content.append(",".join(row_text))
                     text_content.append("\n".join(table_content))
-
             text_content = "\n".join(text_content)
-
             anthropic_input = {
                 "type": "text",
                 "text": text_content,
             }
-
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
-
         elif mime and mime.startswith("image/"):
             url = self.file.to_data_url()
             if url.startswith("data:"):
@@ -390,7 +320,6 @@ class FileContent(Content):
                         "url": url,
                     }
                 }
-
         elif mime == "application/pdf":
             url = self.file.to_data_url()
             if url.startswith("data:"):
@@ -411,28 +340,7 @@ class FileContent(Content):
                         "url": url,
                     }
                 }
-        
-        elif mime and mime.startswith("audio/"):
-            # TODO Add the cost of this operation.
-            transcription = await stt(audio_file=self.file)
-            logger.info(
-                "stt", 
-                transcription=transcription,
-                description=".to_anthropic_input() implicitly transcribed audio to text..."
-            )
-
-            anthropic_input = {
-                "type": "text",
-                "text": transcription
-            }
-
-            self._cached_anthropic_input = anthropic_input
-            return anthropic_input
-            
         raise ValueError(f"Unsupported file {self.file}.")
-
-
-
 
 
 class ToolUseContent(Content):
@@ -447,7 +355,7 @@ class ToolUseContent(Content):
     input: dict[str, Any]
 
 
-    async def to_openai_input(self, model: str | None = None) -> dict[str, Any]:
+    def to_openai_input(self) -> dict[str, Any]:
         """Convert the tool use content to the input format required by OpenAI."""
         return {
             "id": self.id,
@@ -459,7 +367,7 @@ class ToolUseContent(Content):
         }
 
 
-    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any]:
+    def to_anthropic_input(self) -> dict[str, Any]:
         """Convert the tool use content to the input format required by Anthropic."""
         return {
             "type": "tool_use",
@@ -480,18 +388,18 @@ class ToolResultContent(Content):
     content: list[TextContent | FileContent]
 
 
-    async def to_openai_input(self, model: str | None = None) -> dict[str, Any]:
+    def to_openai_input(self) -> dict[str, Any]:
         """Convert the tool result content to the input format required by OpenAI."""
         return {
             "role": "tool",
-            "content": [await item.to_openai_input(model=model) for item in self.content],
+            "content": [item.to_openai_input() for item in self.content],
             "tool_call_id": self.id
         }
 
-    async def to_anthropic_input(self, model: str | None = None) -> dict[str, Any]:
+    def to_anthropic_input(self) -> dict[str, Any]:
         """Convert the tool result content to the input format required by Anthropic."""
         return {
             "type": "tool_result",
             "tool_use_id": self.id,
-            "content": [await item.to_anthropic_input(model=model) for item in self.content],
+            "content": [item.to_anthropic_input() for item in self.content],
         }

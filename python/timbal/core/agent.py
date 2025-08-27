@@ -18,7 +18,7 @@ from pydantic import (
 )
 
 from ..state import get_run_context
-from ..types.content import ToolResultContent, ToolUseContent
+from ..types.content import ToolUseContent
 from ..types.events import OutputEvent
 from ..types.message import Message
 from .llm_router import Model, llm_router

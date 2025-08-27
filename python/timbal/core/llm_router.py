@@ -156,7 +156,7 @@ async def llm_router(
         if system_prompt:
             openai_messages.append({"role": "system", "content": system_prompt})
         for message in messages:
-            openai_message = await message.to_openai_input(model=model_name)
+            openai_message = message.to_openai_input()
             openai_messages.append(openai_message)
 
         openai_kwargs = {
@@ -183,7 +183,7 @@ async def llm_router(
     elif provider == "anthropic":
         anthropic_messages = []
         for message in messages:
-            anthropic_message = await message.to_anthropic_input(model=model_name)
+            anthropic_message = message.to_anthropic_input()
             anthropic_messages.append(anthropic_message)
 
         anthropic_kwargs = {
