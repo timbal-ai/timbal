@@ -378,21 +378,14 @@ class Agent(Runnable):
             async for tool_call, event in self._multiplex_tools(tool_calls):
                 # Only process events from immediate children (not nested subagents)
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
-                    # Convert tool output to Message format if needed
-                    # ? Can we optimize this double validate
-                    event_output = event.output
-                    if not isinstance(event_output, Message):
-                        event_output = Message.validate({
-                            "role": "user",
-                            "content": str(event_output),
-                        })
-                    message = Message(
-                        role="tool",
-                        content=[ToolResultContent(
-                            id=tool_call.id,
-                            content=event_output.content,
-                        )]
-                    )
+                    message = Message.validate({
+                        "role": "tool",
+                        "content": [{
+                            "type": "tool_result",
+                            "id": tool_call.id,
+                            "content": event.output.content if isinstance(event.output, Message) else event.output,
+                        }]
+                    })
                     messages.append(message)
                 yield event
             i += 1

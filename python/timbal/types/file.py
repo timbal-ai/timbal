@@ -380,8 +380,9 @@ class File(io.IOBase):
         files = {"file": (self.name, content, self.__content_type__)}
 
         res = await _platform_api_call("POST", path, files=files)
+        res_json = res.json()
         # ? We could use an UploadFileResponse pydantic model
-        url = res.json()["url"]
+        url = res_json["url"]
         object.__setattr__(self, "__persisted__", url)
         return url
 

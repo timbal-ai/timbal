@@ -595,9 +595,11 @@ class Runnable(ABC, BaseModel):
                                 yield chunk_event
                             else:
                                 yield chunk
-
                 output = collector.collect() if collector else None
-                trace.output = await dump(output)
+
+            # ? Are we dumping multiple times
+            output_dump = await dump(output)
+            trace.output = output_dump
             
             if self.post_hook is not None:
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
