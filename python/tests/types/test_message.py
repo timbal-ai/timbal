@@ -3,7 +3,8 @@ import json
 import pathlib
 
 import pytest
-from timbal.types import File, FileContent, Message, TextContent, ToolResultContent, ToolUseContent
+from timbal.types import File, Message
+from timbal.types.content import FileContent, TextContent, ToolResultContent, ToolUseContent
 
 
 def test_message_text_validation() -> None:

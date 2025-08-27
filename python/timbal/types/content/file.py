@@ -1,16 +1,14 @@
 import base64
 import io
-import json
-from ast import literal_eval
-from typing import Any, Literal
+from typing import Any, Literal, override
 
 import pandas as pd
 import structlog
 from docx import Document
-from pydantic import BaseModel
 
-from ..handlers.pdfs import convert_pdf_to_images
-from .file import File
+from ...handlers.pdfs import convert_pdf_to_images
+from ..file import File
+from .base import BaseContent
 
 logger = structlog.get_logger("timbal.types.content")
 
@@ -23,110 +21,17 @@ AVAILABLE_ENCODINGS = [
 ]
 
 
-class Content(BaseModel):
-    """
-    A class representing the content of a chat message.
-    """
-
-    type: Literal["text", "file", "tool_use", "tool_result"]
-
-
-    @staticmethod
-    def _parse_tool_use_input(input: Any) -> dict[str, Any]:
-        """Aux function to parse tool use input into python objects."""
-        input_arguments = {}
-        if isinstance(input, dict):
-            input_arguments = input
-        else:
-            try:
-                input_arguments = json.loads(input)
-            except Exception:
-                try:
-                    input_arguments = literal_eval(input)
-                except Exception:
-                    logger.error(
-                        f"Both json.loads and literal_eval failed when parsing tool_use input: {input}", 
-                        exc_info=True
-                    )
-        return input_arguments
-        
-
-    @classmethod 
-    def model_validate(cls, value: Any, *args: Any, **kwargs: Any) -> "Content":
-        """Validate and convert input formats into a Content instance."""
-        if isinstance(value, Content):
-            return value
-        elif cls is not Content:
-            # cls will be diferent from Content when we call model_validate on one of the subclasses
-            return super().model_validate(value, *args, **kwargs)
-        elif isinstance(value, str):
-            return TextContent(text=value)
-        elif isinstance(value, File):
-            return FileContent(file=value)
-        elif isinstance(value, dict):
-            content_type = value.get("type", None)
-            if content_type == "text":
-                return TextContent(text=value.get("text"))
-            elif content_type == "file":
-                return FileContent(file=File.validate(value.get("file")))
-            elif content_type == "tool_use":
-                return ToolUseContent(
-                    id=value.get("id"), 
-                    name=value.get("name"), 
-                    input=cls._parse_tool_use_input(value.get("input")),
-                )
-            elif content_type == "tool_result":
-                tool_result_content = value.get("content")
-                if not isinstance(tool_result_content, list):
-                    tool_result_content = [tool_result_content]
-                return ToolResultContent(
-                    id=value.get("id"), 
-                    content=[cls.model_validate(item) for item in tool_result_content],
-                )
-        # By default try to convert whatever python object we have into a string. 
-        return TextContent(text=str(value))
-
-
-class TextContent(Content):
-    """
-    This class represents a text content in a chat message.
-    It also provides methods to convert the text content to the input format required by OpenAI and Anthropic.
-    """
-
-    type: Literal["text"] = "text"
-    text: str 
-
-
-    def to_openai_input(self) -> dict[str, Any]:
-        """Convert the text content to the input format required by OpenAI."""
-        return {
-            "type": "text", 
-            "text": self.text
-        }
-
-
-    def to_anthropic_input(self) -> dict[str, Any]:
-        """Convert the text content to the input format required by Anthropic."""
-        return {
-            "type": "text", 
-            "text": self.text
-        }
-
-
-class FileContent(Content):
-    """
-    This class represents a file content in a chat message. 
-    It also provides methods to convert the file content to the input format required by OpenAI and Anthropic.
-    """
+class FileContent(BaseContent):
+    """File content type for chat messages."""
     type: Literal["file"] = "file"
     file: File
     # Cached openai and anthropic inputs (some conversions are costly, e.g. audio transcriptions).
     _cached_openai_input: Any | None = None
     _cached_anthropic_input: Any | None = None
 
-
+    @override
     def to_openai_input(self) -> dict[str, Any] | list[dict[str, Any]]:
-        """Convert the file content to the input format required by OpenAI."""
+        """See base class."""
         if self._cached_openai_input is not None:
             return self._cached_openai_input
 
@@ -233,9 +138,9 @@ class FileContent(Content):
             }
         raise ValueError(f"Unsupported file {self.file}.")
 
-
+    @override
     def to_anthropic_input(self) -> dict[str, Any] | list[dict[str, Any]]:
-        """Convert the file content to the input format required by Anthropic."""
+        """See base class."""
         if self._cached_anthropic_input is not None:
             return self._cached_anthropic_input
 
@@ -341,65 +246,3 @@ class FileContent(Content):
                     }
                 }
         raise ValueError(f"Unsupported file {self.file}.")
-
-
-class ToolUseContent(Content):
-    """
-    This class represents a tool use content in a chat message.
-    It also provides methods to convert the tool use content to the input format required by OpenAI and Anthropic.
-    """
-
-    type: Literal["tool_use"] = "tool_use"
-    id: str
-    name: str
-    input: dict[str, Any]
-
-
-    def to_openai_input(self) -> dict[str, Any]:
-        """Convert the tool use content to the input format required by OpenAI."""
-        return {
-            "id": self.id,
-            "type": "function",
-            "function": {
-                "arguments": json.dumps(self.input),
-                "name": self.name
-            }
-        }
-
-
-    def to_anthropic_input(self) -> dict[str, Any]:
-        """Convert the tool use content to the input format required by Anthropic."""
-        return {
-            "type": "tool_use",
-            "id": self.id,
-            "name": self.name,
-            "input": self.input,
-        }
-
-
-class ToolResultContent(Content):
-    """
-    This class represents a tool result content in a chat message.
-    It also provides methods to convert the tool result content to the input format required by OpenAI and Anthropic.
-    """
-
-    type: Literal["tool_result"] = "tool_result"
-    id: str
-    content: list[TextContent | FileContent]
-
-
-    def to_openai_input(self) -> dict[str, Any]:
-        """Convert the tool result content to the input format required by OpenAI."""
-        return {
-            "role": "tool",
-            "content": [item.to_openai_input() for item in self.content],
-            "tool_call_id": self.id
-        }
-
-    def to_anthropic_input(self) -> dict[str, Any]:
-        """Convert the tool result content to the input format required by Anthropic."""
-        return {
-            "type": "tool_result",
-            "tool_use_id": self.id,
-            "content": [item.to_anthropic_input() for item in self.content],
-        }

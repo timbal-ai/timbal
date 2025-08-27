@@ -10,7 +10,7 @@ from pydantic import (
 )
 from pydantic_core import CoreSchema, core_schema
 
-from .content import Content, TextContent, ToolResultContent, ToolUseContent
+from .content import TextContent, ToolResultContent, ToolUseContent, content_factory
 
 
 class Message:
@@ -99,12 +99,12 @@ class Message:
             role = value.get("role", None)
             tool_calls = value.get("tool_calls", [])
             if tool_calls:
-                content = [Content.model_validate(item) for item in tool_calls]
+                content = [content_factory(item) for item in tool_calls]
             else:
                 content = value.get("content", None)
                 if not isinstance(content, list):
                     content = [content]
-                content = [Content.model_validate(item) for item in content]
+                content = [content_factory(item) for item in content]
             return cls(role=role, content=content)
         return cls.validate({
             "role": "user",

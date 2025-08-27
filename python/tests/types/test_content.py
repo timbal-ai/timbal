@@ -20,18 +20,19 @@ except ImportError:
     # Fallback for older versions
     from openai.types.chat import ChatCompletionMessageToolCall as OpenAIToolCall
     from openai.types.chat.chat_completion_message_tool_call import Function as OpenAIFunction
-from timbal.types import Content, File, FileContent, TextContent, ToolResultContent, ToolUseContent
+from timbal.types import File
+from timbal.types.content import FileContent, TextContent, ToolResultContent, ToolUseContent, content_factory
 
 
 def test_content_validation_with_text() -> None:
-    content = Content.model_validate({"type": "text", "text": "Hello, World!"})
+    content = content_factory({"type": "text", "text": "Hello, World!"})
     assert isinstance(content, TextContent)
     assert content.text == "Hello, World!"
     assert content.type == "text"
 
     # text must be a string
     with pytest.raises(ValueError):
-        Content.model_validate({"type": "text", "text": 123})
+        content_factory({"type": "text", "text": 123})
 
 
 @pytest.mark.asyncio
@@ -50,7 +51,7 @@ def test_text_from_anthropic_input() -> None:
         type="text",
         text="Hello, World!"
     )
-    text_content = Content.model_validate(text_block)
+    text_content = content_factory(text_block)
     assert isinstance(text_content, TextContent)
     assert text_content.text == "Hello, World!"
     assert text_content.type == "text"
@@ -62,14 +63,14 @@ def test_content_validation_with_file(tmp_path: pathlib.Path) -> None:
         '89504e470d0a1a0a'  # PNG signature
     )
     test_file.write_bytes(png_content)
-    content = Content.model_validate({"type": "file", "file": File.validate(str(test_file))})
+    content = content_factory({"type": "file", "file": File.validate(str(test_file))})
     assert isinstance(content, FileContent)
     assert isinstance(content.file, File)
     assert content.type == "file"
 
     # file must be a File
     with pytest.raises(ValueError):
-        Content.model_validate({"type": "file", "file": "not a file"})
+        content_factory({"type": "file", "file": "not a file"})
 
 @pytest.mark.asyncio
 async def test_file_to_openai_input(tmp_path: pathlib.Path) -> None:
@@ -102,7 +103,7 @@ async def test_file_to_anthropic_input(tmp_path: pathlib.Path) -> None:
 
 
 def test_content_validation_with_tool_use() -> None:
-    content = Content.model_validate({"type": "tool_use", "id": "123", "name": "tool_name", "input": {"city": "London"}})
+    content = content_factory({"type": "tool_use", "id": "123", "name": "tool_name", "input": {"city": "London"}})
     assert isinstance(content, ToolUseContent)
     assert content.id == "123"
     assert content.name == "tool_name"
@@ -111,7 +112,7 @@ def test_content_validation_with_tool_use() -> None:
 
     # input must be a dict
     with pytest.raises(JSONDecodeError):
-        Content.model_validate({"type": "tool_use", "id": "123", "name": "get_weather", "input": "not a dict"})
+        content_factory({"type": "tool_use", "id": "123", "name": "get_weather", "input": "not a dict"})
 
 
 @pytest.mark.asyncio
@@ -135,7 +136,7 @@ def test_tool_use_from_openai_input() -> None:
         type="function",
         function=OpenAIFunction(arguments='{"order_id":"order_12345"}', name='get_delivery_date')
     )
-    tool_use_content = Content.model_validate(tool_use_call)
+    tool_use_content = content_factory(tool_use_call)
     assert isinstance(tool_use_content, ToolUseContent)
 
         
@@ -152,12 +153,12 @@ def test_tool_use_from_anthropic_input() -> None:
         name="get_weather",
         input={"city": "London"}
     )
-    tool_use_content = Content.model_validate(tool_use_block)
+    tool_use_content = content_factory(tool_use_block)
     assert isinstance(tool_use_content, ToolUseContent)
 
 
 def test_content_validation_with_tool_result() -> None:
-    content = Content.model_validate({"type": "tool_result", "id": "123", "content": [TextContent(text="Hello, World!")]})
+    content = content_factory({"type": "tool_result", "id": "123", "content": [TextContent(text="Hello, World!")]})
     assert isinstance(content, ToolResultContent)
     assert content.id == "123"
     assert content.content == [TextContent(text="Hello, World!")]
