@@ -111,10 +111,10 @@ def create_app(
             run_context = RunContext.model_validate(run_context)
             set_run_context(run_context)
 
-        res_content = await app.state.runnable(**req_data).collect()
+        output_event = await app.state.runnable(**req_data).collect()
         return JSONResponse(
             status_code=200,
-            content=res_content.dump,
+            content=output_event.model_dump(),
         )
 
 
@@ -132,7 +132,7 @@ def create_app(
         async def event_streamer() -> AsyncGenerator[str, None]:
             async for event in app.state.runnable(**req_data):
                 # Format as SSE message: data: <json_string>\n\n
-                yield f"data: {json.dumps(event.dump)}\n\n"
+                yield f"data: {json.dumps(event.model_dump())}\n\n"
 
         return StreamingResponse(event_streamer(), media_type="text/event-stream")
 

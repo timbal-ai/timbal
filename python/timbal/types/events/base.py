@@ -1,34 +1,20 @@
-from typing import Any
-
 from pydantic import BaseModel, ConfigDict
-
-from ...utils import dump
 
 
 class BaseEvent(BaseModel):
     """Base class for all timbal events yielded during flow execution."""
-    # Allow storing extra fields in the model and make immutable after creation.
-    model_config = ConfigDict(extra="allow", frozen=True)
+    model_config = ConfigDict(extra="ignore", frozen=True) # Make immutable after creation
 
     type: str
     """The type of the event. This will be very useful for serializing and deserializing events."""
     run_id: str
     """The id of the run this event was emitted from."""
+    parent_run_id: str | None = None
+    """The id of the parent run (if any)."""
     path: str
     """The path of the element that yielded this event."""
+    call_id: str
+    """The id of the single execution in a run."""
+    parent_call_id: str | None = None
+    """The id of the parent call if this event comes from a nested runnable."""
     
-    @classmethod
-    async def build(cls, **data):
-        """Factory method to create an event with pre-computed dump."""
-        instance = cls(**data)
-        # Compute and store the dump
-        object.__setattr__(instance, '_dump', await dump(instance))
-        return instance
-    
-    @property
-    def dump(self) -> dict[str, Any]:
-        """Pre-computed dump of the event."""
-        if hasattr(self, '_dump'):
-            return self._dump
-        else:
-            raise RuntimeError("Event was not created using BaseEvent.build() - use BaseEvent.build() instead of direct instantiation")

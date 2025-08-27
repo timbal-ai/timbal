@@ -528,11 +528,14 @@ class Runnable(ABC, BaseModel):
         )
         run_context.tracing[_call_id] = trace
 
-        start_event = await StartEvent.build(
+        start_event = StartEvent(
             run_id=run_context.id,
-            path=self._path,
+            parent_run_id=run_context.parent_id,
+            path=trace.path,
+            call_id=trace.call_id,
+            parent_call_id=trace.parent_call_id,
         )
-        logger.info("start_event", **start_event.dump)
+        logger.info("start_event", **start_event.model_dump())
         yield start_event
 
         # We store the unvalidated input, as sent by the user. 
@@ -540,7 +543,8 @@ class Runnable(ABC, BaseModel):
         # Resolve default params (executing any callable values)
         resolved_default_params = await self._resolve_default_params()
         input = {**resolved_default_params, **kwargs}
-        trace.input = await dump(input)
+        input_dump = await dump(input)
+        trace.input = input_dump
 
         output, error = None, None
         try:
@@ -586,12 +590,15 @@ class Runnable(ABC, BaseModel):
                         if processed_chunk is not None:
                             # If it's already a BaseEvent, it means we have already emitted it.
                             if not isinstance(chunk, BaseEvent):
-                                chunk_event = await ChunkEvent.build(
+                                chunk_event = ChunkEvent(
                                     run_id=run_context.id,
-                                    path=self._path,
+                                    parent_run_id=run_context.parent_id,
+                                    path=trace.path,
+                                    call_id=trace.call_id,
+                                    parent_call_id=trace.parent_call_id,
                                     chunk=processed_chunk,
                                 )
-                                logger.info("chunk_event", **chunk_event.dump)
+                                logger.info("chunk_event", **chunk_event.model_dump())
                                 yield chunk_event
                             else:
                                 yield chunk
@@ -615,22 +622,27 @@ class Runnable(ABC, BaseModel):
         finally:
             t1 = int(time.time() * 1000)
             trace.t1 = t1
-            # TODO Refactor this. No longer need the implicit dump?
-            output_event = await OutputEvent.build(
+            output_event = OutputEvent(
                 run_id=run_context.id,
-                path=self._path,
-                t0=t0,
-                t1=t1,
-                input=input,
-                output=output,
-                error=error,
+                parent_run_id=run_context.parent_id,
+                path=trace.path,
+                call_id=trace.call_id,
+                parent_call_id=trace.parent_call_id,
+                input=input,  # Store original input
+                output=output,  # Store original output
+                error=trace.error,
+                t0=trace.t0,
+                t1=trace.t1,
                 usage=trace.usage,
             )
+            # Store dumped versions as private attributes for serialization
+            output_event._input_dump = trace.input
+            output_event._output_dump = trace.output
             if _parent_call_id is None:
                 await run_context._save_tracing()
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
                 set_parent_call_id(None)
-            logger.info("output_event", **output_event.dump)
+            logger.info("output_event", **output_event.model_dump())
             yield output_event
 
 
