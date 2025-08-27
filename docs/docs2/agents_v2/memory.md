@@ -12,8 +12,6 @@ Learn how Agent handles memory and context through enhanced tracing and automati
 
 ---
 
-## The Problem: Stateless AI Interactions
-
 When building AI applications, you quickly encounter the challenge of maintaining context across interactions. Common problems include:
 
 1. **Lost Context**: AI forgets previous conversations and user preferences
@@ -49,39 +47,50 @@ result2 = await agent("What's my name?").collect()
 
 # Agent responds: "Your name is John"`}/>
 
+## Automatic Memory Resolution
+
 Complex workflows require maintaining state across multiple steps and agent interactions. -> Workflow state management with automatic context passing
 
 ### Example 2: Multi-Step Workflow Context
 
 <CodeBlock language="python" code ={`from timbal.core import Agent
 
-# Specialized agent for code review with development tools
-code_reviewer = Agent(
-    name="code_reviewer",
-    model="anthropic/claude-3-sonnet",
-    tools=["git", "linter", "security_scanner"],
-    system_prompt="You are a senior developer. Review code for quality, security, and best practices."
+# Product finder agent
+product_finder = Agent(
+    name="product_finder",
+    model="openai/gpt-4o-mini",
+    system_prompt="Find 5 laptops with: brand, model, price, and specs. Keep under 100 words."
 )
 
-# General AI assistant with code reviewer as a tool
-assistant = Agent(
-    name="assistant",
-    model="anthropic/claude-3-sonnet",
-    tools=[code_reviewer, "web_search", "file_reader"],
-    system_prompt="You are a helpful AI assistant. Use specialized agents for complex tasks."
+# Price optimizer that selects best deal
+price_optimizer = Agent(
+    name="price_optimizer",
+    model="openai/gpt-4o-mini",
+    tools=[product_finder],
+    system_prompt="Get laptops using product_finder tool, then recommend the best value option."
 )
 
-# Assistant delegates code review to specialized agent
-result = await assistant("Review this Python code for security vulnerabilities and suggest improvements").collect()`}/>
+result = await price_optimizer(
+    prompt=Message.validate("Find me the best laptop under $1000")
+).collect()`}/>
 
-### Problem 3: User Preference Management
+When the parent calls the child agent, memory is automatically shared. The child agent automatically receives the full conversation context including the original user request and any previous exchanges.
 
-**Challenge:** Different users have different preferences for AI behavior, language, and detail level.
+The `price_optimizer` automatically knows the laptop list from `product_finder` through conversation context.
 
-**Solution:** Context-aware default parameters with user preferences
+#### How Automatic Memory Works
 
-<CodeBlock language="python" code ={`
-from timbal.core import Agent
+When a child agent is called as a tool:
+
+1. **Context Retrieval**: The child agent automatically retrieves the parent's conversation history
+2. **Memory Reconstruction**: All previous messages (user inputs, assistant responses, tool calls) are included
+3. **Seamless Continuation**: The child agent responds with full context awareness
+
+### Example 3: User Preference Management
+
+Different users have different preferences for AI behavior, language, and detail level. -> Context-aware default parameters with user preferences
+
+<CodeBlock language="python" code ={`from timbal.core import Agent
 from timbal.state import RunContext
 
 async def user_preference_hook(input_dict):
@@ -131,61 +140,12 @@ async def handle_user_request(user_id: str, message: str):
     return result.output.content[0].text
 `}/>
 
-## Automatic Memory Resolution
-
-The most powerful feature of Agent is automatic memory resolution for nested agents:
-
-<CodeBlock language="python" code ={`
-from timbal.core import Agent
-from timbal.types.message import Message
-
-# Define a child agent that analyzes data
-child_agent = Agent(
-    name="data_analyst",
-    model="anthropic/claude-3-sonnet",
-    system_prompt="You are a data analyst. Analyze the provided data and give insights."
-)
-
-# Parent agent that coordinates tasks
-parent_agent = Agent(
-    name="coordinator", 
-    model="openai/gpt-4",
-    system_prompt="You coordinate different tasks and delegate to specialists.",
-    tools=[child_agent]  # Child agent as a tool
-)
-
-# When the parent calls the child agent, memory is automatically shared
-result = await parent_agent(
-    prompt=Message(role="user", content="I have sales data for Q1. Please analyze it.")
-).collect()
-
-# The child agent automatically receives the full conversation context
-# including the original user request and any previous exchanges
-`}/>
-
-### How Automatic Memory Works
-
-When a child agent is called as a tool:
-
-1. **Context Retrieval**: The child agent automatically retrieves the parent's conversation history
-2. **Memory Reconstruction**: All previous messages (user inputs, assistant responses, tool calls) are included
-3. **Seamless Continuation**: The child agent responds with full context awareness
-
-<CodeBlock language="python" code ={`
-# Behind the scenes, the child agent receives:
-# [
-#   Message(role="user", content="I have sales data for Q1. Please analyze it."),
-#   Message(role="assistant", content="I'll analyze that data for you.", tool_calls=[...]),
-#   Message(role="tool", content="Analysis results: ...")
-# ]
-`}/>
 
 ## Explicit State Management
 
 For persistent memory across separate sessions, use RunContext:
 
-<CodeBlock language="python" code ={`
-from timbal.core import Agent
+<CodeBlock language="python" code ={`from timbal.core import Agent
 from timbal.state import RunContext
 from timbal.types.message import Message
 
@@ -214,15 +174,12 @@ print(result2.output)  # Should remember Alice lives in Paris
 
 ## Advanced Memory Patterns
 
-### Problem 4: Long Conversation Management
+### Exemple 4: Long Conversation Management
 
-**Challenge:** Very long conversations exceed token limits and need intelligent summarization.
+Very long conversations exceed token limits and need intelligent summarization. -> Conversation summarization and context compression
 
-**Solution:** Conversation summarization and context compression
-
-<CodeBlock language="python" code ={`
-from timbal.core import Agent
-from timbal.state import RunContext
+<CodeBlock language="python" code ={`from timbal.core import Agent
+from timbal.state import get_run_context
 
 async def summarize_conversation_hook(input_dict):
     """Hook that summarizes long conversations to stay within token limits."""
@@ -252,14 +209,11 @@ long_conversation_agent = Agent(
 )
 `}/>
 
-### Problem 5: Multi-User Session Management
+### Example 5: Multi-User Session Management
 
-**Challenge:** Managing multiple concurrent user sessions with different contexts.
+Managing multiple concurrent user sessions with different contexts -> Session-based context management
 
-**Solution:** Session-based context management
-
-<CodeBlock language="python" code ={`
-from timbal.core import Agent
+<CodeBlock language="python" code ={`from timbal.core import Agent
 from timbal.state import RunContext
 import asyncio
 from typing import Dict
@@ -317,39 +271,6 @@ async def handle_concurrent_users():
     results = await asyncio.gather(*tasks)
     return results
 `}/>
-
-## Memory with System Prompts
-
-Agent's system prompt works seamlessly with memory:
-
-<CodeBlock language="python" code ={`
-agent = Agent(
-    name="context_aware_agent",
-    model="anthropic/claude-3-sonnet",
-    system_prompt="You are a helpful assistant with access to conversation history."
-)
-
-# First interaction
-result1 = await agent(
-    prompt=Message(role="user", content="I'm working on a Python project")
-).collect()
-
-# Second interaction with memory
-result2 = await agent(
-    prompt=Message(role="user", content="Can you help me debug this code?")
-).collect()
-
-# The agent remembers the Python project context from the system prompt
-`}/>
-
-## Best Practices
-
-1. **Use Descriptive Context Keys**: Use clear, descriptive keys for context data
-2. **Implement Context Cleanup**: Regularly clean up old context data to prevent memory bloat
-3. **Validate Context Data**: Always validate context data before using it
-4. **Handle Context Errors**: Implement fallback behavior when context is unavailable
-5. **Monitor Context Size**: Track context size to avoid token limit issues
-6. **Test Memory Behavior**: Thoroughly test memory behavior across different scenarios
 
 ## Summary
 

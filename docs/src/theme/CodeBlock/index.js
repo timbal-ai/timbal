@@ -50,6 +50,7 @@ const highlightMap = {
   BaseSaver: 'custom-highlight-green',
   Snapshot: 'custom-highlight-green',
   query: 'custom-highlight-orange',
+  get_run_context: 'custom-highlight-green-fn',
   issue: 'custom-highlight-orange',
   user_email: 'custom-highlight-orange',
   reason: 'custom-highlight-orange',
@@ -181,6 +182,7 @@ const highlightMap = {
   parse_documentation: 'custom-highlight-green-fn',
   create_database: 'custom-highlight-green-fn',
   add_llm: 'custom-highlight-green-fn',
+  summarize_conversation_hook: 'custom-highlight-green-fn',
   compile: 'custom-highlight-green-fn',
   str: 'custom-highlight-blue',
   name: 'custom-highlight-orange',
@@ -208,6 +210,9 @@ const regex = new RegExp(
 
 // Regex to match text between double quotes
 const quoteRegex = /"([^"]*)"/g;
+
+// Regex to match text between single quotes
+const singleQuoteRegex = /'([^']*)'/g;
 
 // Regex to match text between triple quotes (including multi-line)
 const tripleQuoteRegex = /"""[^"]*"""/g;
@@ -659,6 +664,28 @@ export default function CodeBlock(props) {
                           
                           // Handle regular double quotes
                           while ((match = quoteRegex.exec(content)) !== null) {
+                            // Push non-quoted segment
+                            if (match.index > lastIndex) {
+                              const nonQuoted = content.slice(lastIndex, match.index);
+                              // Apply word/symbol highlighting to non-quoted segment
+                              let highlightedNonQuoted = nonQuoted.replace(
+                                regex,
+                                (m) => `<span class=\"${highlightMap[m]}\">${m}</span>`
+                              );
+                              // Now highlight numbers in the result (but not inside quotes)
+                              highlightedNonQuoted = highlightedNonQuoted.replace(
+                                /\\b\\d+(?:\\.\\d+)?\\b/g,
+                                (num) => `<span class=\"custom-highlight-purple\">${num}</span>`
+                              );
+                              segments.push(highlightedNonQuoted);
+                            }
+                            // Push quoted segment with yellow highlight
+                            segments.push(`<span class=\"custom-highlight-yellow\">${match[0]}</span>`);
+                            lastIndex = match.index + match[0].length;
+                          }
+                          
+                          // Handle single quotes
+                          while ((match = singleQuoteRegex.exec(content)) !== null) {
                             // Push non-quoted segment
                             if (match.index > lastIndex) {
                               const nonQuoted = content.slice(lastIndex, match.index);
