@@ -89,32 +89,38 @@ class Workflow(Runnable):
                 if not dfs(step_name):
                     return False
         return True
+    
 
-
-    # TODO Add kwargs -> will be the data maps and whatnot
-    # TODO Add a condition param
-    def add_step(self, step: RunnableLike, **kwargs: Any) -> "Workflow":
+    def link(self, source: str, target: str) -> "Workflow":
         """"""
-        if not isinstance(step, Runnable):
-            if isinstance(step, dict):
-                step = Tool(**step)
-            else:
-                step = Tool(handler=step)
-            
-        if step.name in self._steps:
-            raise ValueError(f"Step {step.name} already exists in the workflow.")
-        
-        # TODO Add more stuff to the add_step() method
-        for k, v in kwargs.items():
-            print(k, v)
-
-        step.previous_steps = set()
-        step.next_steps = set()
-        self._steps[step.name] = step
+        self._steps[source].next_steps.add(target)
+        self._steps[target].previous_steps.add(source)
         if not self._is_dag():
-            raise ValueError("Adding step to workflow would create a cycle.")
+            raise ValueError(f"Linking {source} -> {target} would create a cycle in the workflow.")
+        return self
 
-        step.nest(self._path)
+
+    # TODO Add a condition param
+    def step(self, runnable: RunnableLike, **kwargs: Any) -> "Workflow":
+        """"""
+        if not isinstance(runnable, Runnable):
+            if isinstance(runnable, dict):
+                runnable = Tool(**runnable)
+            else:
+                runnable = Tool(handler=runnable)
+            
+        if runnable.name in self._steps:
+            raise ValueError(f"Step {runnable.name} already exists in the workflow.")
+        
+        # TODO Set execution order if we find refs
+        for k, v in kwargs.items():
+            runnable.default_params[k] = v
+            runnable._validate_default_param(k, v)
+
+        runnable.previous_steps = set()
+        runnable.next_steps = set()
+        runnable.nest(self._path)
+        self._steps[runnable.name] = runnable
         return self
 
     

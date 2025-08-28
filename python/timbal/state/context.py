@@ -158,20 +158,86 @@ class RunContext(BaseModel):
             call_id = trace.parent_call_id
 
 
-    def get_current_input(self) -> dict[str, Any] | None:
-        """Get the input parameters for the currently executing component.
-        
-        This method retrieves the input parameters that were passed to the
-        component currently being executed. Useful in system prompt functions
-        and hooks to access the original input data.
-        
-        Returns:
-            Dictionary containing the input parameters, or None if no current call
-        """
+    def get_data(self, key: str) -> Any:
+        """Get data using ref key format: .input.field, ..output, step_name.shared.key"""
         from . import get_call_id
-        call_id = get_call_id()
-        if not call_id: 
+        current_call_id = get_call_id()
+        if not current_call_id:
+            raise RuntimeError("get_data() can only be called within a Runnable execution context")
+        current_trace = self.tracing.get(current_call_id)
+        if not current_trace:
+            raise RuntimeError(f"Call ID {current_call_id} not found in tracing.")
+        target_trace, data_key = self._resolve_target_trace(key, current_trace)
+        return self._extract_data_from_trace(target_trace, data_key)
+
+
+    def _resolve_target_trace(self, key: str, current_trace) -> tuple[Any, str]:
+        """Resolve which trace to get data from and what key to use."""
+        if key.startswith(".."):
+            if not current_trace.parent_call_id:
+                raise ValueError(f"No parent call found for key: {key}")
+            parent_trace = self.tracing.get(current_trace.parent_call_id)
+            if not parent_trace:
+                raise RuntimeError(f"Parent call ID {current_trace.parent_call_id} not found in tracing.")
+            return parent_trace, key[2:]  # Remove ".."
+        elif key.startswith("."):
+            return current_trace, key[1:]  # Remove "."
+        else:
+            key_parts = key.split(".", 1)
+            if len(key_parts) < 2:
+                raise ValueError(f"Invalid key format for sibling reference: {key}")
+            sibling_name = key_parts[0]
+            remaining_key = key_parts[1]
+            sibling_trace = self._find_sibling_trace(current_trace, sibling_name)
+            if not sibling_trace:
+                raise ValueError(f"Sibling '{sibling_name}' not found")
+            return sibling_trace, remaining_key
+
+
+    def _find_sibling_trace(self, current_trace, sibling_name: str):
+        """Find a sibling trace by name (same parent, path ends with name)."""
+        parent_call_id = current_trace.parent_call_id
+        if not parent_call_id:
             return None
-        assert call_id in self.tracing, f"RunContext.get_current_input: Call ID {call_id} not found in tracing."
-        trace = self.tracing[call_id]
-        return trace.input
+        for trace in self.tracing.values():
+            if (trace.parent_call_id == parent_call_id and 
+                trace.call_id != current_trace.call_id and  # Don't match self
+                trace.path.endswith("." + sibling_name)):
+                return trace
+        return None
+
+
+    def _extract_data_from_trace(self, trace, data_key: str) -> Any:
+        """Extract data from trace using the data key (input.field, output, shared.key)."""
+        key_parts = data_key.split(".")
+        if not key_parts:
+            raise ValueError("Empty data key")
+        data_source = key_parts[0]
+        field_path = key_parts[1:] if len(key_parts) > 1 else []
+        # TODO Convert to an assertion
+        if data_source == "input":
+            current_data = trace.input
+        elif data_source == "output":
+            current_data = trace.output
+        elif data_source == "shared":
+            current_data = trace.shared
+        else:
+            raise ValueError(f"Invalid data source: {data_source}. Must be input, output, or shared.")
+        for field in field_path:
+            if isinstance(current_data, dict) and field in current_data:
+                current_data = current_data[field]
+            elif hasattr(current_data, field):
+                current_data = getattr(current_data, field)
+            else:
+                raise ValueError(f"Field '{field}' not found in {data_source}")
+        return current_data
+
+
+    def set_data(self, key: str, value: Any) -> None:
+        """"""
+        from . import get_call_id
+        current_call_id = get_call_id()
+        if not current_call_id:
+            raise RuntimeError("set_data() can only be called within a Runnable execution context")
+        trace = self.tracing[current_call_id]
+        trace.shared[key] = value

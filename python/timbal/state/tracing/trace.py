@@ -2,29 +2,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# class TraceValue:
-#     """Container for trace data that supports both raw and serialized access."""
-    
-#     def __init__(self, raw_value: Any):
-#         self.raw = raw_value
-#         self._serialized = None
-#         self._serialized_computed = False
-    
-#     async def serialized(self) -> Any:
-#         """Get the serialized version of the raw value."""
-#         if not self._serialized_computed:
-#             self._serialized = await dump(self.raw)
-#             self._serialized_computed = True
-#         return self._serialized
-    
-#     def invalidate_serialized(self) -> None:
-#         """Mark serialized cache as invalid when raw value changes."""
-#         self._serialized = None
-#         self._serialized_computed = False
-    
-#     def __repr__(self):
-#         return f"TraceValue(raw={self.raw})"
-
 
 class Trace(BaseModel):
     model_config = ConfigDict(
@@ -67,4 +44,8 @@ class Trace(BaseModel):
     usage: dict[str, int] = Field(
         default_factory=dict,
         description="The usage of the runnable.",
+    )
+    shared: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Shared data storage for this call. Accessible by child calls but isolated from sibling calls.",
     )

@@ -6,14 +6,17 @@ Public API:
     - RunContext: The data model for the run context.
     - get_run_context(): Retrieves the current run context.
     - get_or_create_run_context(): Retrieves the current run context, creating a new one if necessary.
+    - ref(): Creates runtime-resolved references to shared data.
 
 The context is typically managed automatically by the framework. Advanced users
 may need to set the context manually when creating custom execution flows.
 See the function docstrings for usage details and warnings.
 """
+# ruff: noqa: F401
 from contextvars import ContextVar
 
 from .context import RunContext
+from .ref import ref
 
 # INTERNAL: This variable holds the context. Do not access directly.
 _run_context_var: ContextVar[RunContext | None] = ContextVar("run_context", default=None)

@@ -266,6 +266,20 @@ class Runnable(ABC, BaseModel):
             cls._post_hook_is_coroutine = is_coroutine
         return v
 
+    
+    def _validate_default_param(self, param_name: str, param_value: Any) -> None:
+        """Validate and categorize a default parameter value."""
+        if callable(param_value):
+            # Validate and store callable parameter
+            is_coroutine = self._validate_runtime_callable(param_value)
+            self._default_runtime_params[param_name] = {
+                "callable": param_value,
+                "is_coroutine": is_coroutine,
+            }
+        else:
+            # Store static parameter
+            self._default_fixed_params[param_name] = param_value
+
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize the Runnable after Pydantic model creation.
@@ -275,16 +289,7 @@ class Runnable(ABC, BaseModel):
         """
         # Split default_params into fixed and runtime parameters
         for param_name, param_value in self.default_params.items():
-            if callable(param_value):
-                # Validate and store callable parameter
-                is_coroutine = self._validate_runtime_callable(param_value)
-                self._default_runtime_params[param_name] = {
-                    "callable": param_value,
-                    "is_coroutine": is_coroutine,
-                }
-            else:
-                # Store static parameter
-                self._default_fixed_params[param_name] = param_value
+            self._validate_default_param(param_name, param_value)
 
 
     @abstractmethod
