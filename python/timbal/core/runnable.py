@@ -184,10 +184,7 @@ class Runnable(ABC, BaseModel):
     - Automatic error handling and recovery
     - Integration with collectors system for output processing
     """
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        extra="forbid",
-    )
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     name: str
     """The unique identifier for this runnable component."""

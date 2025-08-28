@@ -1,14 +1,12 @@
+import asyncio
 from collections.abc import AsyncGenerator
 from functools import cached_property
 from typing import Any, override
 
 import structlog
-from pydantic import (
-    BaseModel,
-    PrivateAttr,
-    computed_field,
-)
+from pydantic import BaseModel, ConfigDict, PrivateAttr, computed_field, create_model
 
+from ..types.events.output import OutputEvent
 from .runnable import Runnable, RunnableLike
 from .tool import Tool
 
@@ -21,7 +19,7 @@ logger.warning("Workflow is super early work - use at your own risk or contribut
 class Workflow(Runnable):
     """"""
 
-    _steps: list[Runnable] = PrivateAttr(default_factory=list)
+    _steps: dict[str, Runnable] = PrivateAttr(default_factory=dict)
     """List of steps to execute in the workflow."""
 
 
@@ -51,7 +49,15 @@ class Workflow(Runnable):
     @cached_property
     def params_model(self) -> BaseModel:
         """See base class."""
-        pass
+        fields = {}
+        for step in self._steps.values():
+            for param, field_info in step.params_model.__pydantic_fields__.items():
+                # If a default is set for the param, we remove this from the model, but allow
+                # extra properties to enable overriding these values from kwargs
+                if param not in step.default_params:
+                    fields[param] = (field_info.annotation, field_info)
+        params_model_name = self.name.title().replace("_", "") + "Params"
+        return create_model(params_model_name, __config__=ConfigDict(extra="allow"), **fields)
 
 
     @override 
@@ -59,7 +65,30 @@ class Workflow(Runnable):
     @cached_property
     def return_model(self) -> Any:
         """See base class."""
-        pass
+        # TODO Implement
+        return Any
+
+
+    def _is_dag(self) -> bool:
+        """Checks if the workflow is a directed acyclic graph (DAG)."""
+        # States: 0 = unvisited, 1 = visiting, 2 = visited
+        state = {step_name: 0 for step_name in self._steps.keys()}
+        def dfs(step_name):
+            if state[step_name] == 1:
+                return False
+            if state[step_name] == 2:
+                return True
+            state[step_name] = 1
+            for next_step_name in self._steps[step_name].next_steps:
+                if not dfs(next_step_name):
+                    return False
+            state[step_name] = 2
+            return True
+        for step_name in self._steps.keys():
+            if state[step_name] == 0:
+                if not dfs(step_name):
+                    return False
+        return True
 
 
     # TODO Add kwargs -> will be the data maps and whatnot
@@ -72,20 +101,71 @@ class Workflow(Runnable):
             else:
                 step = Tool(handler=step)
             
-        if any(step.name == s.name for s in self._steps):
+        if step.name in self._steps:
             raise ValueError(f"Step {step.name} already exists in the workflow.")
-            
+        
         # TODO Add more stuff to the add_step() method
-        step.default_params.update(kwargs)
+        for k, v in kwargs.items():
+            print(k, v)
+
+        step.previous_steps = set()
+        step.next_steps = set()
+        self._steps[step.name] = step
+        if not self._is_dag():
+            raise ValueError("Adding step to workflow would create a cycle.")
 
         step.nest(self._path)
-        self._steps.append(step)
-
         return self
+
+    
+    def _skip_next_steps(self, step_name: str, completions: dict[str, asyncio.Event]) -> None:
+        """"""
+        completions[step_name].set()
+        for next_name in self._steps[step_name].next_steps:
+            self._skip_next_steps(next_name, completions)
+
+
+    async def _enqueue_step_events(
+        self, 
+        step: Runnable, 
+        queue: asyncio.Queue, 
+        completions: dict[str, asyncio.Event],
+        **kwargs: Any,
+    ) -> None:
+        """"""
+        # Await for the completion of all ancestors
+        await asyncio.gather(*[completions[step_name].wait() for step_name in step.previous_steps])
+        # This serves multiple purposes. 
+        # - It ensures that the step is not executed multiple times.
+        # - It allows the step to be skipped from other steps, e.g. if a previous step failed.
+        if completions[step.name].is_set():
+            logger.info(f"Skipping {step.name} as it's already marked as completed.")
+            await queue.put(None)
+            return
+
+        # TODO Evaluate conditions
+
+        async for event in step(**kwargs):
+            await queue.put(event)
+            if isinstance(event, OutputEvent) and event.error is not None:
+                self._skip_next_steps(step.name, completions)
+
+        completions[step.name].set()
+        await queue.put(None)
 
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """"""
-        # Extract parent call ID for tracing nested execution
-        _parent_call_id = kwargs.pop("_parent_call_id", None)
-        # TODO
+        queue = asyncio.Queue()
+        completions = {step_name: asyncio.Event() for step_name in self._steps.keys()}
+        tasks = [
+            asyncio.create_task(self._enqueue_step_events(step, queue, completions, **kwargs)) 
+            for step in self._steps.values()
+        ]
+        remaining = len(tasks)
+        while remaining > 0:
+            event = await queue.get()
+            if event is None:
+                remaining -= 1
+            yield event
+        # TODO How to collect the final output?
