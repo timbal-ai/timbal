@@ -1,9 +1,8 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from ...types.field import Field, resolve_default
-from ...utils import _platform_api_call
+from ...utils import _platform_api_call, resolve_default
 
 EmbeddingStatus = Literal["pending", "queued", "processing", "success", "error"]
 
@@ -31,7 +30,10 @@ class Embedding(BaseModel):
 
 
 async def list_embedding_models(
-    org_id: str = Field(description="The organization ID."),
+    org_id: str = Field(
+        ...,
+        description="The organization ID."
+    ),
 ) -> list[str]:
     """
     List all available embedding models enabled for a specific organization.
@@ -42,8 +44,6 @@ async def list_embedding_models(
     Returns:
         list[str]: A list of available embedding models.
     """
-    org_id = resolve_default("org_id", org_id)
-
     path = f"orgs/{org_id}/embedding-models"
 
     res = await _platform_api_call("GET", path)
@@ -51,13 +51,34 @@ async def list_embedding_models(
     
 
 async def create_embedding(
-    org_id: str = Field(description="The organization ID."),
-    kb_id: str = Field(description="The knowledge base ID."),
-    name: str = Field(description="The name of the embedding."),
-    table_name: str = Field(description="The name of the table."),
-    column_name: str = Field(description="The name of the column."),
-    model: str = Field(description="The model to use for the embedding."),
-    with_gin_index: bool = Field(description="Whether to create a GIN index for the embedding."),
+    org_id: str = Field(
+        ...,
+        description="The organization ID."
+    ),
+    kb_id: str = Field(
+        ...,
+        description="The knowledge base ID."
+    ),
+    name: str = Field(
+        ...,
+        description="The name of the embedding."
+    ),
+    table_name: str = Field(
+        ...,
+        description="The name of the table."
+    ),
+    column_name: str = Field(
+        ...,
+        description="The name of the column."
+    ),
+    model: str = Field(
+        ...,
+        description="The model to use for the embedding."
+    ),
+    with_gin_index: bool = Field(
+        False,
+        description="Whether to create a GIN index for the embedding."
+    ),
 ) -> None:
     """
     Create an embedding for a table column.
@@ -75,12 +96,6 @@ async def create_embedding(
         model (str): The embedding model to use.
         with_gin_index (bool): Whether to create a GIN index for the embedding.
     """
-    org_id = resolve_default("org_id", org_id)
-    kb_id = resolve_default("kb_id", kb_id)
-    name = resolve_default("name", name)
-    table_name = resolve_default("table_name", table_name)
-    column_name = resolve_default("column_name", column_name)
-    model = resolve_default("model", model)
     with_gin_index = resolve_default("with_gin_index", with_gin_index)
 
     path = f"orgs/{org_id}/kbs/{kb_id}/embeddings"
@@ -96,10 +111,16 @@ async def create_embedding(
 
 
 async def list_embeddings(
-    org_id: str = Field(description="The organization ID."),
-    kb_id: str = Field(description="The knowledge base ID."),
+    org_id: str = Field(
+        ...,
+        description="The organization ID."
+    ),
+    kb_id: str = Field(
+        ...,
+        description="The knowledge base ID."
+    ),
     table_name: str | None = Field(
-        default=None,
+        None,
         description="The name of the table.",
     ),
 ) -> list[Embedding]:
@@ -116,8 +137,6 @@ async def list_embeddings(
     Returns:
         list[Embedding]: A list of embedding definitions.
     """
-    org_id = resolve_default("org_id", org_id)
-    kb_id = resolve_default("kb_id", kb_id)
     table_name = resolve_default("table_name", table_name)
 
     path = f"orgs/{org_id}/kbs/{kb_id}/embeddings"
@@ -131,9 +150,18 @@ async def list_embeddings(
 
 
 async def delete_embedding(
-    org_id: str = Field(description="The organization ID."),
-    kb_id: str = Field(description="The knowledge base ID."),
-    name: str = Field(description="The name of the embedding."),
+    org_id: str = Field(
+        ...,
+        description="The organization ID."
+    ),
+    kb_id: str = Field(
+        ...,
+        description="The knowledge base ID."
+    ),
+    name: str = Field(
+        ...,
+        description="The name of the embedding."
+    ),
 ) -> None:
     """
     Delete an embedding from a knowledge base.
@@ -145,9 +173,6 @@ async def delete_embedding(
         kb_id (str): The knowledge base ID.
         name (str): The name of the embedding to delete.
     """
-    org_id = resolve_default("org_id", org_id)
-    kb_id = resolve_default("kb_id", kb_id)
-    name = resolve_default("name", name)
 
     path = f"orgs/{org_id}/kbs/{kb_id}/embeddings/{name}"
 

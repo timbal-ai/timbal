@@ -3,13 +3,16 @@ import os
 from typing import Any
 
 import httpx
-
-from ...types.field import Field
+from pydantic import Field
 
 
 async def send_whatsapp_message(
-    to: str = Field(description="The WhatsApp account to send the message to in E.164 format"),
+    to: str = Field(
+        ...,
+        description="The WhatsApp account to send the message to in E.164 format"
+    ),
     message: str = Field(
+        ...,
         description=(
             "The message to send. "
             "The maximum length is 1600 characters. "
@@ -45,9 +48,16 @@ async def send_whatsapp_message(
 
 
 async def send_whatsapp_template(
-    to: str = Field(description="The WhatsApp account to send the message to in E.164 format"),
-    template_sid: str = Field(description="The template SID to send the message to"),
+    to: str = Field(
+        ...,
+        description="The WhatsApp account to send the message to in E.164 format"
+    ),
+    template_sid: str = Field(
+        ...,
+        description="The template SID to send the message to"
+    ),
     template_params: dict[str, Any] = Field(
+        ...,
         description=(
             "The parameters to send to the template. "
             "The parameters must match the template parameters exactly."

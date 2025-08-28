@@ -1,43 +1,41 @@
 import os
+from typing import Literal
 
 from openai import AsyncOpenAI
+from pydantic import Field
 
 from ...errors import APIKeyNotFoundError
-from ...types.field import Field, resolve_default
 from ...types.file import File
+from ...utils import resolve_default
 
 
 async def tts(
     text: str = Field(
+        ...,
         description="The text to convert to speech.",
     ),
-    voice: str = Field(
-        default=None,
+    voice: Literal[
+        "alloy", "ash", "ballad", "coral", "echo", 
+        "fable", "nova", "onyx", "sage", "shimmer"
+    ] = Field(
+        "alloy",
         description="The voice to use for text-to-speech.",
-        choices=[
-            "alloy", "ash", "ballad", "coral", "echo", 
-            "fable", "nova", "onyx", "sage", "shimmer"
-        ],
     ),
-    model_id: str = Field(
-        default=None,
+    model_id: Literal["gpt-4o-mini-tts", "tts-1", "tts-1-hd"] = Field(
+        "gpt-4o-mini-tts",
         description="The model to use for text-to-speech.",
-        choices=["gpt-4o-mini-tts", "tts-1", "tts-1-hd"],
     ),
-    response_format: str = Field(
-        default=None,
+    response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"]= Field(
+        "mp3",
         description="The audio format of the output.",
-        choices=["mp3", "opus", "aac", "flac", "wav", "pcm"],
     ),
-    instructions: str = Field(
-        default=None,
+    instructions: str | None = Field(
+        None,
         description="Instructions to guide the model's speech generation (only supported for gpt-4o-mini-tts model).",
     ),
     # model -> we default to gpt-4o-mini-tts, but support all TTS models
     # user -> not used
 ) -> File:
-
-    text = resolve_default("text", text)
     voice = resolve_default("voice", voice)
     model_id = resolve_default("model_id", model_id)
     response_format = resolve_default("response_format", response_format)
@@ -49,23 +47,13 @@ async def tts(
 
     client = AsyncOpenAI(api_key=api_key)
 
-    kwargs = {}
+    kwargs = {
+        "model": model_id,
+        "voice": voice,
+        "response_format": response_format,
+        "input": text,
+    }
 
-    if text is not None:
-        kwargs["input"] = text
-    if voice is not None:
-        kwargs["voice"] = voice
-    else:
-        kwargs["voice"] = "alloy"  # Default voice
-    if model_id is not None:
-        kwargs["model"] = model_id
-    else:
-        kwargs["model"] = "gpt-4o-mini-tts"  # Default model
-    if response_format is not None:
-        kwargs["response_format"] = response_format
-    else:
-        kwargs["response_format"] = "mp3"  # Default format
-    
     # Add instructions only for gpt-4o-mini-tts model
     if kwargs["model"] == "gpt-4o-mini-tts" and instructions is not None:
         kwargs["instructions"] = instructions
