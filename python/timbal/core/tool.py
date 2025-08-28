@@ -19,14 +19,7 @@ class Tool(Runnable):
     - Auto-generate names from function names
     
     Tools are the basic building blocks that can be used standalone or
-    composed into more complex Agents and Flows.
-    
-    Example:
-        def add_numbers(a: int, b: int) -> int:
-            return a + b
-            
-        tool = Tool(handler=add_numbers)
-        # name will be "add_numbers", params auto-generated from signature
+    composed into more complex Agents and Workflows.
     """
 
     handler: Callable[..., Any]
@@ -35,12 +28,12 @@ class Tool(Runnable):
 
     @model_validator(mode="before")
     @classmethod
-    def validate_name(cls, values: dict[str, Any]) -> dict[str, Any]:
-        """Auto-generate tool name from handler function name if not provided.
+    def validate_handler_and_name(cls, values: dict[str, Any]) -> dict[str, Any]:
+        """Validate handler and auto-generate tool name if not provided.
         
-        This validator runs before Pydantic model creation and automatically
-        extracts the function name to use as the tool name when no explicit
-        name is provided.
+        This validator runs before Pydantic model creation and:
+        1. Ensures the handler is a proper function, not a Runnable instance
+        2. Automatically extracts the function name to use as the tool name when no explicit name is provided
         
         Args:
             values: Raw input values for tool creation
@@ -49,13 +42,20 @@ class Tool(Runnable):
             Updated values dict with name field populated
             
         Raises:
-            ValueError: If handler is missing, has no __name__, or is a lambda without explicit name
+            ValueError: If handler is missing, is a Runnable, has no __name__, or is a lambda without explicit name
         """
+        handler = values.get("handler", None)
+        if handler is None:
+            raise ValueError("You must provide a handler when creating a tool.")
+        
+        # Check if handler is a Runnable instance
+        if isinstance(handler, Runnable):
+            raise ValueError(
+                "Handler cannot be a Runnable instance. Tools should wrap any other python callable. "
+                "If you want to compose Runnables, use an Agent or Workflow instead, or modify the properties of the Runnable itself."
+            )
+        
         if "name" not in values:
-            handler = values.get("handler", None)
-            if handler is None:
-                raise ValueError("You must provide a handler when creating a tool.")
-            
             handler_name = getattr(handler, "__name__", None)
             if handler_name is None:
                 raise ValueError(

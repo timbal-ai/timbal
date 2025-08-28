@@ -81,6 +81,22 @@ class TestToolCreation:
         tool = Tool(name="add_ten", handler=partial_add)
         assert tool.name == "add_ten"
     
+    def test_runnable_handler_rejected(self):
+        """Test that Runnable instances cannot be used as handlers."""
+        # Create a simple tool to use as a Runnable
+        def simple_func(x: str) -> str:
+            return f"simple:{x}"
+        
+        runnable_tool = Tool(handler=simple_func)
+        
+        # Try to create a tool with a Runnable as handler
+        with pytest.raises(ValueError, match="Handler cannot be a Runnable instance"):
+            Tool(handler=runnable_tool)
+        
+        # Error message should suggest using Agent or Workflow
+        with pytest.raises(ValueError, match="use an Agent or Workflow instead"):
+            Tool(handler=runnable_tool)
+    
     def test_tool_introspection(self):
         """Test that tools correctly introspect handler characteristics."""
         # Sync function
