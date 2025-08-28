@@ -12,28 +12,26 @@ Master proven strategies for designing advanced, specialized AI agents using an 
 
 ---
 
-## What is an Agent?
+## What are Agents?
 
-An <span style={{color: 'var(--timbal-purple)'}}><strong>Agent</strong></span> is an AI system that can autonomously reason, make decisions, and take actions to achieve specific goals. Unlike simple chatbots, agents can:
+<span style={{color: 'var(--timbal-purple)'}}><strong>Agents</strong></span> are autonomous execution units that **orchestrate LLM interactions with tool calling**. 
 
-- **Analyze complex problems** and break them down into manageable steps
-- **Choose appropriate tools** from their available toolkit based on the task
-- **Execute multiple actions** in sequence or parallel to solve problems
-- **Learn from interactions** and adapt their approach over time
-- **Maintain context** across multiple conversations and sessions
+Without tools, an agent functions as a basic LLM. The simplest agent requires just a name and model:
 
 <CodeBlock language="python" code ={`from timbal import Agent
 
 agent = Agent(
-    name="my_agent",
-    model="anthropic/claude-3-sonnet"
+    name="my_agent", # required
+    model="openai/gpt-5"
 )  # That's it! You've created your first agent!`}/>
 
-The `name` parameter is required and provides a unique identifier for your agent. The `model` parameter specifies the provider and model to use for the agent.
+You can specify any model using the "provider/model" format. See all supported models in [Model Capabilities](/getting-started/model_capabilities).
 
 **Note:** Make sure to define all required environment variables—such as the API key model that you need—in your `.env` file.
 
-<CodeBlock language="bash" title=".env" code ={`ANTHROPIC_API_KEY=your_api_key_here`}/>
+<CodeBlock language="bash" title=".env" code ={`OPENAI_API_KEY=your_api_key_here`}/>
+
+Define tools as Python functions - the framework handles schema generation, parameter validation, and execution orchestration. The framework performs automatic introspection of function signatures and docstrings for tool schema generation.
 
 ## Quick Example
 
@@ -239,106 +237,25 @@ response = await agent(
 This example shows how an agent can autonomously handle complex customer support scenarios by reasoning about the problem, searching for solutions, and taking appropriate actions.
 </div>
 
-## Key Capabilities of an Agent
+## Architecture features
 
-Let's break down how an Agent thinks and works:
 
-<div className="timeline">
-<div className="timeline-item">
-<div className="timeline-content">
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Execution Engine</strong></span>:
+    - Asynchronous concurrent tool execution via multiplexed event queues
+    - Conversation state management with automatic memory persistence across iterations
+    - Multi-provider LLM routing with unified interface abstraction
+  
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Tool System</strong></span>:
+  - Runtime tool discovery with automatic OpenAI/Anthropic schema generation
+  - Support for nested Runnable composition and hierarchical agent orchestration
+  - Dynamic parameter validation using Pydantic models
 
-<h4>Autonomous Reasoning</h4>
-Agents can analyze complex problems, break them down into steps, and decide the best approach to solve them.
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Advanced Runtime</strong></span>:
+  - Template-based system prompt composition with runtime callable injection
+  - Configurable iteration limits with autonomous termination detection
+  - Event-driven streaming architecture with real-time processing capabilities
+  - Pre/post execution hooks for cross-cutting concerns and runtime interception
 
-</div>
-</div>
-
-<div className="timeline-item">
-<div className="timeline-content">
-
-<h4>Tool Selection</h4>
-They can choose the most appropriate tools from their available toolkit based on the current situation and requirements.
-
-</div>
-</div>
-
-<div className="timeline-item">
-<div className="timeline-content">
-
-<h4>Multi-Step Execution</h4>
-Agents can execute multiple actions in sequence, making decisions based on the results of previous steps.
-
-</div>
-</div>
-
-<div className="timeline-item">
-<div className="timeline-content">
-
-<h4>Context Awareness</h4>
-They maintain awareness of the current situation, user preferences, and conversation history to provide relevant responses.
-
-</div>
-</div>
-</div>
-
-<style>{`
-.timeline {
-  display: flex;
-  align-items: center;
-  margin: 1rem 0;
-  overflow-x: auto;
-  padding: 0.5rem;
-}
-
-.timeline-item {
-  width: 180px;
-  text-align: left;
-  padding: 0.5rem;
-  background: var(--ifm-background-color);
-  border-radius: 6px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
-
-.timeline-connector {
-  color: var(--ifm-color-primary);
-  font-size: 1.2rem;
-  padding: 0 0.5rem;
-}
-
-.timeline-content {
-  padding: 0.5rem;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
-
-.timeline-content h3 {
-  margin-bottom: 0.25rem;
-  font-size: 1rem;
-}
-
-.timeline-content ul {
-  list-style: disc;
-  padding-left: 1.2em;
-  margin: 0;
-}
-
-.timeline-content li {
-  margin: 0.15rem 0;
-  font-size: 0.85rem;
-}
-
-.timeline-content h4 {
-  color: var(--ifm-color-primary);
-  font-weight: bold;
-  margin-bottom: 0.5em;
-  margin-top: 0;
-}
-`}</style>
 
 ## Key Features
 

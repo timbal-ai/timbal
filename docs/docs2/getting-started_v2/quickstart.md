@@ -124,16 +124,19 @@ This is the main file you'll edit to build your agent.
 <CodeBlock language="python" title= "agent.py" code ={`from datetime import datetime
 
 from timbal import Agent
+from timbal.handlers.docx import create_docx
 
 def get_datetime() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now().isoformat()
 
 agent = Agent(
-    name="timbal_agent",
-    model="gemini/gemini-2.5-pro-preview-03-25",
-    tools=[get_datetime]
+    name="demo_agent",
+    model="openai/gpt-5-mini",
+    tools=[get_datetime, create_docx]
 )
-`}/>
+
+await agent(prompt="What time is it?").collect()
+await agent(prompt="Cool, write that down on a word file for me").collect()`}/>
 
 👀 If you want to use LLM models, you might have to provide your API keys for the LLM providers corresponding to the models you are using.
 

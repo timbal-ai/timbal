@@ -21,7 +21,7 @@ Timbal empowers developers with both <span style={{color: 'var(--timbal-purple)'
 
 Timbal provides two main patterns for building AI applications:
 
-- **<span style={{color: 'var(--timbal-purple)'}}><strong>Agentic (Agent-based)</strong></span>**: LLMs autonomously decide execution paths and tool usage based on goals. Best for:
+- **<span style={{color: 'var(--timbal-purple)'}}><strong>Agentic (Agent-based)</strong></span>**: Agents are autonomous execution units that orchestrate LLM interactions with tool calling. Define tools as Python functions - the framework handles schema generation, parameter validation, and execution orchestration. Best for:
   - Complex reasoning tasks
   - Dynamic tool selection
   - Open-ended problem solving
@@ -37,8 +37,8 @@ Timbal provides two main patterns for building AI applications:
     )`}
     />
   </div>
-
-- **<span style={{color: 'var(--timbal-purple)'}}><strong>Workflow (Flow-based)</strong></span>**: You explicitly define the execution steps and tool usage. Ideal for:
+  
+- **<span style={{color: 'var(--timbal-purple)'}}><strong>Workflow (Flow-based)</strong></span>**: Fine-grained control over your AI pipeline with explicit step-by-step execution. Ideal for:
   - Predictable processes
   - Strict control requirements
   - Performance-critical applications
@@ -164,20 +164,16 @@ Choose the pattern that best aligns with your application's requirements for con
 
 ---
 
-## Why Choose Timbal?
+## Why are we building this?
 
-Timbal solves the real problems you face when building AI applications:
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Simplicity over complexity.</strong></span> Unlike LangGraph, CrewAI, and other frameworks that abstract away what's really happening, Timbal keeps things transparent. Under the hood, it's just LLM calls and async function execution - no hidden magic, no opaque abstractions.
 
-- **Build Complex Apps Faster**: Create a complete AI agent in 5 lines of code. 
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Developer experience first.</strong></span> We believe you shouldn't need to learn a new mental model to build AI applications. If you understand functions and async/await from any modern programming language, you understand Timbal. Most agents are built in 10-20 lines of code.
 
-- **Provider-Agnostic**: Switch between the best LLM provider for each step of your application.
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Battle-tested architecture.</strong></span> Our core abstractions have been refined through real-world production usage. The framework is designed around proven patterns: async generators, Pydantic validation, and event-driven processing.
 
-- **Modular Architecture**: Easily integrate new tools, roles, and functionalities.
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Robust interfaces.</strong></span> Strong typing and validation make it nearly impossible to break things from the outside, while clean abstractions make internal modifications straightforward. The framework fails fast with clear error messages.
 
-- **Optimized for Deployment**: Designed for scalability and reliability in real-world use cases.
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Performance by design.</strong></span> Built for production workloads with concurrent execution, efficient memory management, and minimal overhead. Every design decision prioritizes speed and scalability.
 
-- **Security in Mind**: Built to meet the rigorous demands of enterprise-level security.
-
-- **Cost-Efficient**: Optimized to minimize token usage and API calls
-
-Don't waste time reinventing the wheel: Timbal gives you everything you need to build serious AI applications today.
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Stability in a chaotic ecosystem.</strong></span> Providers change APIs monthly. Timbal provides a stable abstraction that shields your applications in production.
