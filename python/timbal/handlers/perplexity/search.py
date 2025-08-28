@@ -4,25 +4,59 @@ from typing import Literal
 import httpx
 import structlog
 from dotenv import load_dotenv
+from pydantic import Field
 
 from ...errors import APIKeyNotFoundError
-from ...types.field import Field, resolve_default
+from ...utils import resolve_default
 
 load_dotenv()
 
 logger = structlog.get_logger("timbal.steps.perplexity.search")
 
 async def search(
-    query: str = Field(description="Query to search for."),
-    model: Literal["sonar", "sonar-pro", "sonar-reasoning-pro", "sonar-reasoning", "sonar-deep-research", "r1-1776", ] = Field(default="sonar", description="Model to use."),
-    system_prompt: str | None = Field(default=None, description="System prompt to guide the LLM's behavior and role."),
-    search_mode: Literal["academic", "web"] = Field(default="web", description="Search mode to use."),
-    reasoning_effort: Literal["low", "medium", "high"] = Field(default="medium", description="Controls how much computational effort the AI dedicates to each query for deep research models."),
-    search_domain_filter: list[str] | None = Field(default=None, description="A list of domains to limit search results to. Currently limited to 10 domains for Allowlisting and Denylisting. For Denylisting, add a - at the beginning of the domain string."),
-    search_recency_filter: str | None = Field(default=None, description="Filters search results based on time"),
-    search_after_date_filter: str | None = Field(default=None, description="Filters search results to only include content published after this date. Format can be flexible (e.g., '3/1/2025', 'March 1, 2025')."),
-    search_before_date_filter: str | None = Field(default=None, description="Filters search results to only include content published before this date. Format can be flexible (e.g., '3/1/2025', 'March 1, 2025')."),
-    web_search_options: dict | None = Field(default=None, description="Configuration for web search including search_context_size (low/medium/high) and user_location for geographic refinement (latitude, longitude, country)."),
+    query: str = Field(
+        ...,
+        description="Query to search for."
+    ),
+    model: Literal[
+        "sonar", "sonar-pro", "sonar-reasoning-pro", "sonar-reasoning", 
+        "sonar-deep-research", "r1-1776"
+    ] = Field(
+        "sonar",
+        description="Model to use."
+    ),
+    system_prompt: str | None = Field(
+        None,
+        description="System prompt to guide the LLM's behavior and role."
+    ),
+    search_mode: Literal["academic", "web"] = Field(
+        "web",
+        description="Search mode to use."
+    ),
+    reasoning_effort: Literal["low", "medium", "high"] = Field(
+        "medium",
+        description="Controls how much computational effort the AI dedicates to each query for deep research models."
+    ),
+    search_domain_filter: list[str] | None = Field(
+        None,
+        description="A list of domains to limit search results to. Currently limited to 10 domains for Allowlisting and Denylisting. For Denylisting, add a - at the beginning of the domain string."
+    ),
+    search_recency_filter: str | None = Field(
+        None,
+        description="Filters search results based on time"
+    ),
+    search_after_date_filter: str | None = Field(
+        None,
+        description="Filters search results to only include content published after this date. Format can be flexible (e.g., '3/1/2025', 'March 1, 2025')."
+    ),
+    search_before_date_filter: str | None = Field(
+        None,
+        description="Filters search results to only include content published before this date. Format can be flexible (e.g., '3/1/2025', 'March 1, 2025')."
+    ),
+    web_search_options: dict | None = Field(
+        None,
+        description="Configuration for web search including search_context_size (low/medium/high) and user_location for geographic refinement (latitude, longitude, country)."
+    ),
 ) -> str:
     """This handler manages interactions with Perplexity's API, processing requests with 
     appropriate parameters and returning a formatted string with the answer and citations.
@@ -41,7 +75,6 @@ async def search(
     Returns:
         str: A formatted string containing the answer with properly formatted citations as markdown links.
     """
-    # Enable calling this step without pydantic model_validate()
     model = resolve_default("model", model)
     system_prompt = resolve_default("system_prompt", system_prompt)
     search_mode = resolve_default("search_mode", search_mode)
@@ -66,13 +99,11 @@ async def search(
         "model": model,
         "messages": messages,
         "stream": False,
+        "search_mode": search_mode,
+        "reasoning_effort": reasoning_effort,
     }
     
     # Only add optional parameters if they have values
-    if search_mode:
-        payload["search_mode"] = search_mode
-    if reasoning_effort:
-        payload["reasoning_effort"] = reasoning_effort
     if search_domain_filter:
         payload["search_domain_filter"] = search_domain_filter
     if search_recency_filter:

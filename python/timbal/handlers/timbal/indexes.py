@@ -1,9 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from ...types.field import Field, resolve_default
-from ...utils import _platform_api_call
+from ...utils import _platform_api_call, resolve_default
 
 
 class Index(BaseModel):
@@ -22,13 +21,34 @@ class Index(BaseModel):
 
 
 async def create_index(
-    org_id: str = Field(description="The organization ID."),
-    kb_id: str = Field(description="The ID of the knowledge base."),
-    table_name: str = Field(description="The name of the table to create the index on."),
-    name: str = Field(description="The name of the index to create."),
-    column_names: list[str] = Field(description="The columns to create the index on."),
-    type: Literal["btree", "hash", "gin", "gist", "brin"] = Field(description="The type of the index to create."),
-    is_unique: bool = Field(description="Whether the index should be unique."),
+    org_id: str = Field(
+        ...,
+        description="The organization ID."
+    ),
+    kb_id: str = Field(
+        ...,
+        description="The ID of the knowledge base."
+    ),
+    table_name: str = Field(
+        ...,
+        description="The name of the table to create the index on."
+    ),
+    name: str = Field(
+        ...,
+        description="The name of the index to create."
+    ),
+    column_names: list[str] = Field(
+        ...,
+        description="The columns to create the index on."
+    ),
+    type: Literal["btree", "hash", "gin", "gist", "brin"] = Field(
+        "btree",
+        description="The type of the index to create."
+    ),
+    is_unique: bool = Field(
+        False,
+        description="Whether the index should be unique."
+    ),
 ) -> None:
     """
     Create an index on a table in a knowledge base.
@@ -45,11 +65,6 @@ async def create_index(
         type (Literal["btree", "hash", "gin", "gist", "brin"]): The type of index to create.
         is_unique (bool): Whether the index should enforce uniqueness.
     """
-    org_id = resolve_default("org_id", org_id)
-    kb_id = resolve_default("kb_id", kb_id)
-    table_name = resolve_default("table_name", table_name)
-    name = resolve_default("name", name)
-    column_names = resolve_default("column_names", column_names)
     type = resolve_default("type", type)
     is_unique = resolve_default("is_unique", is_unique)
 
@@ -66,10 +81,16 @@ async def create_index(
 
     
 async def list_indexes(
-    kb_id: str = Field(description="The ID of the knowledge base."),
-    org_id: str = Field(description="The organization ID."),
+    kb_id: str = Field(
+        ...,
+        description="The ID of the knowledge base."
+    ),
+    org_id: str = Field(
+        ...,
+        description="The organization ID."
+    ),
     table_name: str | None = Field(
-        default=None,
+        None,
         description="The name of the table to list indexes for."
     ),
 ) -> list[Index]:
@@ -86,8 +107,6 @@ async def list_indexes(
     Returns:
         list[Index]: A list of index definitions.
     """
-    org_id = resolve_default("org_id", org_id)
-    kb_id = resolve_default("kb_id", kb_id)
     table_name = resolve_default("table_name", table_name)
 
     path = f"orgs/{org_id}/kbs/{kb_id}/indexes"
@@ -100,9 +119,18 @@ async def list_indexes(
 
 
 async def delete_index(
-    org_id: str = Field(description="The organization ID."),
-    kb_id: str = Field(description="The ID of the knowledge base."),
-    name: str = Field(description="The name of the index to delete."),
+    org_id: str = Field(
+        ...,
+        description="The organization ID."
+    ),
+    kb_id: str = Field(
+        ...,
+        description="The ID of the knowledge base."
+    ),
+    name: str = Field(
+        ...,
+        description="The name of the index to delete."
+    ),
 ) -> None:
     """
     Delete an index from a knowledge base.
@@ -114,9 +142,6 @@ async def delete_index(
         kb_id (str): The knowledge base ID.
         name (str): The name of the index to delete.
     """
-    org_id = resolve_default("org_id", org_id)
-    kb_id = resolve_default("kb_id", kb_id)
-    name = resolve_default("name", name)
 
     path = f"orgs/{org_id}/kbs/{kb_id}/indexes/{name}"
 
