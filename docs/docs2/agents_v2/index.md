@@ -268,5 +268,3 @@ usage={'gpt-5-mini-2025-08-07:input_text_tokens': 325, 'gpt-5-mini-2025-08-07:ou
 
 - Try creating your own Agent with different tools
 - See examples in [Examples](/examples)
-
-Remember: The more you practice, the better you'll become at creating powerful Agents!

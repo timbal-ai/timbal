@@ -39,41 +39,29 @@ agent = Agent(
     Status: {my_functions::get_server_status}."""
 )`}/>
 
-:::warning
-This feature is currently in development.
-:::
-
 You can also pass dynamic parameters to these functions using `RunContext` data that you previously set in the context.
 
 <CodeBlock language="python" code={`# my_functions.py
+from timbal.core import Tool, Agent
 from timbal.state import get_run_context
 
 def get_user_language():
-    """Get user language from context."""
-    context = get_run_context()
-    return context.data.get("user_lang", "english")
+    return get_run_context().get_data(".input.language")
 
-# Set context data first
-context = RunContext(data={"user_lang": "spanish"})
-set_run_context(context)
+  
+def set_user_language(l):
+  context = get_run_context().set_data("user_lang", "catalan")
 
 agent = Agent(
     name="multilang_agent",
     model="openai/gpt-4o-mini",
-    system_prompt="Respond in {my_functions::get_user_language}. You are a helpful assistant."
-)
+    pre_hook=set_user_language,
+    system_prompt="Answer in {my_functions::get_user_language}."
+# )
+
 await agent(prompt="Which is the capital of Germany?").collect()`}/>
 
-The response will be in Spanish. You can change the language by simply updating the RunContext data:
-
-<CodeBlock language="python" code={`# Change language to Catalan
-context = RunContext(data={"user_lang": "catalan"})
-set_run_context(context)
-
-await agent(prompt="Which is the capital of Germany?").collect()
-# Now the response will be in Catalan`}/>
-
-The framework supports both synchronous and asynchronous functions automatically.
+The response will be in Catalan.
 
 **Benefits:**
 
@@ -114,6 +102,16 @@ Template resolution is fast and cached
 
 </div>
 </div>
+
+<div className="timeline-item">
+<div className="timeline-content">
+<h4>Sync/Async</h4>
+<h3></h3>
+Handles both sync and async functions automatically.
+
+</div>
+</div>
+
 </div>
 
 <style>{`

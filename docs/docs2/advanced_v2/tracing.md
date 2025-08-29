@@ -6,73 +6,40 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Tracing and Events
 
-Timbal's tracing system provides complete visibility into agent and workflow execution, enabling monitoring, debugging, and analysis of AI system behavior.
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Timbal's tracing system provides complete visibility into execution flows, capturing detailed information for monitoring, debugging, and analysis.
+</h2>
+
+---
+
+The tracing system consists of three main components:
+- **Events**: Generated during execution to capture state changes
+- **Collectors**: Process events and manage state accumulation  
+- **Traces**: Store complete execution information including timing, usage, and results
 
 ## Events
 
-Events are the foundation of the tracing system. Each execution generates a sequence of events that capture all relevant information:
+Events are emitted during execution to capture key moments and data:
 
-### Event Types
+### Core Event Types
 
-- **StartEvent**: Marks the beginning of an execution
-- **ChunkEvent**: Captures response fragments (especially useful for streaming)
-- **OutputEvent**: Contains the final result and execution metadata
+- **StartEvent**: Emitted when execution begins
+- **ChunkEvent**: Contains streaming response chunks
+- **OutputEvent**: Final execution result with metadata
 
-<CodeBlock language="python" code={`
-from timbal.types.events import StartEvent, ChunkEvent, OutputEvent
-
-# Events are automatically generated during execution
-async for event in agent(prompt="Hello"):
-    if isinstance(event, StartEvent):
-        print(f"Starting execution: {event.run_id}")
-    elif isinstance(event, ChunkEvent):
-        print(f"Chunk: {event.content}")
-    elif isinstance(event, OutputEvent):
-`}/>
+These events are found when making async calls to agents or workflows.
 
 ## Collectors
 
-Collectors process and transform events according to specific needs. Timbal includes several predefined collectors:
+Collectors process events and accumulate results based on event types.
 
-### TimbalCollector
+### Built-in Collectors
 
-Processes native Timbal events and extracts the final result:
+**TimbalCollector** - Automatically selected for Timbal events. Extracts final output from OutputEvent.
 
-<CodeBlock language="python" code={`
-from timbal.collectors.impl.timbal import TimbalCollector
-
-# Automatically used for Timbal events
-collector = TimbalCollector(run_context)
-result = collector.collect()  # Returns the final result
-`}/>
-
-### OpenAICollector
-
-Manages OpenAI streaming events, accumulating content and tool calls:
-
-<CodeBlock language="python" code={`
-from timbal.collectors.impl.openai import OpenAICollector
-
-collector = OpenAICollector(run_context)
-# Processes OpenAI streaming events
-# Accumulates content and tool calls
-`}/>
-
-### DefaultCollector
-
-Fallback collector that handles any event type:
-
-<CodeBlock language="python" code={`
-from timbal.collectors.impl.default import DefaultCollector
-
-collector = DefaultCollector(run_context)
-# Captures all events in an array
-events = collector.collect()
-`}/>
+**DefaultCollector** - Fallback for any event type. Collects all events in a list when no specific collector matches.
 
 ### Custom Collectors
-
-You can create custom collectors by inheriting from `EventCollector`:
 
 <CodeBlock language="python" code={`
 from timbal.collectors.base import EventCollector
@@ -82,71 +49,62 @@ from timbal.collectors import register_collector
 class CustomCollector(EventCollector):
     def __init__(self, run_context):
         super().__init__(run_context)
-        self._processed_events = []
+        self._result = None
     
     @classmethod
     def can_handle(cls, event):
         return hasattr(event, 'custom_field')
     
     def process(self, event):
-        # Process the event and update internal state
-        self._processed_events.append(event)
+        # Process event and update internal state
+        self._result = event.custom_field
         return event
     
     def collect(self):
-        return self._processed_events
+        return self._result
 `}/>
 
-## Tracing Savers
+## Tracing
 
-Tracing savers manage the storage and retrieval of execution traces:
+Traces store complete execution information organized by call hierarchy.
 
-### InMemoryTracingProvider
+### RunContext
 
-Default provider that stores traces in memory:
+The `RunContext` manages execution state and tracing:
 
-<CodeBlock language="python" code={`
-from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
+<CodeBlock language="python" code={`from timbal.state import get_run_context
 
-# Automatically used when no specific configuration is provided
-provider = InMemoryTracingProvider()
-`}/>
-
-### Custom Providers
-
-You can implement custom providers by inheriting from `TracingProvider`:
-
-<CodeBlock language="python" code={`
-from timbal.state.tracing.providers.base import TracingProvider
-
-class DatabaseTracingProvider(TracingProvider):
-    @classmethod
-    async def get(cls, run_id: str):
-        # Retrieve traces from database
-        pass
+# Access current execution context
+context = get_run_context()
+if context:
+    # Update usage metrics
+    context.update_usage("tokens", 150)
     
-    @classmethod
-    async def put(cls, run_context):
-        # Store traces in database
+    # Access trace data
+    traces = context.tracing
 `}/>
 
-## Run Context and Tracing
+### Data Sharing
 
-The `RunContext` manages the global execution state and traces:
+<CodeBlock language="python" code={`# Share data between execution steps
+context.set_data("user_id", "12345")
+user_id = context.get_data("user_id")
 
-<CodeBlock language="python" code={`
-from timbal.state import RunContext, get_run_context
-
-# Create an execution context
-context = RunContext()
-context.tracing  # Contains all execution traces
-
-# Access the current context
-current_context = get_run_context()
-if current_context:
-    # Update usage statistics
-    current_context.update_usage("tokens", 150)
-    
-    # Save traces
-    await current_context.save_tracing()
+# Reference data from other steps
+parent_data = context.get_data("..output")  # Parent output
+sibling_data = context.get_data("step_name.shared.key")  # Sibling data
 `}/>
+
+## Tracing Providers
+
+Providers handle trace storage and retrieval.
+
+### Built-in Providers
+
+**InMemoryTracingProvider** - Default in-memory storage
+
+**PlatformTracingProvider** - Stores traces on Timbal platform
+
+Configuration is automatic based on environment variables:
+- `TIMBAL_API_HOST`, `TIMBAL_API_KEY` - Platform configuration
+- `TIMBAL_ORG_ID`, `TIMBAL_APP_ID` - Organization context

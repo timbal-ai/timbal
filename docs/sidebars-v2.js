@@ -45,7 +45,6 @@ const sidebars = {
       label: 'Advanced',
       collapsed: false,
       items: [
-        'advanced_v2/run_context',
         'advanced_v2/tracing',
       ],
     },

@@ -44,27 +44,18 @@ Timbal provides two main patterns for building AI applications:
   - Performance-critical applications
 
   <div style={{marginTop: '1.5rem', marginBottom: '1.5rem'}}>
-  <CodeBlock language="python" code ={`from timbal import Flow
+  <CodeBlock language="python" code ={`from timbal import Workflow
 
   # Document Database Creation Flow
-  flow = (Flow()
-      # Extract text from uploaded files
-      .add_step(extract_text)
-      .set_input("extract_text.file", "file")
-      # Process and clean extracted text
-      .add_step(text_processor)
-      .set_input("text_processor.raw_text", "extract_text.return")
-      # Convert processed text to searchable database
-      .add_step(convert_to_database)
-      .set_input("convert_to_database.text", "text_processor.processed_text")
-      .set_input("convert_to_database.chunk_size", 1000)
-      # Return database information
-      .set_output("convert_to_database.return", "database_id")
+  workflow = (WorkFlow(name="my_workflow")
+      .step(extract_text)
+      .step(text_processor, raw_text=extract_text.output)
+      .step(convert_to_database, text=text_processor.output", chunk_size=1000)
   )`}
     />
   </div>
   
-  You can create Flows and compose them together to create complex applications.
+  You can create Workflows and compose them together to create complex applications.
 
 Choose the pattern that best aligns with your application's requirements for control, flexibility, and predictability.
 

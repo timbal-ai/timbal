@@ -45,6 +45,12 @@ workflow = Workflow(name="my_workflow")`}/>
       <h3>Links</h3>
       <p>
         <strong>Links</strong> define execution dependencies between steps.
+
+        Links can be:
+        - explicit (manual)
+        - implicit (automatic via data references)
+        
+      Links ensure proper execution order and create a DAG.
       </p>
     </div>
   </div>
@@ -131,6 +137,10 @@ workflow = (Workflow(name="parallel_flow")
     .step(update_database) # Starts at 0s, finishes at 3s
 )
 # Total time: 3 seconds (max of 2 and 3)`}/>
+
+---
+
+.set_input("extract_text.file", "file")
 
 ---
 
