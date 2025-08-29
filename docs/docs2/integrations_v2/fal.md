@@ -95,10 +95,10 @@ agent = Agent(
     tools=[gen_images]
 )
 
-prompt = Message.validate({
-        "prompt": "a futuristic cityscape at night",
-        "model": "fal-ai/flux-pro/v1.1-ultra"
-    })
+prompt = {
+  "prompt": "a futuristic cityscape at night",
+  "model": "fal-ai/flux-pro/v1.1-ultra"
+}
 response = await agent(
     prompt=prompt
 ).collect()`}/>

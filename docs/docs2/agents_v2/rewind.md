@@ -12,82 +12,52 @@ Branch conversations and rewind Agent memory to any previous point using the enh
 
 ---
 
-The <span style={{color: 'var(--timbal-purple)'}}><strong>rewind</strong></span> feature in Agent V2 builds upon the robust tracing system to allow sophisticated conversation branching and memory manipulation. With the enhanced architecture, you can rewind to any point in nested agent conversations and create complex branching scenarios.
+The <span style={{color: 'var(--timbal-purple)'}}><strong>rewind</strong></span> feature allows you to go back to any point in a conversation and explore different paths. This creates branching conversations where you can test alternative responses or recover from errors.
 
-## How Rewind Works
+## How It Works
 
-Agent's rewind functionality leverages the enhanced tracing system and automatic memory resolution:
+Every agent interaction creates a **RunContext** with a unique `run_id`. The framework automatically traces each step, allowing you to reference any previous point in the conversation.
 
-1. **Tracing-Based Memory**: Every interaction is traced with detailed path information
-2. **Nested Context Support**: Rewind works across nested agent calls and tool executions
-3. **Automatic Resolution**: Memory is automatically resolved based on the specified parent context
-4. **Enhanced Branching**: Create complex conversation trees with multiple branches
+### Creating Branches
 
-## Basic Rewind Example
+You can create new branches by setting `RunContext(parent_id=...)` to rewind to any previous point. The agent will only remember the conversation up to that specific point, ignoring everything that happened after.
 
-<CodeBlock language="python" code ={`from timbal.core import Agent
+#### Example
+
+<CodeBlock language="python" code={`from timbal import Agent
 from timbal.state import RunContext, set_run_context
-from timbal.types.message import Message
 
-# Initialize agent and state saver
-agent = Agent(
-    name="conversation_agent",
-    model="openai/gpt-4"
-)
+agent = Agent(name="example", model="openai/gpt-4o-mini")
 
-# Step 1: Start the conversation
-context1 = RunContext()
-set_run_context(context1)
+# Main conversation path
+print("=== Main Path ===")
+step1 = await agent(prompt="Hello").collect()
+step2 = await agent(prompt="My name is David").collect() 
+step3 = await agent(prompt="What's my name?").collect()
+print(f"Normal: {step3.output.content[0].text}")  # "Your name is David"
 
-result1 = await agent(
-    prompt="Hello, I'm a software engineer"
-).collect()
+# Branch from step 1 (skip the name introduction)
+print("\\n=== Branch 1: Rewind to Hello ===")
+context = RunContext(parent_id=step1.run_id)
+set_run_context(context)
 
-# Step 2: Add more information
-result2 = await agent(
-    prompt="I work with Python and Django"
-).collect()
+branch1 = await agent(prompt="What's my name?").collect()
+print(f"Branch 1: {branch1.output.content[0].text}")  # "I don't know your name"`}/>
 
-# Step 3: Continue the conversation
-result3 = await agent(
-    prompt="What technologies do I work with?"
-).collect()
+This creates a branching structure:
 
-print("Normal flow result:", result3.output.content[0].text)
-# Expected: "You work with Python and Django"
+<CodeBlock language="bash" code={`Root: "Hello"
+├── Main Path: "My name is David" → "What's my name?" → "David"
+└── Branch 1: "What's my name?" → "I don't know"  
 
-# Step 4: REWIND - Branch from step 1, ignoring the Python/Django information
-context_rewind = RunContext(parent_id=result1.run_id)
-set_run_context(context_rewind)
+Each branch maintains independent memory from the rewind point.`}/>
 
-result_rewind = await agent(
-    prompt="What technologies do I work with?"
-).collect()
+## Use Cases
 
-print("Rewound result:", result_rewind.output.content[0].text)
-# Expected: "I don't have information about specific technologies you work with"`}/>
+- **Testing**: Try different conversation paths
+- **Error Recovery**: Go back before an error occurred  
+- **Exploration**: Explore "what if" scenarios
+- **A/B Testing**: Compare different response strategies
+- **Debugging**: Isolate specific conversation states
 
-## Rewind Visualization
-
-<CodeBlock language="bash" code ={`Conversation Tree Visualization:
-
-Root: "Hello, I'm a software engineer"
-├──▶ Branch A: "I work with Python and Django"
-│    └── Sub-A1: "What technologies do I work with?"
-│        └── Response: "You work with Python and Django"
-└──▶ Branch B: (Rewind to Root) "What technologies do I work with?"
-       └── Response: "I don't have information about specific technologies you work with"
-
-Each branch maintains memory only up to its parent node.`}/>
-
-## Summary
-
-Agent's rewind capabilities provide:
-
-- **Enhanced Tracing**: Detailed path-based tracing for precise rewind points
-- **Nested Support**: Rewind works across nested agent calls and tool executions
-- **Flexible Branching**: Create complex conversation trees with multiple paths
-- **Context Integration**: System context works seamlessly with rewind
-- **Advanced Patterns**: Conditional rewind, content filtering, and smart memory management
-
-The architecture makes rewind more powerful and reliable while providing advanced customization options for sophisticated conversation management.
+Rewind gives you full control over conversation flow and memory management.

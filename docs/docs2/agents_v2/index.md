@@ -21,300 +21,212 @@ Without tools, an agent functions as a basic LLM. The simplest agent requires ju
 <CodeBlock language="python" code ={`from timbal import Agent
 
 agent = Agent(
-    name="my_agent", # required
+    name="my_agent",
     model="openai/gpt-5"
 )  # That's it! You've created your first agent!`}/>
 
 You can specify any model using the "provider/model" format. See all supported models in [Model Capabilities](/getting-started/model_capabilities).
 
+Some models require specific parameters (like `max_tokens` for Claude). Use `model_params` to pass any additional model configuration: 
+
+<CodeBlock language="python" code ={`agent = Agent(
+    name="claude_agent",
+    model="anthropic/claude-sonnet-4-latest",
+    model_params={
+        "max_tokens": 1024
+    }
+)`}/>
+
 **Note:** Make sure to define all required environment variables—such as the API key model that you need—in your `.env` file.
 
-<CodeBlock language="bash" title=".env" code ={`OPENAI_API_KEY=your_api_key_here`}/>
+<CodeBlock language="bash" title=".env" code ={`OPENAI_API_KEY=your_api_key_here
+ANTHROPIC_API_KEY=your_claude_api_key`}/>
 
-Define tools as Python functions - the framework handles schema generation, parameter validation, and execution orchestration. The framework performs automatic introspection of function signatures and docstrings for tool schema generation.
+Define tools as Python functions - the framework handles schema generation, parameter validation, and execution orchestration.
 
-## Quick Example
-
-Here's an example of an Agent that solves a real business problem - customer support automation:
+### Quick Example
 
 <CodeBlock language="python" code ={`from timbal import Agent
-from timbal.types.message import Message
 
-# Define tools for customer support
-def search_knowledge_base(query: str) -> str:
-    """Search company knowledge base for relevant information."""
-    # Implementation would connect to your knowledge base
-    return f"Found information about: {query}"
+def celsius_to_fahrenheit(celsius: float) -> str:
+    """Convert temperature from Celsius to Fahrenheit"""
+    fahrenheit = (celsius * 9/5) + 32
+    return f"{celsius}°C = {fahrenheit}°F"
 
-def create_support_ticket(issue: str, user_email: str) -> str:
-    """Create a support ticket for complex issues."""
-    # Implementation would integrate with your ticketing system
-    return f"Created ticket for {user_email}: {issue}"
-
-def escalate_to_human(user_email: str, reason: str) -> str:
-    """Escalate complex issues to human agents."""
-    return f"Escalated {user_email} to human agent: {reason}"
-
-# Create a customer support agent
 agent = Agent(
-    name="customer_support_agent",
-    model="anthropic/claude-3-sonnet",
-    tools=[search_knowledge_base, create_support_ticket, escalate_to_human],
-    system_prompt="""You are a customer support agent.
-    Your goal is to help customers efficiently:
-    1. First, try to answer their question using the knowledge base
-    2. If you can't find an answer, create a support ticket
-    3. For complex technical issues, escalate to a human agent
-    4. Always be polite and professional"""
+    name="demo_agent",
+    model="openai/gpt-5-mini",
+    tools=[celsius_to_fahrenheit],
+    system_prompt="You are a helpful temperature conversion assistant."
 )
 
-# Use the agent to handle a customer request
-response = await agent(
-    "I can't log into my account and I've tried resetting my password"
-  ).collect()`}/>
+await agent(prompt="What is 25 degrees Celsius in Fahrenheit?").collect()`}/>
+
+The framework performs automatic introspection of function signatures and docstrings for tool schema generation.
 
 **What happens behind the scenes:**
 
 <div className="log-step-static">
-  StartEvent(..., path='customer_support_agent, ...)
+  start_event ... path=demo_agent ...
+</div>
+
+<div className="log-step-static">
+  start_event ... path=demo_agent.llm ...
 </div>
 
 <details className="log-step-collapsible">
 <summary>
-  OutputEvent(..., path='customer_support_agent.llm-0', ...)
+  output_event ... path=demo_agent.llm ...
 </summary>
-<CodeBlock language="bash" code={`OutputEvent(...,
-    path='customer_support_agent.llm-0', 
+<CodeBlock language="bash" code={`output_event ...
+    path=demo_agent.llm 
     input={
+      'model': 'openai/gpt-5-mini', 
       'messages': [
-        Message(
-          role=user,
-          content=[TextContent(
-            type='text', 
-            text="I can't log into my account and I've tried resetting my password"
-          )]
-        )
-      ], 
-      'tools': [{
-        'type': 'function', 
-        'function': {
-          'name': 'search_knowledge_base',
-          'description': 'Search company knowledge base for relevant information',
-          'parameters': {
-            'properties': {'query': {'title': 'Query', 'type': 'string'}}, 
-            'required': ['query'],
-            ...
-          }
+        {'role': 'user', 'content': [
+          {'type': 'text', 
+          'text': 'How many fahrenheit are 25 celsius'
+          }]
         }
-      }], 
-      'model': 'claude-3-sonnet',
-      ...
-    },
-    output=Message(
-      role=assistant,
-      content=[ToolUseContent(
-        type='tool_use', 
-        id='...', 
-        name='search_knowledge_base', 
-        input={'query': 'login password reset troubleshooting'}
-      )]
-    ), ...)
-`}/>
-</details>
-
-<div className="log-step-static">
-  StartEvent(..., path='customer_support_agent.search_knowledge_base-call_...', ...)
-</div>
-
-<details className="log-step-collapsible">
-<summary>
-  OutputEvent(..., path='customer_support_agent.search_knowledge_base-...)
-</summary>
-<CodeBlock language="bash" code={`OutputEvent(...,
-    path='customer_support_agent.search_knowledge_base-...',
-    input={'query': 'login password reset troubleshooting'},
-    output=Message(
-      role=user,
-      content=[TextContent(type='text', text='Found information about: login password reset troubleshooting')]
-    ), ...)`}/>
-</details>
-
-<div className="log-step-static">
-  StartEvent(..., path='customer_support_agent.llm-1', ...)
-</div>
-
-<details className="log-step-collapsible">
-<summary>
-  OutputEvent(..., path='customer_support_agent.llm-1', ...)
-</summary>
-<CodeBlock language="bash" code={`OutputEvent(...,
-    path='customer_support_agent.llm-1', 
-    input={
-      'messages': [
-        Message(
-          role=user, 
-          content=[TextContent(
-            type='text',
-            text="I can't log into my account and I've tried resetting my password"
-          )]
-        ), 
-        Message(
-          role=assistant, 
-          content=[ToolUseContent(
-            type='tool_use',
-            id='...',
-            name='search_knowledge_base',
-            input={'query': 'login password reset troubleshooting'}
-          )]
-        ),
-        Message(
-          role=user, 
-          content=[ToolResultContent(
-            type='tool_result', 
-            id='call_...', 
-            content=[TextContent(type='text', text='Found information about: login password reset troubleshooting')]
-          )]
-        )
       ],
-      'tools': [{
-        'type': 'function', 
-        'function': {
-          'name': 'create_support_ticket',
-          'description': 'Create a support ticket for complex issues',
-          'parameters': {
-            'properties': {
-              'issue': {'title': 'Issue', 'type': 'string'},
-              'user_email': {'title': 'User Email', 'type': 'string'}
-            },
-            'required': ['issue', 'user_email'],
-            ...
+      'system_prompt': 'You are a helpful temperature conversion assistant.',
+      'tools': [
+        {'name': 'celsius_to_fahrenheit',
+        'description': '', 
+        'input_schema': 
+          {'properties': 
+            {'celsius': {'title': 'Celsius', 'type': 'number'}},
+          'required': ['celsius'],
+          'title': 'CelsiusToFahrenheitParams',
+          'type': 'object'
           }
         }
-      }], 
-      'model': 'claude-3-sonnet',
-      ...
-    },
-    output=Message(
-      role=assistant, 
-      content=[ToolUseContent(
-        type='tool_use',
-        id='...',
-        name='create_support_ticket',
-        input={
-          'issue': 'User cannot log in despite password reset attempts',
-          'user_email': 'user@example.com'
+      ]
+    }
+    output={
+      'role': 'assistant',
+      'content': [
+        {'type': 'tool_use',
+        'id': '068b03c99cbe760c80003d233f0cc50f',
+        'name': 'celsius_to_fahrenheit',
+        'input': {'celsius': 25}
         }
-      )]
-    ),...)`}/>
+      ]
+    }
+    usage={'gpt-5-mini-2025-08-07:input_text_tokens': 141, 'gpt-5-mini-2025-08-07:output_text_tokens': 91}
+    ...`}/>
+</details>
+
+<div className="log-step-static">
+  start_event ... path=demo_agent.celsius_to_fahrenheit ...
+</div>
+
+<details className="log-step-collapsible">
+<summary>
+  output_event ... path=demo_agent.celsius_to_fahrenheit ...
+</summary>
+<CodeBlock language="bash" code={`output_event ...
+    path=demo_agent.celsius_to_fahrenheit
+    input={'celsius': 25}
+    output='25.0°C = 77.0°F'
+    ...`}/>
+</details>
+
+<div className="log-step-static">
+  start_event ... path=demo_agent.llm ...
+</div>
+
+<details className="log-step-collapsible">
+<summary>
+  output_event ..., path=demo_agent.llm ...
+</summary>
+<CodeBlock language="bash" code={`output_event ...
+    path=demo_agent.llm, 
+    input={
+      'model': 'openai/gpt-5-mini',
+      'messages': [
+        {'role': 'user',
+        'content': [
+          {'type': 'text',
+          'text': 'How many fahrenheit are 25 celsius?'}
+        ]},
+        {'role': 'assistant',
+        'content': [
+          {'type': 'tool_use',
+          'id': '068b03c99cbe760c80003d233f0cc50f',
+          'name': 'celsius_to_fahrenheit',
+          'input': {'celsius': 25}
+          }
+        ]},
+        {'role': 'tool',
+        'content': [
+          {'type': 'tool_result',
+          'id': '068b03c99cbe760c80003d233f0cc50f',
+          'content': [
+            {'type': 'text', 'text': '25.0°C = 77.0°F'}
+          ]}
+        ]}
+      ],
+      'system_prompt': 'You are a helpful temperature conversion assistant.',
+      'tools': [
+        {'name': 'celsius_to_fahrenheit',
+        'description': '',
+        'input_schema': {'properties': {'celsius': {'title': 'Celsius', 'type': 'number'}},
+        'required': ['celsius'],
+        'title': 'CelsiusToFahrenheitParams',
+        'type': 'object'}}
+      ]
+    } 
+    output={
+    'role': 'assistant',
+    'content': [
+      {'type': 'text',
+      'text': '25°C is 77°F.'
+      }]
+    }
+    usage={'gpt-5-mini-2025-08-07:input_text_tokens': 186, 'gpt-5-mini-2025-08-07:output_text_tokens': 10}
+    ...`}/>
 </details>
 
 <details className="log-step-collapsible">
 <summary>
-  OutputEvent(..., path='customer_support_agent', ...)
+  output_event ... path=demo_agent ...
 </summary>
-<CodeBlock language="bash" code={`OutputEvent(...,
-    path='customer_support_agent',
-    input={
-      'prompt': {
-        'role': 'user', 
-        'content': [{
-          'type': 'text',
-          'text': "I can't log into my account and I've tried resetting my password"
-        }]
-      }
-    },
-    output=Message(
-      role=assistant, 
-      content=[TextContent(
-        type='text',
-        text='I understand you\'re having trouble logging in even after trying to reset your password. This sounds like a more complex issue that requires technical investigation. I\'ve created a support ticket for you, and our technical team will investigate this issue. You should receive an email confirmation shortly with your ticket number.'
-      )]
-    ), ...)
+<CodeBlock language="bash" code={`output_event ...
+    path=demo_agent
+    input={'prompt': 'How many fahrenheit are 25 celsius?'}
+    output={
+      'role': 'assistant',
+      'content': [
+        {'type': 'text', 'text': '25°C is 77°F.'}
+    ]}
+    usage={'gpt-5-mini-2025-08-07:input_text_tokens': 327, 'gpt-5-mini-2025-08-07:output_text_tokens': 101}
+    ...
 `}/>
 </details>
 
 <div style={{marginTop: '2rem'}}>
-This example shows how an agent can autonomously handle complex customer support scenarios by reasoning about the problem, searching for solutions, and taking appropriate actions.
 </div>
+
+
 
 ## Architecture features
 
-
 - <span style={{color: 'var(--timbal-purple)'}}><strong>Execution Engine</strong></span>:
-    - Asynchronous concurrent tool execution via multiplexed event queues
-    - Conversation state management with automatic memory persistence across iterations
-    - Multi-provider LLM routing with unified interface abstraction
+    - **Asynchronous concurrent tool execution** via multiplexed event queues
+    - Conversation state management with **automatic memory persistence across iterations**
+    - **Multi-provider LLM routing** with unified interface abstraction
   
 - <span style={{color: 'var(--timbal-purple)'}}><strong>Tool System</strong></span>:
-  - Runtime tool discovery with automatic OpenAI/Anthropic schema generation
-  - Support for nested Runnable composition and hierarchical agent orchestration
-  - Dynamic parameter validation using Pydantic models
+  - Runtime **tool** discovery with automatic OpenAI/Anthropic **schema generation**
+  - Support for nested Runnable composition and **hierarchical agent orchestration**
+  - **Dynamic parameter validation** using Pydantic models
 
 - <span style={{color: 'var(--timbal-purple)'}}><strong>Advanced Runtime</strong></span>:
-  - Template-based system prompt composition with runtime callable injection
-  - Configurable iteration limits with autonomous termination detection
-  - Event-driven streaming architecture with real-time processing capabilities
+  - Template-based **system prompt composition** with runtime callable injection
+  - Configurable **iteration limits** with autonomous termination detection
+  - Event-driven **streaming** architecture with real-time processing capabilities
   - Pre/post execution hooks for cross-cutting concerns and runtime interception
-
-
-## Key Features
-
-### Autonomous Execution Loop
-
-Agent implements a sophisticated autonomous execution pattern:
-
-1. **Receive Input**: Accept a user promp
-2. **Memory Resolution**: Load conversation history from parent context if nested
-3. **LLM Interaction**: Call the LLM with available tools and conversation history
-4. **Tool Execution**: Execute tool calls concurrently for better performance
-5. **Iteration**: Continue until no more tool calls or max_iter is reached
-
-### Enhanced Tool Management
-
-<CodeBlock language="python" code ={`# Tools can be defined in multiple ways
-agent = Agent(
-    name="multi_tool_agent",
-    model="openai/gpt-4",
-    tools=[
-        # 1. Direct function
-        search_web,
-        
-        # 2. Tool instance with custom config
-        Tool(
-            handler=query_database,
-            description="Query the customer database",
-            exclude_params=["connection_string"]
-        ),
-        
-        # 3. Dictionary configuration
-        {
-            "handler": send_notification,
-            "description": "Send notification to user",
-            "params_mode": "required"
-        }
-    ]
-)`}/>
-
-Learn more about creating and using tools in the [Tools guide](/agents/tools).
-
-### System Prompt Configuration
-
-Agent uses a `system_prompt` parameter to provide context and instructions:
-
-<CodeBlock language="python" code ={`agent = Agent(
-    name="specialized_agent",
-    model="anthropic/claude-3-sonnet",
-    system_prompt="""You are a data analyst specialized in financial data. 
-    Your role is to:
-    1. Analyze financial data accurately
-    2. Provide clear explanations of trends
-    3. Identify potential risks and opportunities
-    4. Present findings in a professional manner""",
-    tools=[analyze_financial_data, generate_charts, create_reports]
-)
-
-# Use the agent with the configured system prompt
-result = await agent("Analyze this quarterly financial data").collect()`}/>
 
 ## Running an Agent
 
@@ -323,50 +235,38 @@ Agent provides a streamlined execution interface:
 ### Get a Complete Answer
 
 <CodeBlock language="python" code ={`result = await agent(
-    prompt="What's the current market trend for renewable energy stocks?"
+    prompt="What is 25 degrees Celsius in Fahrenheit?"
 ).collect()`}/>
 
 ### Real-Time (Streaming) Output
 
 <CodeBlock language="python" code ={`async for event in agent(
-    prompt="What's the current market trend for renewable energy stocks?"
+    prompt="What is 25 degrees Celsius in Fahrenheit?"
 ):
     print(event)`}/>
 
-Here you can see the actual output from running this example:
+Below are the events that get printed when you run this example:
 
 <div className="log-step-static">
-  type='START' run_id='068a74bf-8b16-7de3-8000-614f2c07a86e' path='specialized_agent' status_text=None
+  type='START' ... path='demo_agent' ...
 </div>
 
 <details className="log-step-collapsible">
 <summary>
-  type='OUTPUT' run_id='068a74bf-8b16-7de3-8000-614f2c07a86e' path='specialized_agent'
+  type='OUTPUT' ... path='demo_agent' ...
 </summary>
-<CodeBlock language="bash" code={`type='OUTPUT' run_id='068a74bf-8b16-7de3-8000-614f2c07a86e' path='specialized_agent' 
-input={'prompt': 'What\'s the current market trend for renewable energy stocks?'} 
-output=Message(role=assistant, content=[TextContent(type='text', text="I don't have access to real-time market data, but I can provide general insights about renewable energy stock trends based on recent developments in the sector.")]) 
-error=None 
-t0=1755794424693 t1=1755794425981 
-usage={'claude-3-sonnet:input_text_tokens': 45, 'claude-3-sonnet:output_text_tokens': 35}`}/>
+<CodeBlock language="bash" code={`type='OUTPUT'
+path='demo_agent'
+input={'prompt': 'What is 25 degrees Celsius in Fahrenheit?'}
+output=Message(role=assistant, content=[TextContent(type='text', text='25°C is 77°F.')])
+...
+usage={'gpt-5-mini-2025-08-07:input_text_tokens': 325, 'gpt-5-mini-2025-08-07:output_text_tokens': 37}`}/>
 </details>
 
-## Parameter Validation
-
-Agent uses Pydantic models for robust parameter validation:
-
-<CodeBlock language="python" code ={`from timbal.types.message import Message
-
-# Input is automatically validated
-result = await agent(
-    prompt=Message.validate("Hello"),  # Must be a Message
-).collect()`}/>
 
 ## Next Steps
 
 - Try creating your own Agent with different tools
-- Experiment with system prompt templates
-- Explore concurrent tool execution patterns
 - See examples in [Examples](/examples)
 
 Remember: The more you practice, the better you'll become at creating powerful Agents!

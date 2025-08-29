@@ -188,10 +188,10 @@ agent = Agent(
     tools=[list_directory]
 )
 
-prompt = Message.validate({
-        "folder": "Projects/2024",
-        "scope": "my-files"
-    })
+prompt = {
+  "folder": "Projects/2024",
+  "scope": "my-files"
+}
 
 response = await agent(
     prompt=prompt

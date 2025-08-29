@@ -24,7 +24,7 @@ const sidebars = {
       collapsed: false,
       items: [
         'agents_v2/index',
-        'agents_v2/memory',
+        'agents_v2/dynamic_agents',
         'agents_v2/rewind',
         'agents_v2/tools',
         'agents_v2/voice',
@@ -34,13 +34,21 @@ const sidebars = {
     },
     {
       type: 'category',
+      label: 'Workflows',
+      collapsed: false,
+      items: [
+        'workflows_v2/index',
+        'workflows_v2/memory',
+        'workflows_v2/advanced',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Advanced',
       collapsed: false,
       items: [
-        'advanced_v2/default_params',
         'advanced_v2/hooks',
         'advanced_v2/run_context',
-        'advanced_v2/system_prompts',
         'advanced_v2/tracing',
       ],
     },

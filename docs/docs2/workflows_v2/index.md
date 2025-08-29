@@ -302,3 +302,42 @@ For more, see the [Workflows documentation](/workflows), [Advanced Workflow Conc
   line-height: 1.5;
 }
 `}</style>
+
+
+
+
+# Default Parameters
+
+Default parameters in Timbal allow you to set predefined values that are automatically injected into your runnable components, providing flexibility and reducing boilerplate code.
+
+## Basic Usage
+
+Default parameters are defined when creating a runnable and are merged with runtime parameters:
+
+<CodeBlock language="python" code={`
+from timbal.core import Tool
+
+def analyze_data(data: str, method: str = "standard", threshold: float = 0.5):
+    return f"Analyzed {data} using {method} with threshold {threshold}"
+
+# Create tool with default parameters
+tool = Tool(
+    name="data_analyzer",
+    handler=analyze_data,
+    default_params={
+        "method": "advanced",
+        "threshold": 0.8
+    }
+)
+
+# Execute with runtime parameters
+result = await tool(data="sample_data").collect()
+# Uses: method="advanced", threshold=0.8 (from defaults)
+# Override: data="sample_data" (from runtime)
+
+# Override default parameters
+result = await tool(data="sample_data", method="simple").collect()
+# Uses: method="simple" (overridden), threshold=0.8 (from defaults)
+`}/>
+Runtime parameters always override default parameters:
+

@@ -318,11 +318,11 @@ agent = Agent(
     model="anthropic/claude-3-5-sonnet-20241022"
     tools=[send_message]
 )
-prompt = Message.validate({
+prompt = {
         "to": ["recipient@example.com"],
         "subject": "Hello from Agent!",
         "body": "This is a test email sent by Agent."
-    })
+    }
 response = await agent(
     prompt=prompt
 ).collect()`}/>

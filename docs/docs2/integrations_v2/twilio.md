@@ -81,13 +81,13 @@ agent = Agent(
     tools=[send_whatsapp_message]
 )
 
-prompt = Message.validate({
-            "to": "+1234567890", 
-            "message": "Hello from Agent!"
-        })
+prompt = {
+    "to": "+1234567890", 
+    "message": "Hello from Agent!"
+}
 response = await agent(
         prompt=prompt
-)`}/>
+).collect()`}/>
 
 ## Notes
 - For more advanced usage, see the [Twilio WhatsApp API documentation](https://www.twilio.com/docs/whatsapp/api).
