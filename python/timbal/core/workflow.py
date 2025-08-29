@@ -105,20 +105,22 @@ class Workflow(Runnable):
                 runnable = Tool(**runnable)
             else:
                 runnable = Tool(handler=runnable)
-            
         if runnable.name in self._steps:
             raise ValueError(f"Step {runnable.name} already exists in the workflow.")
-        
-        runnable.previous_steps = set()
-        runnable.next_steps = set()
-
-        # TODO Set execution order if we find refs
-        for k, v in kwargs.items():
-            runnable.default_params[k] = v
-            runnable._validate_default_param(k, v)
-
         runnable.nest(self._path)
         self._steps[runnable.name] = runnable
+        runnable.previous_steps = set()
+        runnable.next_steps = set()
+        # Use kwargs as default params for the runnable, and inspect callables to automatically link steps
+        runnable._prepare_default_params(kwargs)
+        for v in runnable._default_runtime_params.values():
+            if not v["data_keys"]: continue
+            assert len(v["data_keys"]) == 1, "Multiple data keys not supported yet"
+            data_key = v["data_keys"][0]
+            if data_key.startswith("."): continue
+            previous_step_name = data_key.split(".")[0]
+            logger.info("Linking steps automatically", previous_step=previous_step_name, next_step=runnable.name)
+            self.link(previous_step_name, runnable.name)
         return self
 
     

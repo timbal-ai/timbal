@@ -299,30 +299,25 @@ class Runnable(ABC, BaseModel):
             cls._post_hook_is_coroutine = inspect_result["is_coroutine"]
         return v
 
-    
-    def _validate_default_param(self, param_name: str, param_value: Any) -> None:
-        """Validate and categorize a default parameter value."""
-        if callable(param_value):
-            # Validate and store callable parameter
-            inspect_result = self._inspect_runtime_callable(param_value)
-            self._default_runtime_params[param_name] = {
-                "callable": param_value,
-                "is_coroutine": inspect_result["is_coroutine"],
-            }
-        else:
-            # Store static parameter
-            self._default_fixed_params[param_name] = param_value
+
+    def _prepare_default_params(self, default_params: dict[str, Any]) -> None:
+        """Separates default_params into fixed (static) and runtime (callable) parameters."""
+        if not isinstance(default_params, dict):
+            raise ValueError("default_params must be a dictionary")
+        for param_name, param_value in default_params.items():
+            self.default_params[param_name] = param_value
+            if callable(param_value):
+                # Validate and store callable parameter
+                inspect_result = self._inspect_runtime_callable(param_value)
+                self._default_runtime_params[param_name] = {"callable": param_value, **inspect_result}
+            else:
+                # Store static parameter
+                self._default_fixed_params[param_name] = param_value
 
 
     def model_post_init(self, __context: Any) -> None:
-        """Initialize the Runnable after Pydantic model creation.
-        
-        Separates default_params into fixed (static) and runtime (callable) parameters
-        and validates any callable parameters.
-        """
-        # Split default_params into fixed and runtime parameters
-        for param_name, param_value in self.default_params.items():
-            self._validate_default_param(param_name, param_value)
+        """Initialize the Runnable after Pydantic model creation."""
+        self._prepare_default_params(self.default_params)
 
 
     @abstractmethod
