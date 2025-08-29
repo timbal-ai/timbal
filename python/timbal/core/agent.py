@@ -38,7 +38,7 @@ class AgentParams(BaseModel):
     Defines the input parameters that agents accept when called.
     Supports flexible system prompt composition through templates.
     """
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     prompt: Message = Field(
         ...,
@@ -143,12 +143,12 @@ class Agent(Runnable):
                 fn = module
                 for j in path_parts[-fn_i:]:
                     fn = getattr(fn, j)
-                self._validate_runtime_callable(fn)
+                inspect_result = self._inspect_runtime_callable(fn)
                 self._system_prompt_callables[text] = {
                     "start": match.start(),
                     "end": match.end(),
                     "callable": fn,
-                    "is_coroutine": inspect.iscoroutinefunction(fn),
+                    "is_coroutine": inspect_result["is_coroutine"],
                 }
         
         if self.model.startswith("anthropic"):

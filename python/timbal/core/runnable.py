@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import contextvars
 import inspect
@@ -30,6 +31,7 @@ from ..state import (
     set_run_context,
 )
 from ..state.context import RunContext
+from ..state.data import RunContextDataAccessAnalyzer
 from ..state.tracing.trace import Trace
 from ..types.events import (
     BaseEvent,
@@ -202,11 +204,11 @@ class Runnable(ABC, BaseModel):
     """Runtime default parameter injection.
     These parameters are added to the handler's parameters when the handler is called."""
 
-    pre_hook: Callable[..., Any] | None = None
+    pre_hook: Callable[[], Any] | None = None
     """Pre-execution hook for runtime processing. Must be a parameterless callable.
     Use get_run_context() to access execution state and data.
     """
-    post_hook: Callable[..., Any] | None = None
+    post_hook: Callable[[], Any] | None = None
     """Post-execution hook for runtime processing. Must be a parameterless callable.
     Use get_run_context() to access execution state and output data.
     """
@@ -232,8 +234,8 @@ class Runnable(ABC, BaseModel):
 
 
     @classmethod
-    def _validate_runtime_callable(cls, fn: Any) -> bool:
-        """Validate a runtime callable, return if the callable is a coroutine."""
+    def _inspect_runtime_callable(cls, fn: Any) -> dict[str, Any]:
+        """Inspect a runtime callable, return if the callable is a coroutine and its data dependencies."""
         if not callable(fn):
             raise ValueError(f"fn must be a callable, got {type(fn)}")
         
@@ -241,29 +243,60 @@ class Runnable(ABC, BaseModel):
             raise NotImplementedError("Generator functions are not supported for runtime callables yet.")
         if inspect.isasyncgenfunction(fn):
             raise NotImplementedError("Async generator functions are not supported for runtime callables yet.")
+
+        is_coroutine = inspect.iscoroutinefunction(fn)
+        data_keys = []
         
         sig = inspect.signature(fn)
         required_params = [
             name for name, param in sig.parameters.items()
-            if param.default is inspect.Parameter.empty and param.kind != inspect.Parameter.VAR_POSITIONAL and param.kind != inspect.Parameter.VAR_KEYWORD
+            if param.default is inspect.Parameter.empty
+            and param.kind != inspect.Parameter.VAR_POSITIONAL
+            and param.kind != inspect.Parameter.VAR_KEYWORD
         ]
         if required_params:
             raise ValueError(f"Callable must not have any required parameters, got required: {required_params}")
 
-        return inspect.iscoroutinefunction(fn)
+        # TODO Fix errors with system prompt callables
+        try:
+            source_file = inspect.getsourcefile(fn)
+            if not source_file:
+                raise ValueError("Could not determine source file for runtime callable.")
+            with open(source_file) as f:
+                full_file_source = f.read()
+            first_line = fn.__code__.co_firstlineno
+            tree = ast.parse(full_file_source)
+            target_node = None
+            for node in ast.walk(tree):
+                if (hasattr(node, "lineno") and node.lineno == first_line and 
+                    isinstance(node, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef))):
+                    target_node = node
+                    break
+            if target_node:
+                target_node_analyzer = RunContextDataAccessAnalyzer()
+                target_node_analyzer.visit(target_node)
+                data_keys = target_node_analyzer.data_keys
+        except Exception as e:
+            logger.error("Could not determine data dependencies for runtime callable.", exc_info=e)
+        
+        return {
+            "is_coroutine": is_coroutine,
+            "data_keys": data_keys,
+        }
 
 
     @field_validator("pre_hook", "post_hook")
     @classmethod
-    def _validate_hooks(cls, v: Any, info: ValidationInfo) -> Callable[..., Any] | None:
+    def _validate_hooks(cls, v: Any, info: ValidationInfo) -> Callable[[], Any] | None:
         """Validate a hook, raise ValueError if invalid."""
         if v is None:
             return v
-        is_coroutine = cls._validate_runtime_callable(v)
+        # TODO Do something with the data keys
+        inspect_result = cls._inspect_runtime_callable(v)
         if info.field_name == "pre_hook":
-            cls._pre_hook_is_coroutine = is_coroutine
+            cls._pre_hook_is_coroutine = inspect_result["is_coroutine"]
         elif info.field_name == "post_hook":
-            cls._post_hook_is_coroutine = is_coroutine
+            cls._post_hook_is_coroutine = inspect_result["is_coroutine"]
         return v
 
     
@@ -271,10 +304,10 @@ class Runnable(ABC, BaseModel):
         """Validate and categorize a default parameter value."""
         if callable(param_value):
             # Validate and store callable parameter
-            is_coroutine = self._validate_runtime_callable(param_value)
+            inspect_result = self._inspect_runtime_callable(param_value)
             self._default_runtime_params[param_name] = {
                 "callable": param_value,
-                "is_coroutine": is_coroutine,
+                "is_coroutine": inspect_result["is_coroutine"],
             }
         else:
             # Store static parameter

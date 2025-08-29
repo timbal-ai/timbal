@@ -12,9 +12,6 @@ from .tool import Tool
 
 logger = structlog.get_logger("timbal.core.workflow")
 
-# WARNING: This is super early work and not yet implemented.
-logger.warning("Workflow is super early work - use at your own risk or contribute via PR!")
-
 
 class Workflow(Runnable):
     """"""
@@ -100,7 +97,7 @@ class Workflow(Runnable):
         return self
 
 
-    # TODO Add a condition param
+    # TODO Think how we handle agent model_params vs default_params
     def step(self, runnable: RunnableLike, **kwargs: Any) -> "Workflow":
         """"""
         if not isinstance(runnable, Runnable):
@@ -112,13 +109,14 @@ class Workflow(Runnable):
         if runnable.name in self._steps:
             raise ValueError(f"Step {runnable.name} already exists in the workflow.")
         
+        runnable.previous_steps = set()
+        runnable.next_steps = set()
+
         # TODO Set execution order if we find refs
         for k, v in kwargs.items():
             runnable.default_params[k] = v
             runnable._validate_default_param(k, v)
 
-        runnable.previous_steps = set()
-        runnable.next_steps = set()
         runnable.nest(self._path)
         self._steps[runnable.name] = runnable
         return self
@@ -131,13 +129,7 @@ class Workflow(Runnable):
             self._skip_next_steps(next_name, completions)
 
 
-    async def _enqueue_step_events(
-        self, 
-        step: Runnable, 
-        queue: asyncio.Queue, 
-        completions: dict[str, asyncio.Event],
-        **kwargs: Any,
-    ) -> None:
+    async def _enqueue_step_events(self, step: Runnable, queue: asyncio.Queue, completions: dict[str, asyncio.Event], **kwargs: Any) -> None:
         """"""
         # Await for the completion of all ancestors
         await asyncio.gather(*[completions[step_name].wait() for step_name in step.previous_steps])
