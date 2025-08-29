@@ -14,11 +14,7 @@ Design, connect, and control multi-step AI pipelines using Workflows—Timbal's 
 
 ## What Are Workflows?
 
-:::warning[Work in Progress]
-The Workflow class is currently under development and not fully implemented. The examples in this documentation may not work as expected.
-:::
-
-A **Workflow** is a programmable pipeline that lets you chain together steps—functions, LLMs, or even other workflows—while controlling how data moves between them. Workflows enable you to build complex, intelligent pipelines with clear logic, memory, and branching.
+<span style={{color: 'var(--timbal-purple)'}}><strong>Workflows</strong></span> are programmable execution pipelines that **orchestrate step-by-step processing with explicit control flow**.
 
 <CodeBlock language="python" code={`from timbal.core import Workflow
 
@@ -46,11 +42,9 @@ workflow = Workflow(name="my_workflow")`}/>
   </div>
   <div className="card">
     <div className="card-content">
-      <h3>Execution Order</h3>
+      <h3>Links</h3>
       <p>
-        <strong>Execution order</strong> is determined by the sequence in which steps are added to the workflow.
-        
-        Steps execute in the order they are added, with data flowing from one step to the next through parameter mapping.
+        <strong>Links</strong> define execution dependencies between steps.
       </p>
     </div>
   </div>
@@ -58,18 +52,27 @@ workflow = Workflow(name="my_workflow")`}/>
 
 <CodeBlock language="python" code={`workflow = (
     Workflow(name="my_workflow")
-    .add_step(step_1)
-    .add_step(step_2)
+    .step(step_1)
+    .step(step_2)
+    .link("step_1", "step_2") # Names of the tools (or function names if no tool name set)
 )`}/>
+
+### DAG-Based Execution
+Workflows form a **Directed Acyclic Graph (DAG)** where:
+- Steps can run in parallel when dependencies allow
+- No circular dependencies (prevents infinite loops)
+- Automatic dependency resolution and execution ordering
 
 <div style={{ textAlign: 'center', display: 'flex', justifyContent: 'center', alignItems: 'center', margin: '0rem 0' }}>
   <img src="/img/dag_link.png" style={{ width: '20rem', maxWidth: '100%' }} />
 </div>
+
+
 ---
 
 ## Adding Steps to Your Workflow
 
-Workflows use the `.add_step()` method to add steps. Each step can be:
+Workflows use the `.step()` method to add steps. Each step can be:
 
 - **Functions**: Direct function references
 - **Tools**: Tool objects with handlers
@@ -341,3 +344,8 @@ result = await tool(data="sample_data", method="simple").collect()
 `}/>
 Runtime parameters always override default parameters:
 
+### Key Features
+- **Parallel Execution**: Independent steps run concurrently
+- **Error Isolation**: Failed steps skip dependents, others continue
+- **Type Safety**: Automatic parameter validation via Pydantic
+- **Composition**: Workflows can contain other workflows

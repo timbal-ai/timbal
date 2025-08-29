@@ -12,39 +12,46 @@ Master advanced patterns for Agent including memory management, nested execution
 
 ---
 
-### Execution Hooks
+## Execution Hooks
 
-You can use it either in `Agent` or `Tool`.
+Hooks process data before (`pre_hook`) and after (`post_hook`) agent execution. Available for both `Agent` and `Tool`.
 
-Use hooks to clean input data and handle outputs.
+**Example: Slack Integration**
 
-We can see one example by a Slack configuration that receives messages from slack and has to send via it the result.
+Clean incoming Slack messages and auto-send responses.
 
-<CodeBlock language="python" code ={`def process_message(message: str) -> str:
-    """Process user message."""
-    return f"Processed: {message}"
+:::info
+Import `get_run_context` from Timbal. See [Slack Documentation](integrations_v2/slack) for `send_message` and other functions.
+:::
 
-async def clean_slack_input(input_data: dict) -> None:
-    """Clean Slack formatting before passing to LLM."""
-    message = input_data["message"]
-    # Remove Slack mentions and formatting
-    clean_message = message.replace("<@U123>", "").replace("*", "").strip()
-    input_data["message"] = clean_message
+**Pre-hook:** Clean Slack message formatting:
+<CodeBlock language="python" code ={`async def pre_hook():
+    slack_messages = get_run_context().get_data(".input.prompt")
+    text = slack_messages[0].get("text", "")
+    clean_text = re.sub(r'<@[A-Z0-9]+>', '', text)
+    clean_text = clean_text.replace("*", "").replace("_", "").strip()
+    get_run_context().set_data(".input.prompt", clean_text)`}/>
 
-async def send_to_slack(output: str) -> None:
-    """Send result back to Slack channel."""
-    # Format and send response
-    slack_client.send_message(channel="#general", text=output)
-    print(f"Sent to Slack: {output}")
+**Post-hook:** Auto-send agent response to Slack:
 
-agent = Agent(
-    handler=process_message,
-    pre_hook=clean_slack_input,   # Clean input from Slack
-    post_hook=send_to_slack       # Send result to Slack
+<CodeBlock language="python" code ={`async def post_hook():
+    output = get_run_context().get_data(".output")["content"][0]["text"]
+    send_message(channel="channel-id", text=output)`}/>
+
+**Complete Agent setup:**
+
+<CodeBlock language="python" code ={`Agent(
+    name="slack_agent",
+    model="openai/gpt-4.1-mini",
+    pre_hook=pre_hook,   # Process Slack message before agent
+    post_hook=post_hook, # Handle response after agent
+    system_prompt="You are a helpful assistant. Respond concisely and friendly to Slack messages."
 )`}/>
 
+Hooks provide a powerful way to add middleware functionality to your Timbal components, enabling input/output transformation, validation, monitoring, and context-aware behavior.
 
-### Timbal Platform Integration
+
+## Timbal Platform Integration
 
 :::warning
 This should be in Platform Section
