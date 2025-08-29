@@ -50,8 +50,7 @@ workflow = Workflow(name="my_workflow")`}/>
   </div>
 </div>
 
-<CodeBlock language="python" code={`workflow = (
-    Workflow(name="my_workflow")
+<CodeBlock language="python" code={`Workflow(name="my_workflow")
     .step(step_1)
     .step(step_2)
     .link("step_1", "step_2") # Names of the tools (or function names if no tool name set)
@@ -72,111 +71,105 @@ Workflows form a **Directed Acyclic Graph (DAG)** where:
 
 ## Adding Steps to Your Workflow
 
-Workflows use the `.step()` method to add steps. Each step can be:
+Workflows use `.step()` method to add steps. Each step can be:
 
 - **Functions**: Direct function references
 - **Tools**: Tool objects with handlers
 - **Dictionaries**: Tool configurations
 - **Other Workflows**: Nested workflow components
 
-### Adding Function Steps
-
-<CodeBlock language="python" code={`from timbal.core import Workflow
-
-def celsius_to_fahrenheit(celsius: float) -> float:
-    return celsius * 9 / 5 + 32
-
-def check_threshold(fahrenheit: float, threshold: float = 86) -> str:
-    if fahrenheit > threshold:
-        return "Alert: Temperature is too high!"
-    else:
-        return "Temperature is normal."
-
-workflow = (
-    Workflow(name="temperature_alert")
-    .add_step(celsius_to_fahrenheit)
-    .add_step(check_threshold)
-)`}/>
-
-### Adding Tool Steps
-
-<CodeBlock language="python" code={`from timbal.core import Workflow, Tool
-
-def get_weather(city: str) -> str:
-    return f"The weather in {city} is sunny and 25°C."
-
-weather_tool = Tool(handler=get_weather)
-
-workflow = (
-    Workflow(name="weather_workflow")
-    .add_step(weather_tool)
-)`}/>
 
 ### Adding Steps with Parameters
 
 You can pass fixed parameters to steps using keyword arguments:
 
-<CodeBlock language="python" code={`workflow = (
-    Workflow(name="temperature_alert")
-    .add_step(celsius_to_fahrenheit, celsius=35)
-    .add_step(check_threshold, threshold=90)
+<CodeBlock language="python" code={`Workflow(name="temperature_alert")
+    .step(celsius_to_fahrenheit, celsius=35)
+    .step(check_threshold, threshold=lambda: 6)
 )`}/>
 
----
+### Connecting Steps
 
-## Parameter Mapping and Data Flow
+Use `get_run_context().get_data("step_name.output")` to access outputs from previous steps:
 
-Workflows automatically handle parameter mapping between steps. The output of one step becomes the input of the next step based on function signatures.
-
-### Automatic Parameter Mapping
-
-<CodeBlock language="python" code={`def get_temperature() -> float:
-    return 35.0
-
-def celsius_to_fahrenheit(celsius: float) -> float:
-    return celsius * 9 / 5 + 32
-
-def check_threshold(fahrenheit: float, threshold: float = 86) -> str:
-    if fahrenheit > threshold:
-        return "Alert: Temperature is too high!"
-    else:
-        return "Temperature is normal."
-
-workflow = (
-    Workflow(name="temperature_alert")
-    .add_step(get_temperature)
-    .add_step(celsius_to_fahrenheit)  # Receives output from get_temperature
-    .add_step(check_threshold)        # Receives output from celsius_to_fahrenheit
+<CodeBlock language="python" code={`workflow = (Workflow(name="temperature_alert")
+    .step(step1, celsius=35)
+    .step(step2, temperature=lambda: get_run_context().get_data("step1.output"))
 )`}/>
 
-### Fixed Parameters
+In the above example, you don't need `.link()` because step2 uses step1's output. When a step depends on another step's data, they run sequentially (implicit linking).
 
-You can override automatic data flow with fixed parameters:
+To force sequential execution, use `.link()`:
 
-<CodeBlock language="python" code={`workflow = (
-    Workflow(name="temperature_alert")
-    .add_step(get_temperature)
-    .add_step(celsius_to_fahrenheit)
-    .add_step(check_threshold, threshold=90)  # Fixed threshold value
-)`}/>
+<CodeBlock language="python" code={`def fetch_data():    # Takes 2 seconds
+    time.sleep(2)
+    return "data"
+
+def process_data():  # Takes 3 seconds
+    time.sleep(3)
+    return "processed"
+
+workflow = (Workflow(name="sequential_flow")
+    .step(fetch_data)      # Starts at 0s, finishes at 2s
+    .step(process_data)    # Starts at 2s, finishes at 5s
+    .link("fetch_data", "process_data")
+)
+# Total time: 5 seconds (2 + 3)`}/>
+
+Without `.link()`, steps run in parallel:
+
+<CodeBlock language="python" code={`def send_email():       # Takes 2 seconds
+    time.sleep(2)
+    return "email sent"
+
+def update_database():  # Takes 3 seconds
+    time.sleep(3)
+    return "db updated"
+
+workflow = (Workflow(name="parallel_flow")
+    .step(send_email)      # Starts at 0s, finishes at 2s
+    .step(update_database) # Starts at 0s, finishes at 3s
+)
+# Total time: 3 seconds (max of 2 and 3)`}/>
 
 ---
 
 ## Integrating LLMs
 
-You can add LLMs as steps in your workflow using the LLM handlers:
+You can add LLMs as steps. Timbal provides `llm_router` function that set as a Tool can work as an step.
 
-<CodeBlock language="python" code={`from timbal.core import Workflow
-from timbal.core.handlers import llm_router
+<CodeBlock language="python" code={`from timbal.core import Tool
+from timbal.core.workflow import Workflow
+from timbal.core.llm_router import llm_router
+from timbal.state import get_run_context
+from timbal.types.message import Message
 
 def get_email() -> str:
     return "Hi team, let's meet tomorrow at 10am to discuss the project. Best, Alice"
 
+openai_llm = Tool(
+  name="openai_llm",
+  handler=llm_router,
+  default_params={
+    "model": "openai/gpt-4o-mini",
+    "system_prompt": "You are a helpful assistant that summarizes emails concisely.",
+  }
+)
+
 workflow = (
     Workflow(name="email_summarizer")
-    .add_step(get_email)
-    .add_step(openai_llm, model="gpt-4o-mini", prompt="Summarize this email: {{get_email.return}}")
+    .step(get_email)
+    .step(openai_llm, messages=lambda: [Message.validate(f"Summarize this email: {get_run_context().get_data('get_email.output')}")])
+    .link("get_email", "openai_llm")
 )`}/>
+
+## Default Parameters
+
+Look in the above example that the parameter of the function `openai_llm` comes from `default_params` ('model' and 'system_prompt') and runtime parameters (messages).
+
+Default parameters in Timbal allow you to set predefined values that are automatically injected into your runnable components, providing flexibility and reducing boilerplate code.
+
+Default parameters are defined when creating a runnable and are merged with runtime parameters. Runtime parameters always override default parameters.
 
 ---
 
@@ -185,46 +178,24 @@ workflow = (
 Once your workflow is defined, you can execute it in two main ways:
 
 **Get the final output:**
-<CodeBlock language="python" code={`result = await workflow.complete()
+<CodeBlock language="python" code={`result = await workflow().collect()
 print(result.output)`}/>
 
 **Stream events as they happen:**
-<CodeBlock language="python" code={`async for event in workflow.run():
+<CodeBlock language="python" code={`async for event in workflow():
     print(event)`}/>
 
 ---
 
-## Example: Complete Temperature Alert Workflow
+### Key Features
+- **Parallel Execution**: Independent steps run concurrently
+- **Error Isolation**: Failed steps skip dependents, others continue
+- **Type Safety**: Automatic parameter validation via Pydantic
+- **Composition**: Workflows can contain other workflows
 
-<CodeBlock language="python" code={`from timbal.core import Workflow
+For more, see the [Advanced Workflow Concepts](/workflows/advanced), and [Examples](/examples).
 
-def get_temperature() -> float:
-    return 35.0
 
-def celsius_to_fahrenheit(celsius: float) -> float:
-    return celsius * 9 / 5 + 32
-
-def check_threshold(fahrenheit: float, threshold: float = 86) -> str:
-    if fahrenheit > threshold:
-        return "Alert: Temperature is too high!"
-    else:
-        return "Temperature is normal."
-
-workflow = (
-    Workflow(name="temperature_alert")
-    .add_step(get_temperature)
-    .add_step(celsius_to_fahrenheit)
-    .add_step(check_threshold, threshold=90)
-)
-
-async def main():
-    result = await workflow.complete()
-    print(result.output)  # Will contain the final result from check_threshold
-`}/>
-
----
-
-For more, see the [Workflows documentation](/workflows), [Advanced Workflow Concepts](/workflows/advanced), and [Examples](/examples).
 
 <style>{`
 .cards-container {
@@ -305,47 +276,3 @@ For more, see the [Workflows documentation](/workflows), [Advanced Workflow Conc
   line-height: 1.5;
 }
 `}</style>
-
-
-
-
-# Default Parameters
-
-Default parameters in Timbal allow you to set predefined values that are automatically injected into your runnable components, providing flexibility and reducing boilerplate code.
-
-## Basic Usage
-
-Default parameters are defined when creating a runnable and are merged with runtime parameters:
-
-<CodeBlock language="python" code={`
-from timbal.core import Tool
-
-def analyze_data(data: str, method: str = "standard", threshold: float = 0.5):
-    return f"Analyzed {data} using {method} with threshold {threshold}"
-
-# Create tool with default parameters
-tool = Tool(
-    name="data_analyzer",
-    handler=analyze_data,
-    default_params={
-        "method": "advanced",
-        "threshold": 0.8
-    }
-)
-
-# Execute with runtime parameters
-result = await tool(data="sample_data").collect()
-# Uses: method="advanced", threshold=0.8 (from defaults)
-# Override: data="sample_data" (from runtime)
-
-# Override default parameters
-result = await tool(data="sample_data", method="simple").collect()
-# Uses: method="simple" (overridden), threshold=0.8 (from defaults)
-`}/>
-Runtime parameters always override default parameters:
-
-### Key Features
-- **Parallel Execution**: Independent steps run concurrently
-- **Error Isolation**: Failed steps skip dependents, others continue
-- **Type Safety**: Automatic parameter validation via Pydantic
-- **Composition**: Workflows can contain other workflows

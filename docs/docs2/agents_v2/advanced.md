@@ -21,14 +21,14 @@ Hooks process data before (`pre_hook`) and after (`post_hook`) agent execution. 
 Clean incoming Slack messages and auto-send responses.
 
 :::info
-Import `get_run_context` from Timbal. See [Slack Documentation](integrations_v2/slack) for `send_message` and other functions.
+Import `get_run_context` from Timbal. See Slack Documentation (integrations_v2/slack) for `send_message` and other functions.
 :::
 
 **Pre-hook:** Clean Slack message formatting:
 <CodeBlock language="python" code ={`async def pre_hook():
     slack_messages = get_run_context().get_data(".input.prompt")
     text = slack_messages[0].get("text", "")
-    clean_text = re.sub(r'<@[A-Z0-9]+>', '', text)
+    clean_text = re.sub(r'@[A-Z0-9]+', '', text)
     clean_text = clean_text.replace("*", "").replace("_", "").strip()
     get_run_context().set_data(".input.prompt", clean_text)`}/>
 

@@ -38,8 +38,6 @@ const sidebars = {
       collapsed: false,
       items: [
         'workflows_v2/index',
-        'workflows_v2/memory',
-        'workflows_v2/advanced',
       ],
     },
     {
