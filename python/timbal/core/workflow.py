@@ -14,14 +14,29 @@ logger = structlog.get_logger("timbal.core.workflow")
 
 
 class Workflow(Runnable):
-    """"""
+    """A Workflow is a Runnable that orchestrates execution of multiple steps in a directed acyclic graph (DAG).
+    
+    Workflows implement a step-based execution pattern where:
+    1. Steps are added as Runnable components with explicit dependencies
+    2. Steps can be linked to form execution chains based on data dependencies
+    3. All steps execute concurrently while respecting dependency constraints
+    4. Failed steps automatically skip their dependent steps to prevent cascading failures
+    5. The workflow completes when all executable steps finish
+    
+    Workflows support:
+    - Automatic step linking based on data key dependencies (e.g., step1.output -> step2.input)
+    - Concurrent execution of independent steps for optimal performance
+    - DAG validation to prevent circular dependencies
+    - Graceful error handling with dependent step skipping
+    - Dynamic parameter collection from all constituent steps
+    """
 
     _steps: dict[str, Runnable] = PrivateAttr(default_factory=dict)
     """List of steps to execute in the workflow."""
 
 
     def model_post_init(self, __context: Any) -> None:
-        """"""
+        """Initialize workflow as an orchestrator with async generator handler."""
         super().model_post_init(__context)
         self._path = self.name
 
@@ -67,7 +82,7 @@ class Workflow(Runnable):
 
 
     def _is_dag(self) -> bool:
-        """Checks if the workflow is a directed acyclic graph (DAG)."""
+        """Check if the workflow forms a valid DAG using depth-first search cycle detection."""
         # States: 0 = unvisited, 1 = visiting, 2 = visited
         state = {step_name: 0 for step_name in self._steps.keys()}
         def dfs(step_name):
@@ -89,7 +104,27 @@ class Workflow(Runnable):
     
 
     def link(self, source: str, target: str) -> "Workflow":
-        """"""
+        """Create an explicit dependency link between two workflow steps.
+        
+        Establishes a directed edge from source to target step, ensuring the
+        target step waits for source step completion before executing.
+        Validates that the link doesn't create cycles in the workflow DAG.
+        
+        Args:
+            source: Name of the source step that must complete first
+            target: Name of the target step that depends on the source
+            
+        Returns:
+            Self for method chaining
+            
+        Raises:
+            ValueError: If source or target step is not found in the workflow
+            ValueError: If linking would create a cycle in the workflow
+        """
+        if source not in self._steps:
+            raise ValueError(f"Source step {source} not found in workflow.")
+        if target not in self._steps:
+            raise ValueError(f"Target step {target} not found in workflow.")
         self._steps[source].next_steps.add(target)
         self._steps[target].previous_steps.add(source)
         if not self._is_dag():
@@ -99,7 +134,28 @@ class Workflow(Runnable):
 
     # TODO Think how we handle agent model_params vs default_params
     def step(self, runnable: RunnableLike, **kwargs: Any) -> "Workflow":
-        """"""
+        """Add a step to the workflow with automatic dependency linking.
+        
+        Adds a runnable component as a workflow step and automatically creates
+        dependency links based on data key analysis. If step parameters reference
+        other steps' outputs (e.g., step1.result), those dependencies are
+        automatically linked.
+        
+        The runnable can be:
+        - A Runnable instance
+        - A dictionary that will be converted to a Tool
+        - A callable that will be wrapped in a Tool
+        
+        Args:
+            runnable: The runnable component to add as a step
+            **kwargs: Default parameters for the step, also used for dependency analysis
+            
+        Returns:
+            Self for method chaining
+            
+        Raises:
+            ValueError: If a step with the same name already exists
+        """
         if not isinstance(runnable, Runnable):
             if isinstance(runnable, dict):
                 runnable = Tool(**runnable)
@@ -125,14 +181,14 @@ class Workflow(Runnable):
 
     
     def _skip_next_steps(self, step_name: str, completions: dict[str, asyncio.Event]) -> None:
-        """"""
+        """Recursively mark a step and all its dependents as completed (skipped)."""
         completions[step_name].set()
         for next_name in self._steps[step_name].next_steps:
             self._skip_next_steps(next_name, completions)
 
 
     async def _enqueue_step_events(self, step: Runnable, queue: asyncio.Queue, completions: dict[str, asyncio.Event], **kwargs: Any) -> None:
-        """"""
+        """Execute a single workflow step and enqueue its events to the shared queue."""
         # Await for the completion of all ancestors
         await asyncio.gather(*[completions[step_name].wait() for step_name in step.previous_steps])
         # This serves multiple purposes. 
@@ -155,7 +211,24 @@ class Workflow(Runnable):
 
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
-        """"""
+        """Main workflow execution handler implementing concurrent step orchestration.
+        
+        This is the core workflow logic that implements concurrent step execution:
+        1. Creates completion events for all steps to coordinate dependencies
+        2. Launches all steps concurrently as async tasks
+        3. Each step waits for its prerequisites before executing
+        4. Multiplexes events from all steps as they become available
+        5. Continues until all steps complete or are skipped
+        
+        The workflow provides optimal performance by executing independent steps
+        in parallel while maintaining dependency order through completion events.
+        
+        Args:
+            **kwargs: Execution parameters distributed to appropriate steps
+                
+        Yields:
+            Events from step executions as they become available
+        """
         queue = asyncio.Queue()
         completions = {step_name: asyncio.Event() for step_name in self._steps.keys()}
         tasks = [
