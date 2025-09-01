@@ -14,24 +14,24 @@ Many workflows involve executing steps one after another in a defined order. Thi
 
 In this example, the workflow runs `step1` and `step2` in sequence, passing the input through each step and returning the final result from `step2`.
 
-<CodeBlock language="python" code={`from timbal.core import Workflow, Tool
+<CodeBlock language="python" code={`from timbal.core import Workflow
+from timbal.state import get_run_context
 
 # Define step 1: passes value from input to output
-def step1(value: int) -> dict:
+def step1(x1: int) -> dict:
     """First step that processes the input value."""
-    return {"value": value}
+    return x1
 
 # Define step 2: passes value from input to output  
-def step2(value: int) -> dict:
+def step2(x2: int) -> dict:
     """Second step that processes the input value."""
-    return {"value": value}
+    return x2
 
 # Create the sequential workflow
 sequential_workflow = (
     Workflow(name="sequential-workflow")
     .step(step1)
-    .step(step2)
-    .link("step1", "step2")  # Link step1 output to step2 input
+    .step(step2, x2=lambda: get_run_context().get_data("step1.output"))
 )`}/>
 
 ## Example usage

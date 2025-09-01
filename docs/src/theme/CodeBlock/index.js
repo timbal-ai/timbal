@@ -400,7 +400,6 @@ export default function CodeBlock(props) {
                         {line.map((token, key) => {
                           const tokenProps = getTokenProps({ token });
                           let content = tokenProps.children;
-                          console.log('🔍 DEBUG: Processing token', key, ':', content);
                           // For bash blocks, just return the content in white
                           if (props.language === 'bash') {
                             return (
@@ -415,17 +414,10 @@ export default function CodeBlock(props) {
                           // Handle 'f' and 'f"' to keep f blue (very early)
                           if (typeof content === 'string' && (content.trim() === 'f' || content.startsWith('f"'))) {
                             if (content.startsWith('f"')) {
-                              console.log('🎯 DEBUG: Found f-string token:', content);
                               // Split f" into f (blue) and process the string content
                               const stringContent = content.substring(1); // Remove the f
-                              console.log('🎯 DEBUG: stringContent:', stringContent);
-                              
-                              // Check if there are variables in the f-string
-                              console.log('🎯 DEBUG: Checking for variables in:', stringContent);
-                              console.log('🎯 DEBUG: Has {:', stringContent.includes('{'));
-                              console.log('🎯 DEBUG: Has }:', stringContent.includes('}'));
+
                               if (stringContent.includes('{') && stringContent.includes('}')) {
-                                console.log('🎯 DEBUG: Found variables in f-string!');
                                 const parts = [];
                                 let lastIndex = 0;
                                 
@@ -434,15 +426,12 @@ export default function CodeBlock(props) {
                                 let match;
                                 
                                 while ((match = variableRegex.exec(stringContent)) !== null) {
-                                  console.log('🎯 DEBUG: Found variable match:', match[0], 'with content:', match[1]);
                                   // Add text before the variable in yellow
                                   if (match.index > lastIndex) {
                                     const beforeText = stringContent.slice(lastIndex, match.index);
-                                    console.log('🎯 DEBUG: Adding beforeText:', beforeText);
                                     parts.push(`<span class="custom-highlight-yellow">${beforeText}</span>`);
                                   }
                                   // Add the variable with yellow highlighting
-                                  console.log('🎯 DEBUG: Adding variable:', `{${match[1]}}`);
                                   parts.push(`<span class="custom-highlight-yellow">{${match[1]}}</span>`);
                                   lastIndex = match.index + match[0].length;
                                 }
@@ -450,12 +439,9 @@ export default function CodeBlock(props) {
                                 // Add remaining text in yellow
                                 if (lastIndex < stringContent.length) {
                                   const remainingText = stringContent.slice(lastIndex);
-                                  console.log('🎯 DEBUG: Adding remainingText:', remainingText);
                                   parts.push(`<span class="custom-highlight-yellow">${remainingText}</span>`);
                                 }
                                 
-                                console.log('🎯 DEBUG: Final parts array:', parts);
-                                console.log('🎯 DEBUG: Final HTML:', parts.join(''));
                                 return (
                                   <span key={key}>
                                     <span className="custom-highlight-blue">f</span>
@@ -466,10 +452,8 @@ export default function CodeBlock(props) {
                                 // No variables in this token, but check if we're in an f-string context
                                 // Look at the entire line to see if there are variables in other tokens
                                 const lineContent = line.map(token => getTokenProps({ token }).children).join('');
-                                console.log('🎯 DEBUG: Full line content:', lineContent);
                                 
                                 if (lineContent.includes('{') && lineContent.includes('}')) {
-                                  console.log('🎯 DEBUG: Variables found in line, highlighting this part in yellow');
                                   return (
                                     <span key={key}>
                                       <span className="custom-highlight-blue">f</span>
@@ -496,9 +480,7 @@ export default function CodeBlock(props) {
                           if (typeof content === 'string' && (content.includes('{') || content.includes('}'))) {
                             // Check if we're in an f-string context by looking at the line
                             const lineContent = line.map(token => getTokenProps({ token }).children).join('');
-                            console.log('🎯 DEBUG: Checking variable token:', content, 'in line:', lineContent);
                             if (lineContent.includes('f"') || lineContent.includes("f'")) {
-                              console.log('🎯 DEBUG: Found variable token in f-string:', content);
                               // Highlight the variable in yellow
                               return <span key={key} className="custom-highlight-yellow">{content}</span>;
                             }
@@ -597,15 +579,12 @@ export default function CodeBlock(props) {
                               let match;
                               
                               while ((match = variableRegex.exec(stringContent)) !== null) {
-                                console.log('🎯 DEBUG: Found variable match:', match[0], 'with content:', match[1]);
                                 // Add text before the variable in yellow
                                 if (match.index > lastIndex) {
                                   const beforeText = stringContent.slice(lastIndex, match.index);
-                                  console.log('🎯 DEBUG: Adding beforeText:', beforeText);
                                   parts.push(`<span class="custom-highlight-yellow">${beforeText}</span>`);
                                 }
                                 // Add the variable with yellow highlighting
-                                console.log('🎯 DEBUG: Adding variable:', `{${match[1]}}`);
                                 parts.push(`<span class="custom-highlight-yellow">{${match[1]}}</span>`);
                                 lastIndex = match.index + match[0].length;
                               }
@@ -613,7 +592,6 @@ export default function CodeBlock(props) {
                               // Add remaining text in yellow
                               if (lastIndex < stringContent.length) {
                                 const remainingText = stringContent.slice(lastIndex);
-                                console.log('🎯 DEBUG: Adding remainingText:', remainingText);
                                 parts.push(`<span class="custom-highlight-yellow">${remainingText}</span>`);
                               }
                               
