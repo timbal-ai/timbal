@@ -6,14 +6,14 @@ export default function TimbalExamples() {
 
   const sections = [
     { id: 'agents', name: 'Agents', examples: [
-      { title: 'Calling Agents', link: '/examples/agents/calling_agents' },
-      { title: 'Agent System Prompt', link: '/examples/agents/agent_system_prompt' },
+      //{ title: 'Calling Agents', link: '/examples/agents/calling_agents' },
+      //{ title: 'Agent System Prompt', link: '/examples/agents/agent_system_prompt' },
       { title: 'Adding a Tool', link: '/examples/agents/adding_tool' },
       { title: 'Adding a Workflow', link: '/examples/agents/adding_workflow' },
       { title: 'Supervisor Agent', link: '/examples/agents/supervisor_agent' },
       { title: 'Image Analysis', link: '/examples/agents/image_analysis' },
       { title: 'Using Voice', link: '/examples/agents/using_voice' },
-      { title: 'Dynamic Context', link: '/examples/agents/dynamic_context' }
+      //{ title: 'Dynamic Context', link: '/examples/agents/dynamic_context' }
     ]},
     { id: 'workflows', name: 'Workflows', examples: [
       { title: 'Running Workflows', link: '/examples/workflows/running_workflows' },
