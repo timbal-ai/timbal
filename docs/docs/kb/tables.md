@@ -204,6 +204,11 @@ await import_records(
         }
     ]
 )`} />
+
+:::warning
+**Table Structure**: All fields from the first record determine the table structure. You cannot have different field sets per record - if the first record only has `id`, subsequent records with `id` and `email` will only show the `id` field.
+:::
+
 This is what you'll see in the platform when importing records to your table.
 
 <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', alignItems: 'center' }}>

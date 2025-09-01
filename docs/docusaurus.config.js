@@ -74,6 +74,15 @@ const config = {
         sidebarPath: './sidebars-v2.js',
       },
     ],
+    [
+      '@docusaurus/plugin-content-docs',
+      {
+        id: 'examples',  // Second docs section
+        path: 'examples',
+        routeBasePath: 'examples',
+        sidebarPath: './sidebars-examples.js',
+      },
+    ],
   ],
 
   themeConfig:
@@ -91,10 +100,26 @@ const config = {
           style: { marginLeft: '18px' },
         },
         items: [
-          { to: '/introduction', label: 'Docs', position: 'left' },
-          { to: '/docs2/introduction_v2', label: 'Docs v2', position: 'left' },
-          //{ to: '/platform', label: 'Platform', position: 'left' },
-          // { to: '/examples', label: 'Examples', position: 'left' },
+          {
+            type: 'doc',
+            docId: 'introduction/index',
+            label: 'Docs',
+            position: 'left',
+          },
+          {
+            type: 'doc',
+            docsPluginId: 'docs2',
+            docId: 'introduction_v2/index',
+            label: 'Docs v2',
+            position: 'left',
+          },
+          {
+            type: 'doc',
+            docsPluginId: 'examples',
+            docId: 'overview/index',
+            label: 'Examples',
+            position: 'left',
+          },
           // { to: '/releases', label: 'Releases', position: 'left' },
           {
             href: 'https://github.com/timbal-ai/timbal',
