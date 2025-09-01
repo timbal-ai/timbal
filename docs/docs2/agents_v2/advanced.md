@@ -57,21 +57,32 @@ You can create voice agents that receive audio input and return audio output usi
 
 
 <CodeBlock language="python" code={`from timbal import Agent
-from timbal.handlers.elevenlabs import stt, tts
-from timbal.state import get_run_context
+from timbal.handlers.openai.stt import stt
+from timbal.handlers.openai.tts import tts
 from timbal.types import File
+from timbal.state import get_run_context
 
 async def audio_pre_hook():
-  audio_input = get_run_context().get_data(".input.prompt")
-  text_input = await stt(audio_file=audio_input)
-  get_run_context().set_data(".input.prompt", text_input)
+  audio_input = get_run_context().get_data(".input")
+  # You need to have a reference to the object, to then modify the key directly:
+  audio_input["prompt"] = await stt(audio_file=audio_input["prompt"])
+  get_run_context().set_data(".input", audio_input)
+
+async def audio_post_hook():
+  audio_output = get_run_context().get_data(".output")
+  
+  output_with_audio = {  # Use a different variable name
+    "text": audio_output.content[0].text,
+    "audio": await tts(text=audio_output.content[0].text)
+  }
+  get_run_context().set_data(".output", output_with_audio)
 
 # Create agent with voice tools
 voice_agent = Agent(
   name="voice_assistant",
   model="openai/gpt-4o-mini",
   pre_hook=audio_pre_hook,
-  post_hook=tts,
+  post_hook=audio_post_hook,
 )
 
 # Send audio input
