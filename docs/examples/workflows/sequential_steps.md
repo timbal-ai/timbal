@@ -32,7 +32,7 @@ sequential_workflow = (
     .step(step1)
     .step(step2)
     .link("step1", "step2")  # Link step1 output to step2 input
-)`}
+)`}/>
 
 ## Example usage
 
