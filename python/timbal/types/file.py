@@ -51,10 +51,6 @@ class File(io.IOBase):
         "__content_type__",
     )
 
-    __max_file_size__: int | None = (
-        int(os.getenv("TIMBAL_MAX_FILE_SIZE")) if os.getenv("TIMBAL_MAX_FILE_SIZE") else None
-    )
-    """ Maximum allowed file size in bytes"""
 
 
     def __init__(
@@ -79,13 +75,13 @@ class File(io.IOBase):
             if self.__source_extension__:
                 content_type, _ = mimetypes.guess_type(f"tmp{self.__source_extension__}")
                 if content_type is None:
-                    content_type = f"timbal/{self.__source_extension__}"
+                    content_type = "application/octet-stream"
             else:
                 content_type = "application/octet-stream"
         else:
             content_type, _ = mimetypes.guess_type(str(self))
             if content_type is None:
-                content_type = f"timbal/{self.__source_extension__}"
+                content_type = "application/octet-stream"
         object.__setattr__(self, "__content_type__", content_type)
 
     
@@ -169,6 +165,8 @@ class File(io.IOBase):
                 fileext = object.__getattribute__(self, "__source_extension__")
                 if fileext:
                     fileobj.name = f"{uuid7()}{fileext}"
+            if hasattr(fileobj, "__content_type__"):
+                object.__setattr__(self, "__content_type__", fileobj.__content_type__)
             object.__setattr__(self, "__fileobj__", fileobj)
         return fileobj
 
@@ -249,10 +247,6 @@ class File(io.IOBase):
             path = Path(value).expanduser().resolve()
             if not path.exists() or not path.is_file():
                 raise ValueError("Invalid file path.")
-            if cls.__max_file_size__ is not None:
-                file_size = path.stat().st_size  # bytes
-                if file_size > cls.__max_file_size__:
-                    raise ValueError(f"File size exceeds the maximum allowed size of {cls.__max_file_size__} bytes.")
             parsed_url_extension = path.suffix
             return File(
                 value,
@@ -263,16 +257,6 @@ class File(io.IOBase):
 
         # Data urls: data:[<mediatype>][;base64],<data>.
         if parsed_url.scheme == "data":
-            if cls.__max_file_size__ is not None:
-                comma_idx = value.find(",")
-                # Redundant check.
-                if comma_idx == -1:
-                    raise ValueError("Invalid data URL.")
-                encoded = value[comma_idx + 1 :]
-                # ? We could count the padding if we want to be more precise.
-                estimated_size = len(encoded) * 3 // 4
-                if estimated_size > cls.__max_file_size__:
-                    raise ValueError(f"File size exceeds the maximum allowed size of {cls.__max_file_size__} bytes.")
             parsed_url_mimetype = parsed_url.path.split(";", 1)
             if len(parsed_url_mimetype) != 2:
                 raise ValueError("Data url must specify a mimetype.")
@@ -291,11 +275,6 @@ class File(io.IOBase):
             )
 
         if parsed_url.scheme == "http" or parsed_url.scheme == "https":
-            response = requests.head(value)
-            if cls.__max_file_size__ is not None:
-                content_length = int(response.headers.get("Content-Length", 0))
-                if content_length > cls.__max_file_size__:
-                    raise ValueError(f"File size exceeds the maximum allowed size of {cls.__max_file_size__} bytes.")
             parsed_url_name = parsed_url.path.split("/")[-1]
             parsed_url_extension = f".{parsed_url_name.split('.')[-1]}" if "." in parsed_url_name else ""
             return File(
@@ -433,7 +412,20 @@ class File(io.IOBase):
         res = requests.get(url, stream=True)
         res.raise_for_status()
         fileobj = io.BytesIO(res.content)
-        fileobj.name = url.split("/")[-1]
+        # Try to get a meaningful filename from URL or Content-Disposition header
+        filename = None
+        # Check Content-Disposition header first
+        content_disposition = res.headers.get("Content-Disposition")
+        if content_disposition and "filename=" in content_disposition:
+            try:
+                filename = content_disposition.split("filename=")[1].strip('"\'')
+            except (IndexError, AttributeError):
+                pass
+        # Fallback to URL path
+        if not filename:
+            filename = url.split("/")[-1]
+        fileobj.name = filename
+        fileobj.__content_type__ = res.headers.get("Content-Type", "application/octet-stream")
         return fileobj
 
 
