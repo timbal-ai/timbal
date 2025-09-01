@@ -1,6 +1,7 @@
 ---
 title: Array as Input
 sidebar: 'examples'
+draft: True
 ---
 
 import React from 'react';
