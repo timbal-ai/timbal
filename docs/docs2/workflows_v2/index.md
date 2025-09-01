@@ -20,6 +20,8 @@ Design, connect, and control multi-step AI pipelines using Workflows—Timbal's 
 
 workflow = Workflow(name="my_workflow")`}/>
 
+This is the initial step to create a workflow. Once created, you can build your workflow by adding components as building blocks.
+
 ---
 
 ## Building Blocks of a Workflow
@@ -140,10 +142,6 @@ workflow = (Workflow(name="parallel_flow")
 
 ---
 
-.set_input("extract_text.file", "file")
-
----
-
 ## Integrating LLMs
 
 You can add LLMs as steps. Timbal provides `llm_router` function that set as a Tool can work as an step.
@@ -195,9 +193,31 @@ print(result.output)`}/>
 <CodeBlock language="python" code={`async for event in workflow():
     print(event)`}/>
 
+If a function in your flow needs a value per run (e.g., x), pass it when you call the workflow:
+
+- Inputs are routed only to steps that declare those parameters
+- Runtime inputs override step defaults
+- The same input name can feed multiple steps unless a step overrides it
+
+<CodeBlock language="python" code={`from timbal.core import Workflow
+
+def multiply(x: int) -> int:
+    return x * 2
+
+workflow = Workflow(name="simple_flow").step(multiply)
+
+# Run with a per-run input
+result = await workflow(x=1).collect()   # x is routed to multiply
+print(result.output)  # 2
+
+# Or stream events while using the same input
+async for event in workflow(x=3):
+    print(event)  # Final output will be 6`}/>
+
+
 ---
 
-### Key Features
+## Key Features
 - **Parallel Execution**: Independent steps run concurrently
 - **Error Isolation**: Failed steps skip dependents, others continue
 - **Type Safety**: Automatic parameter validation via Pydantic
