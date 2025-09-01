@@ -103,7 +103,7 @@ class Workflow(Runnable):
         return True
     
 
-    def link(self, source: str, target: str) -> "Workflow":
+    def _link(self, source: str, target: str) -> "Workflow":
         """Create an explicit dependency link between two workflow steps.
         
         Establishes a directed edge from source to target step, ensuring the
@@ -133,7 +133,7 @@ class Workflow(Runnable):
 
 
     # TODO Think how we handle agent model_params vs default_params
-    def step(self, runnable: RunnableLike, **kwargs: Any) -> "Workflow":
+    def step(self, runnable: RunnableLike, depends_on: list[str] | None = None, **kwargs: Any) -> "Workflow":
         """Add a step to the workflow with automatic dependency linking.
         
         Adds a runnable component as a workflow step and automatically creates
@@ -148,25 +148,34 @@ class Workflow(Runnable):
         
         Args:
             runnable: The runnable component to add as a step
+            depends_on: Optional list of steps that must complete before this step
             **kwargs: Default parameters for the step, also used for dependency analysis
             
         Returns:
             Self for method chaining
-            
-        Raises:
-            ValueError: If a step with the same name already exists
         """
         if not isinstance(runnable, Runnable):
             if isinstance(runnable, dict):
                 runnable = Tool(**runnable)
             else:
                 runnable = Tool(handler=runnable)
+
         if runnable.name in self._steps:
             raise ValueError(f"Step {runnable.name} already exists in the workflow.")
+
         runnable.nest(self._path)
         self._steps[runnable.name] = runnable
         runnable.previous_steps = set()
         runnable.next_steps = set()
+
+        # Explicit dependencies
+        if depends_on and not isinstance(depends_on, list):
+            raise ValueError("depends_on must be a list of step names")
+        if depends_on:
+            depends_on = set(depends_on)
+            for dep in depends_on:
+                self._link(dep, runnable.name)
+
         # Use kwargs as default params for the runnable, and inspect callables to automatically link steps
         runnable._prepare_default_params(kwargs)
         for v in runnable._default_runtime_params.values():
@@ -176,7 +185,8 @@ class Workflow(Runnable):
             if data_key.startswith("."): continue
             previous_step_name = data_key.split(".")[0]
             logger.info("Linking steps automatically", previous_step=previous_step_name, next_step=runnable.name)
-            self.link(previous_step_name, runnable.name)
+            self._link(previous_step_name, runnable.name)
+
         return self
 
     

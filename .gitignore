@@ -24,3 +24,7 @@ version.zig
 
 # Safe testing during development
 sandbox/
+
+# Docs
+node_modules/
+.docusaurus/
