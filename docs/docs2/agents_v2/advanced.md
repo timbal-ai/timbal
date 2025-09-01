@@ -16,7 +16,7 @@ Master advanced patterns for Agent including memory management, nested execution
 
 Hooks process data before (`pre_hook`) and after (`post_hook`) agent execution. Available for both `Agent` and `Tool`.
 
-**Example: Slack Integration**
+### Example: Slack Integration
 
 Clean incoming Slack messages and auto-send responses.
 
@@ -49,6 +49,38 @@ Import `get_run_context` from Timbal. See Slack Documentation (integrations_v2/s
 )`}/>
 
 Hooks provide a powerful way to add middleware functionality to your Timbal components, enabling input/output transformation, validation, monitoring, and context-aware behavior.
+
+
+### Example: Voice Integration
+
+You can create voice agents that receive audio input and return audio output using pre and post hooks. This enables speech-to-speech interactions where users speak to the agent and receive spoken responses.
+
+
+<CodeBlock language="python" code={`from timbal import Agent
+from timbal.handlers.elevenlabs import stt, tts
+from timbal.state import get_run_context
+from timbal.types import File
+
+async def audio_pre_hook():
+  audio_input = get_run_context().get_data(".input.prompt")
+  text_input = await stt(audio_file=audio_input)
+  get_run_context().set_data(".input.prompt", text_input)
+
+# Create agent with voice tools
+voice_agent = Agent(
+  name="voice_assistant",
+  model="openai/gpt-4o-mini",
+  pre_hook=audio_pre_hook,
+  post_hook=tts,
+)
+
+# Send audio input
+audio_input = File.validate("path/to/user_audio.wav")
+response = await voice_agent(prompt=audio_input).collect()
+
+# The agent will automatically use STT to transcribe input and TTS to generate audio output`}/>
+
+This approach gives the agent more control over when and how to use voice processing, while the pre/post-hook approach provides automatic voice conversion for all interactions.
 
 
 ## Timbal Platform Integration
