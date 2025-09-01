@@ -34,6 +34,9 @@ async def stt(
     if not api_key:
         raise APIKeyNotFoundError("ELEVENLABS_API_KEY not found")
 
+    # Ensure the pointer is at the beginning of the file
+    audio_file.seek(0)
+
     async with httpx.AsyncClient() as client:
         headers = {"xi-api-key": api_key}
 

@@ -574,7 +574,8 @@ class Runnable(ABC, BaseModel):
         resolved_default_params = await self._resolve_default_params()
         input = {**resolved_default_params, **kwargs}
         input_dump = await dump(input)
-        trace.input = input_dump
+        trace.input = input
+        trace._input_dump = input_dump
 
         output, error = None, None
         try:
@@ -636,7 +637,8 @@ class Runnable(ABC, BaseModel):
 
             # ? Are we dumping multiple times
             output_dump = await dump(output)
-            trace.output = output_dump
+            trace.output = output
+            trace._output_dump = output_dump
             
             if self.post_hook is not None:
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
@@ -666,8 +668,8 @@ class Runnable(ABC, BaseModel):
                 usage=trace.usage,
             )
             # Store dumped versions as private attributes for serialization
-            output_event._input_dump = trace.input
-            output_event._output_dump = trace.output
+            output_event._input_dump = input_dump
+            output_event._output_dump = trace._output_dump if hasattr(trace, "_output_dump") else None
             if _parent_call_id is None:
                 await run_context._save_tracing()
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point

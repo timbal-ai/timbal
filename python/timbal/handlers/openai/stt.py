@@ -100,6 +100,9 @@ async def stt(
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise APIKeyNotFoundError("OPENAI_API_KEY not found")
+
+    # Ensure the pointer is at the beginning of the file
+    audio_file.seek(0)
     
     client = AsyncOpenAI(api_key=api_key)
     
