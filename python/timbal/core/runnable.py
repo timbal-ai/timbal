@@ -558,21 +558,21 @@ class Runnable(ABC, BaseModel):
         )
         run_context.tracing[_call_id] = trace
 
+        # Execute the 'when' condition inside the appropriate runnable context
+        if hasattr(self, "when") and self.when:
+            should_run = await self._execute_runtime_callable(self.when["callable"], self.when["is_coroutine"])
+            if not should_run:
+                # Remove the trace entry. As if this was never run
+                run_context.tracing.pop(_call_id)
+                # Clean exit. The async for loop will complete normally but won't iterate over anything
+                return
+
         # We store a preliminary version of the input and output in the trace, in case resolution fails
         input, output, error = kwargs, None, None
         trace.input = input
         trace._input_dump = None # ? await dump(input)
         trace._output_dump = None
         try:
-            # Execute the 'when' condition inside the appropriate runnable context
-            if hasattr(self, "when") and self.when:
-                should_run = await self._execute_runtime_callable(self.when["callable"], self.when["is_coroutine"])
-                if not should_run:
-                    # Remove the trace entry. As if this was never run
-                    run_context.tracing.pop(_call_id)
-                    # Clean exit. The async for loop will complete normally but won't iterate over anything
-                    return
-
             start_event = StartEvent(
                 run_id=run_context.id,
                 parent_run_id=run_context.parent_id,

@@ -212,13 +212,18 @@ class Workflow(Runnable):
             return
 
         step_started = False
-        async for event in step(**kwargs):
-            await queue.put(event)
-            if isinstance(event, StartEvent):
-                step_started = True
-            if isinstance(event, OutputEvent) and event.error is not None:
-                logger.info(f"Skipping step {step.name} successors...")
-                self._skip_next_steps(step.name, completions)
+        try:
+            async for event in step(**kwargs):
+                await queue.put(event)
+                if isinstance(event, StartEvent):
+                    step_started = True
+                if isinstance(event, OutputEvent) and event.error is not None:
+                    logger.info(f"Skipping step {step.name} successors...")
+                    self._skip_next_steps(step.name, completions)
+        except Exception as e:
+            await queue.put(e)
+            return
+        
         if not step_started:
             logger.info(f"Skipping step {step.name} and all successors...")
             self._skip_next_steps(step.name, completions)
@@ -255,7 +260,9 @@ class Workflow(Runnable):
         remaining = len(tasks)
         while remaining > 0:
             event = await queue.get()
-            if event is None:
+            if isinstance(event, Exception):
+                raise event
+            elif event is None:
                 remaining -= 1
-            yield event
-        # TODO How to collect the final output?
+            else:
+                yield event
