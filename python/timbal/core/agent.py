@@ -1,11 +1,14 @@
+from ast import Break
 import asyncio
 import importlib
 import inspect
+import json
 import re
 from collections.abc import AsyncGenerator
 from functools import cached_property
 from pathlib import Path
 from typing import Any, override
+from typing import Type
 
 import structlog
 from pydantic import (
@@ -29,6 +32,9 @@ logger = structlog.get_logger("timbal.core.agent")
 
 
 SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)*\}")
+
+
+    
 
 
 # TODO Add more params here
@@ -72,6 +78,8 @@ class Agent(Runnable):
     """Maximum number of LLM->tool call iterations before stopping."""
     model_params: dict[str, Any] = {}
     """Model parameters to pass to the agent."""
+    output_schema: Type[BaseModel] | None = None
+    """JSON schema to force structured output."""
 
     _llm: Tool = PrivateAttr()
     """Internal LLM tool instance for making model calls."""
@@ -79,6 +87,17 @@ class Agent(Runnable):
     """Dictionary mapping tool names to Tool instances for fast lookup."""
     _system_prompt_callables: dict[str, Any] = PrivateAttr(default_factory=dict)
     """Dictionary mapping template patterns to their callable functions and metadata."""
+
+
+
+    def create_schema_tool(self) -> Tool:
+        """Create a tool that forces the output to match a specific schema."""
+        return Tool(
+            name="force_output_schema",
+            description=f"Use it always before providing the final answer.",
+            handler=lambda x: x
+        )
+
 
 
     def model_post_init(self, __context: Any) -> None:
@@ -154,6 +173,9 @@ class Agent(Runnable):
         if self.model.startswith("anthropic"):
             if not self.model_params.get("max_tokens"):
                 raise ValueError("'max_tokens' is required for claude models.")
+        
+
+        
         # Create internal LLM tool for model interactions
         self._llm = Tool(
             name="llm",
@@ -161,6 +183,14 @@ class Agent(Runnable):
             default_params=self.model_params,
         )
         self._llm.nest(self._path)
+
+        # Add structured output tool if schema is provided
+        if self.output_schema:
+            # print("Adding schema tool")
+            output_schema_tool = self.create_schema_tool()
+            output_schema_tool.params_model = self.output_schema
+            self.tools.append(output_schema_tool)
+        
 
         # Normalize tools: convert functions/dicts to Tool instances
         # tools and _tools_by_name will hold references to the same Tool instances
@@ -179,6 +209,7 @@ class Agent(Runnable):
             tool.nest(self._path)
             normalized_tools.append(tool)
             tools_by_name[tool.name] = tool
+        
         
         self.tools = normalized_tools
         self._tools_by_name = tools_by_name 
@@ -216,6 +247,7 @@ class Agent(Runnable):
         return Message
 
 
+
     async def _resolve_system_prompt(self) -> str | None:
         """Resolve system prompt by executing embedded template functions.
         
@@ -243,6 +275,7 @@ class Agent(Runnable):
             system_prompt = system_prompt.replace(k, str(result) if result is not None else "")
         
         return system_prompt
+
 
 
     async def _resolve_memory(self) -> list[Message]:
@@ -379,9 +412,40 @@ class Agent(Runnable):
             ]
             
             if not tool_calls:
-                break
+                break           
 
-            async for tool_call, event in self._multiplex_tools(tool_calls):
+            force_output_result = None
+            for tool_call in tool_calls:
+                if tool_call.name == "force_output_schema":
+                    force_output_result = tool_call.input
+                    break
+            
+            if force_output_result is not None:
+                final_message = Message.validate({
+                    "role": "assistant",
+                    "content": [{
+                        "type": "text",
+                        "text": str(force_output_result)
+                    }]
+                })
+                messages[-1] = final_message
+                
+                yield OutputEvent(
+                    run_id=get_run_context().id,
+                    parent_run_id=get_run_context().parent_id,
+                    path=self._path,
+                    call_id=get_run_context().id,  
+                    parent_call_id=None,
+                    input=kwargs,  
+                    output=final_message,
+                    error=None,
+                    t0=0,
+                    t1=0,
+                    usage={}
+                )
+                return 
+
+            async for tool_call, event in self._multiplex_tools(tool_calls):   
                 # Only process events from immediate children (not nested subagents)
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
                     message = Message.validate({
@@ -395,4 +459,5 @@ class Agent(Runnable):
                     messages.append(message)
                 yield event
             i += 1
+        
             
