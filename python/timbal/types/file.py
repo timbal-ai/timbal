@@ -1,7 +1,6 @@
 import base64
 import io
 import mimetypes
-import os
 import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path

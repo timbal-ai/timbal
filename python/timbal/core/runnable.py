@@ -558,27 +558,39 @@ class Runnable(ABC, BaseModel):
         )
         run_context.tracing[_call_id] = trace
 
-        start_event = StartEvent(
-            run_id=run_context.id,
-            parent_run_id=run_context.parent_id,
-            path=trace.path,
-            call_id=trace.call_id,
-            parent_call_id=trace.parent_call_id,
-        )
-        logger.info("start_event", **start_event.model_dump())
-        yield start_event
-
-        # We store the unvalidated input, as sent by the user. 
-        # This will ensure full replayability of the run.
-        # Resolve default params (executing any callable values)
-        resolved_default_params = await self._resolve_default_params()
-        input = {**resolved_default_params, **kwargs}
-        input_dump = await dump(input)
+        # We store a preliminary version of the input and output in the trace, in case resolution fails
+        input, output, error = kwargs, None, None
         trace.input = input
-        trace._input_dump = input_dump
-
-        output, error = None, None
+        trace._input_dump = None # ? await dump(input)
+        trace._output_dump = None
         try:
+            # Execute the 'when' condition inside the appropriate runnable context
+            if hasattr(self, "when") and self.when:
+                should_run = await self._execute_runtime_callable(self.when["callable"], self.when["is_coroutine"])
+                if not should_run:
+                    # Remove the trace entry. As if this was never run
+                    run_context.tracing.pop(_call_id)
+                    # Clean exit. The async for loop will complete normally but won't iterate over anything
+                    return
+
+            start_event = StartEvent(
+                run_id=run_context.id,
+                parent_run_id=run_context.parent_id,
+                path=trace.path,
+                call_id=trace.call_id,
+                parent_call_id=trace.parent_call_id,
+            )
+            logger.info("start_event", **start_event.model_dump())
+            yield start_event
+
+            # We store the unvalidated input, as sent by the user. 
+            # This will ensure full replayability of the run.
+            # Resolve default params (executing any callable values)
+            resolved_default_params = await self._resolve_default_params()
+            input = {**resolved_default_params, **input}
+            trace.input = input
+            trace._input_dump = await dump(input)
+
             if self.pre_hook is not None:
                 await self._execute_runtime_callable(self.pre_hook, self._pre_hook_is_coroutine)
             
@@ -634,11 +646,8 @@ class Runnable(ABC, BaseModel):
                             else:
                                 yield chunk
                 output = collector.collect() if collector else None
-
-            # ? Are we dumping multiple times
-            output_dump = await dump(output)
             trace.output = output
-            trace._output_dump = output_dump
+            trace._output_dump = await dump(output)
             
             if self.post_hook is not None:
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
@@ -660,16 +669,15 @@ class Runnable(ABC, BaseModel):
                 path=trace.path,
                 call_id=trace.call_id,
                 parent_call_id=trace.parent_call_id,
-                input=input,  # Store original input
-                output=output,  # Store original output
+                input=trace.input,
+                output=trace.output,
                 error=trace.error,
                 t0=trace.t0,
                 t1=trace.t1,
                 usage=trace.usage,
             )
-            # Store dumped versions as private attributes for serialization
-            output_event._input_dump = input_dump
-            output_event._output_dump = trace._output_dump if hasattr(trace, "_output_dump") else None
+            output_event._input_dump = trace._input_dump
+            output_event._output_dump = trace._output_dump
             if _parent_call_id is None:
                 await run_context._save_tracing()
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point

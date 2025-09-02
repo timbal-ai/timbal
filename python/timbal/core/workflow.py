@@ -1,10 +1,12 @@
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
 from typing import Any, override
 
 import structlog
 from pydantic import BaseModel, ConfigDict, PrivateAttr, computed_field, create_model
+
+from timbal.types.events.start import StartEvent
 
 from ..types.events.output import OutputEvent
 from .runnable import Runnable, RunnableLike
@@ -104,23 +106,7 @@ class Workflow(Runnable):
     
 
     def _link(self, source: str, target: str) -> "Workflow":
-        """Create an explicit dependency link between two workflow steps.
-        
-        Establishes a directed edge from source to target step, ensuring the
-        target step waits for source step completion before executing.
-        Validates that the link doesn't create cycles in the workflow DAG.
-        
-        Args:
-            source: Name of the source step that must complete first
-            target: Name of the target step that depends on the source
-            
-        Returns:
-            Self for method chaining
-            
-        Raises:
-            ValueError: If source or target step is not found in the workflow
-            ValueError: If linking would create a cycle in the workflow
-        """
+        """Internal method to link workflow steps."""
         if source not in self._steps:
             raise ValueError(f"Source step {source} not found in workflow.")
         if target not in self._steps:
@@ -133,7 +119,13 @@ class Workflow(Runnable):
 
 
     # TODO Think how we handle agent model_params vs default_params
-    def step(self, runnable: RunnableLike, depends_on: list[str] | None = None, **kwargs: Any) -> "Workflow":
+    def step(
+        self, 
+        runnable: RunnableLike, 
+        depends_on: list[str] | None = None, 
+        when: Callable[[], bool] | None = None, 
+        **kwargs: Any,
+    ) -> "Workflow":
         """Add a step to the workflow with automatic dependency linking.
         
         Adds a runnable component as a workflow step and automatically creates
@@ -149,6 +141,7 @@ class Workflow(Runnable):
         Args:
             runnable: The runnable component to add as a step
             depends_on: Optional list of steps that must complete before this step
+            when: Optional callable that returns a boolean to conditionally execute the step
             **kwargs: Default parameters for the step, also used for dependency analysis
             
         Returns:
@@ -167,25 +160,34 @@ class Workflow(Runnable):
         self._steps[runnable.name] = runnable
         runnable.previous_steps = set()
         runnable.next_steps = set()
+        runnable.when = None
 
         # Explicit dependencies
         if depends_on and not isinstance(depends_on, list):
             raise ValueError("depends_on must be a list of step names")
         if depends_on:
-            depends_on = set(depends_on)
+            depends_on = set(depends_on) # Deduplicate here to avoid duplicate _is_dag calls
             for dep in depends_on:
                 self._link(dep, runnable.name)
+
+        # Optional handler to determine whether to execute the step, and inspect it to automatically link steps
+        if when:
+            inspect_result = runnable._inspect_runtime_callable(when)
+            runnable.when = {"callable": when, **inspect_result}
+            for data_key in inspect_result["data_keys"]:
+                if data_key.startswith("."): continue
+                previous_step_name = data_key.split(".")[0]
+                logger.info("Automatically linking steps", previous_step=previous_step_name, next_step=runnable.name)
+                self._link(previous_step_name, runnable.name)
 
         # Use kwargs as default params for the runnable, and inspect callables to automatically link steps
         runnable._prepare_default_params(kwargs)
         for v in runnable._default_runtime_params.values():
-            if not v["data_keys"]: continue
-            assert len(v["data_keys"]) == 1, "Multiple data keys not supported yet"
-            data_key = v["data_keys"][0]
-            if data_key.startswith("."): continue
-            previous_step_name = data_key.split(".")[0]
-            logger.info("Linking steps automatically", previous_step=previous_step_name, next_step=runnable.name)
-            self._link(previous_step_name, runnable.name)
+            for data_key in v["data_keys"]:
+                if data_key.startswith("."): continue
+                previous_step_name = data_key.split(".")[0]
+                logger.info("Automatically linking steps", previous_step=previous_step_name, next_step=runnable.name)
+                self._link(previous_step_name, runnable.name)
 
         return self
 
@@ -209,12 +211,17 @@ class Workflow(Runnable):
             await queue.put(None)
             return
 
-        # TODO Evaluate conditions
-
+        step_started = False
         async for event in step(**kwargs):
             await queue.put(event)
+            if isinstance(event, StartEvent):
+                step_started = True
             if isinstance(event, OutputEvent) and event.error is not None:
+                logger.info(f"Skipping step {step.name} successors...")
                 self._skip_next_steps(step.name, completions)
+        if not step_started:
+            logger.info(f"Skipping step {step.name} and all successors...")
+            self._skip_next_steps(step.name, completions)
 
         completions[step.name].set()
         await queue.put(None)

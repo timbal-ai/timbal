@@ -220,7 +220,7 @@ class RunContext(BaseModel):
             return None
         for trace in self.tracing.values():
             if (trace.parent_call_id == parent_call_id and 
-                trace.call_id != current_trace.call_id and  # Don't match self
+                # trace.call_id != current_trace.call_id and  # Don't match self
                 trace.path.endswith("." + sibling_name)):
                 return trace
         return None
