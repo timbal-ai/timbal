@@ -213,12 +213,9 @@ You must respond with a valid JSON object containing:
 - "explanation": string explaining your reasoning
 """
 
-        prompt = f"""<output>
-{message_text}
-</output>
-
-{"\n".join([f"<reference>\n{v}\n</reference>\n" for v in ref])}
-"""
+        # Newlines in f-strings were introduced in python >= 3.12
+        prompt = "<output>\n" + str(message_text) + "\n</output>\n\n"
+        prompt += "\n".join(["<reference>\n" + str(v) + "\n</reference>\n" for v in ref])
         messages = [Message.validate(prompt)]
 
         json_schema = {
@@ -332,12 +329,9 @@ You must respond with a valid JSON object containing:
 - "explanation": string explaining your reasoning
 """
 
-        prompt = f"""<steps>
-{steps_text}
-</steps>
-
-{"\n".join([f"<reference>\n{v}\n</reference>\n" for v in ref])}
-"""
+        # Newlines in f-strings were introduced in python >= 3.12
+        prompt = "<steps>\n" + str(steps_text) + "\n</steps>\n\n"
+        prompt += "\n".join(["<reference>\n" + str(v) + "\n</reference>\n" for v in ref])
         messages = [Message.validate(prompt)]
 
         json_schema = {

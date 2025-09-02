@@ -73,13 +73,19 @@ class File(io.IOBase):
         if source_scheme == "bytes":
             if self.__source_extension__:
                 content_type, _ = mimetypes.guess_type(f"tmp{self.__source_extension__}")
-                if content_type is None:
+                # Python 3.11 doesn't recognize .md files, add fallback
+                if content_type is None and self.__source_extension__ == ".md":
+                    content_type = "text/markdown"
+                elif content_type is None:
                     content_type = "application/octet-stream"
             else:
                 content_type = "application/octet-stream"
         else:
             content_type, _ = mimetypes.guess_type(str(self))
-            if content_type is None:
+            # Python 3.11 doesn't recognize .md files, add fallback
+            if content_type is None and str(self).endswith(".md"):
+                content_type = "text/markdown"
+            elif content_type is None:
                 content_type = "application/octet-stream"
         object.__setattr__(self, "__content_type__", content_type)
 

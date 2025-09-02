@@ -269,7 +269,7 @@ class Runnable(ABC, BaseModel):
             target_node = None
             for node in ast.walk(tree):
                 if (hasattr(node, "lineno") and node.lineno == first_line and 
-                    isinstance(node, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef))):
+                    isinstance(node, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef)):
                     target_node = node
                     break
             if target_node:

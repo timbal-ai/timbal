@@ -1,5 +1,11 @@
 import json
-from typing import Any, Literal, override
+from typing import Any, Literal
+
+# `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
+try:
+    from typing import override
+except ImportError:
+    from typing_extensions import override
 
 from .base import BaseContent
 

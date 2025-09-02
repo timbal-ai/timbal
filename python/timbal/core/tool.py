@@ -1,7 +1,13 @@
 import inspect
 from collections.abc import Callable
 from functools import cached_property
-from typing import Any, override
+from typing import Any
+
+# `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
+try:
+    from typing import override
+except ImportError:
+    from typing_extensions import override
 
 from pydantic import BaseModel, computed_field, model_validator
 
