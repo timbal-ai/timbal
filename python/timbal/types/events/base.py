@@ -3,7 +3,7 @@ from pydantic import BaseModel, ConfigDict
 
 class BaseEvent(BaseModel):
     """Base class for all timbal events yielded during flow execution."""
-    model_config = ConfigDict(extra="ignore", frozen=True) # Make immutable after creation
+    model_config = ConfigDict(extra="ignore")
 
     type: str
     """The type of the event. This will be very useful for serializing and deserializing events."""
