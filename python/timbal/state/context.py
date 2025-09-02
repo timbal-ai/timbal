@@ -8,8 +8,12 @@ from uuid_extensions import uuid7
 from .config import PlatformConfig
 from .tracing import Tracing
 from .tracing.providers import InMemoryTracingProvider, PlatformTracingProvider, TracingProvider
+from .tracing.trace import Trace
 
 logger = structlog.get_logger("timbal.state.context")
+
+# Sentinel value to distinguish between explicitly passing None and not passing anything as function param
+_MISSING = object()
 
 
 class RunContext(BaseModel):
@@ -160,18 +164,33 @@ class RunContext(BaseModel):
 
     def get_data(self, key: str) -> Any:
         """Get data using ref key format: .input.field, ..output, step_name.shared.key"""
+        current_trace = self._resolve_current_trace()
+        target_trace, key = self._resolve_target_trace(current_trace, key)
+        source, key = self._resolve_source(target_trace, key)
+        return self._handle_key(source, key)
+
+
+    def set_data(self, key: str, value: Any) -> None:
+        """Set data using ref key format: .input.field, ..output, step_name.shared.key"""
+        current_trace = self._resolve_current_trace()
+        target_trace, key = self._resolve_target_trace(current_trace, key)
+        source, key = self._resolve_source(target_trace, key)
+        self._handle_key(source, key, value)
+
+
+    def _resolve_current_trace(self) -> Trace:
+        """Get the current trace from the call stack."""
         from . import get_call_id
         current_call_id = get_call_id()
         if not current_call_id:
-            raise RuntimeError("get_data() can only be called within a Runnable execution context")
+            raise RuntimeError("{get,set}_data() can only be called within a Runnable execution context")
         current_trace = self.tracing.get(current_call_id)
         if not current_trace:
             raise RuntimeError(f"Call ID {current_call_id} not found in tracing.")
-        target_trace, data_key = self._resolve_target_trace(key, current_trace)
-        return self._extract_data_from_trace(target_trace, data_key)
+        return current_trace
 
 
-    def _resolve_target_trace(self, key: str, current_trace) -> tuple[Any, str]:
+    def _resolve_target_trace(self, current_trace: Trace, key: str) -> tuple[Trace, str]:
         """Resolve which trace to get data from and what key to use."""
         if key.startswith(".."):
             if not current_trace.parent_call_id:
@@ -188,13 +207,13 @@ class RunContext(BaseModel):
                 raise ValueError(f"Invalid key format for sibling reference: {key}")
             sibling_name = key_parts[0]
             remaining_key = key_parts[1]
-            sibling_trace = self._find_sibling_trace(current_trace, sibling_name)
+            sibling_trace = self._resolve_sibling_trace(current_trace, sibling_name)
             if not sibling_trace:
                 raise ValueError(f"Sibling '{sibling_name}' not found")
             return sibling_trace, remaining_key
 
 
-    def _find_sibling_trace(self, current_trace, sibling_name: str):
+    def _resolve_sibling_trace(self, current_trace: Trace, sibling_name: str) -> Trace | None:
         """Find a sibling trace by name (same parent, path ends with name)."""
         parent_call_id = current_trace.parent_call_id
         if not parent_call_id:
@@ -205,39 +224,38 @@ class RunContext(BaseModel):
                 trace.path.endswith("." + sibling_name)):
                 return trace
         return None
+    
 
-
-    def _extract_data_from_trace(self, trace, data_key: str) -> Any:
-        """Extract data from trace using the data key (input.field, output, shared.key)."""
-        key_parts = data_key.split(".")
+    def _resolve_source(self, trace: Trace, key: str) -> tuple[Any, str]:
+        """Navigate nested keys to find the final source object and key."""
+        key_parts = key.split(".")
         if not key_parts:
-            raise ValueError("Empty data key")
-        data_source = key_parts[0]
-        field_path = key_parts[1:] if len(key_parts) > 1 else []
-        # TODO Convert to an assertion
-        if data_source == "input":
-            current_data = trace.input
-        elif data_source == "output":
-            current_data = trace.output
-        elif data_source == "shared":
-            current_data = trace.shared
+            raise ValueError("Empty key")
+        current_source = trace
+        for key in key_parts[:-1]:
+            current_source = self._handle_key(current_source, key)
+        return current_source, key_parts[-1]
+    
+
+    def _handle_key(self, source: Any, key: str, value: Any = _MISSING) -> Any:
+        """Get or set a key on dict/list/object, returning the current/previous value."""
+        if isinstance(source, dict) and key in source:
+            current_value = source[key]
+            if value is not _MISSING:
+                source[key] = value
+            return current_value
+        elif isinstance(source, list):
+            key = int(key)
+            if key < 0 or key >= len(source):
+                raise ValueError(f"Index '{key}' out of bounds for list of length {len(source)}")
+            current_value = source[key]
+            if value is not _MISSING:
+                source[key] = value
+            return current_value
+        elif hasattr(source, key):
+            current_value = getattr(source, key)
+            if value is not _MISSING:
+                setattr(source, key, value)
+            return current_value
         else:
-            raise ValueError(f"Invalid data source: {data_source}. Must be input, output, or shared.")
-        for field in field_path:
-            if isinstance(current_data, dict) and field in current_data:
-                current_data = current_data[field]
-            elif hasattr(current_data, field):
-                current_data = getattr(current_data, field)
-            else:
-                raise ValueError(f"Field '{field}' not found in {data_source}")
-        return current_data
-
-
-    def set_data(self, key: str, value: Any) -> None:
-        """"""
-        from . import get_call_id
-        current_call_id = get_call_id()
-        if not current_call_id:
-            raise RuntimeError("set_data() can only be called within a Runnable execution context")
-        trace = self.tracing[current_call_id]
-        trace.shared[key] = value
+            raise ValueError(f"Key '{key}' not found in {source}")
