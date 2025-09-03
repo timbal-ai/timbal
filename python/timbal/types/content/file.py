@@ -1,6 +1,12 @@
 import base64
 import io
-from typing import Any, Literal, override
+from typing import Any, Literal
+
+# `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
+try:
+    from typing import override
+except ImportError:
+    from typing_extensions import override
 
 import pandas as pd
 import structlog

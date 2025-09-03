@@ -1,4 +1,10 @@
-from typing import Any, override
+from typing import Any
+
+# `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
+try:
+    from typing import override
+except ImportError:
+    from typing_extensions import override
 
 from ...state.context import RunContext
 from .. import register_collector

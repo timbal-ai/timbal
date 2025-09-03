@@ -1,6 +1,6 @@
 # Timbal
 
-> 🚀 **Agents**: API nearly stable, publishing in coming weeks | ⚠️ **Workflows**: Early work, major advances coming soon
+> 🚀 **Agents and Workflows**: APIs nearly stable - version 1.0.0 coming soon!
 
 The framework for building and orchestrating agentic AI applications—fast, scalable, and enterprise-ready. Clean async execution with automatic state persistence that enable tool-using agents that think, plan, and act in dynamic environments.
 
@@ -22,10 +22,18 @@ Perfect for:
 - Multi-turn conversations with memory across iterations
 
 ### 2. Workflows
-Explicit step-by-step execution with full control over data flow. Ideal for:
+Explicit step-by-step execution with full control over data flow and automatic dependency management. Workflows orchestrate multiple steps in a directed acyclic graph (DAG) where:
+
+- **Steps run concurrently** while respecting dependency constraints
+- **Automatic linking** based on data key references
+- **Graceful error handling** with dependent step skipping on failures
+- **Conditional execution** with `when` clauses for dynamic control
+
+Perfect for:
+- Complex data processing pipelines with multiple stages
 - Predictable processes with defined execution paths
-- Strict control requirements over tool usage
-- Performance-critical applications needing optimization
+- Performance-critical applications requiring concurrent execution
+- Workflows where explicit control over step dependencies is needed
 
 ## Installation
 
@@ -94,9 +102,68 @@ The framework performs automatic introspection of function signatures and docstr
 
 ### Workflows
 
-Fine-grained control over your AI pipeline with explicit step-by-step execution:
+Workflows provide explicit step-by-step execution with automatic dependency management. Define your pipeline as a series of steps that execute concurrently while respecting dependencies:
 
-*Example coming as soon as the API is in beta.*
+```python
+from timbal import Workflow
+from timbal.state import get_run_context()
+
+def fetch_url(url: str) -> str:
+    # ...
+    pass
+
+def summarize_text(text: str, max_length: int) -> str:
+    # ...
+    pass
+
+def extract_keywords(text: str) -> list[str]:
+    # ...
+    pass
+
+def save_to_file(path: str, content: dict) -> None:
+    # ...
+    pass
+
+workflow = (Workflow(name="content_pipeline")
+    .step(fetch_url)
+    .step(summarize_text, max_length=200, text=lambda: get_run_context().get_data("fetch_url.output"))
+    .step(extract_keywords, text=lambda: get_run_context().get_data("fetch_url.output"))
+    .step(
+        save_to_file, 
+        path="./results.json", 
+        content=lambda: {
+            "summary": get_run_context().get_data("summarize_text.output"),
+            "keywords": get_run_context().get_data("extract_keywords.output")
+        }
+    )
+)
+
+await workflow(url="https://timbal.ai").collect()
+```
+
+**Execution Flow:**
+
+The workflow automatically infers execution order from data dependencies:
+
+1. **`fetch_url`** runs first (no dependencies, takes `url` from workflow input)
+2. **`summarize_text` and `extract_keywords`** execute in parallel once `fetch_url` completes
+3. **`save_to_file`** waits for both parallel steps to finish, then combines their outputs
+
+Execution pattern: `fetch_url` → (`summarize_text` || `extract_keywords`) → `save_to_file`
+
+**Key Features:**
+
+- **Automatic Dependency Linking**: Lambda functions using `get_run_context().get_data()` create automatic step dependencies
+- **Workflow Input Propagation**: Unspecified step parameters become workflow-level inputs  
+- **Concurrent Execution**: Independent steps run in parallel for optimal performance
+- **DAG Validation**: Prevents circular dependencies with built-in cycle detection
+- **Error Resilience**: Failed steps skip their dependents gracefully
+
+**Architecture:**
+- Steps execute as a directed acyclic graph (DAG) with dependency coordination
+- Event-driven multiplexing streams output from all steps as they complete
+- Built-in state management tracks step completion and data flow
+- Pydantic validation ensures type safety across step boundaries
 
 ## Why are we building this?
 

@@ -1,7 +1,13 @@
 import asyncio
 from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
-from typing import Any, override
+from typing import Any
+
+# `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
+try:
+    from typing import override
+except ImportError:
+    from typing_extensions import override
 
 import structlog
 from pydantic import BaseModel, ConfigDict, PrivateAttr, computed_field, create_model
@@ -175,7 +181,8 @@ class Workflow(Runnable):
             inspect_result = runnable._inspect_runtime_callable(when)
             runnable.when = {"callable": when, **inspect_result}
             for data_key in inspect_result["data_keys"]:
-                if data_key.startswith("."): continue
+                if data_key.startswith("."): 
+                    continue
                 previous_step_name = data_key.split(".")[0]
                 logger.info("Automatically linking steps", previous_step=previous_step_name, next_step=runnable.name)
                 self._link(previous_step_name, runnable.name)
@@ -184,7 +191,8 @@ class Workflow(Runnable):
         runnable._prepare_default_params(kwargs)
         for v in runnable._default_runtime_params.values():
             for data_key in v["data_keys"]:
-                if data_key.startswith("."): continue
+                if data_key.startswith("."): 
+                    continue
                 previous_step_name = data_key.split(".")[0]
                 logger.info("Automatically linking steps", previous_step=previous_step_name, next_step=runnable.name)
                 self._link(previous_step_name, runnable.name)
