@@ -131,6 +131,18 @@ class OpenAICollector(EventCollector):
             })
             
         if self._tool_calls:
+            # Check if this is an output_model_tool call and intercept it
+            for tool_call in self._tool_calls:
+                if tool_call.get("name") == "output_model_tool":
+                    # Convert to text message instead of tool call
+                    return Message.validate({
+                        "role": "assistant",
+                        "content": [{
+                            "type": "text",
+                            "text": tool_call.get("input", "{}")
+                        }]
+                    })
+            
             # Openai allows the use of custom IDs for tool calls. 
             # We choose to generate our own random IDs for consistency and to make sure they don't collide
             # (they are not transparent with the algs being used)
@@ -140,7 +152,7 @@ class OpenAICollector(EventCollector):
             ]
             return Message.validate({
                 "role": "assistant",
-                "tool_calls": tool_calls
+                "content": tool_calls
             })
             
         return None

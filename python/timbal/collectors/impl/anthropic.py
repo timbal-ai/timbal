@@ -127,9 +127,21 @@ class AnthropicCollector(EventCollector):
             })
             
         if self._tool_calls:
+            # Check if this is an output_model_tool call and intercept it
+            for tool_call in self._tool_calls:
+                if tool_call.get("name") == "output_model_tool":
+                    # Convert to text message instead of tool call
+                    return Message.validate({
+                        "role": "assistant",
+                        "content": [{
+                            "type": "text",
+                            "text": tool_call.get("input", "{}")
+                        }]
+                    })
+            
             return Message.validate({
                 "role": "assistant",
-                "tool_calls": self._tool_calls
+                "content": self._tool_calls
             })
             
         return None

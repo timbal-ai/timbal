@@ -75,6 +75,69 @@ class TestOutputModel:
         assert recipe_obj.total_time
         assert recipe_obj.steps
 
+    
+    async def test_followup_question_from_output(self):
+        """Test that the agent can answer a follow-up question based on its own Recipe output
+        without returning the raw schema.
+        """
+
+        class Ingredient(BaseModel):
+            name: str = Field(..., description="Name of the ingredient")
+            amount: float = Field(..., description="Amount of the ingredient")
+            unit: str = Field(..., description="Unit of the ingredient")
+
+        class Recipe(BaseModel):
+            ingredients: list[Ingredient] = Field(..., description="List of ingredients")
+            total_time: float = Field(..., description="Total time in minutes")
+            steps: list[str] = Field(..., description="Steps to follow")
+
+        agent = Agent(
+            name="recipe_followup_agent",
+            model="openai/gpt-4o-mini",
+            output_model=Recipe
+        )
+
+        # First query: generate recipe
+        user_input = "Give me a lasagna recipe."
+        response = await agent(prompt=user_input).collect()
+
+        try:
+            recipe_str = response.output.content[0].text
+            print(recipe_str)
+            recipe_data = json.loads(recipe_str)
+            recipe_obj = Recipe(**recipe_data)
+        except Exception as e:
+            assert False, f"Failed to parse initial recipe: {e}"
+
+        # Second query (question based on the output)
+        assert recipe_obj.ingredients
+        assert recipe_obj.total_time > 0
+        assert recipe_obj.steps
+
+        followup_input = f"For how many people this recipe is suitable?"
+        followup_response = await agent(prompt=followup_input).collect()
+        followup_str = followup_response.output.content[0].text
+        print("ANSWER", followup_str)
+
+        try:
+            json.loads(followup_str)
+            assert False, "Follow-up response was JSON, but should have been plain text."
+        except json.JSONDecodeError:
+            assert isinstance(followup_str, str)
+            assert len(followup_str.strip()) > 0
+
+        # Third query (structured format again)
+        user_input = "Adapt the recipe for two more people."
+        response = await agent(prompt=user_input).collect()
+
+        try:
+            recipe_str = response.output.content[0].text
+            print(recipe_str)
+            recipe_data = json.loads(recipe_str)
+            recipe_obj = Recipe(**recipe_data)
+        except Exception as e:
+            assert False, f"Failed to parse initial recipe: {e}"
+
 
     async def test_optional_fields_and_defaults(self):
         """Test output model with optional fields and default values."""

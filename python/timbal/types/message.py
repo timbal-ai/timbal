@@ -97,14 +97,10 @@ class Message:
             return value
         if isinstance(value, dict):
             role = value.get("role", None)
-            tool_calls = value.get("tool_calls", [])
-            if tool_calls:
-                content = [content_factory(item) for item in tool_calls]
-            else:
-                content = value.get("content", None)
-                if not isinstance(content, list):
-                    content = [content]
-                content = [content_factory(item) for item in content]
+            content = value.get("content", None)
+            if not isinstance(content, list):
+                content = [content]
+            content = [content_factory(item) for item in content]
             return cls(role=role, content=content)
         return cls.validate({
             "role": "user",

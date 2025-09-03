@@ -370,7 +370,6 @@ class Agent(Runnable):
 
         i = 0
         while True:
-            tool_calls = []
             # Call LLM with current conversation
             async for event in self._llm(
                 model=self.model,
@@ -385,22 +384,14 @@ class Agent(Runnable):
                     if event.error is not None:
                         raise RuntimeError(event.error)
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
-                    # Check if the LLM response contains a tool use content for the output model tool
-                    for content in event.output.content:
-                        if isinstance(content, ToolUseContent):
-                            if content.name == "output_model_tool":
-                                event.output = Message.validate({
-                                    "role": "assistant",
-                                    "content": [{
-                                        "type": "text",
-                                        "text": json.dumps(content.input)
-                                    }]
-                                })
-                                tool_calls = []
-                                break
-                            tool_calls.append(content)
+                    # Add LLM response to conversation for next iteration
                     messages.append(event.output)
                 yield event
+            
+            tool_calls = [
+                content for content in messages[-1].content
+                if isinstance(content, ToolUseContent)
+            ]
             
             if not tool_calls:
                 break           
