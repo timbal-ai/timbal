@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 class Trace(BaseModel):
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
-        extra="ignore",
+        extra="allow",
     )
 
     path: str = Field(
@@ -45,16 +45,11 @@ class Trace(BaseModel):
         default_factory=dict,
         description="The usage of the runnable.",
     )
-    shared: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Shared data storage for this call. Accessible by child calls but isolated from sibling calls.",
-    )
 
     _input_dump: Any = PrivateAttr()
     """The dumped/serialized version of input for internal use."""
     _output_dump: Any = PrivateAttr()
     """The dumped/serialized version of output for internal use."""
-    # TODO Think. Should we store dumped versions of shared data?
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
         """Override model_dump to use dumped versions of input and output during serialization."""

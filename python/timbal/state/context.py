@@ -239,23 +239,24 @@ class RunContext(BaseModel):
 
     def _handle_key(self, source: Any, key: str, value: Any = _MISSING) -> Any:
         """Get or set a key on dict/list/object, returning the current/previous value."""
-        if isinstance(source, dict) and key in source:
-            current_value = source[key]
+        if isinstance(source, dict):
+            current_value = source.get(key)
             if value is not _MISSING:
                 source[key] = value
             return current_value
         elif isinstance(source, list):
             key = int(key)
             if key < 0 or key >= len(source):
-                raise ValueError(f"Index '{key}' out of bounds for list of length {len(source)}")
-            current_value = source[key]
+                current_value = None
+            else:
+                current_value = source[key]
             if value is not _MISSING:
                 source[key] = value
             return current_value
-        elif hasattr(source, key):
-            current_value = getattr(source, key)
+        else:
+            current_value = None
+            if hasattr(source, key):
+                current_value = getattr(source, key)
             if value is not _MISSING:
                 setattr(source, key, value)
             return current_value
-        else:
-            raise ValueError(f"Key '{key}' not found in {source}")
