@@ -114,7 +114,7 @@ class TestOutputModel:
         assert recipe_obj.total_time > 0
         assert recipe_obj.steps
 
-        followup_input = f"For how many people this recipe is suitable?"
+        followup_input = "For how many people this recipe is suitable?"
         followup_response = await agent(prompt=followup_input).collect()
         followup_str = followup_response.output.content[0].text
         print("ANSWER", followup_str)
