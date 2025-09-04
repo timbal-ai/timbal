@@ -187,7 +187,7 @@ class TestOutputModel:
 
         agent = Agent(
             name="math_agent",
-            model="openai/gpt-4o-mini",
+            model="openai/gpt-4.1",
             tools=[add, multiply],
             output_model=CalculationResult
         )

@@ -282,14 +282,38 @@ class Runnable(ABC, BaseModel):
                 raise ValueError("Could not determine source file for runtime callable.")
             with open(source_file) as f:
                 full_file_source = f.read()
-            first_line = fn.__code__.co_firstlineno
+            
             tree = ast.parse(full_file_source)
             target_node = None
+            # Strategy 1: Find by function name (most reliable for decorated functions)
+            func_name = fn.__name__
             for node in ast.walk(tree):
-                if (hasattr(node, "lineno") and node.lineno == first_line and 
-                    isinstance(node, ast.Lambda | ast.FunctionDef | ast.AsyncFunctionDef)):
+                if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and 
+                    hasattr(node, 'name') and node.name == func_name):
                     target_node = node
                     break
+            # Strategy 2: If we have multiple functions with the same name, use source lines to narrow it down
+            if not target_node:
+                try:
+                    source_lines, start_line = inspect.getsourcelines(fn)
+                    # Look for FunctionDef nodes within a few lines of the start_line
+                    for node in ast.walk(tree):
+                        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and
+                            hasattr(node, 'name') and node.name == func_name and
+                            hasattr(node, 'lineno') and 
+                            start_line <= node.lineno <= start_line + len(source_lines)):
+                            target_node = node
+                            break
+                except:
+                    pass
+            # Strategy 3: Fallback to line number matching for lambdas
+            if not target_node:
+                first_line = fn.__code__.co_firstlineno
+                for node in ast.walk(tree):
+                    if (hasattr(node, "lineno") and node.lineno == first_line and 
+                        isinstance(node, ast.Lambda)):
+                        target_node = node
+                        break
             if target_node:
                 target_node_analyzer = RunContextDataAccessAnalyzer()
                 target_node_analyzer.visit(target_node)
