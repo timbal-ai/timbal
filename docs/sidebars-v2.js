@@ -29,6 +29,7 @@ const sidebars = {
         'agents_v2/tools',
         'agents_v2/voice',
         'agents_v2/evals',
+        'agents_v2/structured_output',
         'agents_v2/advanced',
       ],
     },
