@@ -151,7 +151,7 @@ class Agent(Runnable):
                 fn = module
                 for j in path_parts[-fn_i:]:
                     fn = getattr(fn, j)
-                inspect_result = self._inspect_runtime_callable(fn)
+                inspect_result = self._inspect_callable(fn)
                 self._system_prompt_callables[text] = {
                     "start": match.start(),
                     "end": match.end(),

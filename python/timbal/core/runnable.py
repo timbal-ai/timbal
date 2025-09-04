@@ -239,9 +239,8 @@ class Runnable(ABC, BaseModel):
     # ? Can we store all post_hook related stuff together?
 
 
-    # TODO Rename to _inspect_callable
     @classmethod
-    def _inspect_runtime_callable(
+    def _inspect_callable(
         cls, 
         fn: Any, 
         allow_required_params: bool = False,
@@ -336,8 +335,7 @@ class Runnable(ABC, BaseModel):
         """Validate a hook, raise ValueError if invalid."""
         if v is None:
             return v
-        # TODO Do something with the data keys
-        inspect_result = cls._inspect_runtime_callable(v)
+        inspect_result = cls._inspect_callable(v)
         if info.field_name == "pre_hook":
             cls._pre_hook_is_coroutine = inspect_result["is_coroutine"]
             cls._pre_hook_data_keys = inspect_result["data_keys"]
@@ -355,7 +353,7 @@ class Runnable(ABC, BaseModel):
             self.default_params[param_name] = param_value
             if callable(param_value):
                 # Validate and store callable parameter
-                inspect_result = self._inspect_runtime_callable(param_value)
+                inspect_result = self._inspect_callable(param_value)
                 self._default_runtime_params[param_name] = {"callable": param_value, **inspect_result}
             else:
                 # Store static parameter

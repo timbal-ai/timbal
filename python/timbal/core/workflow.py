@@ -173,15 +173,14 @@ class Workflow(Runnable):
             raise ValueError("depends_on must be a list of step names")
         depends_on = set(depends_on or []) # Deduplicate here to avoid duplicate _is_dag calls
 
-        #
+        # Handlers, pre- and post-hooks can have data keys that force dependencies
         depends_on.update([data_key.split(".")[0] for data_key in runnable._data_keys if not data_key.startswith(".")])
-        # Pre- and post-hooks can have data keys that force dependencies
         depends_on.update([data_key.split(".")[0] for data_key in runnable._pre_hook_data_keys if not data_key.startswith(".")])
         depends_on.update([data_key.split(".")[0] for data_key in runnable._post_hook_data_keys if not data_key.startswith(".")])
 
         # Optional handler to determine whether to execute the step, and inspect it to automatically link steps
         if when:
-            inspect_result = runnable._inspect_runtime_callable(when)
+            inspect_result = runnable._inspect_callable(when)
             runnable.when = {"callable": when, **inspect_result}
             depends_on.update([data_key.split(".")[0] for data_key in inspect_result["data_keys"] if not data_key.startswith(".")])
 

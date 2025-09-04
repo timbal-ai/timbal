@@ -85,7 +85,7 @@ class Tool(Runnable):
         super().model_post_init(__context)
         self._path = self.name
         
-        inspect_result = self._inspect_runtime_callable(
+        inspect_result = self._inspect_callable(
             self.handler, 
             allow_required_params=True,
             allow_gen=True,
