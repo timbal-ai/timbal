@@ -1,7 +1,7 @@
 # ruff: noqa: F401
 import warnings
 
-from .core import Agent, Tool  #, Workflow
+from .core import Agent, Tool, Workflow
 
 # Filter SWIG-related deprecation warnings.
 warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*builtin type SwigPyPacked.*")
