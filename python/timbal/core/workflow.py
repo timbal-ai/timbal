@@ -171,31 +171,28 @@ class Workflow(Runnable):
         # Explicit dependencies
         if depends_on and not isinstance(depends_on, list):
             raise ValueError("depends_on must be a list of step names")
-        if depends_on:
-            depends_on = set(depends_on) # Deduplicate here to avoid duplicate _is_dag calls
-            for dep in depends_on:
-                self._link(dep, runnable.name)
+        depends_on = set(depends_on or []) # Deduplicate here to avoid duplicate _is_dag calls
+
+        #
+        depends_on.update([data_key.split(".")[0] for data_key in runnable._data_keys if not data_key.startswith(".")])
+        # Pre- and post-hooks can have data keys that force dependencies
+        depends_on.update([data_key.split(".")[0] for data_key in runnable._pre_hook_data_keys if not data_key.startswith(".")])
+        depends_on.update([data_key.split(".")[0] for data_key in runnable._post_hook_data_keys if not data_key.startswith(".")])
 
         # Optional handler to determine whether to execute the step, and inspect it to automatically link steps
         if when:
             inspect_result = runnable._inspect_runtime_callable(when)
             runnable.when = {"callable": when, **inspect_result}
-            for data_key in inspect_result["data_keys"]:
-                if data_key.startswith("."): 
-                    continue
-                previous_step_name = data_key.split(".")[0]
-                logger.info("Automatically linking steps", previous_step=previous_step_name, next_step=runnable.name)
-                self._link(previous_step_name, runnable.name)
+            depends_on.update([data_key.split(".")[0] for data_key in inspect_result["data_keys"] if not data_key.startswith(".")])
 
         # Use kwargs as default params for the runnable, and inspect callables to automatically link steps
         runnable._prepare_default_params(kwargs)
         for v in runnable._default_runtime_params.values():
-            for data_key in v["data_keys"]:
-                if data_key.startswith("."): 
-                    continue
-                previous_step_name = data_key.split(".")[0]
-                logger.info("Automatically linking steps", previous_step=previous_step_name, next_step=runnable.name)
-                self._link(previous_step_name, runnable.name)
+            depends_on.update([data_key.split(".")[0] for data_key in v["data_keys"] if not data_key.startswith(".")])
+
+        for dep in depends_on:
+            logger.info("Linking steps", previous_step=dep, next_step=runnable.name)
+            self._link(dep, runnable.name)
 
         return self
 

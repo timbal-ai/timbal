@@ -9,7 +9,7 @@ try:
 except ImportError:
     from typing_extensions import override
 
-from pydantic import BaseModel, computed_field, model_validator
+from pydantic import BaseModel, SkipValidation, computed_field, model_validator
 
 from ..utils import create_model_from_argspec
 from .runnable import Runnable
@@ -28,7 +28,7 @@ class Tool(Runnable):
     composed into more complex Agents and Workflows.
     """
 
-    handler: Callable[..., Any]
+    handler: SkipValidation[Callable[..., Any]]
     """The callable function or method that this tool wraps."""
 
 
@@ -85,10 +85,18 @@ class Tool(Runnable):
         super().model_post_init(__context)
         self._path = self.name
         
+        inspect_result = self._inspect_runtime_callable(
+            self.handler, 
+            allow_required_params=True,
+            allow_gen=True,
+            allow_async_gen=True,
+        )
+
         self._is_orchestrator = False
-        self._is_coroutine = inspect.iscoroutinefunction(self.handler)
-        self._is_gen = inspect.isgeneratorfunction(self.handler)
-        self._is_async_gen = inspect.isasyncgenfunction(self.handler)
+        self._is_coroutine = inspect_result["is_coroutine"]
+        self._is_gen = inspect_result["is_gen"]
+        self._is_async_gen = inspect_result["is_async_gen"]
+        self._data_keys = inspect_result["data_keys"]
 
     
     @override

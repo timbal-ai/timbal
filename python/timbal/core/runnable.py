@@ -223,40 +223,58 @@ class Runnable(ABC, BaseModel):
     """Whether the Runnable handler is a generator."""
     _is_async_gen: bool = PrivateAttr()
     """Whether the Runnable handler is an async generator."""
+    _data_keys: list[str] = PrivateAttr(default_factory=list)
+    """List of data keys that the handler depends on."""
     _default_fixed_params: dict[str, Any] = PrivateAttr(default_factory=dict)
     """Dictionary of static default parameters."""
     _default_runtime_params: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
     """Dictionary mapping parameter names to their callable functions and metadata."""
     _pre_hook_is_coroutine: bool | None = PrivateAttr()
     """Whether the pre_hook is a coroutine."""
+    _pre_hook_data_keys: list[str] = PrivateAttr(default_factory=list)
+    # ? Can we store all pre_hook related stuff together?
     _post_hook_is_coroutine: bool | None = PrivateAttr()
     """Whether the post_hook is a coroutine."""
+    _post_hook_data_keys: list[str] = PrivateAttr(default_factory=list)
+    # ? Can we store all post_hook related stuff together?
 
 
+    # TODO Rename to _inspect_callable
     @classmethod
-    def _inspect_runtime_callable(cls, fn: Any) -> dict[str, Any]:
+    def _inspect_runtime_callable(
+        cls, 
+        fn: Any, 
+        allow_required_params: bool = False,
+        allow_coroutine: bool = True,
+        allow_gen: bool = False,
+        allow_async_gen: bool = False,
+    ) -> dict[str, Any]:
         """Inspect a runtime callable, return if the callable is a coroutine and its data dependencies."""
         if not callable(fn):
             raise ValueError(f"fn must be a callable, got {type(fn)}")
         
-        if inspect.isgeneratorfunction(fn):
-            raise NotImplementedError("Generator functions are not supported for runtime callables yet.")
-        if inspect.isasyncgenfunction(fn):
-            raise NotImplementedError("Async generator functions are not supported for runtime callables yet.")
-
         is_coroutine = inspect.iscoroutinefunction(fn)
-        data_keys = []
+        if not allow_coroutine and is_coroutine:
+            raise NotImplementedError("Coroutine functions are not supported for runtime callables yet.")
+        is_gen = inspect.isgeneratorfunction(fn)
+        if not allow_gen and is_gen:
+            raise NotImplementedError("Generator functions are not supported for runtime callables yet.")
+        is_async_gen = inspect.isasyncgenfunction(fn)
+        if not allow_async_gen and is_async_gen:
+            raise NotImplementedError("Async generator functions are not supported for runtime callables yet.")
         
-        sig = inspect.signature(fn)
-        required_params = [
-            name for name, param in sig.parameters.items()
-            if param.default is inspect.Parameter.empty
-            and param.kind != inspect.Parameter.VAR_POSITIONAL
-            and param.kind != inspect.Parameter.VAR_KEYWORD
-        ]
-        if required_params:
-            raise ValueError(f"Callable must not have any required parameters, got required: {required_params}")
+        if not allow_required_params:
+            sig = inspect.signature(fn)
+            required_params = [
+                name for name, param in sig.parameters.items()
+                if param.default is inspect.Parameter.empty
+                and param.kind != inspect.Parameter.VAR_POSITIONAL
+                and param.kind != inspect.Parameter.VAR_KEYWORD
+            ]
+            if required_params:
+                raise ValueError(f"Callable must not have any required parameters, got required: {required_params}")
 
+        data_keys = []
         # TODO Fix errors with system prompt callables
         try:
             source_file = inspect.getsourcefile(fn)
@@ -279,8 +297,11 @@ class Runnable(ABC, BaseModel):
         except Exception as e:
             logger.error("Could not determine data dependencies for runtime callable.", exc_info=e)
         
+        # ? Use a model for this?
         return {
             "is_coroutine": is_coroutine,
+            "is_gen": is_gen,
+            "is_async_gen": is_async_gen,
             "data_keys": data_keys,
         }
 
@@ -295,8 +316,10 @@ class Runnable(ABC, BaseModel):
         inspect_result = cls._inspect_runtime_callable(v)
         if info.field_name == "pre_hook":
             cls._pre_hook_is_coroutine = inspect_result["is_coroutine"]
+            cls._pre_hook_data_keys = inspect_result["data_keys"]
         elif info.field_name == "post_hook":
             cls._post_hook_is_coroutine = inspect_result["is_coroutine"]
+            cls._post_hook_data_keys = inspect_result["data_keys"]
         return v
 
 
