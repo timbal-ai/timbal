@@ -1,7 +1,7 @@
 import structlog
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from ..validators import Validator, contains_steps, not_contains_steps, regex, semantic_steps
+from ..validators import Validator, contains_steps, not_contains_steps, regex, semantic_steps, contains_any_steps
 
 logger = structlog.get_logger("timbal.eval.types.steps")
 
@@ -47,6 +47,8 @@ class Steps(BaseModel):
                 validators.append(semantic_steps(validator_arg))
             elif validator_name == "not_contains":
                 validators.append(not_contains_steps(validator_arg))
+            elif validator_name == "contains_any":
+                validators.append(contains_any_steps(validator_arg))
             # TODO Add more validators.
             else:
                 logger.warning("unknown_validator", validator=validator_name)
