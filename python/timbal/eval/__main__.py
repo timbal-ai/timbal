@@ -13,7 +13,7 @@ from ..logs import setup_logging
 # TODO This shouldn't be in just the server 'module'.
 from ..server.utils import ModuleSpec, load_module
 from .engine import eval_file
-from .types.models import dump
+from ..types.models import dump
 from .types.result import EvalTestSuiteResult
 from .utils import discover_files
 
@@ -69,9 +69,6 @@ if __name__ == "__main__":
         )
 
     agent = load_module(module_spec)
-
-    from timbal.state.savers import JSONLSaver
-    agent.state_saver = JSONLSaver(path=Path("state.jsonl"))
 
     tests_path = args.tests
     if not tests_path:

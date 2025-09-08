@@ -12,7 +12,9 @@ from ..core.agent import Agent
 from ..errors import EvalError
 from ..state.context import RunContext
 from ..state.data import DataValue
+from ..state.savers import InMemorySaver
 from ..state.snapshot import Snapshot
+from ..state import set_run_context
 from ..types.chat.content import TextContent
 from ..types.message import Message
 from .types.result import EvalResult, EvalTestSuiteResult
@@ -35,7 +37,7 @@ async def eval_steps(
         if agent.state_saver is None:
             return False, ["No state saver available"], []
             
-        last_snapshot = agent.state_saver.get_last(path=agent.path, context=run_context)
+        last_snapshot = await agent.state_saver.get_last(path=agent.path)
         if last_snapshot is None:
             return False, ["No snapshot found"], []
             
@@ -220,8 +222,9 @@ async def run_turn(
         t0=int(time.time() * 1000),
         data=data,
     )
-    agent.state_saver.put(snapshot, RunContext())
+    await agent.state_saver.put(snapshot)
     run_context = RunContext(parent_id=snapshot.id)
+    set_run_context(run_context)
 
     # Run the agent
     try:
@@ -313,7 +316,7 @@ async def run_turn(
 
 async def eval_file(
     path: Path,
-    _agent: Agent,
+    agent: Agent,
     test_results: EvalTestSuiteResult,
     test_name: str | None = None
 ) -> Any:
@@ -324,13 +327,15 @@ async def eval_file(
     test_suite = TestSuite.model_validate(test_suite)
     
     for test in test_suite.tests:
+        # Reset the state saver for each test
+        agent.state_saver = InMemorySaver()
         if test_name is not None and test.name != test_name:
             continue
         conversation_history = []
         for i, turn in enumerate(test.turns):
             is_last_turn = (i == len(test.turns) - 1)
             if is_last_turn:
-                await run_turn(_agent, turn, test, conversation_history, test_results, str(path.name))
+                await run_turn(agent, turn, test, conversation_history, test_results, str(path.name))
             else:
                 conversation_history.append(turn.input.to_message(role="user"))
                 if turn.output:
