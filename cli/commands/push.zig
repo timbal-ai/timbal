@@ -227,20 +227,28 @@ fn inspectImage(
 const ProbeResJson = struct {
     params_model_schema: std.json.Value,
     return_model_schema: std.json.Value,
+    type: []const u8,
+    version: []const u8,
 
-    pub fn deinit(self: *ProbeRes, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *ProbeResJson, allocator: std.mem.Allocator) void {
         self.params_model_schema.deinit(allocator);
         self.return_model_schema.deinit(allocator);
+        allocator.free(self.type);
+        allocator.free(self.version);
     }
 };
 
 const ProbeRes = struct {
     params_model_schema: []const u8,
     return_model_schema: []const u8,
+    type: []const u8,
+    version: []const u8,
 
     pub fn deinit(self: *ProbeRes, allocator: std.mem.Allocator) void {
         allocator.free(self.params_model_schema);
         allocator.free(self.return_model_schema);
+        allocator.free(self.type);
+        allocator.free(self.version);
     }
 };
 
@@ -295,6 +303,8 @@ fn probeImage(
     return ProbeRes{
         .params_model_schema = try params_model_schema.toOwnedSlice(),
         .return_model_schema = try return_model_schema.toOwnedSlice(),
+        .type = try allocator.dupe(u8, parsed.value.type),
+        .version = try allocator.dupe(u8, parsed.value.version),
     };
 }
 
@@ -350,8 +360,9 @@ fn authenticate(
         .hash = image_digest_info.hash,
         .size = image_digest_info.size,
         .platform = image_digest_info.platform,
-        .version = timbal_version,
         .name = version_name,
+        .version = probe_res.version,
+        .type = probe_res.type,
         .params_model_schema = probe_res.params_model_schema,
         .return_model_schema = probe_res.return_model_schema,
     }, .{});

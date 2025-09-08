@@ -6,7 +6,7 @@ const dockerignore = @embedFile("../init-templates/.dockerignore");
 const pyproject_toml = @embedFile("../init-templates/pyproject.toml");
 const timbal_yaml = @embedFile("../init-templates/timbal.yaml");
 const agent_py = @embedFile("../init-templates/agent.py");
-const flow_py = @embedFile("../init-templates/flow.py");
+const workflow_py = @embedFile("../init-templates/workflow.py");
 
 // Embedded version.
 const timbal_version = @import("../version.zig").timbal_version;
@@ -28,7 +28,7 @@ fn printUsage() !void {
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
         "    \x1b[1;36m--agent \x1b[0m Initialize a timbal project as an agent (default)\n" ++
-        "    \x1b[1;36m--flow  \x1b[0m Initialize a timbal project as a flow\n" ++
+        "    \x1b[1;36m--workflow \x1b[0m Initialize a timbal project as a workflow\n" ++
         "\n" ++
         "\x1b[1;32mGlobal options:\n" ++
         "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet      \x1b[0mDo not print any output\n" ++
@@ -59,8 +59,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             quiet = true;
         } else if (std.mem.eql(u8, arg, "--agent")) {
             app_type = "agent";
-        } else if (std.mem.eql(u8, arg, "--flow")) {
-            app_type = "flow";
+        } else if (std.mem.eql(u8, arg, "--workflow")) {
+            app_type = "workflow";
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             if (arg_path != null) {
                 try printUsageWithError("Error: multiple target paths provided");
@@ -102,9 +102,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Change the FQN in the timbal.yaml file.
     const fully_qualified_name = if (std.mem.eql(u8, app_type, "agent"))
-        "agent.py:agent"
+        "agent.py::agent"
     else
-        "flow.py:flow";
+        "workflow.py::workflow";
     const timbal_yaml_replaced = try std.mem.replaceOwned(u8, allocator, timbal_yaml, "{{fully_qualified_name}}", fully_qualified_name);
     defer allocator.free(timbal_yaml_replaced);
 
@@ -116,7 +116,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (std.mem.eql(u8, app_type, "agent")) {
         try init_templates.append(.{ .content = agent_py, .dist = "agent.py" });
     } else {
-        try init_templates.append(.{ .content = flow_py, .dist = "flow.py" });
+        try init_templates.append(.{ .content = workflow_py, .dist = "workflow.py" });
     }
 
     for (init_templates.items) |init_template| {

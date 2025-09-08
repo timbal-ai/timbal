@@ -1,9 +1,10 @@
 import asyncio
 from datetime import datetime
 
+from dotenv import load_dotenv
 from timbal import Agent
-from timbal.state import RunContext, set_run_context
-from timbal.state.savers import TimbalPlatformSaver
+
+load_dotenv()
 
 
 def get_datetime() -> str:
@@ -11,9 +12,9 @@ def get_datetime() -> str:
 
 
 agent = Agent(
-    model="gpt-4.1-mini",
+    name="demo_agent",
+    model="openai/gpt-4o-mini",
     tools=[get_datetime],
-    state_saver=TimbalPlatformSaver(),
 )
 
 
@@ -22,10 +23,8 @@ async def main():
         prompt = input("User: ")
         if prompt == "q":
             break
-        agent_output_event = await agent.complete(prompt=prompt)
-        print(f"Agent: {agent_output_event.output}")
-        run_context = RunContext(parent_id=agent_output_event.run_id)
-        set_run_context(run_context)
+        agent_output_event = await agent(prompt=prompt).collect()
+        print(f"Agent: {agent_output_event.output}") # noqa: T201
 
 
 if __name__ == "__main__":
@@ -33,6 +32,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         # Catch any Ctrl+C that wasn't caught in main()
-        print("\nGoodbye!")
+        print("\nGoodbye!") # noqa: T201
     finally:
-        print("Goodbye!")
+        print("Goodbye!") # noqa: T201
