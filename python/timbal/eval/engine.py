@@ -27,17 +27,16 @@ logger = structlog.get_logger("timbal.eval.engine")
 
 
 
-async def eval_steps(
-    turn: Turn,
-    agent: Agent,
-    run_context: RunContext
-) -> tuple[bool, list[str], list[dict]]:
+async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[dict]]:
     """"""
     try:
         if agent.state_saver is None:
             return False, ["No state saver available"], []
             
+        # Get the most recent snapshot from the agent's state saver
+        # This should contain the agent's execution memory after the agent has run
         last_snapshot = await agent.state_saver.get_last(path=agent.path)
+            
         if last_snapshot is None:
             return False, ["No snapshot found"], []
             
@@ -223,18 +222,15 @@ async def run_turn(
         data=data,
     )
     await agent.state_saver.put(snapshot)
-    run_context = RunContext(parent_id=snapshot.id)
-    set_run_context(run_context)
+    set_run_context(RunContext(parent_id=snapshot.id))
 
-    # Run the agent
     try:
-        agent_output_event = await agent.complete(context=run_context, prompt=user_input)
+        agent_output_event = await agent.complete(prompt=user_input)
         agent_usage = agent_output_event.usage
         if agent_output_event.output and agent_output_event.output.content and len(agent_output_event.output.content) > 0:
             agent_output = agent_output_event.output.content[0].text
         else:
             agent_output = "No output generated"
-        run_context = RunContext(parent_id=agent_output_event.run_id)
         
         # Check if there was an execution error in the agent output event
         if agent_output_event.error is not None:
@@ -253,12 +249,12 @@ async def run_turn(
         test_results.execution_errors += 1
         agent_usage = {}
         agent_output = f"Execution failed: {str(e)}"
-        run_context = RunContext(parent_id=snapshot.id)
 
-    # Evaluate the steps
+    # Reset the run context so we can use get_last to fetch the last snapshot
+    set_run_context(RunContext(parent_id=agent_output_event.run_id))
     steps_passed, steps_explanations, actual_steps = None, [], []
     if turn.steps and execution_error is None:  # Only evaluate steps if no execution error
-        steps_passed, steps_explanations, actual_steps = await eval_steps(turn, agent, run_context)
+        steps_passed, steps_explanations, actual_steps = await eval_steps(turn, agent)
         if steps_passed:
             test_results.steps_passed += 1
         else:
@@ -332,13 +328,10 @@ async def eval_file(
         if test_name is not None and test.name != test_name:
             continue
         conversation_history = []
-        for i, turn in enumerate(test.turns):
-            is_last_turn = (i == len(test.turns) - 1)
-            if is_last_turn:
-                await run_turn(agent, turn, test, conversation_history, test_results, str(path.name))
-            else:
-                conversation_history.append(turn.input.to_message(role="user"))
-                if turn.output:
-                    conversation_history.append(turn.output.to_message(role="assistant"))
-    
+        for turn in test.turns[:-1]:
+            conversation_history.append(turn.input.to_message(role="user"))
+            if turn.output:
+                conversation_history.append(turn.output.to_message(role="assistant"))
+        await run_turn(agent, test.turns[-1], test, conversation_history, test_results, str(path.name))
+
     return test_results
