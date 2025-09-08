@@ -11,7 +11,7 @@ from ...utils import resolve_default
 
 load_dotenv()
 
-logger = structlog.get_logger("timbal.steps.perplexity.search")
+logger = structlog.get_logger("timbal.handlers.perplexity.search")
 
 async def search(
     query: str = Field(

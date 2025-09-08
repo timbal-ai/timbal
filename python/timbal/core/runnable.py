@@ -287,7 +287,7 @@ class Runnable(ABC, BaseModel):
             # Strategy 1: Find by function name (most reliable for decorated functions)
             func_name = fn.__name__
             for node in ast.walk(tree):
-                if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and 
+                if (isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and 
                     hasattr(node, 'name') and node.name == func_name):
                     target_node = node
                     break
@@ -297,13 +297,13 @@ class Runnable(ABC, BaseModel):
                     source_lines, start_line = inspect.getsourcelines(fn)
                     # Look for FunctionDef nodes within a few lines of the start_line
                     for node in ast.walk(tree):
-                        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and
+                        if (isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and
                             hasattr(node, 'name') and node.name == func_name and
                             hasattr(node, 'lineno') and 
                             start_line <= node.lineno <= start_line + len(source_lines)):
                             target_node = node
                             break
-                except:
+                except: # noqa: E722
                     pass
             # Strategy 3: Fallback to line number matching for lambdas
             if not target_node:
