@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime
 
 from timbal import Agent
-from timbal.state import RunContext
+from timbal.state import RunContext, set_run_context
 from timbal.state.savers import TimbalPlatformSaver
 
 
@@ -18,14 +18,14 @@ agent = Agent(
 
 
 async def main():
-    run_context = RunContext()
     while True:
         prompt = input("User: ")
         if prompt == "q":
             break
-        agent_output_event = await agent.complete(context=run_context, prompt=prompt)
+        agent_output_event = await agent.complete(prompt=prompt)
         print(f"Agent: {agent_output_event.output}")
         run_context = RunContext(parent_id=agent_output_event.run_id)
+        set_run_context(run_context)
 
 
 if __name__ == "__main__":
