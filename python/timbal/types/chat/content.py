@@ -23,6 +23,7 @@ Usage:
 """
 
 import base64
+import email
 import io
 import json
 from ast import literal_eval
@@ -56,6 +57,59 @@ AVAILABLE_ENCODINGS = [
     "iso-8859-1",
     "utf-16",
 ]
+
+
+def _extract_email_body(raw_email_content: str) -> str:
+    """Extract only the body content from an EML email, excluding headers and metadata."""
+    msg = email.message_from_string(raw_email_content)
+    
+    # Extract body text, preferring plain text over HTML
+    body = ""
+    
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            if content_type == "text/plain":
+                payload = part.get_payload(decode=True)
+                if payload:
+                    try:
+                        body = payload.decode(part.get_content_charset() or 'utf-8')
+                        break  # Prefer plain text
+                    except (UnicodeDecodeError, LookupError):
+                        for encoding in AVAILABLE_ENCODINGS:
+                            try:
+                                body = payload.decode(encoding)
+                                break
+                            except UnicodeDecodeError:
+                                continue
+            elif content_type == "text/html" and not body:
+                # Fallback to HTML if no plain text found
+                payload = part.get_payload(decode=True)
+                if payload:
+                    try:
+                        body = payload.decode(part.get_content_charset() or 'utf-8')
+                    except (UnicodeDecodeError, LookupError):
+                        for encoding in AVAILABLE_ENCODINGS:
+                            try:
+                                body = payload.decode(encoding)
+                                break
+                            except UnicodeDecodeError:
+                                continue
+    else:
+        # Single part message
+        payload = msg.get_payload(decode=True)
+        if payload:
+            try:
+                body = payload.decode(msg.get_content_charset() or 'utf-8')
+            except (UnicodeDecodeError, LookupError):
+                for encoding in AVAILABLE_ENCODINGS:
+                    try:
+                        body = payload.decode(encoding)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+    
+    return body.strip() if body else ""
 
 
 class Content(BaseModel):
@@ -313,6 +367,32 @@ class FileContent(Content):
             self._cached_openai_input = pages_input
             return pages_input
 
+        elif self.file.__source_extension__ == ".eml":
+            # EML files are text-based email files - extract only body content
+            raw_bytes = self.file.read()
+            
+            raw_content = None
+            for encoding in AVAILABLE_ENCODINGS:
+                try:
+                    raw_content = raw_bytes.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if raw_content is None:
+                raise ValueError(f"Could not decode EML file {self.file} with any of: {AVAILABLE_ENCODINGS}")
+
+            # Extract only the email body content, excluding headers and metadata
+            body_content = _extract_email_body(raw_content)
+            
+            openai_input = {
+                "type": "text",
+                "text": body_content,
+            }
+
+            self._cached_openai_input = openai_input
+            return openai_input
+
         elif mime and mime.startswith("audio/"):
             gpt_audio_models = [
                 "gpt-4o-audio-preview", "gpt-4o-mini-audio-preview", 
@@ -475,6 +555,32 @@ class FileContent(Content):
                     }
                 }
         
+        elif self.file.__source_extension__ == ".eml":
+            # EML files are text-based email files - extract only body content
+            raw_bytes = self.file.read()
+            
+            raw_content = None
+            for encoding in AVAILABLE_ENCODINGS:
+                try:
+                    raw_content = raw_bytes.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if raw_content is None:
+                raise ValueError(f"Could not decode EML file {self.file} with any of: {AVAILABLE_ENCODINGS}")
+
+            # Extract only the email body content, excluding headers and metadata
+            body_content = _extract_email_body(raw_content)
+
+            anthropic_input = {
+                "type": "text",
+                "text": body_content,
+            }
+
+            self._cached_anthropic_input = anthropic_input
+            return anthropic_input
+
         elif mime and mime.startswith("audio/"):
             # TODO Add the cost of this operation.
             transcription = await stt(audio_file=self.file)
