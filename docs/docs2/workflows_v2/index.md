@@ -7,7 +7,7 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 # Orchestrating AI Workflows
 
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-Design, connect, and control multi-step AI pipelines using Workflows—Timbal's flexible workflow engine.
+Design, connect, and control multi-step AI pipelines using Workflows.
 </h2>
 
 ---
@@ -20,49 +20,12 @@ Design, connect, and control multi-step AI pipelines using Workflows—Timbal's 
 
 workflow = Workflow(name="my_workflow")`}/>
 
-This is the initial step to create a workflow. Once created, you can build your workflow by adding components as building blocks.
+This is the first step to create a workflow. Next, add components as building blocks.
 
 ---
 
-## Building Blocks of a Workflow
-
-<div className="cards-container">
-  <div className="card">
-    <div className="card-content">
-      <h3>Steps</h3>
-      <p>
-        <strong>Steps</strong> are the core units of work.
-
-        Each step can be:
-        - a function
-        - a Tool
-        - another workflow
-        
-      Steps process data, perform actions, and pass results onward.
-      </p>
-    </div>
-  </div>
-  <div className="card">
-    <div className="card-content">
-      <h3>Links</h3>
-      <p>
-        <strong>Links</strong> define execution dependencies between steps.
-
-        Links can be:
-        - explicit (manual)
-        - implicit (automatic via data references)
-        
-      Links ensure proper execution order and create a DAG.
-      </p>
-    </div>
-  </div>
-</div>
-
-<CodeBlock language="python" code={`Workflow(name="my_workflow")
-    .step(step_1)
-    .step(step_2)
-    .link("step_1", "step_2") # Names of the tools (or function names if no tool name set)
-)`}/>
+## Building Blocks of a Workflow: Steps
+<strong>Steps</strong> are the core units of work, which can process data, perform actions and pass results onward.
 
 ### DAG-Based Execution
 Workflows form a **Directed Acyclic Graph (DAG)** where:
@@ -75,9 +38,9 @@ Workflows form a **Directed Acyclic Graph (DAG)** where:
 </div>
 
 
----
 
-## Adding Steps to Your Workflow
+
+### Adding Steps to the Workflow
 
 Workflows use `.step()` method to add steps. Each step can be:
 
@@ -86,24 +49,62 @@ Workflows use `.step()` method to add steps. Each step can be:
 - **Dictionaries**: Tool configurations
 - **Other Workflows**: Nested workflow components
 
+<CodeBlock language="python" code={`workflow = (Workflow(name="my_workflow")
+    .step(step_1)
+    .step(step_2)
+)`}/>
+
 
 ### Adding Steps with Parameters
 
 You can pass fixed parameters to steps using keyword arguments:
 
-<CodeBlock language="python" code={`Workflow(name="temperature_alert")
+<CodeBlock language="python" code={`def celsius_to_fahrenheit(celsius: float) -> float:
+    return (celsius * 9/5) + 32
+
+def check_threshold(temperature: float, threshold: float) -> str:
+    return "Alert!" if temperature > threshold else "Normal"
+    
+  workflow = (Workflow(name="temperature_alert")
     .step(celsius_to_fahrenheit, celsius=35)
-    .step(check_threshold, threshold=lambda: 6)
+    .step(check_threshold, temperature=80, threshold=lambda: 85)
 )`}/>
 
-### Connecting Steps
+If a parameter value is specified in the workflow definition, it overrides the step parameter value. In the following example, the `threshold` value for the `check_threshold` function will be *85*, not *100*.
 
-Use `get_run_context().get_data("step_name.output")` to access outputs from previous steps:
+<CodeBlock language="python" highlight="1" code={`workflow = (Workflow(name="temperature_alert", threshold=100)
+    .step(celsius_to_fahrenheit, celsius=35)
+    .step(check_threshold, temperature=80, threshold=lambda: 85)
+)`}/>
+
+### Reusing Functions
+
+If you need to use the same function multiple times in a workflow, you must wrap it in a new Tool each time:
+
+<CodeBlock language="python" highlight="10" code={`# Create a Tool to reuse the function
+threshold_checker_tool = Tool(
+    name="threshold_checker",
+    handler=check_threshold
+)
+
+workflow = (Workflow(name="temperature_monitoring", temperature=80)
+    .step(celsius_to_fahrenheit, celsius=35)
+    .step(check_threshold, threshold=lambda: 85)
+    .step(threshold_checker_tool, threshold=lambda: 100)
+)`}/>
+
+
+
+<!-- ### Connecting Steps
+
+Use `get_run_context().get_data("step_name.output")` to access outputs from neighbour steps:
 
 <CodeBlock language="python" code={`workflow = (Workflow(name="temperature_alert")
     .step(step1, celsius=35)
     .step(step2, temperature=lambda: get_run_context().get_data("step1.output"))
 )`}/>
+
+The framework automatically handles the dependency of one step on another step's data.
 
 In the above example, you don't need `.link()` because step2 uses step1's output. When a step depends on another step's data, they run sequentially (implicit linking).
 
@@ -138,7 +139,7 @@ workflow = (Workflow(name="parallel_flow")
     .step(send_email)      # Starts at 0s, finishes at 2s
     .step(update_database) # Starts at 0s, finishes at 3s
 )
-# Total time: 3 seconds (max of 2 and 3)`}/>
+# Total time: 3 seconds (max of 2 and 3)`}/> -->
 
 ---
 
@@ -181,7 +182,7 @@ Default parameters are defined when creating a runnable and are merged with runt
 
 ---
 
-## Running Your Workflow
+## Running the Workflow
 
 Once your workflow is defined, you can execute it in two main ways:
 
@@ -223,7 +224,7 @@ async for event in workflow(x=3):
 - **Type Safety**: Automatic parameter validation via Pydantic
 - **Composition**: Workflows can contain other workflows
 
-For more, see the [Advanced Workflow Concepts](/workflows/advanced), and [Examples](/examples).
+Check [Context](/workflows_v2/context.md) for data sharing between steps, and [Control Flow](/workflows_v2/control_flow.md) for different step execution behaviors.
 
 
 

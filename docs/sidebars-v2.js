@@ -25,6 +25,7 @@ const sidebars = {
       items: [
         'agents_v2/index',
         'agents_v2/dynamic_agents',
+        'agents_v2/structured_output',
         'agents_v2/rewind',
         'agents_v2/tools',
         'agents_v2/voice',
@@ -38,8 +39,8 @@ const sidebars = {
       collapsed: false,
       items: [
         'workflows_v2/index',
-        'workflows_v2/context',
         'workflows_v2/control_flow',
+        'workflows_v2/context',
       ],
     },
     {

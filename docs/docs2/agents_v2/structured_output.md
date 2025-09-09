@@ -29,7 +29,7 @@ By defining schemas upfront, you can trust that your agent’s output will alway
 3. The agent will always return responses that conform to the schema.
 
 
-For example, here’s a schema for a travel assistant agent:
+For example, here’s a schema for a chef assistant agent:
 
 <CodeBlock language="python" code ={
 `from pydantic import BaseModel
@@ -59,7 +59,7 @@ response = await agent(
 
 ### Output Example
 
-The response will strictly follow the DayPlan structure:
+The response will strictly follow the Recipe structure:
 
 <CodeBlock language="python" code ={`
   {
