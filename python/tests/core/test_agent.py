@@ -271,6 +271,34 @@ class TestAgentExecution:
         assert len(events) > 0
         for event in events:
             assert event.path.startswith("streaming_agent")
+    
+    @pytest.mark.asyncio
+    async def test_system_prompt_override(self):
+        """Test that system_prompt parameter overrides agent's default system_prompt."""
+        # Create agent with default system prompt
+        default_system_prompt = "You are a helpful assistant."
+        agent = Agent(
+            name="override_agent",
+            model="openai/gpt-4o-mini",
+            system_prompt=default_system_prompt
+        )
+        
+        # Override system prompt during execution
+        override_system_prompt = "You must respond with exactly one word: 'SUCCESS'"
+        prompt = Message.validate({"role": "user", "content": "Hello, how are you?"})
+        result = agent(
+            prompt=prompt,
+            system_prompt=override_system_prompt
+        )
+        
+        output = await result.collect()
+        assert isinstance(output, OutputEvent)
+        skip_if_agent_error(output, "system_prompt_override")
+        
+        assert isinstance(output.output, Message)
+        response_content = str(output.output.content).strip().upper()
+        # The overridden system prompt should make the agent respond with "SUCCESS"
+        assert "SUCCESS" in response_content
 
 
 class TestAgentNesting:

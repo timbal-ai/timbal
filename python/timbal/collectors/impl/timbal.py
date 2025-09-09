@@ -6,6 +6,8 @@ try:
 except ImportError:
     from typing_extensions import override
 
+import structlog
+
 from ...state.context import RunContext
 from ...types.events.base import BaseEvent as TimbalBaseEvent
 from ...types.events.chunk import ChunkEvent as TimbalChunkEvent
@@ -13,6 +15,8 @@ from ...types.events.output import OutputEvent as TimbalOutputEvent
 from ...types.events.start import StartEvent as TimbalStartEvent
 from .. import register_collector
 from ..base import EventCollector
+
+logger = structlog.get_logger("timbal.collectors.impl.timbal")
 
 
 @register_collector
@@ -29,7 +33,7 @@ class TimbalCollector(EventCollector):
         return isinstance(event, TimbalBaseEvent)
 
     @override
-    def process(self, event: TimbalBaseEvent) -> dict[str, Any] | None:
+    def process(self, event: TimbalBaseEvent) -> TimbalBaseEvent | None:
         """Processes Timbal events."""
         if isinstance(event, TimbalStartEvent):
             return self._handle_start_event(event)
@@ -40,18 +44,19 @@ class TimbalCollector(EventCollector):
         if isinstance(event, TimbalOutputEvent):
             return self._handle_output_event(event)
         
+        logger.warning("Unknown Timbal event type", event_type=type(event), event=event.model_dump())
         return None
     
-    def _handle_start_event(self, _event: TimbalStartEvent) -> None:
-        return None
+    def _handle_start_event(self, event: TimbalStartEvent) -> TimbalStartEvent:
+        return event
     
-    def _handle_chunk_event(self, _event: TimbalChunkEvent) -> None:
-        return None
+    def _handle_chunk_event(self, event: TimbalChunkEvent) -> TimbalChunkEvent:
+        return event
     
-    def _handle_output_event(self, event: TimbalOutputEvent) -> None:
+    def _handle_output_event(self, event: TimbalOutputEvent) -> TimbalOutputEvent:
         """Handle output events with usage statistics and final results."""
         self._output = event.output
-        return None
+        return event
     
     @override
     def collect(self) -> Any:

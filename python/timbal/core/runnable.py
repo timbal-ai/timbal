@@ -677,7 +677,7 @@ class Runnable(ABC, BaseModel):
                         # If the processed chunk is not None, it means we have streaming content
                         if processed_chunk is not None:
                             # If it's already a BaseEvent, it means we have already emitted it.
-                            if not isinstance(chunk, BaseEvent):
+                            if not isinstance(processed_chunk, BaseEvent):
                                 chunk_event = ChunkEvent(
                                     run_id=run_context.id,
                                     parent_run_id=run_context.parent_id,
@@ -689,7 +689,7 @@ class Runnable(ABC, BaseModel):
                                 logger.info("chunk_event", **chunk_event.model_dump())
                                 yield chunk_event
                             else:
-                                yield chunk
+                                yield processed_chunk
                 output = collector.collect() if collector else None
             trace.output = output
             trace._output_dump = await dump(output)

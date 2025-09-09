@@ -411,9 +411,9 @@ class TestControlFlow:
             events.append(event)
         
         output_events = [e for e in events if isinstance(e, OutputEvent)]
-        assert len(output_events) == 1
-        assert output_events[0].error is None
-        assert "step1:override_input" in str(output_events[0].output)
+        assert len(output_events) == 2
+        assert output_events[-1].error is None
+        assert "step1:override_input" in str(output_events[-1].output)
 
 
 class TestParameterAndNesting:

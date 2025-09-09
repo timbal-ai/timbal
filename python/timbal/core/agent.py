@@ -368,7 +368,10 @@ class Agent(Runnable):
         Yields:
             Events from LLM calls and tool executions
         """
-        system_prompt = await self._resolve_system_prompt()
+        # ? Do we want to allow the user to pass parameterized system prompts
+        system_prompt = kwargs.pop("system_prompt", None)
+        if not system_prompt:
+            system_prompt = await self._resolve_system_prompt()
         # Initialize conversation with memory + user prompt
         messages = await self._resolve_memory()
         messages.append(kwargs.pop("prompt"))
