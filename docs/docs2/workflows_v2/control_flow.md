@@ -38,11 +38,9 @@ workflow = (Workflow(name='my_workflow')
 )`}/>
 
 In this example, we have:
-- `func_1` and `func_2` runs concurrently.
+- `func_1` and `func_2` run concurrently.
 - `func_3` starts only after `func_1` has finished.
 - The workflow's final output will be `b`, since `func_2` it is the last to finish.
-<!-- - The workflow's final output will be `b`, the result from func_2. Recall: The workflow’s final output is determined by whichever function completes last. -->
-<!-- - The workflow’s final output is determined by whichever function completes last -->
 
 
 ## Forcing Sequential Execution:
@@ -83,51 +81,3 @@ In this case, `send_alert` step will be executed after both `func_1` and `func_2
 - Sequential execution is applied automatically when parameter dependencies exist between steps.
 - Sequential execution can be enforced with `depends_on`.
 - Conditional execution of steps is specified with `when`.
-
-
-<!-- 
-import asyncio
-import random
-
-async def scrape_news():
-    await asyncio.sleep(1)
-    print("News scraped")
-    return ["AI breakthrough", "Stock market up"]
-
-async def scrape_weather():
-    await asyncio.sleep(1)
-    print("Weather scraped")
-    return "Sunny"
-
-async def summarize(news):
-    await asyncio.sleep(1)
-    summary = f"Summary: {', '.join(news)}"
-    print(summary)
-    return summary
-
-async def send_alert(summary, weather):
-    await asyncio.sleep(1)
-    print(f"Alert sent: {summary} | Weather: {weather}")
-
-async def main():
-    # Parallel: scrape news and weather at the same time
-    news, weather = await asyncio.gather(scrape_news(), scrape_weather())
-
-    # Sequential: summarize depends on news
-    summary = await summarize(news)
-
-    # Conditional: only send alert if keyword found in news
-    if "AI" in news:
-        await send_alert(summary, weather)
-    else:
-        print("No alert sent")
-
-asyncio.run(main())
-
-
-
-How it behaves
-scrape_news and scrape_weather run in parallel.
-summarize runs after news scraping finishes.
-send_alert runs only if “AI” is found in the news headlines.
- -->

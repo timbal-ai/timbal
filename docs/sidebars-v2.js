@@ -20,6 +20,16 @@ const sidebars = {
     },
     {
       type: 'category',
+      collapsed: false,
+      label: 'Core Concepts',
+      items: [
+        'core_concepts_v2/runnables',
+        'core_concepts_v2/events',
+        'core_concepts_v2/tracing',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Agents',
       collapsed: false,
       items: [

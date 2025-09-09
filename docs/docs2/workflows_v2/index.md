@@ -27,7 +27,7 @@ This is the first step to create a workflow. Next, add components as building bl
 ## Building Blocks of a Workflow: Steps
 <strong>Steps</strong> are the core units of work, which can process data, perform actions and pass results onward.
 
-### DAG-Based Execution
+<!-- ### DAG-Based Execution
 Workflows form a **Directed Acyclic Graph (DAG)** where:
 - Steps can run in parallel when dependencies allow
 - No circular dependencies (prevents infinite loops)
@@ -35,7 +35,7 @@ Workflows form a **Directed Acyclic Graph (DAG)** where:
 
 <div style={{ textAlign: 'center', display: 'flex', justifyContent: 'center', alignItems: 'center', margin: '0rem 0' }}>
   <img src="/img/dag_link.png" style={{ width: '20rem', maxWidth: '100%' }} />
-</div>
+</div> -->
 
 
 
@@ -70,16 +70,10 @@ def check_threshold(temperature: float, threshold: float) -> str:
     .step(check_threshold, temperature=80, threshold=lambda: 85)
 )`}/>
 
-If a parameter value is specified in the workflow definition, it overrides the step parameter value. In the following example, the `threshold` value for the `check_threshold` function will be *85*, not *100*.
-
-<CodeBlock language="python" highlight="1" code={`workflow = (Workflow(name="temperature_alert", threshold=100)
-    .step(celsius_to_fahrenheit, celsius=35)
-    .step(check_threshold, temperature=80, threshold=lambda: 85)
-)`}/>
 
 ### Reusing Functions
 
-If you need to use the same function multiple times in a workflow, you must wrap it in a new Tool each time:
+**You can only have one step with the same name inside a workflow**. If you need to use the same function multiple times in a workflow, you must wrap it in a new Tool each time with distinct names.
 
 <CodeBlock language="python" highlight="10" code={`# Create a Tool to reuse the function
 threshold_checker_tool = Tool(
