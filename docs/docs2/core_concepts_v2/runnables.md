@@ -22,7 +22,68 @@ All runnables provide a unified interface and execution pattern, enabling seamle
 - **[Agents](../agents_v2/index.md)** - Autonomous execution units that orchestrate LLM interactions with tool calling
 - **[Workflows](../workflows_v2/index.md)** - Programmable execution pipelines that orchestrate step-by-step processing
 
-## API
+
+### Runnable identifier
+
+**All runnables must have a unique `name` defined, as it serves as the identifier for the runnable within Timbal's execution engine**. This name is used for tracing, debugging, and referencing the runnable in workflows, agents, and other components. Whether you're creating a Tool object, an Agent, or a Workflow, the name parameter is required and must be unique within your application context.
+
+Here's how to create a basic Runnable component:
+<CodeBlock language="python" code={`from timbal import Tool
+
+
+def add_numbers(a: float, b: float) -> float:
+    """Add two numbers together."""
+    return a + b
+
+tool = Tool(
+    name="addition_tool",
+    handler=add_numbers,
+)`}/>
+
+---
+
+## Parameter Handling and Execution
+
+Runnables provide a unified parameter handling system that works consistently across all types of runnables (Tools, Agents, and Workflows). **All follow the same format for passing inputs**: you can pass parameters directly as keyword arguments when calling the runnable, and these parameters are automatically mapped to the underlying handler function's parameters.
+
+<CodeBlock language="python" code={`# Runnable call
+result = await addition_tool(a=5, b=3).collect()  # Returns 8`}/>
+
+
+### Default Parameters
+The system also allows for parameter through default values defined in the Runnable.
+Injected parameters can be overridden by explicitly passing them during execution:
+
+<CodeBlock language="python" highlight={"7"} code={`from timbal import Tool
+
+
+tool = Tool(
+    name="addition_tool",
+    handler=add_numbers,
+    default_params={"b": 2}
+)
+
+result = await addition_tool(a=5).collect()  # Returns 8`}/>
+
+<!-- <CodeBlock language="python" code={`def add_with_config(a: float, b: float, multiplier: int = 1) -> float:
+    """Add two numbers with optional multiplier."""
+    return (a + b) * multiplier
+
+tool = Tool(
+    name="configurable_adder",
+    handler=add_with_config,
+    default_params={"multiplier": 2}
+)
+
+# Use default multiplier
+result1 = await tool(a=5, b=3).collect()  # Returns (5+3)*2 = 16
+
+# Override the default multiplier
+result2 = await tool(a=5, b=3, multiplier=3).collect()  # Returns (5+3)*3 = 24`}/> -->
+
+
+
+<!-- ## API
 
 #### Core Configuration
 - `name` (str) - Required unique identifier for the runnable
@@ -39,107 +100,11 @@ All runnables provide a unified interface and execution pattern, enabling seamle
 
 #### Execution Hooks
 - `pre_hook` (Callable | None = None) - Hook function executed before the main handler
-- `post_hook` (Callable | None = None) - Hook function executed after the main handler completes
+- `post_hook` (Callable | None = None) - Hook function executed after the main handler completes -->
 
 
-<!-- #### Functions
-
-#### Tool Objects
-
-<CodeBlock language="python" code={`from timbal import Tool
-
-def calculate_tax(amount: float, rate: float = 0.1) -> float:
-    """Calculate tax on an amount."""
-    return amount * rate
-
-tax_tool = Tool(
-    handler=calculate_tax,
-    description="Calculate tax on a monetary amount",
-    schema_params_mode="required"  # Only show required params to LLM
-)`}/>
-
-#### Workflow
-<CodeBlock language="python" code={`from timbal import Workflow
-
-# Create a Workflow
-analysis_agent = Workflow(
-
-)
-
-# Use agent as runnable in workflow
-workflow = (
-    Workflow(name="analysis_pipeline")
-    .step(analysis_agent)  # Agent as runnable
-)`}/>
-
-#### Agents
-<CodeBlock language="python" code={`from timbal import Agent
-
-# Create an agent
-analysis_agent = Agent(
-    name="data_analyzer",
-    model="openai/gpt-4o-mini",
-    system_prompt="Analyze the provided data and return insights."
-)
-
-# Use agent as runnable in workflow
-workflow = (
-    Workflow(name="analysis_pipeline")
-    .step(analysis_agent)  # Agent as runnable
-)`}/> -->
-
-
-
-
-
-
-
-<!-- ## Core Features
-
-### Base Execution Unit with Parameter Validation and Schema Generation
-
-Runnables serve as the fundamental execution units in Timbal, providing robust parameter validation and automatic schema generation capabilities.
-
-#### Parameter Validation
-Every Runnable uses Pydantic models for input validation, ensuring type safety and data integrity:
-
-<CodeBlock language="python" code={`from timbal import Tool
-from pydantic import BaseModel
-
-class UserInput(BaseModel):
-    name: str
-    age: int
-    email: str | None = None
-
-def process_user(user: UserInput) -> dict:
-    return {"processed": True, "user": user.model_dump()}
-
-# The Tool automatically validates inputs against the UserInput model
-user_tool = Tool(
-    handler=process_user,
-    name="process_user",
-    description="Process user information"
-)
-
-# This will validate the input and raise ValidationError if invalid
-result = await user_tool(name="John", age=25, email="john@example.com").collect()`}/>
-
-#### Schema Generation
-Runnables automatically generate JSON schemas for LLM tool calling, supporting both OpenAI and Anthropic formats:
-
-<CodeBlock language="python" code={`# OpenAI-compatible schema
-openai_schema = user_tool.openai_schema
-# Returns: {"type": "function", "function": {"name": "process_user", ...}}
-
-# Anthropic-compatible schema  
-anthropic_schema = user_tool.anthropic_schema
-# Returns: {"name": "process_user", "input_schema": {...}}
-
-# Formatted schema with parameter filtering
-filtered_schema = user_tool.format_params_model_schema()`}/> -->
-
----
-## Execution Hooks
+<!-- --- -->
+<!-- ## Execution Hooks
 
 Runnables support pre and post-execution hooks for implementing cross-cutting concerns like logging, monitoring, or data transformation.
 
@@ -156,9 +121,9 @@ tool = Tool(
 )`}/>
 
 #### Post-Hook
-Executes after the main handler completes, useful for cleanup, result processing, or notifications:
+Executes after the main handler completes, useful for cleanup, result processing, or notifications: -->
 
-<CodeBlock language="python" code={`def cleanup_resources():
+<!-- <CodeBlock language="python" code={`def cleanup_resources():
     """Clean up resources after execution."""
     # Cleanup logic here
     pass
@@ -166,10 +131,9 @@ Executes after the main handler completes, useful for cleanup, result processing
 tool = Tool(
     handler=my_handler,
     post_hook=cleanup_resources
-)`}/>
+)`}/> -->
 
----
-## Parameter Injection and Transformation
+<!-- ## Parameter Injection and Transformation
 
 Runnables provide powerful parameter injection capabilities that allow you to automatically inject values into your handlers without explicitly passing them. When you call a Runnable, any parameters defined in `default_params` are automatically merged with the arguments you provide, ensuring all required parameters are available.
 
@@ -196,93 +160,37 @@ tool = Tool(
 )
 
 # All parameters are automatically resolved and injected
-result = await tool(data="test").collect()`}/>
+result = await tool(data="test").collect()`}/> -->
 
 
-### Parameter Override Behavior
 
-Injected parameters can be overridden by explicitly passing them during execution:
-
-<CodeBlock language="python" code={`tool = Tool(
-    handler=my_handler,
-    default_params={"timeout": 30, "retries": 3}
-)
-
-# Override the default timeout but keep retries
-result = await tool(data="test", timeout=60).collect()
-# Final call: my_handler(data="test", timeout=60, retries=3)`}/>
 
 ---
-## Nested Execution Patterns for Complex Workflows
+## Nesting Runnables
 
-Runnables support hierarchical execution patterns where runnables can call other runnables, creating complex execution graphs.
+Runnables can be combined in various ways to create powerful execution patterns. 
 
-#### Example: Nested Tool Execution
+#### Example: Agent with Tools
 
-<CodeBlock language="python" code={`def data_processor(data_path: str) -> str:
-    """Process data"""
-    result = await data_loader(data_path).collect()
-    # Data processing logic here
-    return f"Processed: {result}"
-
-def data_loader(data_path: str) -> str:
-    """Loads data"""
-    # Data loading logic here
-    return f"Further processed: {processed_data}"
+<CodeBlock language="python" code={`from timbal import Tool, Agent, Workflow
 
 
-# Create tools
-loader_tool = Tool(handler=data_loader, name="loader")
-processor_tool = Tool(handler=data_processor, name="processor")
+def add_numbers(a: float, b: float) -> float:
+  """Add two numbers together."""
+  return a + b
 
-# The execution trace will show the nested call hierarchy
-result = await processor_tool(data_path="test.csv").collect()`}/>
+def calculate_product(a: float, b: float) -> float:
+    """Multiply two numbers."""
+    return a * b
 
-<!-- #### Workflow Orchestration
-Workflows can orchestrate multiple runnables in complex patterns:
+# Wrap functions as tools
+addition_tool = Tool(name="addition_tool", handler=calcuadd_numberslate_sum)
+product_tool = Tool(name="product_tool", handler=calculate_product)
 
-<CodeBlock language="python" code={`from timbal import Workflow
-
-def step1(data: str) -> str:
-    return f"Step 1: {data}"
-
-def step2(data: str) -> str:
-    return f"Step 2: {data}"
-
-def step3(data: str) -> str:
-    return f"Step 3: {data}"
-
-# Create a workflow with nested execution
-workflow = (
-    Workflow(name="nested_workflow")
-    .step(step1)           # First step
-    .step(step2)           # Second step  
-    .step(step3)           # Third step
-)
-
-# Each step can access the full execution context
-result = await workflow(data="input").collect()`}/>
-
-#### Context Propagation
-Context automatically flows through nested executions:
-
-<CodeBlock language="python" code={`def parent_handler(data: str) -> str:
-    """Parent handler that sets context data."""
-    context = get_run_context()
-    context.data["parent_data"] = "from_parent"
-    
-    # Call child handler - context is preserved
-    child_result = await child_handler(data=data).collect()
-    
-    return f"Parent + {child_result}"
-
-def child_handler(data: str) -> str:
-    """Child handler that accesses parent context."""
-    context = get_run_context()
-    parent_data = context.data.get("parent_data", "not_found")
-    
-    return f"Child: {data} (parent: {parent_data})"
-
-# Context flows from parent to child automatically
-parent_tool = Tool(handler=parent_handler)
-result = await parent_tool(data="test").collect()`}/> -->
+# Create an agent that can use these tools
+math_agent = Agent(
+    name="math_assistant",
+    model="openai/gpt-4o-mini",
+    tools=[addition_tool, product_tool],
+    system_prompt="You are a math assistant. Use the available tools to perform calculations."
+)`}/>
