@@ -954,6 +954,7 @@ class Agent(BaseStep):
             # We don't want to cancel the execution if this errors. 
             try:
                 await self.state_saver.put(snapshot=snapshot)
+                set_run_context(RunContext(parent_id=snapshot.id))
             except Exception as err:
                 logger.error("put_memory_error", err=err)
 
