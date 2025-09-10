@@ -34,9 +34,12 @@ import structlog
 from anthropic.types import TextBlock as AnthropicTextBlock
 from anthropic.types import ToolUseBlock as AnthropicToolUseBlock
 from docx import Document
+
 try:
     # In newer OpenAI SDK versions, use the concrete function tool call type
-    from openai.types.chat.chat_completion_message_function_tool_call import ChatCompletionMessageFunctionToolCall as OpenAIToolCall
+    from openai.types.chat.chat_completion_message_function_tool_call import (
+        ChatCompletionMessageFunctionToolCall as OpenAIToolCall,
+    )
 except ImportError:
     # Fallback for older versions
     from openai.types.chat import ChatCompletionMessageToolCall as OpenAIToolCall
@@ -44,6 +47,7 @@ from pydantic import BaseModel
 
 # TODO Add a param in the Agent.__init__() where we can customize this.
 from ...steps.openai import stt
+
 # from ...steps.elevenlabs import stt
 from ...steps.pdfs import convert_pdf_to_images
 from ..file import File
@@ -110,6 +114,40 @@ def _extract_email_body(raw_email_content: str) -> str:
                         continue
     
     return body.strip() if body else ""
+
+
+def _extract_email_attachments(raw_email_content: str) -> list[dict[str, Any]]:
+    """Extract attachments from an EML email."""
+    msg = email.message_from_string(raw_email_content)
+    attachments = []
+    
+    if msg.is_multipart():
+        for part in msg.walk():
+            # Skip the main message part
+            if part.get_content_maintype() == 'multipart':
+                continue
+                
+            # Check if this part has a filename (attachment)
+            filename = part.get_filename()
+            if filename:
+                content_type = part.get_content_type()
+                payload = part.get_payload(decode=True)
+                content_id = part.get('Content-ID')
+                
+                if payload:
+                    # Create a temporary file-like object for the attachment
+                    attachment_data = {
+                        'filename': filename,
+                        'content_type': content_type,
+                        'data': payload,
+                        'size': len(payload)
+                    }
+                    if content_id:
+                        # Remove angle brackets from Content-ID
+                        attachment_data['content_id'] = content_id.strip('<>')
+                    attachments.append(attachment_data)
+    
+    return attachments
 
 
 class Content(BaseModel):
@@ -368,7 +406,7 @@ class FileContent(Content):
             return pages_input
 
         elif self.file.__source_extension__ == ".eml":
-            # EML files are text-based email files - extract only body content
+            # EML files are text-based email files - extract body content and attachments
             raw_bytes = self.file.read()
             
             raw_content = None
@@ -382,13 +420,73 @@ class FileContent(Content):
             if raw_content is None:
                 raise ValueError(f"Could not decode EML file {self.file} with any of: {AVAILABLE_ENCODINGS}")
 
-            # Extract only the email body content, excluding headers and metadata
+            # Extract email body content and attachments
             body_content = _extract_email_body(raw_content)
+            attachments = _extract_email_attachments(raw_content)
             
-            openai_input = {
-                "type": "text",
-                "text": body_content,
-            }
+            msg = email.message_from_string(raw_content)
+
+            processed_attachments = set()
+            attachment_counter = 1
+            openai_input = []
+            
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_id = part.get('Content-ID')
+                    if content_id:
+                        # Remove angle brackets from Content-ID
+                        cid = content_id.strip('<>')
+                        # Find matching attachment
+                        for i, attachment in enumerate(attachments):
+                            if attachment.get('content_id') == cid and i not in processed_attachments:
+                                # Replace CID reference with descriptive placeholder
+                                filename = attachment['filename']
+                                
+                                placeholder = f"[File {attachment_counter}: {filename}]"
+                                
+                                # Replace CID reference in body
+                                cid_pattern = f"[cid:{cid}]"
+                                body_content = body_content.replace(cid_pattern, placeholder)
+                                
+                                # Add the attachment as FileContent
+                                attachment_file = io.BytesIO(attachment['data'])
+                                attachment_file.name = attachment['filename']
+                                extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
+                                file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                                converted = await FileContent(file=file_obj).to_openai_input()
+                                if isinstance(converted, list):
+                                    openai_input.extend(converted)
+                                else:
+                                    openai_input.append(converted)
+                                
+                                processed_attachments.add(i)
+                                attachment_counter += 1
+                                break
+            
+            # Process attachments without CID references (like standalone PDFs)
+            for i, attachment in enumerate(attachments):
+                if not attachment.get('content_id') and i not in processed_attachments:
+                    filename = attachment['filename']
+                    placeholder = f"[File {attachment_counter}: {filename}]"
+                    
+                    # Add placeholder to body content
+                    body_content += f"\n\n{placeholder}"
+                    
+                    # Add the attachment as FileContent
+                    attachment_file = io.BytesIO(attachment['data'])
+                    attachment_file.name = attachment['filename']
+                    extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
+                    file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                    converted = await FileContent(file=file_obj).to_openai_input()
+                    if isinstance(converted, list):
+                        openai_input.extend(converted)
+                    else:
+                        openai_input.append(converted)
+                    
+                    processed_attachments.add(i)
+                    attachment_counter += 1
+
+            openai_input.append(await TextContent(text=body_content).to_openai_input())
 
             self._cached_openai_input = openai_input
             return openai_input
@@ -556,7 +654,7 @@ class FileContent(Content):
                 }
         
         elif self.file.__source_extension__ == ".eml":
-            # EML files are text-based email files - extract only body content
+            # EML files are text-based email files - extract body content and attachments
             raw_bytes = self.file.read()
             
             raw_content = None
@@ -570,13 +668,80 @@ class FileContent(Content):
             if raw_content is None:
                 raise ValueError(f"Could not decode EML file {self.file} with any of: {AVAILABLE_ENCODINGS}")
 
-            # Extract only the email body content, excluding headers and metadata
+            # Extract email body content and attachments
             body_content = _extract_email_body(raw_content)
+            attachments = _extract_email_attachments(raw_content)
+            
+            msg = email.message_from_string(raw_content)
 
-            anthropic_input = {
-                "type": "text",
-                "text": body_content,
-            }
+            processed_attachments = set()
+            attachment_counter = 1
+            anthropic_input = []
+            
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_id = part.get('Content-ID')
+                    if content_id:
+                        # Remove angle brackets from Content-ID
+                        cid = content_id.strip('<>')
+                        # Find matching attachment
+                        for i, attachment in enumerate(attachments):
+                            if attachment.get('content_id') == cid and i not in processed_attachments:
+                                # Replace CID reference with descriptive placeholder
+                                filename = attachment['filename']
+                                
+                                placeholder = f"[File {attachment_counter}: {filename}]"
+                                
+                                # Replace CID reference in body
+                                cid_pattern = f"[cid:{cid}]"
+                                body_content = body_content.replace(cid_pattern, placeholder)
+                                
+                                # Add the attachment as FileContent
+                                attachment_file = io.BytesIO(attachment['data'])
+                                attachment_file.name = attachment['filename']
+                                extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
+                                # Ensure the filename has the correct extension for MIME type detection
+                                if extension and not attachment['filename'].endswith(extension):
+                                    attachment_file.name = attachment['filename'] + extension
+                                file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                                converted = await FileContent(file=file_obj).to_anthropic_input()
+                                if isinstance(converted, list):
+                                    anthropic_input.extend(converted)
+                                else:
+                                    anthropic_input.append(converted)
+                                
+                                processed_attachments.add(i)
+                                attachment_counter += 1
+                                break
+            
+            # Process attachments without CID references (like standalone PDFs)
+            for i, attachment in enumerate(attachments):
+                if not attachment.get('content_id') and i not in processed_attachments:
+                    filename = attachment['filename']
+                    placeholder = f"[File {attachment_counter}: {filename}]"
+                    
+                    # Add placeholder to body content
+                    body_content += f"\n\n{placeholder}"
+                    
+                    # Add the attachment as FileContent
+                    attachment_file = io.BytesIO(attachment['data'])
+                    attachment_file.name = attachment['filename']
+                    extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
+                    # Ensure the filename has the correct extension for MIME type detection
+                    if extension and not attachment['filename'].endswith(extension):
+                        attachment_file.name = attachment['filename'] + extension
+                    file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                    converted = await FileContent(file=file_obj).to_anthropic_input()
+                    if isinstance(converted, list):
+                        anthropic_input.extend(converted)
+                    else:
+                        anthropic_input.append(converted)
+                    
+                    processed_attachments.add(i)
+                    attachment_counter += 1
+
+            # Add text content at the beginning
+            anthropic_input.insert(0, await TextContent(text=body_content).to_anthropic_input())
 
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
