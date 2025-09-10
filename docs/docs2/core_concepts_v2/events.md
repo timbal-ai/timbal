@@ -27,7 +27,9 @@ All events share common properties:
 
 #### Start Event
 Signals the beginning of a Runnable execution. 
-<CodeBlock language="python" code={`StartEvent(
+<CodeBlock language="python" code={`from timbal.types.events import StartEvent
+
+start_event = StartEvent(
     run_id="run_123",
     parent_run_id="parent_456", 
     path="workflow.step1",
@@ -37,7 +39,9 @@ Signals the beginning of a Runnable execution.
 
 #### Chunk Event
 Contains streaming or intermediate results during execution (generators, async generators, streaming responses).
-<CodeBlock language="python" code={`ChunkEvent(
+<CodeBlock language="python" code={`from timbal.types.events import ChunkEvent
+
+chunk_event = ChunkEvent(
     run_id="run_123",
     parent_run_id="parent_456",
     path="workflow.step1", 
@@ -50,7 +54,9 @@ Contains streaming or intermediate results during execution (generators, async g
 #### Output Event 
 Contains the final result and execution metadata.
 
-<CodeBlock language="python" code={`OutputEvent(
+<CodeBlock language="python" code={`from timbal.types.events import OutputEvent
+
+output_event = OutputEvent(
     run_id="run_123",
     parent_run_id="parent_456",
     path="workflow.step1",
@@ -72,7 +78,7 @@ Contains the final result and execution metadata.
 
 To consume events in real-time, you can iterate over the async generator returned by calling a Runnable. This allows you to process events as they are generated.
 
- <CodeBlock language="python" code={`async for event in runnable(**params):
+ <CodeBlock language="python" code={`async for event in runnable(**kwargs):
     print(event)`}/> 
 
 ---
@@ -80,19 +86,19 @@ To consume events in real-time, you can iterate over the async generator returne
 The `collect()` method is a key feature of the Runnable system that allows you to easily extract the final result from an async generator without manually iterating through all the events. This returns the output value from the Output Event.
 
 <CodeBlock language="python" code={`# Instead of manually iterating through events
-async for event in runnable(**params):
+async for event in runnable(**kwargs):
     if isinstance(event, OutputEvent):
         result = event.output
         break
 
 # You can simply use collect()
-result = await runnable(**params).collect()`}/> 
+result = await runnable(**kwargs).collect()`}/> 
 
 
 ---
 
 ## Handle Errors
-<CodeBlock language="python" code={`async for event in runnable(**params):
+<CodeBlock language="python" code={`async for event in runnable(**kwargs):
     if isinstance(event, OutputEvent) and event.error:
         print(f"Error: {event.error['message']}")
         print(f"Traceback: {event.error['traceback']}")`}/>

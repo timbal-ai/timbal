@@ -1,216 +1,132 @@
 import React, { useState } from 'react';
-import { Highlight, themes, Prism } from 'prism-react-renderer';
+import { Highlight, Prism } from 'prism-react-renderer';
 
 // Make Prism available globally (needed for language extension)
 (typeof global !== 'undefined' ? global : window).Prism = Prism;
 
-// Custom theme with black background
-const customTheme = {
-  ...themes.github,
+// Monokai theme
+const monokaiTheme = {
   plain: {
-    ...themes.github.plain,
-    backgroundColor: '#2d2d2d',
-    color: '#ffffff',
+    color: '#f8f8f2',
+    backgroundColor: '#272822',
   },
-  styles: themes.github.styles.map(style => ({
-    ...style,
-    types: style.types,
-  })),
+  styles: [
+    {
+      types: ['comment', 'prolog', 'doctype', 'cdata'],
+      style: {
+        color: '#75715e',
+      },
+    },
+    {
+      types: ['punctuation'],
+      style: {
+        color: '#f8f8f2',
+      },
+    },
+    {
+      types: ['namespace'],
+      style: {
+        opacity: 0.7,
+      },
+    },
+    {
+      types: ['property', 'tag', 'constant', 'symbol', 'deleted'],
+      style: {
+        color: '#f92672',
+      },
+    },
+    {
+      types: ['boolean', 'number'],
+      style: {
+        color: '#ae81ff',
+      },
+    },
+    {
+      types: ['selector', 'attr-name', 'string', 'char', 'builtin', 'inserted'],
+      style: {
+        color: '#e6db74',
+      },
+    },
+    {
+      types: ['operator', 'entity', 'url', 'variable'],
+      style: {
+        color: '#f8f8f2',
+      },
+    },
+    {
+      types: ['atrule', 'attr-value', 'function', 'class-name'],
+      style: {
+        color: '#a6e22e',
+      },
+    },
+    {
+      types: ['keyword'],
+      style: {
+        color: '#66d9ef',
+      },
+    },
+    {
+      types: ['regex', 'important'],
+      style: {
+        color: '#fd971f',
+      },
+    },
+    {
+      types: ['important', 'bold'],
+      style: {
+        fontWeight: 'bold',
+      },
+    },
+    {
+      types: ['italic'],
+      style: {
+        fontStyle: 'italic',
+      },
+    },
+    {
+      types: ['entity'],
+      style: {
+        cursor: 'help',
+      },
+    },
+  ],
 };
 
-// Map of words to their custom CSS classes
+// Custom highlighting for specific keywords
 const highlightMap = {
-  from: 'custom-highlight-pink',
-  import: 'custom-highlight-pink',
-  pass: 'custom-highlight-pink',
-  '|': 'custom-highlight-pink',
-  '=' : 'custom-highlight-pink',
-  '*' : 'custom-highlight-pink',
-  '/' : 'custom-highlight-pink',
-  '+' : 'custom-highlight-pink',
-  timbal: 'custom-highlight-green',
   Agent: 'custom-highlight-green',
-  steps: 'custom-highlight-green',
-  perplexity: 'custom-highlight-green',
-  InMemorySaver: 'custom-highlight-green',
-  fal: 'custom-highlight-green',
-  text_to_image: 'custom-highlight-green',
-  RunContext: 'custom-highlight-green',
-  '@abstractmethod': 'custom-highlight-green',
-  put: 'custom-highlight-green',
-  get_last: 'custom-highlight-green',
-  abc: 'custom-highlight-green',
-  ABC: 'custom-highlight-green',
-  twilio: 'custom-highlight-green',
-  handlers: 'custom-highlight-green',
-  docx: 'custom-highlight-green',
-  whatsapp: 'custom-highlight-green',
-  model: 'custom-highlight-orange',
-  None: 'custom-highlight-purple',
-  base: 'custom-highlight-green',
-  CustomSaver: 'custom-highlight-green',
-  BaseSaver: 'custom-highlight-green',
-  Snapshot: 'custom-highlight-green',
-  query: 'custom-highlight-orange',
-  get_run_context: 'custom-highlight-green-fn',
-  create_docx: 'custom-highlight-green-fn',
-  now: 'custom-highlight-green-fn',
-  isoformat: 'custom-highlight-green-fn',
-  fetch_data: 'custom-highlight-green-fn',
-  process_data: 'custom-highlight-green-fn',
-  update_database: 'custom-highlight-green-fn',
-  get_email: 'custom-highlight-green-fn',
-  multiply: 'custom-highlight-green-fn',
-  step: 'custom-highlight-green-fn',
-  link: 'custom-highlight-green-fn',
   Workflow: 'custom-highlight-green',
-  issue: 'custom-highlight-orange',
-  user_email: 'custom-highlight-orange',
-  reason: 'custom-highlight-orange',
-  system_context: 'custom-highlight-orange',
-  instructions: 'custom-highlight-orange',
-  tools: 'custom-highlight-orange',
-  parent_id: 'custom-highlight-orange',
-  id: 'custom-highlight-orange',
-  model_id: 'custom-highlight-orange',
-  to: 'custom-highlight-orange',
-  message: 'custom-highlight-orange',
-  resource: 'custom-highlight-orange',
-  self: 'custom-highlight-orange',
-  path: 'custom-highlight-orange',
-  snapshot: 'custom-highlight-orange',
-  max_results: 'custom-highlight-orange',
-  message_id: 'custom-highlight-orange',
-  thread_id: 'custom-highlight-orange',
-  subject: 'custom-highlight-orange',
-  body: 'custom-highlight-orange',
-  template_sid: 'custom-highlight-orange',
-  template_params: 'custom-highlight-orange',
-  scope: 'custom-highlight-orange',
-  folder: 'custom-highlight-orange',
-  destination: 'custom-highlight-orange',
-  text: 'custom-highlight-orange',
-  voice_id: 'custom-highlight-orange',
-  memory_id: 'custom-highlight-orange',
-  location: 'custom-highlight-orange',
-  celsius: 'custom-highlight-orange',
-  fahrenheit: 'custom-highlight-orange',
-  threshold: 'custom-highlight-orange',
-  full_name: 'custom-highlight-orange',
-  memory_window_size: 'custom-highlight-orange',
-  '(': 'custom-highlight-yellow-dark',
-  ')': 'custom-highlight-yellow-dark',
-  '[': 'custom-highlight-purple-pink',
-  ']': 'custom-highlight-purple-pink',
-  '{': 'custom-highlight-yellow-dark',
-  '}': 'custom-highlight-yellow-dark',
-  ',': 'custom-highlight-white',
-  'Flow': 'custom-highlight-green',
-  await: 'custom-highlight-pink',
-  as: 'custom-highlight-pink',
-  else: 'custom-highlight-pink',
-  def: 'custom-highlight-blue',
-  lambda: 'custom-highlight-blue',
-  async:'custom-highlight-pink', //'custom-highlight-blue',
-  class: 'custom-highlight-blue',
-  '-': 'custom-highlight-white',
-  '>': 'custom-highlight-white',
-  ':': 'custom-highlight-white',
-  '.' : 'custom-highlight-white',
-  state: 'custom-highlight-green',
-  savers: 'custom-highlight-green',
-  sharepoint: 'custom-highlight-green',
   Tool: 'custom-highlight-green',
-  list_directory: 'custom-highlight-green-fn',
-  get_first_name: 'custom-highlight-green-fn',
-  get_last_name: 'custom-highlight-green-fn',
-  check_full_name: 'custom-highlight-green-fn',
-  search_knowledge_base: 'custom-highlight-green-fn',
-  core: 'custom-highlight-green',
-  abstractmethod: 'custom-highlight-green-fn',
-  handle_customer_request: 'custom-highlight-green-fn',
-  analyze_financial_data: 'custom-highlight-green-fn',
-  generate_charts: 'custom-highlight-green-fn',
-  create_reports: 'custom-highlight-green-fn',
-  main: 'custom-highlight-green-fn',
-  create_support_ticket: 'custom-highlight-green-fn',
-  escalate_to_human: 'custom-highlight-green-fn',
-  gen_images: 'custom-highlight-green-fn',
-  download_file: 'custom-highlight-green-fn',
-  send_email: 'custom-highlight-green-fn',
-  analyze_data: 'custom-highlight-green-fn',
-  TimbalPlatformSaver: 'custom-highlight-green',
-  sql: 'custom-highlight-green',
-  postgres: 'custom-highlight-green',
-  return: 'custom-highlight-pink',
+  StartEvent: 'custom-highlight-green',
+  ChunkEvent: 'custom-highlight-green',
+  OutputEvent: 'custom-highlight-green',
+  kwargs: 'custom-highlight-orange',
+  from: 'custom-highlight-pink',
   for: 'custom-highlight-pink',
   in: 'custom-highlight-pink',
   if: 'custom-highlight-pink',
+  and: 'custom-highlight-pink',
   elif: 'custom-highlight-pink',
   else: 'custom-highlight-pink',
-  datetime: 'custom-highlight-green',
-  elevenlabs: 'custom-highlight-green',
-  gmail: 'custom-highlight-green',
-  JSONLSaver: 'custom-highlight-green',
-  openai: 'custom-highlight-green',
-  messages: 'custom-highlight-green',
-  types: 'custom-highlight-green',
-  File: 'custom-highlight-green',
-  postgres_query: 'custom-highlight-green-fn',
-  query_database: 'custom-highlight-green-fn',
-  send_notification: 'custom-highlight-green-fn',
-  PGConfig: 'custom-highlight-green',
-  get_message: 'custom-highlight-green-fn',
-  get_thread: 'custom-highlight-green-fn',
-  set_run_context:'custom-highlight-green-fn',
-  get_datetime: 'custom-highlight-green-fn',
-  send_message: 'custom-highlight-green-fn',
-  run_sql_query: 'custom-highlight-green-fn',
-  create_draft_message: 'custom-highlight-green-fn',
-  send_whatsapp_message: 'custom-highlight-green-fn',
-  send_whatsapp_template: 'custom-highlight-green-fn',
-  openai_stt: 'custom-highlight-green-fn',
-  elevenlabs_tts: 'custom-highlight-green-fn',
-  validate: 'custom-highlight-green-fn',
-  complete: 'custom-highlight-green-fn',
-  print: 'custom-highlight-blue-no-italic', // 'custom-highlight-green-fn',
-  search: 'custom-highlight-green-fn',
-  stt: 'custom-highlight-green-fn',
-  tts: 'custom-highlight-green-fn',
-  run: 'custom-highlight-green-fn',
-  search_web: 'custom-highlight-green-fn',
-  set_input: 'custom-highlight-green-fn',
-  extract_text: 'custom-highlight-green-fn',
-  text_processor: 'custom-highlight-green-fn',
-  convert_to_database: 'custom-highlight-green-fn',
-  get_weather: 'custom-highlight-green-fn',
-  get_time: 'custom-highlight-green-fn',
-  add_step: 'custom-highlight-green-fn',
-  add_link: 'custom-highlight-green-fn',
-  set_output: 'custom-highlight-green-fn',
-  set_data_map: 'custom-highlight-green-fn',
-  set_data_value: 'custom-highlight-green-fn',
-  get_temperature_celsius: 'custom-highlight-green-fn',
-  celsius_to_fahrenheit: 'custom-highlight-green-fn',
-  check_threshold: 'custom-highlight-green-fn',
-  parse_documentation: 'custom-highlight-green-fn',
-  create_database: 'custom-highlight-green-fn',
-  add_llm: 'custom-highlight-green-fn',
-  summarize_conversation_hook: 'custom-highlight-green-fn',
-  compile: 'custom-highlight-green-fn',
+  break: 'custom-highlight-pink',
+  isinstance: 'custom-highlight-blue',
+  try: 'custom-highlight-pink',
+  except: 'custom-highlight-pink',
+  Exception: 'custom-highlight-blue',
+  import: 'custom-highlight-pink',
+  await: 'custom-highlight-pink',
+  async: 'custom-highlight-pink',
+  def: 'custom-highlight-blue',
+  class: 'custom-highlight-blue',
+  return: 'custom-highlight-pink',
+  '*': 'custom-highlight-pink',
+  '+': 'custom-highlight-pink',
   str: 'custom-highlight-blue',
-  name: 'custom-highlight-orange',
-  user_id: 'custom-highlight-orange',
-  user_message: 'custom-highlight-orange',
-  message: 'custom-highlight-green',
-  Message: 'custom-highlight-green',
-  f: 'custom-highlight-blue',
-  location: 'custom-highlight-orange',
-
-  // Add more words and classes as needed
+  float: 'custom-highlight-blue',
+  int: 'custom-highlight-blue',
+  bool: 'custom-highlight-blue',
 };
 
-// Build a regex to match any of the words or symbols
 const regex = new RegExp(
   `(${Object.keys(highlightMap)
     .map(word =>
@@ -221,18 +137,6 @@ const regex = new RegExp(
     .join('|')})`,
   'g'
 );
-
-// Regex to match text between double quotes
-const quoteRegex = /"([^"]*)"/g;
-
-// Regex to match text between single quotes
-const singleQuoteRegex = /'([^']*)'/g;
-
-// Regex to match text between triple quotes (including multi-line)
-const tripleQuoteRegex = /"""[^"]*"""/g;
-
-// Regex to match numbers
-const numberRegex = /\\b\\d+(?:\\.\\d+)?\\b/g;
 
 export default function CodeBlock(props) {
   const { title, children, highlight } = props;
@@ -271,7 +175,7 @@ export default function CodeBlock(props) {
       )}
       <div style={{ position: 'relative' }}>
         <Highlight 
-          theme={customTheme} 
+          theme={monokaiTheme} 
           {...props}
         >
           {({ className, style, tokens, getLineProps, getTokenProps }) => {
@@ -279,41 +183,26 @@ export default function CodeBlock(props) {
               line => line.map(token => token.content).join('')
             ).join('\n');
 
-            // let promptCount = 0;
-            let stateSaverTotal = 0;
-            let audioFileTotal = 0;
-            let dbConfigTotal = 0;
-            let sqlTotal = 0;
+            // Extract function parameters from def lines
+            const functionParams = new Set();
             tokens.forEach(line => {
-              line.forEach(token => {
-                const content = getTokenProps({ token }).children;
-                if (typeof content === 'string' && content.trim() === 'state_saver') {
-                  stateSaverTotal++;
+              const lineContent = line.map(token => token.content).join('');
+              const defMatch = lineContent.match(/def\s+\w+\s*\(([^)]*)\)/);
+              if (defMatch) {
+                const params = defMatch[1];
+                // Extract parameter names (handle type hints like a: float)
+                const paramMatches = params.match(/\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(?::\s*[^,)]+)?/g);
+                if (paramMatches) {
+                  paramMatches.forEach(param => {
+                    const paramName = param.split(':')[0].trim();
+                    if (paramName && paramName !== 'self') {
+                      functionParams.add(paramName);
+                    }
+                  });
                 }
-                if (typeof content === 'string' && content.trim() === 'audio_file') {
-                  audioFileTotal++;
-                }
-                if (typeof content === 'string' && content.trim() === 'db_config') {
-                  dbConfigTotal++;
-                }
-                if (typeof content === 'string' && content.trim() === 'sql') {
-                  sqlTotal++;
-                }
-              });
+              }
             });
-            let stateSaverCount = 0;
-            let audioFileCount = 0;
-            let dbConfigCount = 0;
-            let sqlCount = 0;
-            // At the top of your render function:
-            let bracketStack = [];
-            let inTripleQuote = false; // Track if we're inside a triple-quoted string
-            const getBracketColor = (depth) => {
-              const mod = (depth - 1) % 3;
-              if (mod === 0) return 'custom-highlight-yellow-dark'; // yellow class
-              if (mod === 1) return { color: '#ff69b4' }; // pink
-              return { color: '#42a5f5' }; // blue
-            };
+
 
             return (
               <>
@@ -350,15 +239,12 @@ export default function CodeBlock(props) {
                   ...style,
                   border: 'none',
                   borderRadius: 0,
-                  color: props.language === 'bash' ? '#ffffff' : style.color,
                   margin: 0,
                   position: 'relative',
                 }}>
                   {tokens.map((line, i) => {
-                    // Join the line's tokens into a string to check for comment
-                    const lineContent = line.map(token => getTokenProps({ token }).children).join('');
-                    const isHighlighted = highlightedLines.includes(i + 1); // +1 because line numbers are 1-based
-
+                    const isHighlighted = highlightedLines.includes(i + 1);
+                    
                     const lineStyle = {
                       ...getLineProps({ line }).style,
                       ...(isHighlighted ? {
@@ -369,28 +255,27 @@ export default function CodeBlock(props) {
                       } : {})
                     };
 
+                    // Check if line is a comment
+                    const lineContent = line.map(token => token.content).join('');
                     if (/^\s*#/.test(lineContent)) {
-                      // If the line is a comment, render it as a single gray, italic line, preserving indentation
                       return (
                         <div 
                           key={i} 
                           {...getLineProps({ line })}
                           style={lineStyle}
                         >
-                          {line.map((token, key) => {
-                            const tokenProps = getTokenProps({ token });
-                            return (
-                              <span
-                                key={key}
-                                className={props.language === 'bash' ? 'custom-highlight-comment' : 'custom-highlight-comment'}
-                              >
-                                {tokenProps.children}
-                              </span>
-                            );
-                          })}
+                          {line.map((token, key) => (
+                            <span
+                              key={key}
+                              className="custom-highlight-comment"
+                            >
+                              {token.content}
+                            </span>
+                          ))}
                         </div>
                       );
                     }
+
                     return (
                       <div 
                         key={i} 
@@ -400,537 +285,161 @@ export default function CodeBlock(props) {
                         {line.map((token, key) => {
                           const tokenProps = getTokenProps({ token });
                           let content = tokenProps.children;
-                          // For bash blocks, just return the content in white
+
+                          // Skip highlighting for whitespace/spaces FIRST
+                          if (typeof content === 'string' && (/^\s+$/.test(content) || content === ' ' || content === '\t')) {
+                            return <span key={key} {...tokenProps} />;
+                          }
+
+                          // For bash blocks, keep white
                           if (props.language === 'bash') {
                             return (
-                              <span
-                                key={key}
-                                style={{ color: '#ffffff' }}
-                              >
+                              <span key={key} style={{ color: '#ffffff' }}>
                                 {content}
                               </span>
                             );
                           }
-                          // Handle 'f' and 'f"' to keep f blue (very early)
-                          if (typeof content === 'string' && (content.trim() === 'f' || content.startsWith('f"'))) {
-                            if (content.startsWith('f"')) {
-                              // Split f" into f (blue) and process the string content
-                              const stringContent = content.substring(1); // Remove the f
 
-                              if (stringContent.includes('{') && stringContent.includes('}')) {
-                                const parts = [];
-                                let lastIndex = 0;
-                                
-                                // Find all {variable} patterns
-                                const variableRegex = /\{([^}]+)\}/g;
-                                let match;
-                                
-                                while ((match = variableRegex.exec(stringContent)) !== null) {
-                                  // Add text before the variable in yellow
-                                  if (match.index > lastIndex) {
-                                    const beforeText = stringContent.slice(lastIndex, match.index);
-                                    parts.push(`<span class="custom-highlight-yellow">${beforeText}</span>`);
-                                  }
-                                  // Add the variable with yellow highlighting
-                                  parts.push(`<span class="custom-highlight-yellow">{${match[1]}}</span>`);
-                                  lastIndex = match.index + match[0].length;
-                                }
-                                
-                                // Add remaining text in yellow
-                                if (lastIndex < stringContent.length) {
-                                  const remainingText = stringContent.slice(lastIndex);
-                                  parts.push(`<span class="custom-highlight-yellow">${remainingText}</span>`);
-                                }
-                                
-                                return (
-                                  <span key={key}>
-                                    <span className="custom-highlight-blue">f</span>
-                                    <span dangerouslySetInnerHTML={{ __html: parts.join('') }} />
-                                  </span>
-                                );
-                              } else {
-                                // No variables in this token, but check if we're in an f-string context
-                                // Look at the entire line to see if there are variables in other tokens
-                                const lineContent = line.map(token => getTokenProps({ token }).children).join('');
-                                
-                                if (lineContent.includes('{') && lineContent.includes('}')) {
-                                  return (
-                                    <span key={key}>
-                                      <span className="custom-highlight-blue">f</span>
-                                      <span className="custom-highlight-yellow">{stringContent}</span>
-                                    </span>
-                                  );
-                                } else {
-                                  // No variables, just highlight the string in yellow
-                                  return (
-                                    <span key={key}>
-                                      <span className="custom-highlight-blue">f</span>
-                                      <span className="custom-highlight-yellow">{stringContent}</span>
-                                    </span>
-                                  );
-                                }
-                              }
-                            } else {
-                              return <span key={key} className="custom-highlight-blue">{content}</span>;
-                            }
-                          }
-
-                          // --- Handle f-string variables in separate tokens ---
-                          // Check if this token contains variables that are part of an f-string
-                          if (typeof content === 'string' && (content.includes('{') || content.includes('}'))) {
-                            // Check if we're in an f-string context by looking at the line
-                            const lineContent = line.map(token => getTokenProps({ token }).children).join('');
-                            if (lineContent.includes('f"') || lineContent.includes("f'")) {
-                              // Highlight the variable in yellow
-                              return <span key={key} className="custom-highlight-yellow">{content}</span>;
-                            }
-                          }
-
-                          // --- Triple quote state management (highest priority) ---
-                          if (typeof content === 'string') {
-                            // Check if this token contains triple quotes
-                            if (content.includes('"""')) {
-                              // Count triple quotes in this token
-                              const tripleQuoteCount = (content.match(/"""/g) || []).length;
-                              
-                              // If we have an odd number of triple quotes, toggle the state
-                              if (tripleQuoteCount % 2 === 1) {
-                                inTripleQuote = !inTripleQuote;
-                              }
-                              
-                              // If we're inside a triple quote or this token contains triple quotes, highlight in yellow
-                              if (inTripleQuote || tripleQuoteCount > 0) {
-                                return (
-                                  <span key={key} style={{ color: '#E6DB74' }}>
-                                    {content}
-                                  </span>
-                                );
-                              }
-                            } else if (inTripleQuote) {
-                              // We're inside a triple quote but this token doesn't contain triple quotes
-                              return (
-                                <span key={key} style={{ color: '#E6DB74' }}>
-                                  {content}
-                                </span>
-                              );
-                            }
-                          }
-                          
-                          // --- Comment detection ---
-                          if (typeof content === 'string' && content.includes('#')) {
-                            // Split content at # and make the comment part gray and italic
-                            const parts = content.split('#');
-                            if (parts.length > 1) {
-                              return (
-                                <span key={key}>
-                                  <span>{parts[0]}</span>
-                                  <span className="custom-highlight-comment">#{parts.slice(1).join('#')}</span>
-                                </span>
-                              );
-                            }
-                          }
-                          // --- parameter= inside parentheses logic ---
-                          if (typeof content === 'string' && content.includes('=')) {
-                            // Check if we're inside parentheses by looking at the entire line
-                            const lineContent = line.map(token => getTokenProps({ token }).children).join('');
-                            // Count opening and closing parentheses before this token
-                            let openCount = 0;
-                            let closeCount = 0;
-                            for (let i = 0; i < line.length; i++) {
-                              const tokenContent = getTokenProps({ token: line[i] }).children;
-                              if (i < key) {
-                                // Count parentheses before this token
-                                for (let j = 0; j < tokenContent.length; j++) {
-                                  if (tokenContent[j] === '(') openCount++;
-                                  if (tokenContent[j] === ')') closeCount++;
-                                }
-                              } else if (i === key) {
-                                // We found our token, check if we're inside parentheses
-                                if (openCount > closeCount) {
-                                  return <span key={key} className="custom-highlight-orange">{content}</span>;
-                                }
-                                break;
-                              }
-                            }
-                          }
-                          // --- f-string context check (early) ---
-                          // Check if we're in an f-string context by looking at the entire line
-                          const lineContent = line.map(token => getTokenProps({ token }).children).join('');
-                          // Try different f-string detection approaches
-                          const hasFString = lineContent.includes('f"') || lineContent.includes("f'") || 
-                                           (line.some(token => getTokenProps({ token }).children === 'f') && 
-                                            line.some(token => getTokenProps({ token }).children.includes('"')));
-                          
-                          // Check if this specific token contains f-string content
-                          const isFStringToken = hasFString && typeof content === 'string' && content.includes('"') && content.trim() !== 'f';
-
-                          if (isFStringToken) {
-                            // This is part of an f-string, process it to handle variables
-                            const stringContent = content.substring(1, content.length - 1); // Remove quotes
-                            
-                            // Check if there are any variables in the f-string
-                            if (stringContent.includes('{') && stringContent.includes('}')) {
-                              // There are variables, so we need to split and highlight appropriately
-                              const parts = [];
-                              let lastIndex = 0;
-                              
-                              // Find all {variable} patterns
-                              const variableRegex = /\{([^}]+)\}/g;
-                              let match;
-                              
-                              while ((match = variableRegex.exec(stringContent)) !== null) {
-                                // Add text before the variable in yellow
-                                if (match.index > lastIndex) {
-                                  const beforeText = stringContent.slice(lastIndex, match.index);
-                                  parts.push(`<span class="custom-highlight-yellow">${beforeText}</span>`);
-                                }
-                                // Add the variable with yellow highlighting
-                                parts.push(`<span class="custom-highlight-yellow">{${match[1]}}</span>`);
-                                lastIndex = match.index + match[0].length;
-                              }
-                              
-                              // Add remaining text in yellow
-                              if (lastIndex < stringContent.length) {
-                                const remainingText = stringContent.slice(lastIndex);
-                                parts.push(`<span class="custom-highlight-yellow">${remainingText}</span>`);
-                              }
-                              
-                              return (
-                                <span key={key} dangerouslySetInnerHTML={{ __html: parts.join('') }} />
-                              );
-                            } else {
-                              // No variables, make the entire content yellow
-                              return <span key={key} className="custom-highlight-yellow">{content}</span>;
-                            }
-                          }
-                          // --- Regular string with variables logic ---
-                          if (typeof content === 'string' && content.startsWith('"') && content.endsWith('"') && !lineContent.includes('f"')) {
-                            // This is a regular string (not f-string), process variables inside {} and \n
-                            const stringContent = content.substring(1, content.length - 1); // Remove quotes
-                            const parts = [];
-                            let lastIndex = 0;
-                            
-                            // Find all {variable} patterns
-                            const variableRegex = /\{([^}]+)\}/g;
-                            let match;
-                            
-                            while ((match = variableRegex.exec(stringContent)) !== null) {
-                              // Add text before the variable
-                              if (match.index > lastIndex) {
-                                const beforeText = stringContent.slice(lastIndex, match.index);
-                                // Process \n in the before text
-                                const beforeParts = beforeText.split('\\n');
-                                for (let i = 0; i < beforeParts.length; i++) {
-                                  if (i > 0) parts.push(`<span class="custom-highlight-purple">\\n</span>`);
-                                  if (beforeParts[i]) parts.push(`<span class="custom-highlight-yellow">"${beforeParts[i]}</span>`);
-                                }
-                              }
-                              // Add the variable in purple
-                              parts.push(`<span class="custom-highlight-purple">{${match[1]}}</span>`);
-                              lastIndex = match.index + match[0].length;
-                            }
-                            
-                            // Add remaining text
-                            if (lastIndex < stringContent.length) {
-                              const remainingText = stringContent.slice(lastIndex);
-                              // Process \n in the remaining text
-                              const remainingParts = remainingText.split('\\n');
-                              for (let i = 0; i < remainingParts.length; i++) {
-                                if (i > 0) parts.push(`<span class="custom-highlight-purple">\\n</span>`);
-                                if (remainingParts[i]) parts.push(`<span class="custom-highlight-yellow">"${remainingParts[i]}</span>`);
-                              }
-                            }
-                            
-                            // Add closing quote
-                            parts.push(`<span class="custom-highlight-yellow">"</span>`);
-                            
-                            return (
-                              <span key={key} dangerouslySetInnerHTML={{ __html: parts.join('') }} />
-                            );
-                          }
-
-                          // Split the content into quoted and non-quoted segments
-                          const segments = [];
-                          let lastIndex = 0;
-                          let match;
-                          
-                          // Handle regular double quotes
-                          while ((match = quoteRegex.exec(content)) !== null) {
-                            // Push non-quoted segment
-                            if (match.index > lastIndex) {
-                              const nonQuoted = content.slice(lastIndex, match.index);
-                              // Apply word/symbol highlighting to non-quoted segment
-                              let highlightedNonQuoted = nonQuoted.replace(
-                                regex,
-                                (m) => `<span class=\"${highlightMap[m]}\">${m}</span>`
-                              );
-                              // Now highlight numbers in the result (but not inside quotes)
-                              highlightedNonQuoted = highlightedNonQuoted.replace(
-                                /\\b\\d+(?:\\.\\d+)?\\b/g,
-                                (num) => `<span class=\"custom-highlight-purple\">${num}</span>`
-                              );
-                              segments.push(highlightedNonQuoted);
-                            }
-                            // Push quoted segment with yellow highlight
-                            segments.push(`<span class=\"custom-highlight-yellow\">${match[0]}</span>`);
-                            lastIndex = match.index + match[0].length;
-                          }
-                          
-                          // Handle single quotes
-                          while ((match = singleQuoteRegex.exec(content)) !== null) {
-                            // Push non-quoted segment
-                            if (match.index > lastIndex) {
-                              const nonQuoted = content.slice(lastIndex, match.index);
-                              // Apply word/symbol highlighting to non-quoted segment
-                              let highlightedNonQuoted = nonQuoted.replace(
-                                regex,
-                                (m) => `<span class=\"${highlightMap[m]}\">${m}</span>`
-                              );
-                              // Now highlight numbers in the result (but not inside quotes)
-                              highlightedNonQuoted = highlightedNonQuoted.replace(
-                                /\\b\\d+(?:\\.\\d+)?\\b/g,
-                                (num) => `<span class=\"custom-highlight-purple\">${num}</span>`
-                              );
-                              segments.push(highlightedNonQuoted);
-                            }
-                            // Push quoted segment with yellow highlight
-                            segments.push(`<span class=\"custom-highlight-yellow\">${match[0]}</span>`);
-                            lastIndex = match.index + match[0].length;
-                          }
-                          // Push any remaining non-quoted segment
-                          if (lastIndex < content.length) {
-                            const nonQuoted = content.slice(lastIndex);
-                            let highlightedNonQuoted = nonQuoted.replace(
-                              regex,
-                              (m) => `<span class=\"${highlightMap[m]}\">${m}</span>`
-                            );
-                            // Now highlight numbers in the result (but not inside quotes)
-                            highlightedNonQuoted = highlightedNonQuoted.replace(
-                              /\\b\\d+(?:\\.\\d+)?\\b/g,
-                              (num) => `<span class=\"custom-highlight-purple\">${num}</span>`
-                            );
-                            segments.push(highlightedNonQuoted);
-                          }
-                          const highlightedContent = segments.join('');
-                          // Custom logic for 'prompt'
-                          // if (
-                          //   typeof content === 'string' &&
-                          //   content.trim() === 'prompt'
-                          // ) {
-                            // promptCount++;
-                            // if (promptCount === 1) {
-                            //   // orange
-                            //   return <span key={key} className="custom-highlight-orange">{content}</span>;
-                            // }
-                            // if (promptCount === 2) {
-                            //   // white
-                            //   return <span key={key} style={{ color: '#fff' }}>{content}</span>;
-                            // }
-                            // For 3rd and later, use default or another style
-                            // return <span key={key} {...tokenProps} />;
-                          // }
-                          // --- audio_file logic ---
-                          if (
-                            typeof content === 'string' &&
-                            content.trim() === 'audio_file'
-                          ) {
-                            audioFileCount++;
-                            // If there are 3, highlight the second
-                            if (audioFileTotal === 3 && audioFileCount === 2) {
-                              return <span key={key} className="custom-highlight-orange">{content}</span>;
-                            }
-                            // Otherwise, default
-                            return <span key={key} {...tokenProps} />;
-                          }
-                          // --- state_saver logic ---
-                          if (
-                            typeof content === 'string' &&
-                            content.trim() === 'state_saver'
-                          ) {
-                            stateSaverCount++;
-                            // If there is only one, highlight it
-                            if (stateSaverTotal === 1 && stateSaverCount === 1) {
-                              return <span key={key} className="custom-highlight-orange">{content}</span>;
-                            }
-                            // If there are 2, highlight the first
-                            if (stateSaverTotal === 2 && stateSaverCount === 1) {
-                              return <span key={key} className="custom-highlight-orange">{content}</span>;
-                            }
-                            // If there are 3, highlight the second
-                            if (stateSaverTotal === 3 && stateSaverCount === 2) {
-                              return <span key={key} className="custom-highlight-orange">{content}</span>;
-                            }
-                            // Otherwise, default
-                            return <span key={key} {...tokenProps} />;
-                          }
-                          // --- db_config logic ---
-                          if (
-                            typeof content === 'string' &&
-                            content.trim() === 'db_config'
-                          ) {
-                            dbConfigCount++;
-                            // If there is only one, highlight it
-                            if (dbConfigTotal === 1 && dbConfigCount === 1) {
-                              return <span key={key} className="custom-highlight-orange">{content}</span>;
-                            }
-                            // If there are 2, highlight the first
-                            if (dbConfigTotal === 2 && dbConfigCount === 1) {
-                              return <span key={key} className="custom-highlight-orange">{content}</span>;
-                            }
-                            // If there are 3, highlight the second
-                            if (dbConfigTotal === 3 && dbConfigCount === 2) {
-                              return <span key={key} className="custom-highlight-orange">{content}</span>;
-                            }
-                            // Otherwise, default
-                            return <span key={key} {...tokenProps} />;
-                          }
-                          // --- sql logic ---
-                          if (
-                            typeof content === 'string' &&
-                            content.trim() === 'sql'
-                          ) {
-                            sqlCount++;
-                            // First occurrence is green
-                            if (sqlCount === 1) {
-                              return <span key={key} className="custom-highlight-green">{content}</span>;
-                            }
-                            // Next two occurrences are orange
-                            if (sqlCount === 2 || sqlCount === 3) {
-                              return <span key={key} className="custom-highlight-orange">{content}</span>;
-                            }
-                            // Otherwise, default
-                            return <span key={key} {...tokenProps} />;
-                          }
-                          // --- text logic ---
-                          if (
-                            typeof content === 'string' &&
-                            content.trim() === 'text'
-                          ) {
-                            // Check if the previous token was a dot
-                            const prevToken = key > 0 ? line[key - 1] : null;
-                            const prevContent = prevToken ? getTokenProps({ token: prevToken }).children : '';
-                            
-                            if (prevContent === '.') {
-                              // If text comes after a dot, make it white
-                              return <span key={key} style={{ color: '#fff' }}>{content}</span>;
-                            } else {
-                              // Otherwise, use the orange highlight from the map
-                              return <span key={key} className="custom-highlight-orange">{content}</span>;
-                            }
-                          }
-                          // --- Parenthesis coloring logic ---
-                          if (content === '(' || content === '{' || content === '[') {
-                            bracketStack.push(content);
-                            const depth = bracketStack.length;
-                            const color = getBracketColor(depth);
-                            if (typeof color === 'string') {
-                              return <span key={key} className={color}>{content}</span>;
-                            } else {
-                              return <span key={key} style={color}>{content}</span>;
-                            }
-                          }
-                          if (content === ')' || content === '}' || content === ']') {
-                            const depth = bracketStack.length;
-                            const color = getBracketColor(depth);
-                            let result;
-                            if (typeof color === 'string') {
-                              result = <span key={key} className={color}>{content}</span>;
-                            } else {
-                              result = <span key={key} style={color}>{content}</span>;
-                            }
-                            // Only pop if the stack is not empty and the last opened matches
-                            const last = bracketStack[bracketStack.length - 1];
-                            if (
-                              (content === ')' && last === '(') ||
-                              (content === '}' && last === '{') ||
-                              (content === ']' && last === '[')
-                            ) {
-                              bracketStack.pop();
-                            }
-                                                          return result;
-                          }
-                          // --- \n highlighting logic ---
-                          if (typeof content === 'string' && content.includes('\\n')) {
-                            // Split content at \n and highlight \n parts in purple
-                            const parts = content.split('\\n');
-                            if (parts.length > 1) {
-                              return (
-                                <span key={key}>
-                                  {parts.map((part, index) => (
-                                    <span key={index}>
-                                      {part}
-                                      {index < parts.length - 1 && <span className="custom-highlight-purple">\\n</span>}
-                                    </span>
-                                  ))}
-                                </span>
-                              );
-                            }
-                          }
-                          // --- parameter= inside parentheses logic (final check) ---
-                          // Check if this is a word that might be part of a parameter
-                          if (typeof content === 'string' && content.trim() && !content.includes('=') && !content.includes('"') && !content.includes('(') && !content.includes(')')) {
+                          // Check if we're inside parentheses for kwargs detection (functions and classes)
+                          if (typeof content === 'string' && content.trim() && !content.includes('=') && !content.includes('(') && !content.includes(')')) {
                             // Check if the next token is = and we're inside parentheses
                             const nextToken = key < line.length - 1 ? line[key + 1] : null;
                             const nextContent = nextToken ? getTokenProps({ token: nextToken }).children : '';
-                            if (nextContent === '=') {
-                              // Check if we're inside parentheses
+                            
+                            if (nextContent === '=' || nextContent.includes('=')) {
+                              // Check if we're inside parentheses by counting them across all previous lines and current line
                               let openCount = 0;
                               let closeCount = 0;
                               
-                              // Look through all previous lines and current line up to this token
-                              for (let lineIndex = 0; lineIndex < tokens.length; lineIndex++) {
-                                const currentLine = tokens[lineIndex];
-                                for (let tokenIndex = 0; tokenIndex < currentLine.length; tokenIndex++) {
-                                  const tokenContent = getTokenProps({ token: currentLine[tokenIndex] }).children;
-                                  
-                                  // Stop when we reach our current token
-                                  if (lineIndex === i && tokenIndex === key) {
-                                    if (openCount > closeCount) {
-                                      return <span key={key} className="custom-highlight-orange">{content}</span>;
-                                    }
-                                    break;
-                                  }
-                                  
-                                  // Count parentheses
+                              // Count parentheses in all previous lines
+                              for (let lineIndex = 0; lineIndex < i; lineIndex++) {
+                                const prevLine = tokens[lineIndex];
+                                for (let tokenIndex = 0; tokenIndex < prevLine.length; tokenIndex++) {
+                                  const tokenContent = getTokenProps({ token: prevLine[tokenIndex] }).children;
                                   if (tokenContent === '(') openCount++;
                                   if (tokenContent === ')') closeCount++;
                                 }
                               }
-                            }
-                          }
-                          if (typeof content === 'string' && content === '=') {
-                            // Check if the previous token combined with = forms a parameter
-                            const prevToken = key > 0 ? line[key - 1] : null;
-                            const prevContent = prevToken ? getTokenProps({ token: prevToken }).children : '';
-                            const fullParam = prevContent + content;
-                            
-                            // Check if we're inside parentheses by looking at all tokens before this one
-                            let openCount = 0;
-                            let closeCount = 0;
-                            
-                            // Look through all previous lines and current line up to this token
-                            for (let lineIndex = 0; lineIndex < tokens.length; lineIndex++) {
-                              const currentLine = tokens[lineIndex];
-                              for (let tokenIndex = 0; tokenIndex < currentLine.length; tokenIndex++) {
-                                const tokenContent = getTokenProps({ token: currentLine[tokenIndex] }).children;
-                                
-                                // Stop when we reach our current token
-                                if (lineIndex === i && tokenIndex === key) {
-                                  if (openCount > closeCount) {
-                                    // Make the = pink (from highlight map) and return it
-                                    return <span key={key} className="custom-highlight-pink">{content}</span>;
-                                  }
-                                  break;
-                                }
-                                
-                                // Count parentheses
+                              
+                              // Count parentheses in current line up to this token
+                              for (let tokenIndex = 0; tokenIndex < key; tokenIndex++) {
+                                const tokenContent = getTokenProps({ token: line[tokenIndex] }).children;
                                 if (tokenContent === '(') openCount++;
                                 if (tokenContent === ')') closeCount++;
                               }
+                              
+                              if (openCount > closeCount) {
+                                return <span key={key} className="custom-highlight-orange">{content}</span>;
+                              }
                             }
                           }
-                          // Only use dangerouslySetInnerHTML if we have a match
-                            if (highlightedContent !== content) {
+
+                          // Check if this is a function name being used as a value (like handler=add)
+                          if (typeof content === 'string' && content.trim()) {
+                            // Check if previous token was = and we're inside parentheses
+                            const prevToken = key > 0 ? line[key - 1] : null;
+                            const prevContent = prevToken ? getTokenProps({ token: prevToken }).children : '';
+                            
+                            if (prevContent === '=' || prevContent.includes('=')) {
+                              // Check if we're inside parentheses
+                              let openCount = 0;
+                              let closeCount = 0;
+                              
+                              // Count parentheses in all previous lines
+                              for (let lineIndex = 0; lineIndex < i; lineIndex++) {
+                                const prevLine = tokens[lineIndex];
+                                for (let tokenIndex = 0; tokenIndex < prevLine.length; tokenIndex++) {
+                                  const tokenContent = getTokenProps({ token: prevLine[tokenIndex] }).children;
+                                  if (tokenContent === '(') openCount++;
+                                  if (tokenContent === ')') closeCount++;
+                                }
+                              }
+                              
+                              // Count parentheses in current line up to this token
+                              for (let tokenIndex = 0; tokenIndex < key; tokenIndex++) {
+                                const tokenContent = getTokenProps({ token: line[tokenIndex] }).children;
+                                if (tokenContent === '(') openCount++;
+                                if (tokenContent === ')') closeCount++;
+                              }
+                              
+                              if (openCount > closeCount) {
+                                // Check if this looks like a function name (not a string, number, or built-in)
+                                if (!content.includes('"') && !content.includes("'") && 
+                                    !/^\d+(\.\d+)?$/.test(content) && 
+                                    !['True', 'False', 'None'].includes(content) &&
+                                    /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(content)) {
+                                  return <span key={key} className="custom-highlight-green-fn">{content}</span>;
+                                }
+                              }
+                            }
+                          }
+
+                          // Check if this token comes after 'from' in import statements
+                          if (typeof content === 'string' && content.trim()) {
+                            // Look for 'from' in previous tokens on this line
+                            let hasFromBefore = false;
+                            let hasImportAfter = false;
+                            
+                            for (let tokenIndex = 0; tokenIndex < key; tokenIndex++) {
+                              const tokenContent = getTokenProps({ token: line[tokenIndex] }).children;
+                              if (tokenContent === 'from') {
+                                hasFromBefore = true;
+                                break;
+                              }
+                            }
+                            
+                            // Check if 'import' appears after this token
+                            for (let tokenIndex = key + 1; tokenIndex < line.length; tokenIndex++) {
+                              const tokenContent = getTokenProps({ token: line[tokenIndex] }).children;
+                              if (tokenContent === 'import') {
+                                hasImportAfter = true;
+                                break;
+                              }
+                            }
+
+                            // If we found 'from' before and 'import' after, highlight the identifier part only
+                            if (hasFromBefore && hasImportAfter) {
+                              const trimmed = content.trim();
+                              if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(trimmed)) {
+                                // Replace only the identifier part, keep the whitespace
+                                const highlightedContent = content.replace(
+                                  /([a-zA-Z_][a-zA-Z0-9_]*)/,
+                                  '<span class="custom-highlight-green">$1</span>'
+                                );
+                                return (
+                                  <span
+                                    key={key}
+                                    dangerouslySetInnerHTML={{ __html: highlightedContent }}
+                                  />
+                                );
+                              }
+                            }
+                          }
+
+                          // Check if this is a function parameter
+                          if (typeof content === 'string' && functionParams.has(content.trim())) {
+                            return <span key={key} className="custom-highlight-orange">{content}</span>;
+                          }
+
+
+                          // Special handling for 'async' keyword based on context
+                          if (typeof content === 'string' && content.trim() === 'async') {
+                            // Check what comes after async
+                            let nextToken = '';
+                            for (let tokenIndex = key + 1; tokenIndex < line.length; tokenIndex++) {
+                              const nextTokenContent = getTokenProps({ token: line[tokenIndex] }).children;
+                              if (nextTokenContent && nextTokenContent.trim()) {
+                                nextToken = nextTokenContent.trim();
+                                break;
+                              }
+                            }
+                            
+                            // async def -> blue, async for -> pink
+                            const colorClass = nextToken === 'def' ? 'custom-highlight-blue' : 'custom-highlight-pink';
+                            const highlightedContent = content.replace(
+                              /(async)/,
+                              `<span class="${colorClass}">$1</span>`
+                            );
                             return (
                               <span
                                 key={key}
@@ -938,18 +447,29 @@ export default function CodeBlock(props) {
                               />
                             );
                           }
-                          // Otherwise use regular children
+
+                          // Apply custom highlighting
+                          if (typeof content === 'string') {
+                            const highlightedContent = content.replace(
+                              regex,
+                              (match) => `<span class="${highlightMap[match]}">${match}</span>`
+                            );
+
+                            if (highlightedContent !== content) {
+                              return (
+                                <span
+                                  key={key}
+                                  dangerouslySetInnerHTML={{ __html: highlightedContent }}
+                                />
+                              );
+                            }
+                          }
+
+                          // Default token rendering
                           return (
-                            <span
-                              key={key}
-                              {...tokenProps}
-                            />
+                            <span key={key} {...tokenProps} />
                           );
                         })}
-                        {/* Add spacer only on the last line */}
-                        {i === tokens.length - 1 && (
-                          <span style={{ display: 'inline-block', width: '1em' }} />
-                        )}
                       </div>
                     );
                   })}
@@ -962,4 +482,3 @@ export default function CodeBlock(props) {
     </div>
   );
 }
-

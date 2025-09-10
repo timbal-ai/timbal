@@ -19,7 +19,9 @@ The <span style={{color: 'var(--timbal-purple)'}}><strong>RunContext</strong></s
 The function `get_run_context()` provides access to the current execution's shared state container. You can interact with it using two main methods: `get_data(key)` to retrieve values from the shared state or `set_data(key, value)` to store or update data. The context is automatically available within any Runnable execution (functions, tools, agents, or workflows)
 
 
-<CodeBlock language="python" code={`async def process_user_data(user_id: str):
+<CodeBlock language="python" code={`from timbal.state import get_run_context
+
+async def process_user_data(user_id: str):
     # Access the current RunContext
     context = get_run_context()
     

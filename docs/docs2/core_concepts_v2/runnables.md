@@ -42,7 +42,7 @@ add_tool = Tool(
 
 Runnables can be called as a regular python function. You can **pass parameters as keyword arguments**, and they'll be automatically mapped to the appropriate parameters in the underlying functions:
 
-<CodeBlock language="python" code={`result = await add_tool(a=5, b=3).collect()  # Returns 8`}/>
+<CodeBlock language="python" code={`result = await add_tool(a=5, b=3).collect() # Returns 8`}/>
 
 You can also set default parameter values when creating the runnable:
 
@@ -52,10 +52,10 @@ You can also set default parameter values when creating the runnable:
     default_params={"b": 3}
 )
 
-result = await add_tool(a=5).collect()  # Returns 8`}/>
+result = await add_tool(a=5).collect() # Returns 8`}/>
 
 Note that runtime parameters override default values:
 
-<CodeBlock language="python" code={`result = await add_tool(a=5, b=10).collect()  # Returns 15`}/>
+<CodeBlock language="python" code={`result = await add_tool(a=5, b=10).collect() # Returns 15`}/>
 
 In the above example, `b=10` is passed at runtime and overrides the default `b=3`.
