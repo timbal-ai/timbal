@@ -52,6 +52,7 @@ const sidebars = {
         'workflows_v2/index',
         'workflows_v2/control_flow',
         'workflows_v2/context',
+        'workflows_v2/integrating_llms',
       ],
     },
     {
