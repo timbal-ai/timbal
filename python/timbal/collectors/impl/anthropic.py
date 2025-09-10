@@ -44,6 +44,8 @@ class AnthropicCollector(EventCollector):
         self._content: str = ""
         self._tool_calls: list[dict[str, Any]] = []
         self._current_block: dict[str, Any] | None = None
+        self._first_token: float | None = None
+        self._output_tokens: int = 0
     
     @classmethod
     @override
@@ -60,9 +62,8 @@ class AnthropicCollector(EventCollector):
             return self._handle_content_block_start(event)
         
         if isinstance(event, RawContentBlockDeltaEvent):
-            if not hasattr(self, "_ttft"):
-                self._ttft = time.perf_counter() - self._start
-                self._run_context.update_metadata("ttft", self._ttft)
+            if self._first_token is None:
+                self._first_token = time.perf_counter()
             return self._handle_content_block_delta(event)
         
         if isinstance(event, RawMessageDeltaEvent):
@@ -122,6 +123,7 @@ class AnthropicCollector(EventCollector):
             anthropic_model = self.anthropic_model
             output_tokens_key = f"{anthropic_model}:output_tokens"
             output_tokens = event.usage.output_tokens
+            self._output_tokens += output_tokens
             self._run_context.update_usage(output_tokens_key, output_tokens)
         
         return None
@@ -129,7 +131,11 @@ class AnthropicCollector(EventCollector):
     @override
     def collect(self) -> Message:
         """Returns structured Anthropic response."""
-        # Anthropic models usually return text alongside tool uses
+        ttft = self._first_token - self._start
+        self._run_context.update_metadata("ttft", ttft)
+        tps = self._output_tokens / (time.perf_counter() - self._first_token)
+        self._run_context.update_metadata("tps", tps)
+
         content = []
         if self._content:
             content.append(self._content)

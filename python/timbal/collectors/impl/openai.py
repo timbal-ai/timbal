@@ -28,6 +28,8 @@ class OpenAICollector(EventCollector):
         self._content: str = ""
         self._tool_calls: list[dict[str, Any]] = []
         self._current_tool_call: dict[str, Any] | None = None
+        self._first_token: float | None = None
+        self._output_tokens: int = 0
     
     @classmethod
     @override
@@ -45,9 +47,8 @@ class OpenAICollector(EventCollector):
             return None
 
         # Calculate TTFT (Time To First Token) on first token
-        if not hasattr(self, "_ttft"):
-            self._ttft = time.perf_counter() - self._start
-            self._run_context.update_metadata("ttft", self._ttft)
+        if self._first_token is None:
+            self._first_token = time.perf_counter()
 
         # Handle tool calls
         if event.choices[0].delta.tool_calls:
@@ -80,6 +81,7 @@ class OpenAICollector(EventCollector):
         self._run_context.update_usage(f"{openai_model}:input_text_tokens", input_tokens)
 
         output_tokens = int(openai_usage.completion_tokens)
+        self._output_tokens += output_tokens
         output_tokens_details = openai_usage.completion_tokens_details
         
         if hasattr(output_tokens_details, "audio_tokens"):
@@ -135,6 +137,11 @@ class OpenAICollector(EventCollector):
     @override
     def collect(self) -> Message:
         """Returns structured OpenAI response."""
+        ttft = self._first_token - self._start
+        self._run_context.update_metadata("ttft", ttft)
+        tps = self._output_tokens / (time.perf_counter() - self._first_token)
+        self._run_context.update_metadata("tps", tps)
+
         content = []
         if self._content:
             content.append(self._content)
