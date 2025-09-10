@@ -1,45 +1,46 @@
 ---
-title: Runnable
+title: Runnables
 sidebar: 'docsSidebar_v2'
 ---
 import CodeBlock from '@site/src/theme/CodeBlock';
 
 
-# Runnable
+# Runnables
 
-<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-The fundamental building blocks that power Tools, Agents and Workflows in Timbal.
+<h2 className="subtitle" style={{marginTop: '0px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Executable primitives that provide consistent interfaces for all Timbal components.
 </h2>
 
 ---
 
 ## What is a Runnable?
-A <span style={{color: 'var(--timbal-purple)'}}><strong>Runnable</strong></span> is an executable unit capable of processing inputs and producing outputs through an async generator interface. It works as a wrapper that turns any callable into a standarized, traceable, and composable execution unit. It supports both sync and async execution patterns.
+A <span style={{color: 'var(--timbal-purple)'}}><strong>Runnable</strong></span> is an executable unit capable of processing inputs and producing outputs through an async generator interface. It works as a wrapper that turns any callable into a standarized, traceable, and composable execution unit. It supports sync, async, sync generators, and async generators execution patterns.
 
-### Class Parameters
-- `name`: Required unique identifier.
-- `description`: Optional description for LLM tool schemas
+All runnables provide a unified interface and execution pattern, enabling seamless composition regardless of their underlying implementation:
 
-#### Schema Control and Runtime Configuration
-Runnables automatically generate JSON schemas for LLM tool calling, supporting both OpenAI and Anthropic formats.
-
-- `schema_params_mode`: Controls parameter visibility ("all" vs "required")
-- `schema_include_params`: Explicitly include specific parameters
-- `schema_exclude_params`: Exclude specific parameters from schemas
-- `default_params`: Runtime parameter injection (both static and callable values)
-
-#### Execution Hooks
-- `pre_hook`: Pre-execution hook that runs before the main handler
-- `post_hook`: Post-execution hook that runs after the main handler
-
-
-### Types of Runnables
-Runnables provide a unified interface regardless of the underlying implementation. They all follow the same execution pattern and can be composed together seamlessly:
-<!-- Whether it is a simple function, a complex AI agent, or an entire workflow, they all follow the same execution pattern and can be composed together seamlessly.  -->
-- **Functions** - Basic Python functions that provide the foundation for all other runnable types.
-- **[Tool Objects](../agents_v2/tools)** - Enhanced function wrappers with schema generation and parameter control
+- **[Tools](../agents_v2/tools)** - Enhanced function wrappers with schema generation and parameter control
 - **[Agents](../agents_v2/index.md)** - Autonomous execution units that orchestrate LLM interactions with tool calling
 - **[Workflows](../workflows_v2/index.md)** - Programmable execution pipelines that orchestrate step-by-step processing
+
+## API
+
+#### Core Configuration
+- `name` (str) - Required unique identifier for the runnable
+- `description` (str | None = None) - Optional description used for LLM tool schemas
+- `metadata` (dict | None = None) - Optional metadata for additional information
+
+#### Schema Generation & Tool Calling
+- `schema_params_mode` (Literal["all", "required"] = "all") - Controls parameter visibility in generated schemas
+- `schema_include_params` (list[str] | None = None) - Explicitly include specific parameters in schema
+- `schema_exclude_params` (list[str] | None = None) - Explicitly exclude specific parameters from schema
+
+#### Runtime Parameter Injection
+- `default_params` (dict | None = None) - Inject parameters at runtime (supports both static values and callable functions)
+
+#### Execution Hooks
+- `pre_hook` (Callable | None = None) - Hook function executed before the main handler
+- `post_hook` (Callable | None = None) - Hook function executed after the main handler completes
+
 
 <!-- #### Functions
 
@@ -212,15 +213,6 @@ result = await tool(data="test", timeout=60).collect()
 # Final call: my_handler(data="test", timeout=60, retries=3)`}/>
 
 ---
-## Support for Sync/Async/Generator Handlers with Automatic Context Propagation
-
-Runnables seamlessly handle different types of handlers while maintaining proper context propagation throughout the execution.
-- Sync Handlers: Regular Python functions that run in a thread pool to avoid blocking.
-- Async Handlers: Coroutine functions that run in the main event loop.
-- Generator Handlers: Functions that yield intermediate results for streaming.
-
-
----
 ## Nested Execution Patterns for Complex Workflows
 
 Runnables support hierarchical execution patterns where runnables can call other runnables, creating complex execution graphs.
@@ -294,11 +286,3 @@ def child_handler(data: str) -> str:
 # Context flows from parent to child automatically
 parent_tool = Tool(handler=parent_handler)
 result = await parent_tool(data="test").collect()`}/> -->
-
-
-
-
-
-
-
-
