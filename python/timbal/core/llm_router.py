@@ -33,10 +33,10 @@ Model = Literal[
     "openai/gpt-4o-audio-preview",
     "openai/gpt-4o-mini-audio-preview",
     # Anthropic models
-    "anthropic/claude-opus-4-latest",
-    "anthropic/claude-sonnet-4-latest",
+    "anthropic/claude-opus-4-1",
+    "anthropic/claude-opus-4-0",
+    "anthropic/claude-sonnet-4-0",
     "anthropic/claude-3-7-sonnet-latest",
-    "anthropic/claude-3-5-sonnet-latest",
     "anthropic/claude-3-5-haiku-latest",
     # TogetherAI models
     "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",

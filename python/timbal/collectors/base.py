@@ -7,8 +7,9 @@ from ..state.context import RunContext
 class EventCollector(ABC):
     """Base abstract class for all event collectors with internal state management."""
     
-    def __init__(self, run_context: RunContext):
+    def __init__(self, run_context: RunContext, start: float):
         self._run_context = run_context
+        self._start = start
     
     @classmethod
     @abstractmethod

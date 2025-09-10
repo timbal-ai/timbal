@@ -76,8 +76,12 @@ class Message:
                 content.extend(anthropic_input)
             else:
                 content.append(anthropic_input)
+        # Anthropic doesn't accept the tool role. We must send this under the user role.
+        role = self.role
+        if role == "tool":
+            role = "user"
         return {
-            "role": self.role,
+            "role": role,
             "content": content,
         }
 

@@ -45,6 +45,10 @@ class Trace(BaseModel):
         default_factory=dict,
         description="The usage of the runnable.",
     )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Flexible metadata storage for run-specific metrics and data.",
+    )
 
     _input_dump: Any = PrivateAttr()
     """The dumped/serialized version of input for internal use."""

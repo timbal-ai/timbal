@@ -1,3 +1,4 @@
+import time
 from typing import Any
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
@@ -22,8 +23,8 @@ OpenAIEvent = ChatCompletionChunk
 class OpenAICollector(EventCollector):
     """Collector for OpenAI streaming events."""
     
-    def __init__(self, run_context: RunContext):
-        super().__init__(run_context)
+    def __init__(self, run_context: RunContext, start: float):
+        super().__init__(run_context, start)
         self._content: str = ""
         self._tool_calls: list[dict[str, Any]] = []
         self._current_tool_call: dict[str, Any] | None = None
@@ -42,6 +43,11 @@ class OpenAICollector(EventCollector):
 
         if not len(event.choices):
             return None
+
+        # Calculate TTFT (Time To First Token) on first token
+        if not hasattr(self, "_ttft"):
+            self._ttft = time.perf_counter() - self._start
+            self._run_context.update_metadata("ttft", self._ttft)
 
         # Handle tool calls
         if event.choices[0].delta.tool_calls:
@@ -129,13 +135,10 @@ class OpenAICollector(EventCollector):
     @override
     def collect(self) -> Message:
         """Returns structured OpenAI response."""
-        
+        content = []
         if self._content:
-            return Message.validate({
-                "role": "assistant",
-                "content": self._content
-            })
-            
+            content.append(self._content)
+
         if self._tool_calls:
             # Check if this is an output_model_tool call and intercept it
             for tool_call in self._tool_calls:
@@ -148,7 +151,6 @@ class OpenAICollector(EventCollector):
                             "text": tool_call.get("input", "{}")
                         }]
                     })
-            
             # Openai allows the use of custom IDs for tool calls. 
             # We choose to generate our own random IDs for consistency and to make sure they don't collide
             # (they are not transparent with the algs being used)
@@ -156,9 +158,9 @@ class OpenAICollector(EventCollector):
                 {**tc, "id": uuid7(as_type="str").replace("-", "")}
                 for tc in self._tool_calls
             ]
-            return Message.validate({
-                "role": "assistant",
-                "content": tool_calls
-            })
-            
-        return None
+            content.extend(tool_calls)
+
+        return Message.validate({
+            "role": "assistant",
+            "content": content
+        })

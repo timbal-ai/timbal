@@ -23,8 +23,8 @@ logger = structlog.get_logger("timbal.collectors.impl.timbal")
 class TimbalCollector(EventCollector):
     """Collector for Timbal events."""
     
-    def __init__(self, run_context: RunContext):
-        super().__init__(run_context)
+    def __init__(self, run_context: RunContext, start: float):
+        super().__init__(run_context, start)
         self._output: Any = None
     
     @classmethod

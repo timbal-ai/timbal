@@ -13,8 +13,8 @@ from ..base import EventCollector
 class DefaultCollector(EventCollector):
     """Default fallback collector that handles any event type."""
     
-    def __init__(self, run_context: RunContext):
-        super().__init__(run_context)
+    def __init__(self, run_context: RunContext, start: float):
+        super().__init__(run_context, start)
         self._events: list[Any] = []
     
     @classmethod

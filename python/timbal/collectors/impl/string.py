@@ -15,8 +15,8 @@ from ..base import EventCollector
 class StringCollector(EventCollector):
     """Collector for simple string events."""
     
-    def __init__(self, run_context: RunContext):
-        super().__init__(run_context)
+    def __init__(self, run_context: RunContext, start: float):
+        super().__init__(run_context, start)
         self._result: str = ""
     
     @classmethod

@@ -1,3 +1,4 @@
+import time
 from typing import Any
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
@@ -38,8 +39,8 @@ AnthropicEvent = (
 class AnthropicCollector(EventCollector):
     """Collector for Anthropic streaming events."""
     
-    def __init__(self, run_context: RunContext):
-        super().__init__(run_context)
+    def __init__(self, run_context: RunContext, start: float):
+        super().__init__(run_context, start)
         self._content: str = ""
         self._tool_calls: list[dict[str, Any]] = []
         self._current_block: dict[str, Any] | None = None
@@ -59,6 +60,9 @@ class AnthropicCollector(EventCollector):
             return self._handle_content_block_start(event)
         
         if isinstance(event, RawContentBlockDeltaEvent):
+            if not hasattr(self, "_ttft"):
+                self._ttft = time.perf_counter() - self._start
+                self._run_context.update_metadata("ttft", self._ttft)
             return self._handle_content_block_delta(event)
         
         if isinstance(event, RawMessageDeltaEvent):
@@ -125,13 +129,11 @@ class AnthropicCollector(EventCollector):
     @override
     def collect(self) -> Message:
         """Returns structured Anthropic response."""
-        
+        # Anthropic models usually return text alongside tool uses
+        content = []
         if self._content:
-            return Message.validate({
-                "role": "assistant",
-                "content": self._content
-            })
-            
+            content.append(self._content)
+
         if self._tool_calls:
             # Check if this is an output_model_tool call and intercept it
             for tool_call in self._tool_calls:
@@ -144,10 +146,9 @@ class AnthropicCollector(EventCollector):
                             "text": tool_call.get("input", "{}")
                         }]
                     })
-            
-            return Message.validate({
-                "role": "assistant",
-                "content": self._tool_calls
-            })
-            
-        return None
+            content.extend(self._tool_calls)
+        
+        return Message.validate({
+            "role": "assistant",
+            "content": content
+        })

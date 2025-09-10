@@ -642,6 +642,7 @@ class Runnable(ABC, BaseModel):
             # Pydantic model_validate() does not mutate the input dict
             validated_input = dict(self.params_model.model_validate(input))
 
+            handler_start = time.perf_counter()
             async_gen = None
             if not self._is_async_gen and not self._is_coroutine:
                 loop = asyncio.get_running_loop()
@@ -670,7 +671,7 @@ class Runnable(ABC, BaseModel):
                     if collector is None:
                         collector_type = get_collector_registry().get_collector_type(chunk)
                         if collector_type:
-                            collector = collector_type(run_context)
+                            collector = collector_type(run_context, handler_start)
                     
                     if collector:
                         processed_chunk = collector.process(chunk)
@@ -720,6 +721,7 @@ class Runnable(ABC, BaseModel):
                 t0=trace.t0,
                 t1=trace.t1,
                 usage=trace.usage,
+                metadata=trace.metadata,
             )
             output_event._input_dump = trace._input_dump
             output_event._output_dump = trace._output_dump

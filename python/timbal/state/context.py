@@ -161,6 +161,19 @@ class RunContext(BaseModel):
             trace.usage[key] = current_value + value
             call_id = trace.parent_call_id
 
+    
+    def update_metadata(self, key: str, value: Any) -> None:
+        """Update metadata for the current call.
+
+        Args:
+            key: The metadata key
+            value: The metadata value
+        """
+        from . import get_call_id 
+        call_id = get_call_id()
+        assert call_id in self.tracing, f"RunContext.update_metadata: Call ID {call_id} not found in tracing."
+        self.tracing[call_id].metadata[key] = value
+
 
     def get_data(self, key: str) -> Any:
         """Get data using ref key format: .input.field, ..output, step_name.shared.key"""

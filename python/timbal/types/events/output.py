@@ -21,6 +21,9 @@ class OutputEvent(BaseEvent):
     """The end time of the step in milliseconds."""
     usage: dict[str, int]
     """The usage of the step."""
+    metadata: dict[str, Any]
+    """Additional metadata about the step."""
+
     _input_dump: Any = PrivateAttr()
     """The dumped/serialized version of input for internal use."""
     _output_dump: Any = PrivateAttr()
