@@ -159,16 +159,21 @@ class Agent(Runnable):
                     "is_coroutine": inspect_result["is_coroutine"],
                 }
         
-        if self.model.startswith("anthropic"):
+        model_provider, model_name = self.model.split("/")
+        if model_provider == "anthropic":
             if not self.model_params.get("max_tokens"):
                 raise ValueError("'max_tokens' is required for claude models.")
-        
         
         # Create internal LLM tool for model interactions
         self._llm = Tool(
             name="llm",
             handler=llm_router,
             default_params=self.model_params,
+            metadata={
+                "type": "LLM",
+                "model_provider": model_provider,
+                "model_name": model_name,
+            },
         )
         self._llm.nest(self._path)
 

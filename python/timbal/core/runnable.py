@@ -192,6 +192,8 @@ class Runnable(ABC, BaseModel):
     """The unique identifier for this runnable component."""
     description: str | None = None
     """Optional description of what this runnable does, used in LLM tool schemas."""
+    metadata: dict[str, Any] = {}
+    """Optional metadata for this runnable."""
 
     schema_params_mode: Literal["all", "required"] = "all"
     """Parameter inclusion mode: 'all' includes all params, 'required' only required ones."""
@@ -363,6 +365,9 @@ class Runnable(ABC, BaseModel):
     def model_post_init(self, __context: Any) -> None:
         """Initialize the Runnable after Pydantic model creation."""
         self._prepare_default_params(self.default_params)
+        # Allow users to override the type in metadata if desired. Else, use the class name.
+        if "type" not in self.metadata:
+            self.metadata["type"] = self.__class__.__name__
 
 
     @abstractmethod
@@ -600,6 +605,7 @@ class Runnable(ABC, BaseModel):
             call_id=_call_id,
             parent_call_id=_parent_call_id,
             t0=t0,
+            metadata={**self.metadata}, # Shallow copy
         )
         run_context.tracing[_call_id] = trace
 
