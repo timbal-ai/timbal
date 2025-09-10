@@ -33,25 +33,15 @@ The function `get_run_context()` provides access to the current execution's shar
 
 ---
 
-## Parent-child Run Relationships
-A hierarchical execution tree is created, where each run can have a parent run. This hierarchy enables memory continuity: child runs inherit context and memory from their parent runs.
-
-
 
 ## Data Sharing Notation
 Data sharing capabilities are provided through a hierarchical key format that enables components to access data across different levels of the execution hierarchy. There are three main access patterns:
 
-- **Current Step Access** (`.` prefix): Access to their own data.
+- **Current Runnable Access** (`.` prefix): Access to their own data.
     - `.input.parameter_name`
     - `.output`
     - `.custom_variable_name`
 
-- **Parent Step Access** (`..` prefix): Access data from their immediate parent in the execution hierarchy. For example, the `..input` retrieves the input from the parent step, enabling child components to build upon parent results.
+- **Parent Runnable Access** (`..` prefix): Access data from their immediate parent in the execution hierarchy. For example, the `..input` retrieves the input from the parent Runnable, enabling child components to build upon parent results.
 
-- **Neighbour Step Access (step name)**: Access data from neighbour steps using the step name as a prefix, such as `step_name.output` or `step_name.custom_variable`. This enables horizontal data sharing between steps in workflows.
-
-
-## 
-
-
-
+- **Neighbours Runnable Access**: Access data from neighbour Runnables. See section [Workflow Context](../workflows_v2/context.md) for more details.

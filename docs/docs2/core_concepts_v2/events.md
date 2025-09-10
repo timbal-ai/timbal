@@ -91,17 +91,12 @@ result = await runnable(**params).collect()`}/>
 
 ---
 
-## Practical Examples
-#### Handle Errors
+## Handle Errors
 <CodeBlock language="python" code={`async for event in runnable(**params):
     if isinstance(event, OutputEvent) and event.error:
         print(f"Error: {event.error['message']}")
         print(f"Traceback: {event.error['traceback']}")`}/>
 
-#### Collect Final Result
-<CodeBlock language="python" code={`# Get just the final result
-result = await runnable(**params).collect()
-print(f"Final result: {result}")`}/>
 
 
 

@@ -42,7 +42,7 @@ Workflows form a **Directed Acyclic Graph (DAG)** where:
 
 ### Adding Steps to the Workflow
 
-Workflows use `.step()` method to add steps. You can pass fixed parameters to steps using keyword arguments:
+Workflows use `.step()` method to add steps. **Any Runnable is valid to create a step**. This includes sync/async functions, Tool objects, Agents, and other Workflows. You can pass fixed parameters to steps using keyword arguments:
 
 <!-- - **Functions**: Direct function references
 - **Tools**: Tool objects with handlers
@@ -65,7 +65,7 @@ Workflows use `.step()` method to add steps. You can pass fixed parameters to st
 def check_threshold(temperature: float, threshold: float) -> str:
     return "Alert!" if temperature > threshold else "Normal"
     
-  workflow = (Workflow(name="temperature_alert")
+workflow = (Workflow(name="temperature_alert")
     .step(celsius_to_fahrenheit, celsius=35)
     .step(check_threshold, temperature=80, threshold=lambda: 85)
 )`}/>
@@ -73,7 +73,7 @@ def check_threshold(temperature: float, threshold: float) -> str:
 
 ### Reusing Functions
 
-**You can only have one step with the same name inside a workflow**. If you need to use the same function multiple times in a workflow, you must wrap it in a new Tool each time with distinct names.
+**Each step in a workflow must have a unique name**. If you need to use the same function multiple times in a workflow, wrap it in a new Tool each time with distinct names.
 
 <CodeBlock language="python" highlight="10" code={`# Create a Tool to reuse the function
 threshold_checker_tool = Tool(
