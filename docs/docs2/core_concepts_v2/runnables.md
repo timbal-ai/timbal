@@ -1,42 +1,47 @@
 ---
-title: Runnables
+title: Runnable
 sidebar: 'docsSidebar_v2'
 ---
 import CodeBlock from '@site/src/theme/CodeBlock';
 
 
-# Runnables
+# Runnable
 
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-The fundamental building blocks that power tools, agents and workflows in Timbal.
+The fundamental building blocks that power Tools, Agents and Workflows in Timbal.
 </h2>
 
 ---
 
-## What are Runnables?
-A <span style={{color: 'var(--timbal-purple)'}}><strong>Runnable</strong></span> is an executable unit capable of processing inputs and producing outputs through an async generator interface. They work as a wrapper that turns any callable into a standarized, traceable, and composable execution unit. It supports both sync and async execution patterns.
-
+## What is a Runnable?
+A <span style={{color: 'var(--timbal-purple)'}}><strong>Runnable</strong></span> is an executable unit capable of processing inputs and producing outputs through an async generator interface. It works as a wrapper that turns any callable into a standarized, traceable, and composable execution unit. It supports both sync and async execution patterns.
 
 ### Class Parameters
 - `name`: Required unique identifier.
-- `description`: Optional description for LLM tool schemas.
+- `description`: Optional description for LLM tool schemas
 
 #### Schema Control and Runtime Configuration
+Runnables automatically generate JSON schemas for LLM tool calling, supporting both OpenAI and Anthropic formats.
+
 - `schema_params_mode`: Controls parameter visibility ("all" vs "required")
 - `schema_include_params`: Explicitly include specific parameters
 - `schema_exclude_params`: Exclude specific parameters from schemas
 - `default_params`: Runtime parameter injection (both static and callable values)
 
 #### Execution Hooks
-- `pre_hook`: Pre-execution hook that runs before the main handler.
-- `post_hook`: Post-execution hook that runs after the main handler.
+- `pre_hook`: Pre-execution hook that runs before the main handler
+- `post_hook`: Post-execution hook that runs after the main handler
 
 
 ### Types of Runnables
-Runnables provide a unified interface regardless of the underlying implementation. Whether it is a simple function, a complex AI agent, or an entire workflow, they all follow the same execution pattern and can be composed together seamlessly.
+Runnables provide a unified interface regardless of the underlying implementation. They all follow the same execution pattern and can be composed together seamlessly:
+<!-- Whether it is a simple function, a complex AI agent, or an entire workflow, they all follow the same execution pattern and can be composed together seamlessly.  -->
+- **Functions** - Basic Python functions that provide the foundation for all other runnable types.
+- **[Tool Objects](../agents_v2/tools)** - Enhanced function wrappers with schema generation and parameter control
+- **[Agents](../agents_v2/index.md)** - Autonomous execution units that orchestrate LLM interactions with tool calling
+- **[Workflows](../workflows_v2/index.md)** - Programmable execution pipelines that orchestrate step-by-step processing
 
-#### Functions
-
+<!-- #### Functions
 
 #### Tool Objects
 
@@ -52,8 +57,21 @@ tax_tool = Tool(
     schema_params_mode="required"  # Only show required params to LLM
 )`}/>
 
-#### Workflow as Runnables
-#### Agents as Runnables
+#### Workflow
+<CodeBlock language="python" code={`from timbal import Workflow
+
+# Create a Workflow
+analysis_agent = Workflow(
+
+)
+
+# Use agent as runnable in workflow
+workflow = (
+    Workflow(name="analysis_pipeline")
+    .step(analysis_agent)  # Agent as runnable
+)`}/>
+
+#### Agents
 <CodeBlock language="python" code={`from timbal import Agent
 
 # Create an agent
@@ -67,29 +85,217 @@ analysis_agent = Agent(
 workflow = (
     Workflow(name="analysis_pipeline")
     .step(analysis_agent)  # Agent as runnable
+)`}/> -->
+
+
+
+
+
+
+
+<!-- ## Core Features
+
+### Base Execution Unit with Parameter Validation and Schema Generation
+
+Runnables serve as the fundamental execution units in Timbal, providing robust parameter validation and automatic schema generation capabilities.
+
+#### Parameter Validation
+Every Runnable uses Pydantic models for input validation, ensuring type safety and data integrity:
+
+<CodeBlock language="python" code={`from timbal import Tool
+from pydantic import BaseModel
+
+class UserInput(BaseModel):
+    name: str
+    age: int
+    email: str | None = None
+
+def process_user(user: UserInput) -> dict:
+    return {"processed": True, "user": user.model_dump()}
+
+# The Tool automatically validates inputs against the UserInput model
+user_tool = Tool(
+    handler=process_user,
+    name="process_user",
+    description="Process user information"
+)
+
+# This will validate the input and raise ValidationError if invalid
+result = await user_tool(name="John", age=25, email="john@example.com").collect()`}/>
+
+#### Schema Generation
+Runnables automatically generate JSON schemas for LLM tool calling, supporting both OpenAI and Anthropic formats:
+
+<CodeBlock language="python" code={`# OpenAI-compatible schema
+openai_schema = user_tool.openai_schema
+# Returns: {"type": "function", "function": {"name": "process_user", ...}}
+
+# Anthropic-compatible schema  
+anthropic_schema = user_tool.anthropic_schema
+# Returns: {"name": "process_user", "input_schema": {...}}
+
+# Formatted schema with parameter filtering
+filtered_schema = user_tool.format_params_model_schema()`}/> -->
+
+---
+## Execution Hooks
+
+Runnables support pre and post-execution hooks for implementing cross-cutting concerns like logging, monitoring, or data transformation.
+
+#### Pre-Hook
+Executes before the main handler runs, useful for setup, validation, or data preparation:
+
+<CodeBlock language="python" code={`def log_start():
+    """Log the start of execution."""
+    print(f"Starting execution...")
+
+tool = Tool(
+    handler=my_handler,
+    pre_hook=log_start
 )`}/>
 
+#### Post-Hook
+Executes after the main handler completes, useful for cleanup, result processing, or notifications:
+
+<CodeBlock language="python" code={`def cleanup_resources():
+    """Clean up resources after execution."""
+    # Cleanup logic here
+    pass
+
+tool = Tool(
+    handler=my_handler,
+    post_hook=cleanup_resources
+)`}/>
+
+---
+## Parameter Injection and Transformation
+
+Runnables provide powerful parameter injection capabilities that allow you to automatically inject values into your handlers without explicitly passing them. When you call a Runnable, any parameters defined in `default_params` are automatically merged with the arguments you provide, ensuring all required parameters are available.
+
+- **Static Parameter Injection**: Inject fixed values that are always included in every execution
+- **Dynamic Parameter Injection**: Inject values computed at runtime using callable functions. This is perfect for context-dependent values, timestamps, or configuration that changes between executions.
 
 
+<CodeBlock language="python" code={`import time
 
-### Key points
-- Any callable can be used as a runnable
+def get_timestamp():
+    """Get current timestamp for this execution."""
+    return int(time.time())
+
+def process_with_context(data: str, user: str, timestamp: int, config: dict) -> str:
+    """Process data with runtime-injected context."""
+    return f"User {user} processed {data} at {timestamp}"
+
+tool = Tool(
+    handler=process_with_context,
+    default_params={
+        "user": "user_123",             # Static
+        "timestamp": get_timestamp,     # Dynamic
+    }
+)
+
+# All parameters are automatically resolved and injected
+result = await tool(data="test").collect()`}/>
 
 
+### Parameter Override Behavior
+
+Injected parameters can be overridden by explicitly passing them during execution:
+
+<CodeBlock language="python" code={`tool = Tool(
+    handler=my_handler,
+    default_params={"timeout": 30, "retries": 3}
+)
+
+# Override the default timeout but keep retries
+result = await tool(data="test", timeout=60).collect()
+# Final call: my_handler(data="test", timeout=60, retries=3)`}/>
+
+---
+## Support for Sync/Async/Generator Handlers with Automatic Context Propagation
+
+Runnables seamlessly handle different types of handlers while maintaining proper context propagation throughout the execution.
+- Sync Handlers: Regular Python functions that run in a thread pool to avoid blocking.
+- Async Handlers: Coroutine functions that run in the main event loop.
+- Generator Handlers: Functions that yield intermediate results for streaming.
 
 
-<!-- TODO: explain in Events page -->
-## The `Collect()` Method
-The `collect()` method is a key feature of the Runnable system that allows you to easily extract the final result from an async generator without manually iterating through all the events.
+---
+## Nested Execution Patterns for Complex Workflows
 
-<CodeBlock language="python" code={`# Instead of manually iterating through events
-async for event in runnable(**params):
-    if isinstance(event, OutputEvent):
-        result = event.output
-        break
+Runnables support hierarchical execution patterns where runnables can call other runnables, creating complex execution graphs.
 
-# You can simply use collect()
-result = await runnable(**params).collect()`}/>
+#### Example: Nested Tool Execution
+
+<CodeBlock language="python" code={`def data_processor(data_path: str) -> str:
+    """Process data"""
+    result = await data_loader(data_path).collect()
+    # Data processing logic here
+    return f"Processed: {result}"
+
+def data_loader(data_path: str) -> str:
+    """Loads data"""
+    # Data loading logic here
+    return f"Further processed: {processed_data}"
+
+
+# Create tools
+loader_tool = Tool(handler=data_loader, name="loader")
+processor_tool = Tool(handler=data_processor, name="processor")
+
+# The execution trace will show the nested call hierarchy
+result = await processor_tool(data_path="test.csv").collect()`}/>
+
+<!-- #### Workflow Orchestration
+Workflows can orchestrate multiple runnables in complex patterns:
+
+<CodeBlock language="python" code={`from timbal import Workflow
+
+def step1(data: str) -> str:
+    return f"Step 1: {data}"
+
+def step2(data: str) -> str:
+    return f"Step 2: {data}"
+
+def step3(data: str) -> str:
+    return f"Step 3: {data}"
+
+# Create a workflow with nested execution
+workflow = (
+    Workflow(name="nested_workflow")
+    .step(step1)           # First step
+    .step(step2)           # Second step  
+    .step(step3)           # Third step
+)
+
+# Each step can access the full execution context
+result = await workflow(data="input").collect()`}/>
+
+#### Context Propagation
+Context automatically flows through nested executions:
+
+<CodeBlock language="python" code={`def parent_handler(data: str) -> str:
+    """Parent handler that sets context data."""
+    context = get_run_context()
+    context.data["parent_data"] = "from_parent"
+    
+    # Call child handler - context is preserved
+    child_result = await child_handler(data=data).collect()
+    
+    return f"Parent + {child_result}"
+
+def child_handler(data: str) -> str:
+    """Child handler that accesses parent context."""
+    context = get_run_context()
+    parent_data = context.data.get("parent_data", "not_found")
+    
+    return f"Child: {data} (parent: {parent_data})"
+
+# Context flows from parent to child automatically
+parent_tool = Tool(handler=parent_handler)
+result = await parent_tool(data="test").collect()`}/> -->
+
+
 
 
 

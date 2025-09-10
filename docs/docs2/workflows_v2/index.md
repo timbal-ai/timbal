@@ -42,9 +42,9 @@ Workflows form a **Directed Acyclic Graph (DAG)** where:
 
 ### Adding Steps to the Workflow
 
-Workflows use `.step()` method to add steps. Each step can be:
+Workflows use `.step()` method to add steps. You can pass fixed parameters to steps using keyword arguments:
 
-- **Functions**: Direct function references
+<!-- - **Functions**: Direct function references
 - **Tools**: Tool objects with handlers
 - **Dictionaries**: Tool configurations
 - **Other Workflows**: Nested workflow components
@@ -52,12 +52,12 @@ Workflows use `.step()` method to add steps. Each step can be:
 <CodeBlock language="python" code={`workflow = (Workflow(name="my_workflow")
     .step(step_1)
     .step(step_2)
-)`}/>
+)`}/> -->
 
 
-### Adding Steps with Parameters
+<!-- ### Adding Steps with Parameters -->
 
-You can pass fixed parameters to steps using keyword arguments:
+
 
 <CodeBlock language="python" code={`def celsius_to_fahrenheit(celsius: float) -> float:
     return (celsius * 9/5) + 32
@@ -178,7 +178,7 @@ Default parameters are defined when creating a runnable and are merged with runt
 
 ## Running the Workflow
 
-Once your workflow is defined, you can execute it in two main ways:
+Once your Workflow is defined, you can execute it in two main ways:
 
 **Get the final output:**
 <CodeBlock language="python" code={`result = await workflow().collect()
