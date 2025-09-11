@@ -109,6 +109,7 @@ const highlightMap = {
   elif: 'custom-highlight-pink',
   else: 'custom-highlight-pink',
   break: 'custom-highlight-pink',
+  pass: 'custom-highlight-pink',
   isinstance: 'custom-highlight-blue',
   try: 'custom-highlight-pink',
   except: 'custom-highlight-pink',
@@ -121,6 +122,13 @@ const highlightMap = {
   return: 'custom-highlight-pink',
   '*': 'custom-highlight-pink',
   '+': 'custom-highlight-pink',
+  '=': 'custom-highlight-pink',
+  '{': 'custom-highlight-purple-pink',
+  '}': 'custom-highlight-purple-pink',
+  '(': 'custom-highlight-yellow',
+  ')': 'custom-highlight-yellow',
+  '[': 'custom-highlight-purple-pink',
+  ']': 'custom-highlight-purple-pink',
   str: 'custom-highlight-blue',
   float: 'custom-highlight-blue',
   int: 'custom-highlight-blue',
@@ -446,6 +454,20 @@ export default function CodeBlock(props) {
                                 dangerouslySetInnerHTML={{ __html: highlightedContent }}
                               />
                             );
+                          }
+
+                          // Handle f-strings - check if this token contains an f-string
+                          if (typeof content === 'string' && /^f['"]/.test(content)) {
+                            // Split the f-string to highlight only the 'f' prefix
+                            const match = content.match(/^(f)(['"].*['"]?)$/);
+                            if (match) {
+                              return (
+                                <span key={key}>
+                                  <span style={{ color: '#66d9ef' }}>{match[1]}</span>
+                                  <span style={{ color: '#e6db74' }}>{match[2]}</span>
+                                </span>
+                              );
+                            }
                           }
 
                           // Apply custom highlighting
