@@ -430,7 +430,13 @@ class File(io.IOBase):
         if not filename:
             filename = url.split("/")[-1]
         fileobj.name = filename
-        fileobj.__content_type__ = res.headers.get("Content-Type", "application/octet-stream")
+        # Set content type from server response
+        # NOTE: This will overwrite the File's extension-based content type detection
+        server_content_type = res.headers.get("Content-Type", "application/octet-stream")
+        # Only set __content_type__ if server provides a specific type (not generic binary)
+        if server_content_type not in ("application/octet-stream", "binary/octet-stream"):
+            fileobj.__content_type__ = server_content_type
+        # For generic types, let the File class keep its extension-based detection
         return fileobj
 
 

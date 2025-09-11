@@ -169,7 +169,7 @@ class RunContext(BaseModel):
             key: The metadata key
             value: The metadata value
         """
-        from . import get_call_id 
+        from . import get_call_id
         call_id = get_call_id()
         assert call_id in self.tracing, f"RunContext.update_metadata: Call ID {call_id} not found in tracing."
         self.tracing[call_id].metadata[key] = value

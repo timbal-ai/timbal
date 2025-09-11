@@ -12,7 +12,6 @@ import pandas as pd
 import structlog
 from docx import Document
 
-from ...handlers.pdfs import convert_pdf_to_images
 from ..file import File
 from .base import BaseContent
 
@@ -25,6 +24,26 @@ AVAILABLE_ENCODINGS = [
     "iso-8859-1",
     "utf-16",
 ]
+
+
+def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
+    """Convert a PDF file to a list of images files."""
+    import tempfile
+    from pathlib import Path
+    import fitz
+    pdf.seek(0) # Ensure the pointer is at the start of the file
+    doc = fitz.Document(stream=pdf.read())
+    pages = []
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
+        # TODO Use File.validate(bytes, {"extension": ".png"})
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = Path(f.name)
+        pix.save(tmp_path)
+        pix_file = File.validate(tmp_path)
+        pages.append(pix_file)
+    return pages
 
 
 class FileContent(BaseContent):
@@ -112,9 +131,9 @@ class FileContent(BaseContent):
             # TODO Review openai sdk "file" type
             # OpenAI internally gets an image of each page and complements it with the extracted text.
             # ? For all the use cases we've used, extracting just the images has worked well.
-            pages = convert_pdf_to_images(self.file)
+            pages = pdf_to_images(self.file)
             logger.info(
-                "convert_pdf_to_images", 
+                "pdf_to_images", 
                 n_pages=len(pages), 
                 description=".to_openai_input() implicitly converting input pdf to images...",
             )
