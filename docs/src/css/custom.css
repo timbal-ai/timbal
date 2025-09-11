@@ -1,0 +1,848 @@
+/**
+ * Any CSS included here will be global. The classic template
+ * bundles Infima by default. Infima is a CSS framework designed to
+ * work well for content-centric websites.
+ */
+ @import "tailwindcss";
+
+:root {
+  --ifm-color-primary: #5012cb;
+  --ifm-color-primary-dark: #5012cb;
+  --ifm-color-primary-darker: #c6b8ff;
+  --ifm-color-primary-darkest: #c6b8ff;
+  --ifm-color-primary-light: #c6b8ff;
+  --ifm-color-primary-lighter: #c6b8ff;
+  --ifm-color-primary-lightest: #c6b8ff;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+  --ifm-font-size-base: 1rem;
+  --ifm-line-height-base: 1.35;
+  --timbal-purple: #5012cb;
+  --icon-check-green: #4cd964; /* dark green for light mode */
+  --release-badge-bg: var(--ifm-color-primary-light);
+  --release-badge-color: var(--timbal-purple);
+  --release-version-color: #888;
+  --release-highlight-gradient: linear-gradient(120deg, var(--timbal-purple) 0%, var(--ifm-color-primary-light) 100%);
+  --release-highlight-text: #fff;
+  --release-link: #2563eb;
+}
+
+/* For readability concerns, you should choose a lighter palette in dark mode. */
+html[data-theme='dark'] {
+  --ifm-color-primary: #c6b8ff;
+  --ifm-color-primary-dark: #5012cb;
+  --ifm-color-primary-darker: #5012cb;
+  --ifm-color-primary-darkest: #5012cb;
+  --ifm-color-primary-light: #5012cb;
+  --ifm-color-primary-lighter: #5012cb;
+  --ifm-color-primary-lightest: #5012cb;
+  --docusaurus-highlighted-code-line-bg: rgba(1, 1, 1, 0.3);
+  --ifm-color-emphasis-900: #ffffff;
+  --ifm-font-color-base: #ffffff;
+  --ifm-heading-color: #ffffff;
+  --timbal-purple: #c6b8ff; /* Dark mode */
+  --icon-check-green: #00ff00; /* bright green for dark mode */
+  --release-badge-bg: var(--timbal-purple);
+  --release-badge-color: var(--ifm-color-primary-light);
+  --release-version-color: #bbb;
+  --release-highlight-gradient: linear-gradient(120deg, var(--timbal-purple) 0%, var(--ifm-color-primary-light) 100%);
+  --release-highlight-text: #fff;
+  --release-link: #b5aaff;
+}
+
+html, body {
+  overflow-x: hidden !important;
+  max-width: 100vw !important;
+}
+
+.container {
+  margin-left: auto;
+  margin-right: auto;
+  max-width: 1100px; /* Slightly narrower than default */
+  padding-left: 2rem; /* Left padding */
+  padding-right: 2rem; /* Right padding */
+}
+
+.navbar__brand {
+  pointer-events: none; /* Prevents clicking */
+  cursor: default; /* Changes cursor to default */
+}
+
+div[class^="alert"] .admonition-heading {
+  display: none; /* Hides the default title (Tip, Info, etc.) */
+}
+
+
+.breadcrumbs__item:first-child {
+  display: none; /* Hides the home icon and link */
+}
+
+
+/* Ensure all text is white in dark mode */
+/* [data-theme='dark'] article p,
+[data-theme='dark'] article li,
+[data-theme='dark'] article strong,
+[data-theme='dark'] article em, */
+/* [data-theme='dark'] article span {
+  color: #ffffff !important;
+} */
+
+/* Change h3 headers color in dark mode */
+[data-theme='dark'] article h3 {
+  color: white;
+}
+
+/* Make the sidebar stay fixed */
+/* Make the sidebar sticky */
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh; /* Make it take the full height of the viewport */
+  overflow-y: auto; /* Allow scrolling if content overflows */
+  z-index: 10; /* Ensure it's on top */
+  background-color: white; /* Make it stand out */
+}
+
+.alert [class*="admonitionHeading"] {
+  font-size: 0.8em !important;
+}
+.alert [class*="admonitionContent"] {
+  font-size: 0.8em !important;
+}
+.alert [class*="admonitionIcon"] {
+  font-size: 0.8em !important;
+}
+
+/* Inline code: keep default theme */
+:not(pre) > code {
+  background: var(--ifm-code-background) !important;
+  color: var(--ifm-code-color) !important;
+}
+
+
+.vertical-stepper {
+  display: flex;
+  flex-direction: column;
+  margin: 2rem 0;
+  position: relative;
+}
+
+.step {
+  display: flex;
+  align-items: flex-start;
+  position: relative;
+  padding-bottom: 3rem; /* Add padding between steps */
+}
+
+.step:last-child {
+  padding-bottom: 0; /* Remove padding for last step */
+}
+
+.circle {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #222;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 1.3em;
+  z-index: 2; /* Ensure circle is above the line */
+  margin-right: 16px;
+  position: relative;
+  border: 3px solid #333;
+  box-shadow: 0 2px 8px 0 #0002;
+  flex-shrink: 0;
+}
+
+.step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 17px; /* Half of circle width (36/2) minus half of line width (2/2) */
+  top: 36px; /* Height of circle */
+  width: 2px;
+  height: calc(100% - 36px); /* Full height minus circle */
+  background: #333;
+  z-index: 1;
+}
+
+.step-content {
+  flex: 1;
+  min-width: 0;
+  padding-top: 8px; /* Align content with circle */
+}
+
+.step-title {
+  font-weight: bold;
+  font-size: 1.25em;
+  margin-bottom: 0.2em;
+}
+.step-desc {
+  color: #bbb;
+  font-size: 1em;
+}
+[data-theme='dark'] .step-title {
+  color: #fff;
+}
+[data-theme='dark'] .step-desc {
+  color: #bbb;
+}
+[data-theme='light'] .step-title {
+  color: #222;
+}
+[data-theme='light'] .step-desc {
+  color: #444;
+}
+
+
+/* Provider column styling */
+.provider {
+  color: var(--timbal-purple);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.model-badge {
+  background-color: #f4f4f4;
+  display: inline-block;
+  border-radius: 12px;
+  padding: 0.15em 0.7em;
+  font-size: 1em;
+  font-family: inherit;
+  font-weight: 500;
+  margin: 0 0.1em;
+  letter-spacing: 0.01em;
+  color: #222; /* Default for light mode */
+}
+
+[data-theme='dark'] .model-badge {
+  color: #fff;
+  background-color: #171717;
+}
+
+/* Center table icons */
+td, th {
+  text-align: left;
+  vertical-align: middle;
+}
+
+/* Remove zebra striping and set a uniform background for all table rows and headers */
+table,
+thead,
+tbody,
+tr,
+th,
+td {
+  background: transparent !important;
+}
+
+/* Optional: Remove table borders if you want a cleaner look */
+table,
+th,
+td {
+  border: none !important;
+}
+
+table,
+th,
+td {
+  font-size: 0.9em !important;
+}
+
+.centered-cell {
+  display: inline-block;
+  text-align: center;
+  width: 100%;
+}
+
+/* Increase horizontal padding for all table cells */
+table th,
+table td {
+  padding-left: 1.2em !important;
+  padding-right: 1.2em !important;
+}
+
+/* OR: Only increase padding for the first two columns */
+table td:first-child,
+table th:first-child {
+  padding-left: 1.5em !important;
+  padding-right: 1em !important;
+}
+table td:nth-child(2),
+table th:nth-child(2) {
+  padding-left: 1em !important;
+  padding-right: 1.5em !important;
+}
+
+table td:first-child,
+table th:first-child {
+  min-width: 120px;
+}
+
+.icon-x svg,
+.icon-check svg {
+  vertical-align: middle;
+  display: inline-block;
+}
+
+/* Reduce vertical (top/bottom) padding for all table cells */
+table th,
+table td {
+  padding-top: 0.5em !important;
+  padding-bottom: 0.5em !important;
+  /* You can keep your horizontal padding rules here if you want */
+}
+
+/* Reduce space below admonitions (info/note/success boxes) */
+.tight-admonition,
+div[class^="admonition"] {
+  margin-bottom: 0em !important; /* or even 0.2em for less space */
+}
+
+/* Reduce vertical space between paragraphs */
+article p {
+  margin-top: 0.3em;
+  margin-bottom: 0.3em;
+  line-height: var(--ifm-line-height-base);
+}
+
+/* Optionally, reduce space after headings too */
+article h1,
+article h2,
+article h3,
+article h4,
+article h5,
+article h6 {
+  margin-bottom: 0.4em;
+  margin-top: 0.7em;
+  line-height: var(--ifm-line-height-base);
+}
+
+.theme-code-block-title,
+div[class*="codeBlock"] .theme-code-block-title,
+div[class*="codeBlock"] [class*="codeBlockTitle"] {
+  font-size: 0.8em !important;
+  padding-top: 0.5em !important;
+  padding-bottom: 0.5em !important;
+}
+
+/* Make the sidebar narrower */
+.theme-doc-sidebar-container {
+  width: 300px !important;
+  font-size: 0.92em !important;
+  margin-left: 4em !important;
+  padding-top: 0.5em !important;
+  line-height: var(--ifm-line-height-base);
+}
+
+.menu__link--sublist-caret::after {
+  font-size: 1.2em !important;
+  width: 1.2em !important;
+  height: 1.2em !important;
+  min-width: 1.2em !important;
+  min-height: 1.2em !important;
+  background-size: 1.2em 1.2em !important;
+  line-height: var(--ifm-line-height-base);
+}
+
+/* Make sidebar category titles bold */
+.theme-doc-sidebar-container .menu__list-item-collapsible > .menu__link {
+  font-weight: bold !important;
+  line-height: var(--ifm-line-height-base);
+}
+
+
+.custom-highlight-pink {
+  color: #F92672!important;
+}
+
+.custom-highlight-orange {
+  color: orange !important;
+  font-style: italic;
+}
+
+.custom-highlight-green {
+  color: #A6E22E !important;
+  text-decoration: underline;
+}
+
+.custom-highlight-yellow {
+  color: #E6DB74 !important;
+}
+
+.custom-highlight-purple-pink {
+  color: #D291FF !important;
+}
+
+.token.number,
+.custom-highlight-purple {
+  color: #B48EFC !important;
+}
+
+.custom-highlight-yellow-dark {
+  color: #FFD600 !important;
+}
+
+
+.custom-highlight-comment {
+  color: #969688 !important;
+  font-style: italic;
+}
+
+.custom-highlight-blue {
+  color: #66D9EF !important;
+  font-style: italic;
+}
+
+.custom-highlight-blue-no-italic {
+  color: #66D9EF !important;
+}
+
+.custom-highlight-green-fn {
+  color: #A6E22E !important;
+}
+
+.custom-highlight-white {
+  color: #ffffff !important;
+}
+
+.menu__link[href$="/introduction"] {
+  font-weight: bold;
+  line-height: var(--ifm-line-height-base);
+}
+
+.wider-table, .wider-table th, .wider-table td {
+  font-size: 0.9em !important;
+}
+
+
+/* Adjust heading sizes proportionally */
+article h1 {
+  font-size: 1.8rem; 
+}
+article h2 {
+  font-size: 1.6rem;
+}
+
+article h3 {
+  font-size: 1.3rem;
+}
+
+/* Adjust table text size */
+table,
+th,
+td {
+  font-size: 0.9em !important; /* Reduced from 0.9em */
+}
+
+/* Adjust code block text size */
+.theme-code-block,
+pre,
+code {
+  font-size: 0.9em !important;
+}
+
+/* Keep original sidebar size */
+.theme-doc-sidebar-container,
+.theme-doc-sidebar-menu,
+.theme-doc-sidebar {
+  font-size: 0.92em !important; /* Keep original size */
+  line-height: var(--ifm-line-height-base);
+}
+
+[data-docs-sidebar="examplesSidebar"] h1:first-child {
+  display: none;
+}
+
+[data-theme='dark'] h4 {
+  color: var(--timbal-purple) !important;
+}
+
+/* Utility class for SVG icons to be light purple in dark mode */
+[data-theme='dark'] .timbal-category-icon svg {
+  fill: var(--timbal-purple) !important;
+}
+
+/* Make the Docusaurus pagination box smaller */
+.pagination-nav__link {
+  padding: 0.5rem 0.7rem !important;
+}
+
+.pagination-nav__label,
+.pagination-nav__sublabel {
+  font-size: 0.95em !important;
+}
+
+.pagination-nav__label {
+  font-weight: 600 !important;
+}
+
+.release-badge {
+  display: inline-block;
+  background: var(--release-badge-bg);
+  color: var(--release-badge-color);
+  border-radius: 8px;
+  padding: 0.3em 1em;
+  font-weight: 600;
+  font-size: 1.1em;
+  margin-right: 1em;
+}
+
+.release-version {
+  font-size: 1.1em;
+  color: var(--release-version-color);
+}
+
+.release-highlight-card {
+  background: var(--release-highlight-gradient);
+  border-radius: 18px;
+  width:670px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0.3rem;
+  box-shadow: 0 4px 24px 0 #0001;
+}
+
+.release-highlight-card span {
+  color: var(--release-highlight-text);
+  font-size: 3rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.release-link {
+  color: var(--release-link);
+  font-weight: 500;
+  text-decoration: underline;
+  font-size: 0.95em;
+}
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop {
+  width: 800px !important;
+  margin-top: 5rem !important;
+}
+
+
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop,
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop ul,
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop li,
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop a {
+  font-size: 1rem !important; /* or your preferred size */
+}
+
+/* Make release date headings look like badges, only on releases page */
+html.docs-doc-id-releases\2F index .theme-doc-markdown .release-date-heading {
+  display: inline-block;
+  background: var(--release-badge-bg);
+  color: var(--release-badge-color);
+  border-radius: 8px;
+  padding: 0.3em 1em;
+  font-weight: 600;
+  font-size: 1.1em;
+  margin-bottom: 1em;
+  margin-top: 2em;
+}
+
+html.docs-doc-id-releases\2F index .theme-doc-toc-desktop .release-date-heading {
+  background: none !important;
+  color: inherit !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  font-weight: inherit !important;
+  font-size: inherit !important;
+  margin: 0 !important;
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
+  display: inline;
+}
+
+html.docs-doc-id-releases\2F index article h3 {
+  font-size: 0.9rem !important; /* or your preferred size */
+  font-weight: 600; /* optional: adjust weight */
+}
+
+/* Only on releases page, pull the first .release-highlight-card up */
+html.docs-doc-id-releases\2F index .release-date-heading {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* Only affect h3 inside the left column of the releases flex row */
+.release-date-heading {
+  margin-top: 0.2em !important;
+  margin-bottom: 0.2em !important;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* Make sure Release Highlights is vertically aligned */
+.release-highlights-title {
+  margin-top: 0.8em !important;
+  margin-bottom: 0.2em !important;
+  vertical-align: middle;
+}
+
+.release-highlight-card > span {
+  font-size: 1.6rem !important;
+  font-weight: 600 !important;
+}
+
+
+html[data-theme='dark'] footer {
+  background: #262626 !important; /* or your preferred dark color */
+  color: #fff !important;         /* optional: ensure text/icons are visible */
+}
+
+.file-tree-box {
+  border: 1px solid var(--ifm-toc-border-color, #333);
+  border-radius: 6px;
+  padding: 1rem;
+  background: var(--ifm-background-surface-color, #fafbfc);
+  display: inline-block;
+  margin-top: 1rem;
+  transition: background 0.2s, border 0.2s;
+}
+
+.file-tree-icon {
+  width: 16px;
+  vertical-align: middle;
+  /* Default: dark icon for light mode */
+  filter: invert(0%);
+  transition: filter 0.2s;
+}
+
+/* Dark mode styles */
+html[data-theme='dark'] .file-tree-box {
+  background: #23272f;
+  border-color: #444950;
+}
+
+html[data-theme='dark'] .file-tree-icon {
+  /* Invert icon color to white for dark mode */
+  filter: invert(100%);
+}
+
+.file-tree-box .file-list {
+  color: #000000 !important; /* or your preferred gray */
+}
+
+html[data-theme='dark'] .file-tree-box .file-list {
+  color:  #ffffff  !important; /* or your preferred gray */
+}
+
+.custom-codeblock-container {
+  position: relative;
+}
+.copy-icon-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  background: rgba(30,30,30,0.7);
+  border: none;
+  border-radius: 6px;
+  padding: 4px;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.2s, background 0.2s;
+  pointer-events: auto;
+}
+.custom-codeblock-container:hover .copy-icon-btn {
+  opacity: 1;
+}
+.copy-icon-btn svg {
+  display: block;
+}
+.copy-icon-btn.copied {
+  background: transparent;
+  animation: copied-pop 0.2s;
+}
+@keyframes copied-pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+  100% { transform: scale(1); }
+}
+
+.theme-doc-toc-desktop {
+  margin-right: 0.3em !important; /* or 0, or whatever looks best */
+  margin-left: -0em !important; /* or 0, or whatever looks best */
+}
+
+.timeline {
+  display: flex;
+  align-items: stretch;
+  gap: 1rem;
+  overflow-x: auto;
+  padding: 0.5rem;
+}
+
+
+.timeline-content {
+  font-size: 0.9rem;      /* or try 0.95rem or 0.9rem for even smaller */
+  line-height: 1.4;        /* tighter line spacing */
+}
+
+.timeline-content h4 {
+  font-size: 1.08rem;      /* slightly smaller heading */
+  margin-bottom: 0.4em;
+}
+
+.log-step-static,
+details.log-step-collapsible,
+details.log-step-collapsible[open] {
+  border: 1.3px solid #5012cb !important; 
+  background: #f7f4fd !important;        
+  border-radius: 10px !important;
+  margin: 0.5em 0 !important;
+  padding: 0.5em 1em !important;
+  font-family: var(--ifm-font-family-monospace, monospace);
+  color: #5012cb !important;             
+  font-size: 0.8em !important;
+  box-shadow: none !important;
+}
+
+/* Dark mode overrides */
+html[data-theme='dark'] .log-step-static,
+html[data-theme='dark'] details.log-step-collapsible,
+html[data-theme='dark'] details.log-step-collapsible[open] {
+  background: #2d2150 !important; /* lighter dark purple for better contrast */
+  color: #c6b8ff !important;      /* light purple text */
+  border: 1.3px solid #c6b8ff !important; /* light purple border */
+}
+
+/* Make the summary text light purple in dark mode */
+html[data-theme='dark'] details.log-step-collapsible > summary,
+html[data-theme='dark'] .log-step-summary {
+  color: #c6b8ff !important;
+}
+
+/* Make the custom arrow light purple in dark mode */
+html[data-theme='dark'] .log-arrow svg polygon {
+  fill: #c6b8ff !important;
+}
+
+details.log-step-collapsible > summary {
+  display: flex;
+}
+
+/* Add extra space below the last sidebar item */
+.theme-doc-sidebar-menu .menu__list > li:last-child {
+  margin-bottom: 0.8em; /* Adjust as needed */
+  line-height: var(--ifm-line-height-base);
+}
+
+/* Forzar interlineado compacto en toda la sidebar de Docusaurus */
+.theme-doc-sidebar-container,
+.theme-doc-sidebar-menu,
+.theme-doc-sidebar,
+.menu__list,
+.menu__list-item,
+.menu__link,
+.menu__link--sublist,
+.menu__link--sublist-caret,
+.menu__caret,
+.menu__list .menu__list,
+.menu__list .menu__list-item,
+.menu__list .menu__link {
+  line-height: 0.8 !important;
+}
+
+/* Ensure GitHub nav item stays in one line */
+.navbar__items--right .navbar__item {
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+}
+
+/* List styling with hierarchical bullets */
+article ul {
+  list-style-type: disc;
+  padding-left: 2em;
+  margin: 0.5em 0;
+}
+
+article ul ul {
+  list-style-type: circle;
+  margin: 0.2em 0;
+}
+
+article ul li {
+  margin: 0.3em 0;
+  position: relative;
+}
+
+article ol {
+  list-style-type: decimal;
+  padding-left: 2em;
+  margin: 0.5em 0;
+}
+article ol li {
+  margin: 0.3em 0;
+  position: relative;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .step {
+    padding-bottom: 2rem;
+  }
+  
+  .step-content {
+    font-size: 0.9em;
+  }
+  
+  .circle {
+    width: 32px;
+    height: 32px;
+    font-size: 1.2em;
+  }
+  
+  .step:not(:last-child)::after {
+    left: 15px;
+    top: 32px;
+    height: calc(100% - 32px);
+  }
+}
+
+@media (max-width: 480px) {
+  .step {
+    padding-bottom: 1.5rem;
+  }
+  
+  .circle {
+    width: 28px;
+    height: 28px;
+    font-size: 1.1em;
+    margin-right: 12px;
+  }
+  
+  .step:not(:last-child)::after {
+    left: 13px;
+    top: 28px;
+    height: calc(100% - 28px);
+  }
+  
+  .step-content {
+    font-size: 0.85em;
+  }
+}
+
+/* Responsive container padding */
+@media (max-width: 768px) {
+  .container {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .container {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+}
+
+

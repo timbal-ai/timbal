@@ -1,0 +1,50 @@
+{
+    "name": "docs",
+    "version": "0.0.0",
+    "private": true,
+    "scripts": {
+      "start": "docusaurus start",
+      "serve": "docusaurus serve",
+      "build": "docusaurus build",
+      "gh-pages": "gh-pages -d build",
+      "deploy": "GIT_USER=`git config user.name` USE_SSH=true docusaurus deploy"
+    },
+    "dependencies": {
+      "@docusaurus/core": "^3.8.1",
+      "@docusaurus/preset-classic": "^3.8.1",
+      "@fortawesome/free-brands-svg-icons": "^6.5.1",
+      "@fortawesome/free-solid-svg-icons": "^6.5.1",
+      "@fortawesome/react-fontawesome": "^0.2.0",
+      "@mdx-js/react": "^3.0.0",
+      "@tailwindcss/postcss": "^4.1.7",
+      "@tailwindcss/vite": "^4.1.7",
+      "autoprefixer": "^10.4.21",
+      "clsx": "^2.0.0",
+      "lucide-react": "^0.294.0",
+      "postcss": "^8.5.3",
+      "prism-react-renderer": "^2.3.0",
+      "react": "^18.2.0",
+      "react-dom": "^18.2.0",
+      "tailwindcss": "^4.1.7"
+    },
+    "devDependencies": {
+      "@docusaurus/module-type-aliases": "^3.8.1",
+      "@docusaurus/types": "^3.8.1",
+      "gh-pages": "^6.1.0"
+    },
+    "browserslist": {
+      "production": [
+        ">0.5%",
+        "not dead",
+        "not op_mini all"
+      ],
+      "development": [
+        "last 3 chrome version",
+        "last 3 firefox version",
+        "last 5 safari version"
+      ]
+    },
+    "engines": {
+      "node": ">=18.0"
+    }
+  }
