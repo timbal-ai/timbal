@@ -218,7 +218,7 @@ async for event in workflow(x=3):
 - **Type Safety**: Automatic parameter validation via Pydantic
 - **Composition**: Workflows can contain other workflows
 
-Check [Context](/workflows_v2/context.md) for data sharing between steps, and [Control Flow](/workflows_v2/control_flow.md) for different step execution behaviors.
+Check [Context](/workflows/context.md) for data sharing between steps, and [Control Flow](/workflows/control_flow.md) for different step execution behaviors.
 
 
 

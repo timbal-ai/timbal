@@ -18,9 +18,9 @@ A <span style={{color: 'var(--timbal-purple)'}}><strong>Runnable</strong></span>
 
 All runnables provide a unified interface and execution pattern, enabling seamless composition regardless of their underlying implementation:
 
-- **[Tools](../agents_v2/tools)** - Enhanced function wrappers with schema generation and parameter control
-- **[Agents](../agents_v2/index.md)** - Autonomous execution units that orchestrate LLM interactions with tool calling
-- **[Workflows](../workflows_v2/index.md)** - Programmable execution pipelines that orchestrate step-by-step processing
+- **[Tools](../agents/tools)** - Enhanced function wrappers with schema generation and parameter control
+- **[Agents](../agents/index.md)** - Autonomous execution units that orchestrate LLM interactions with tool calling
+- **[Workflows](../workflows/index.md)** - Programmable execution pipelines that orchestrate step-by-step processing
 
 All runnables must have a unique `name`. This name is used for tracing, debugging, and referencing the runnable in workflows, agents, and other components. Whether you're creating a Tool, an Agent, or a Workflow, the `name` parameter is required and must be unique within your application context.
 

@@ -55,6 +55,13 @@ html, body {
   max-width: 100vw !important;
 }
 
+/* Subtle TOC active styling */
+.theme-doc-toc-desktop .table-of-contents__link--active {
+  color: var(--ifm-color-primary) !important;
+  font-weight: 600 !important;
+}
+
+
 .container {
   margin-left: auto;
   margin-right: auto;
@@ -102,6 +109,7 @@ div[class^="alert"] .admonition-heading {
   z-index: 10; /* Ensure it's on top */
   background-color: white; /* Make it stand out */
 }
+
 
 .alert [class*="admonitionHeading"] {
   font-size: 0.8em !important;
@@ -666,9 +674,11 @@ html[data-theme='dark'] .file-tree-box .file-list {
   100% { transform: scale(1); }
 }
 
+/* Ensure proper TOC positioning without interfering with scroll-spy */
 .theme-doc-toc-desktop {
-  margin-right: 0.3em !important; /* or 0, or whatever looks best */
-  margin-left: -0em !important; /* or 0, or whatever looks best */
+  margin-right: 1rem !important;
+  margin-left: 0 !important;
+  /* Remove conflicting position rules - handled above */
 }
 
 .timeline {

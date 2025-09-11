@@ -46,4 +46,4 @@ Data sharing capabilities are provided through a hierarchical key format that en
 
 - **Parent Runnable Access** (`..` prefix): Access data from their immediate parent in the execution hierarchy. For example, the `..input` retrieves the input from the parent Runnable, enabling child components to build upon parent results.
 
-- **Neighbours Runnable Access**: Access data from neighbour Runnables. See section [Workflow Context](../workflows_v2/context.md) for more details.
+- **Neighbours Runnable Access**: Access data from neighbour Runnables. See section [Workflow Context](../workflows/context.md) for more details.
