@@ -351,6 +351,20 @@ Timbal generates comprehensive evaluation results in JSON format:
 
 ---
 
+:::warning Current Limitation
+**Important**: The eval system automatically overrides your agent's state saver configuration. During evaluation, your agent will use `JSONLSaver` regardless of its original configuration.
+
+<CodeBlock language="python" code={`# Your agent can use any state saver - it will be overridden during evals
+from timbal.state.savers import InMemorySaver, JSONLSaver, TimbalPlatformSaver
+
+agent = Agent(
+    # ... other parameters
+    state_saver=InMemorySaver()  # or any other saver - will be overridden
+)`}/>
+
+The eval system automatically sets: `agent.state_saver = JSONLSaver(path=Path("state.jsonl"))`
+:::
+
 ## Summary
 
 Timbal's evaluation framework provides:

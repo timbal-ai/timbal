@@ -7,345 +7,264 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 
 # Understanding Agents
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-Master proven strategies for designing advanced, specialized AI agents that work together seamlessly to tackle complex challenges.
+Master proven strategies for designing advanced, specialized AI agents using an architecture that work together seamlessly to tackle complex challenges.
 </h2>
 
 ---
 
-## What is an Agent?
+## What are Agents?
 
-An <span style={{color: 'var(--timbal-purple)'}}><strong>Agent</strong></span> is like having your own AI-powered teammate—one that can understand your goals, reason about the best way to achieve them, and take actions on your behalf. Powered by advanced Large Language Models (LLMs), Agents go far beyond simple chatbots or assistants.
+<span style={{color: 'var(--timbal-purple)'}}><strong>Agents</strong></span> are autonomous execution units that **orchestrate LLM interactions with tool calling**. 
 
-Think of an Agent as:
+Without tools, an agent functions as a basic LLM. The simplest agent requires just a name and model:
 
-- A digital coworker that can read, write, and analyze information.
-- A problem-solver that can break down complex tasks into steps and execute them.
-- A connector that can use tools, access APIs, search the web, or interact with other software to get things done.
+<CodeBlock language="python" code ={`from timbal import Agent
 
-<CodeBlock language="python" code ={`Agent()  # That's it! You've created your first agent!`}/>
-
-**Note:** Make sure to define all required environment variables—such as your OpenAI API key, your Gemini API key, the API key model that you need—in your `.env` file.
-
-<CodeBlock language="bash" title=".env" code ={`OPENAI_API_KEY=your_api_key_here`}/>
-
-## Quick Example
-
-Here's an example of an agent that uses a tool to get weather information:
-
-<CodeBlock language="python" code ={`from timbal import Agent, Tool
-
-# Define a weather tool
-def get_weather(location: str) -> str:
-    # This is a simplified example - in practice, you'd use a real weather API
-    return "The weather is sunny"
-
-# Create an agent with the weather tool
 agent = Agent(
-    model="gemini-2.5-pro-preview-03-25",
-    tools=[
-        Tool(
-            runnable=get_weather,
-            description="Get the weather for a specific location",
-        )
-    ]
-)
+    name="my_agent",
+    model="openai/gpt-5"
+)  # That's it! You've created your first agent!`}/>
 
-# Use the agent to get weather information
-response = await agent.complete(
-    prompt="What's the weather like in New York?"
+You can specify any model using the "provider/model" format. See all supported models in [Model Capabilities](/getting-started/model_capabilities).
+
+Some models require specific parameters (like `max_tokens` for Claude). Use `model_params` to pass any additional model configuration: 
+
+<CodeBlock language="python" code ={`agent = Agent(
+    name="claude_agent",
+    model="anthropic/claude-sonnet-4-latest",
+    model_params={
+        "max_tokens": 1024
+    }
 )`}/>
 
- **Agent Execution Logs**:
+**Note:** Make sure to define all required environment variables—such as the API key model that you need—in your `.env` file.
+
+<CodeBlock language="bash" title=".env" code ={`OPENAI_API_KEY=your_api_key_here
+ANTHROPIC_API_KEY=your_claude_api_key`}/>
+
+Define tools as Python functions - the framework handles schema generation, parameter validation, and execution orchestration.
+
+### Quick Example
+
+<CodeBlock language="python" code ={`from timbal import Agent
+
+def celsius_to_fahrenheit(celsius: float) -> str:
+    """Convert temperature from Celsius to Fahrenheit"""
+    fahrenheit = (celsius * 9/5) + 32
+    return f"{celsius}°C = {fahrenheit}°F"
+
+agent = Agent(
+    name="demo_agent",
+    model="openai/gpt-5-mini",
+    tools=[celsius_to_fahrenheit],
+    system_prompt="You are a helpful temperature conversion assistant."
+)
+
+await agent(prompt="What is 25 degrees Celsius in Fahrenheit?").collect()`}/>
+
+The framework performs automatic introspection of function signatures and docstrings for tool schema generation.
+
+**What happens behind the scenes:**
 
 <div className="log-step-static">
-  StartEvent(..., path='agent, ...)
+  start_event ... path=demo_agent ...
+</div>
+
+<div className="log-step-static">
+  start_event ... path=demo_agent.llm ...
 </div>
 
 <details className="log-step-collapsible">
 <summary>
-  OutputEvent(..., path='agent.llm-0', ...)
+  output_event ... path=demo_agent.llm ...
 </summary>
-<CodeBlock language="bash" code={`OutputEvent(...,
-    path='agent.llm-0', 
+<CodeBlock language="bash" code={`output_event ...
+    path=demo_agent.llm 
     input={
+      'model': 'openai/gpt-5-mini', 
       'messages': [
-        Message(
-          role=user,
-          content=[TextContent(
-            type='text', 
-            text="What's the weather like in New York?"
-          )]
-        )
-      ], 
-      'tools': [{
-        'type': 'function', 
-        'function': {
-          'name': 'get_weather',
-          'description': 'Get the weather for a specific location',
-          'parameters': {
-            'properties': {'location': {'title': 'Location', 'type': 'string'}}, 
-            'required': ['location'],
-            ...
-          }
+        {'role': 'user', 'content': [
+          {'type': 'text', 
+          'text': 'How many fahrenheit are 25 celsius'
+          }]
         }
-      }], 
-      'model': 'gpt-4',
-      ...
-    },
-    output=Message(
-      role=assistant,
-      content=[ToolUseContent(
-        type='tool_use', 
-        id='...', 
-        name='get_weather', 
-        input={'location': 'New York'}
-      )]
-    ), ...)
-`}/>
-</details>
-
-<div className="log-step-static">
-  StartEvent(..., path='agent.get_weather-call_...', ...)
-</div>
-
-<details className="log-step-collapsible">
-<summary>
-  OutputEvent(..., path='agent.get_weather-...)
-</summary>
-<CodeBlock language="bash" code={`OutputEvent(...,
-    path='agent.get_weather-...',
-    input={'location': 'New York'},
-    output=Message(
-      role=user,
-      content=[TextContent(type='text', text='The weather is sunny')]
-    ), ...)`}/>
-</details>
-
-<div className="log-step-static">
-  StartEvent(..., path='agent.llm-1', ...)
-</div>
-
-<details className="log-step-collapsible">
-<summary>
-  OutputEvent(..., path='agent.llm-1', ...)
-</summary>
-<CodeBlock language="bash" code={`OutputEvent(...,
-    path='agent.llm-1', 
-    input={
-      'messages': [
-        Message(
-          role=user, 
-          content=[TextContent(
-            type='text',
-            text="What's the weather like in New York?"
-          )]
-        ), 
-        Message(
-          role=assistant, 
-          content=[ToolUseContent(
-            type='tool_use',
-            id='...',
-            name='get_weather',
-            input={'location': 'New York'}
-          )]
-        ),
-        Message(
-          role=user, 
-          content=[ToolResultContent(
-            type='tool_result', 
-            id='call_...', 
-            content=[TextContent(type='text', text='The weather is sunny')]
-          )]
-        )
       ],
-      'tools': [{
-        'type': 'function', 
-        'function': {
-          'name': 'get_weather',
-          'description': 'Get the weather for a specific location',
-          'parameters': {
-            'properties': {'location': {'title': 'Location', 'type': 'string'}},
-            'required': ['location'],
-            ...
+      'system_prompt': 'You are a helpful temperature conversion assistant.',
+      'tools': [
+        {'name': 'celsius_to_fahrenheit',
+        'description': '', 
+        'input_schema': 
+          {'properties': 
+            {'celsius': {'title': 'Celsius', 'type': 'number'}},
+          'required': ['celsius'],
+          'title': 'CelsiusToFahrenheitParams',
+          'type': 'object'
           }
         }
-      }], 
-      'model': 'gpt-4',
-      ...
-    },
-    output=Message(
-      role=assistant, 
-      content=[TextContent(
-        type='text',
-        text='The weather in New York is sunny.'
-      )]
-    ),...)`}/>
+      ]
+    }
+    output={
+      'role': 'assistant',
+      'content': [
+        {'type': 'tool_use',
+        'id': '068b03c99cbe760c80003d233f0cc50f',
+        'name': 'celsius_to_fahrenheit',
+        'input': {'celsius': 25}
+        }
+      ]
+    }
+    usage={'gpt-5-mini-2025-08-07:input_text_tokens': 141, 'gpt-5-mini-2025-08-07:output_text_tokens': 91}
+    ...`}/>
+</details>
+
+<div className="log-step-static">
+  start_event ... path=demo_agent.celsius_to_fahrenheit ...
+</div>
+
+<details className="log-step-collapsible">
+<summary>
+  output_event ... path=demo_agent.celsius_to_fahrenheit ...
+</summary>
+<CodeBlock language="bash" code={`output_event ...
+    path=demo_agent.celsius_to_fahrenheit
+    input={'celsius': 25}
+    output='25.0°C = 77.0°F'
+    ...`}/>
+</details>
+
+<div className="log-step-static">
+  start_event ... path=demo_agent.llm ...
+</div>
+
+<details className="log-step-collapsible">
+<summary>
+  output_event ..., path=demo_agent.llm ...
+</summary>
+<CodeBlock language="bash" code={`output_event ...
+    path=demo_agent.llm, 
+    input={
+      'model': 'openai/gpt-5-mini',
+      'messages': [
+        {'role': 'user',
+        'content': [
+          {'type': 'text',
+          'text': 'How many fahrenheit are 25 celsius?'}
+        ]},
+        {'role': 'assistant',
+        'content': [
+          {'type': 'tool_use',
+          'id': '068b03c99cbe760c80003d233f0cc50f',
+          'name': 'celsius_to_fahrenheit',
+          'input': {'celsius': 25}
+          }
+        ]},
+        {'role': 'tool',
+        'content': [
+          {'type': 'tool_result',
+          'id': '068b03c99cbe760c80003d233f0cc50f',
+          'content': [
+            {'type': 'text', 'text': '25.0°C = 77.0°F'}
+          ]}
+        ]}
+      ],
+      'system_prompt': 'You are a helpful temperature conversion assistant.',
+      'tools': [
+        {'name': 'celsius_to_fahrenheit',
+        'description': '',
+        'input_schema': {'properties': {'celsius': {'title': 'Celsius', 'type': 'number'}},
+        'required': ['celsius'],
+        'title': 'CelsiusToFahrenheitParams',
+        'type': 'object'}}
+      ]
+    } 
+    output={
+    'role': 'assistant',
+    'content': [
+      {'type': 'text',
+      'text': '25°C is 77°F.'
+      }]
+    }
+    usage={'gpt-5-mini-2025-08-07:input_text_tokens': 186, 'gpt-5-mini-2025-08-07:output_text_tokens': 10}
+    ...`}/>
 </details>
 
 <details className="log-step-collapsible">
 <summary>
-  OutputEvent(..., path='agent', ...)
+  output_event ... path=demo_agent ...
 </summary>
-<CodeBlock language="bash" code={`OutputEvent(...,
-    path='agent',
-    input={
-      'prompt': {
-        'role': 'user', 
-        'content': [{
-          'type': 'text',
-          'text': "What's the weather like in New York?"
-        }]
-      }
-    },
-    output=Message(
-      role=assistant, 
-      content=[TextContent(
-        type='text',
-        text='The weather in New York is sunny.'
-      )]
-    ), ...)
+<CodeBlock language="bash" code={`output_event ...
+    path=demo_agent
+    input={'prompt': 'How many fahrenheit are 25 celsius?'}
+    output={
+      'role': 'assistant',
+      'content': [
+        {'type': 'text', 'text': '25°C is 77°F.'}
+    ]}
+    usage={'gpt-5-mini-2025-08-07:input_text_tokens': 327, 'gpt-5-mini-2025-08-07:output_text_tokens': 101}
+    ...
 `}/>
 </details>
 
 <div style={{marginTop: '2rem'}}>
-This example shows how to create an agent with a custom tool. The agent can now use the weather tool to fetch real-time weather data when needed. You can add multiple tools to make your agent even more powerful!
 </div>
 
-## Key Capabilities of an Agent
 
-Let's break down how an Agent thinks and works:
 
-<div className="timeline">
-<div className="timeline-item">
-<div className="timeline-content">
+## Architecture features
 
-<h4>Autonomous Reasoning</h4>
-Agents can decide what to do next based on your instructions and the current situation.
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Execution Engine</strong></span>:
+    - **Asynchronous concurrent tool execution** via multiplexed event queues
+    - Conversation state management with **automatic memory persistence across iterations**
+    - **Multi-provider LLM routing** with unified interface abstraction
+  
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Tool System</strong></span>:
+  - Runtime **tool** discovery with automatic OpenAI/Anthropic **schema generation**
+  - Support for nested Runnable composition and **hierarchical agent orchestration**
+  - **Dynamic parameter validation** using Pydantic models
 
-</div>
-</div>
-
-<div className="timeline-item">
-<div className="timeline-content">
-
-<h4>Tool Use</h4>
-They can use built-in or custom tools (like searching the internet, fetching data, or running code) to accomplish tasks.
-
-</div>
-</div>
-
-<div className="timeline-item">
-<div className="timeline-content">
-
-<h4>Memory</h4>
-Agents can remember previous interactions, decisions, or data, allowing them to work on long-term or multi-step projects.
-
-</div>
-</div>
-
-<div className="timeline-item">
-<div className="timeline-content">
-
-<h4>Adaptability</h4>
-They can handle a wide range of tasks, from answering questions to automating workflows.
-
-</div>
-</div>
-</div>
-
-<style>{`
-.timeline {
-  display: flex;
-  align-items: center;
-  margin: 1rem 0;
-  overflow-x: auto;
-  padding: 0.5rem;
-}
-
-.timeline-item {
-  width: 180px;
-  text-align: left;
-  padding: 0.5rem;
-  background: var(--ifm-background-color);
-  border-radius: 6px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
-
-.timeline-connector {
-  color: var(--ifm-color-primary);
-  font-size: 1.2rem;
-  padding: 0 0.5rem;
-}
-
-.timeline-content {
-  padding: 0.5rem;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
-
-.timeline-content h3 {
-  margin-bottom: 0.25rem;
-  font-size: 1rem;
-}
-
-.timeline-content ul {
-  list-style: disc;
-  padding-left: 1.2em;
-  margin: 0;
-}
-
-.timeline-content li {
-  margin: 0.15rem 0;
-  font-size: 0.85rem;
-}
-
-.timeline-content h4 {
-  color: var(--ifm-color-primary);
-  font-weight: bold;
-  margin-bottom: 0.5em;
-  margin-top: 0;
-}
-`}</style>
-
+- <span style={{color: 'var(--timbal-purple)'}}><strong>Advanced Runtime</strong></span>:
+  - Template-based **system prompt composition** with runtime callable injection
+  - Configurable **iteration limits** with autonomous termination detection
+  - Event-driven **streaming** architecture with real-time processing capabilities
+  - Pre/post execution hooks for cross-cutting concerns and runtime interception
 
 ## Running an Agent
 
-To execute an Agent, there are 2 possibilities depending on the synchronisation.
+Agent provides a streamlined execution interface:
 
 ### Get a Complete Answer
 
-For when the agent returns a complete response after processing. We will use the `complete()` function:
-
-<CodeBlock language="python" code ={`response = await agent.complete(prompt="What time is it?")`}/>
+<CodeBlock language="python" code ={`result = await agent(
+    prompt="What is 25 degrees Celsius in Fahrenheit?"
+).collect()`}/>
 
 ### Real-Time (Streaming) Output
 
-Otherwise, when we want to know specific information on each event we can find the response asynchrounsly by running `run()`:
+<CodeBlock language="python" code ={`async for event in agent(
+    prompt="What is 25 degrees Celsius in Fahrenheit?"
+):
+    print(event)`}/>
 
-<CodeBlock language="python" code ={`response = async for event in agent.run(prompt="What time is it?"):
-    print(event) `}/>
+Below are the events that get printed when you run this example:
 
-Events tell you what's happening in your agent. Here's what you can do with them:
+<div className="log-step-static">
+  type='START' ... path='demo_agent' ...
+</div>
 
-<CodeBlock language="python" code ={`async for event in agent.run(prompt="What time is it?"):
-    if event.type == "START":
-        print(f"Starting Agent: {event.step_id}")`}/>
-
-<CodeBlock language="python" code ={`async for event in agent.run(prompt="What time is it?"):
-    if event.type == "OUTPUT":
-        print(f"Agent finished in {event.elapsed_time}ms")
-        print(f"Outputs: {event.outputs}")`}/>
+<details className="log-step-collapsible">
+<summary>
+  type='OUTPUT' ... path='demo_agent' ...
+</summary>
+<CodeBlock language="bash" code={`type='OUTPUT'
+path='demo_agent'
+input={'prompt': 'What is 25 degrees Celsius in Fahrenheit?'}
+output=Message(role=assistant, content=[TextContent(type='text', text='25°C is 77°F.')])
+...
+usage={'gpt-5-mini-2025-08-07:input_text_tokens': 325, 'gpt-5-mini-2025-08-07:output_text_tokens': 37}`}/>
+</details>
 
 
 ## Next Steps
 
 - Try creating your own Agent with different tools
-- Experiment with different configurations
-- See an example agent in [Examples](/examples)
-
-Remember: The more you practice, the better you'll become at creating powerful Agents!
+- See examples in [Examples](/examples)

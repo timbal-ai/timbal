@@ -7,283 +7,220 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 # Orchestrating AI Workflows
 
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-Design, connect, and control multi-step AI pipelines using Flows—Timbal's flexible workflow engine.
+Design, connect, and control multi-step AI pipelines using Workflows.
 </h2>
 
 ---
 
-## What Are Flows?
+## What Are Workflows?
 
-A **Flow** is a programmable pipeline that lets you chain together steps—functions, LLMs, or even other flows—while controlling how data moves between them. Flows enable you to build complex, intelligent workflows with clear logic, memory, and branching.
+<span style={{color: 'var(--timbal-purple)'}}><strong>Workflows</strong></span> are programmable execution pipelines that **orchestrate step-by-step processing with explicit control flow**.
 
-<CodeBlock language="python" code={`from timbal import Flow
+<CodeBlock language="python" code={`from timbal.core import Workflow
 
-flow = Flow(id="my_flow")`}/>
+workflow = Workflow(name="my_workflow")`}/>
+
+This is the first step to create a workflow. Next, add components as building blocks.
 
 ---
 
-## Building Blocks of a Flow
+## Building Blocks of a Workflow: Steps
+<strong>Steps</strong> are the core units of work, which can process data, perform actions and pass results onward.
 
-<div className="cards-container">
-  <div className="card">
-    <div className="card-content">
-      <h3>Steps</h3>
-      <p>
-        <strong>Steps</strong> are the core units of work.
-
-        Each step can be:
-        - a function
-        - a BaseStep
-        - another flow. 
-        
-      Steps process data, perform actions, and pass results onward.
-      </p>
-    </div>
-  </div>
-  <div className="card">
-    <div className="card-content">
-      <h3>Links</h3>
-      <p>
-        <strong>Links</strong> define the order and dependencies between steps. 
-        
-        They control how data and execution flow from one step to another, and can be used for tool calls, tool results, and conditional branching.
-      </p>
-    </div>
-  </div>
-</div>
-
-<CodeBlock language="python" code={`flow = (
-    Flow()
-    .add_step("step_1", handler_1)
-    .add_step("step_2", handler_2)
-    .add_link("step_1", "step_2")
-)`}/>
-
+<!-- ### DAG-Based Execution
+Workflows form a **Directed Acyclic Graph (DAG)** where:
+- Steps can run in parallel when dependencies allow
+- No circular dependencies (prevents infinite loops)
+- Automatic dependency resolution and execution ordering
 
 <div style={{ textAlign: 'center', display: 'flex', justifyContent: 'center', alignItems: 'center', margin: '0rem 0' }}>
   <img src="/img/dag_link.png" style={{ width: '20rem', maxWidth: '100%' }} />
-</div>
----
+</div> -->
 
-## Controlling Step Inputs
 
-When building flows, you often need to control how each step receives its inputs. Timbal provides two powerful methods for this:
 
-- **Data Maps** (`set_data_map`): Dynamically connect a step's input to the output of another step or a flow input.
-- **Data Values** (`set_data_value`): Set a static value or template for a step's input.
 
-### Data Maps
-**Purpose:**
-Connect a step's input parameter to the output of another step, or to a flow input.
+### Adding Steps to the Workflow
 
-**Syntax:**
-<CodeBlock language="python" code={`.set_data_map("step_name.parameter", "source")`}/>
+Workflows use `.step()` method to add steps. **Any Runnable is valid to create a step**. This includes sync/async functions, Tool objects, Agents, and other Workflows. You can pass fixed parameters to steps using keyword arguments:
 
-- `step_name.parameter`: The input parameter of a step (e.g., `check.fahrenheit`).
-- `source`: The data key to use as the value. This can be:
-  - The output of another step (e.g., `to_fahrenheit.return`)
-  - A flow input (e.g., `input_x`)
+<!-- - **Functions**: Direct function references
+- **Tools**: Tool objects with handlers
+- **Dictionaries**: Tool configurations
+- **Other Workflows**: Nested workflow components
 
-**Example:**
-<CodeBlock language="python" code={`.set_data_map("to_fahrenheit.celsius", "get_temp.return")
-.set_data_map("check.fahrenheit", "to_fahrenheit.return")`}/>
+<CodeBlock language="python" code={`workflow = (Workflow(name="my_workflow")
+    .step(step_1)
+    .step(step_2)
+)`}/> -->
 
-This means:
-- The `celsius` parameter of the `to_fahrenheit` step receives the output of `get_temp`.
-- The `fahrenheit` parameter of the `check` step receives the output of `to_fahrenheit`.
 
-### Data Values
-**Purpose:**
-Set a static value or template for a step's input.
+<!-- ### Adding Steps with Parameters -->
 
-**Syntax:**
-<CodeBlock language="python" code={`.set_data_value("step_name.parameter", value)`}/>
 
-- `step_name.parameter`: The input parameter of a step (e.g., `check.threshold`).
-- `value`: A constant (e.g., `86`), or a template string (e.g., `"{{step_1.return}} and {{step_2.return}}"`).
 
-**Example:**
-<CodeBlock language="python" code={`.set_data_value("check.threshold", 86)`}/>
+<CodeBlock language="python" code={`def celsius_to_fahrenheit(celsius: float) -> float:
+    return (celsius * 9/5) + 32
 
-This means:
-- The `threshold` parameter of the `check` step will always be set to `86`.
-
-### Inputs and Outputs
-
-**Inputs** and **outputs** in a flow are special cases of data mapping:
-
-- **Inputs**: Use `.set_input("step.parameter", "input_name")` to specify that a step should receive its value from a flow input.
-- **Outputs**: Use `.set_output("step.return", "result_name")` to specify which step's output is returned by the flow.
-
-:::note
-The output key will always be "**.return**" (e.g., "to_fahrenheit.return"), since it refers to the return value of the step.
-:::
-
-**Example:**
-
-<CodeBlock language="python" code={`flow = (
-    Flow()
-    .add_step("to_fahrenheit", celsius_to_fahrenheit)
-    .set_input("to_fahrenheit.celsius", "input_celsius")  # input_celsius is a flow input
-    .set_output("to_fahrenheit.return", "fahrenheit")   # expose flow output
+def check_threshold(temperature: float, threshold: float) -> str:
+    return "Alert!" if temperature > threshold else "Normal"
+    
+workflow = (Workflow(name="temperature_alert")
+    .step(celsius_to_fahrenheit, celsius=35)
+    .step(check_threshold, temperature=80, threshold=lambda: 85)
 )`}/>
 
-This means:
-- The flow expects an input called `input_celsius`.
-- The output of `to_fahrenheit` will be available as `fahrenheit` in the flow's result.
 
----
+### Reusing Functions
 
-### Example: Temperature Alert Flow
+**Each step in a workflow must have a unique name**. If you need to use the same function multiple times in a workflow, wrap it in a new Tool each time with distinct names.
 
-<CodeBlock language="python" code={`from timbal import Flow
-
-def celsius_to_fahrenheit(celsius):
-    return celsius * 9 / 5 + 32
-
-def check_threshold(fahrenheit, threshold):
-    if fahrenheit > threshold:
-        return "Alert: Temperature is too high!"
-    else:
-        return "Temperature is normal."
-
-flow = (
-    Flow()
-    .add_step("to_fahrenheit", celsius_to_fahrenheit)
-    .add_step("check", check_threshold)
-    # Map Celsius input parameter to the function
-    .set_input("to_fahrenheit.celsius", "input_celsius")
-    # Map Fahrenheit output to threshold checker
-    .set_data_map("check.fahrenheit", "to_fahrenheit.return")
-    # Set a static threshold value
-    .set_data_value("check.threshold", 86)
-    .set_output("check.return", "status")
+<CodeBlock language="python" highlight="10" code={`# Create a Tool to reuse the function
+threshold_checker_tool = Tool(
+    name="threshold_checker",
+    handler=check_threshold
 )
 
-async def main():
-    result = await flow.complete(input_celsius=35)
-    print(result.output["status"])
-`}/>
+workflow = (Workflow(name="temperature_monitoring", temperature=80)
+    .step(celsius_to_fahrenheit, celsius=35)
+    .step(check_threshold, threshold=lambda: 85)
+    .step(threshold_checker_tool, threshold=lambda: 100)
+)`}/>
 
----
 
-## Dynamic Data with String Interpolation
 
-Template strings let you combine and transform outputs from multiple steps.  
-This is especially useful for LLM prompts or merging results.
+<!-- ### Connecting Steps
 
-<CodeBlock language="python" code={`from timbal import Flow
+Use `get_run_context().get_data("step_name.output")` to access outputs from neighbour steps:
 
-def get_first_name():
-    return "Alice"
+<CodeBlock language="python" code={`workflow = (Workflow(name="temperature_alert")
+    .step(step1, celsius=35)
+    .step(step2, temperature=lambda: get_run_context().get_data("step1.output"))
+)`}/>
 
-def get_last_name():
-    return "Smith"
+The framework automatically handles the dependency of one step on another step's data.
 
-def check_full_name(full_name):
-    if full_name == "Alice Smith":
-        return "Welcome, Alice Smith!"
-    else:
-        return f"User {full_name} not recognized."
+In the above example, you don't need `.link()` because step2 uses step1's output. When a step depends on another step's data, they run sequentially (implicit linking).
 
-flow = (
-    Flow()
-    .add_step("first_name", get_first_name)
-    .add_step("last_name", get_last_name)
-    .add_step("validate", check_full_name)
-    # Interpolate the outputs of first_name and last_name into a full name string
-    .set_data_value("validate.full_name", "{{first_name.return}} {{last_name.return}}")
-    .set_output("validate.return", "message")
+To force sequential execution, use `.link()`:
+
+<CodeBlock language="python" code={`def fetch_data():    # Takes 2 seconds
+    time.sleep(2)
+    return "data"
+
+def process_data():  # Takes 3 seconds
+    time.sleep(3)
+    return "processed"
+
+workflow = (Workflow(name="sequential_flow")
+    .step(fetch_data)      # Starts at 0s, finishes at 2s
+    .step(process_data)    # Starts at 2s, finishes at 5s
+    .link("fetch_data", "process_data")
 )
+# Total time: 5 seconds (2 + 3)`}/>
 
-async def main():
-    result = await flow.complete()
-    print(result.output["message"])`}/>
+Without `.link()`, steps run in parallel:
+
+<CodeBlock language="python" code={`def send_email():       # Takes 2 seconds
+    time.sleep(2)
+    return "email sent"
+
+def update_database():  # Takes 3 seconds
+    time.sleep(3)
+    return "db updated"
+
+workflow = (Workflow(name="parallel_flow")
+    .step(send_email)      # Starts at 0s, finishes at 2s
+    .step(update_database) # Starts at 0s, finishes at 3s
+)
+# Total time: 3 seconds (max of 2 and 3)`}/> -->
 
 ---
 
 ## Integrating LLMs
 
-You can add LLMs (Large Language Models) as steps in your flow using .add_llm().
-LLMs can use memory, call tools, and be chained with other steps for advanced reasoning.
-- **Memory**: Use the memory_id parameter to enable persistent context across runs.
-- **Tool Use**: Connect LLMs to tools or functions using .add_link(..., is_tool=True) and .add_link(..., is_tool_result=True) for advanced workflows.
-- **Prompt Construction**: Use string interpolation to dynamically build prompts from previous step outputs.
+You can add LLMs as steps. Timbal provides `llm_router` function that set as a Tool can work as an step.
 
-Suppose you want to fetch an email, then have an LLM summarize it:
+<CodeBlock language="python" code={`from timbal.core import Tool
+from timbal.core.workflow import Workflow
+from timbal.core.llm_router import llm_router
+from timbal.state import get_run_context
+from timbal.types.message import Message
 
-<CodeBlock language="python" code={`from timbal import Flow
-
-def get_email():
+def get_email() -> str:
     return "Hi team, let's meet tomorrow at 10am to discuss the project. Best, Alice"
 
-flow = (
-    Flow()
-    .add_step("fetch_email", get_email)
-    .add_llm("llm", model="gpt-4o-mini", memory_id="persistent_memory")
-    # Use string interpolation to build the prompt from the previous step
-    .set_data_value("llm.prompt", "Summarize this email: {{fetch_email.return}}")
-    .set_output("llm.return", "summary")
+openai_llm = Tool(
+  name="openai_llm",
+  handler=llm_router,
+  default_params={
+    "model": "openai/gpt-4o-mini",
+    "system_prompt": "You are a helpful assistant that summarizes emails concisely.",
+  }
 )
 
-async def main():
-    result = await flow.complete()
-    print(result.output["summary"].content[0].text)`}/>
-
-**What’s happening here?***
-- `fetch_email` retrieves the email text.
-- The LLM step receives a prompt that includes the email content.
-- The LLM generates a summary, which is returned as the flow output.
-
-:::tip
-You can chain multiple steps, use memory for context, and connect LLMs to external tools for even more powerful workflows.
-:::
-
-For more, see the [Advanced documentation](/workflows/advanced)
-
----
-
-## Enabling Memory and Finalizing Your Flow
-
-To enable advanced features like persistent memory, you need to finalize your flow using the .compile() method.
-
-Compiling your flow validates its structure and (optionally) attaches a state saver for memory.
-
-### Why compile?
-
-Compiling ensures your flow is ready for production, with all steps, data maps, and memory configured correctly.
-
-### How to enable memory?
-
-Pass a state saver (like InMemorySaver) to .compile() to persist context across runs.
-
-See [State Savers] for more information.
-
-<CodeBlock language="python" code={`from timbal.state.savers import InMemorySaver
-
-flow = (
-    Flow()
-    .add_llm(memory_id="persistent_memory")
-    .compile(state_saver=InMemorySaver())
+workflow = (
+    Workflow(name="email_summarizer")
+    .step(get_email)
+    .step(openai_llm, messages=lambda: [Message.validate(f"Summarize this email: {get_run_context().get_data('get_email.output')}")])
+    .link("get_email", "openai_llm")
 )`}/>
 
+## Default Parameters
+
+Look in the above example that the parameter of the function `openai_llm` comes from `default_params` ('model' and 'system_prompt') and runtime parameters (messages).
+
+Default parameters in Timbal allow you to set predefined values that are automatically injected into your runnable components, providing flexibility and reducing boilerplate code.
+
+Default parameters are defined when creating a runnable and are merged with runtime parameters. Runtime parameters always override default parameters.
+
 ---
 
-## How to Run Your Flow
+## Running the Workflow
 
-Once your flow is defined and compiled, you can execute it in two main ways:
+Once your Workflow is defined, you can execute it in two main ways:
 
 **Get the final output:**
-<CodeBlock language="python" code={`result = await flow.complete(input_x=123)
-print(result.output["result"])`}/>
+<CodeBlock language="python" code={`result = await workflow().collect()
+print(result.output)`}/>
 
 **Stream events as they happen:**
-<CodeBlock language="python" code={`async for event in flow.run(input_x=123):
+<CodeBlock language="python" code={`async for event in workflow():
     print(event)`}/>
+
+If a function in your flow needs a value per run (e.g., x), pass it when you call the workflow:
+
+- Inputs are routed only to steps that declare those parameters
+- Runtime inputs override step defaults
+- The same input name can feed multiple steps unless a step overrides it
+
+<CodeBlock language="python" code={`from timbal.core import Workflow
+
+def multiply(x: int) -> int:
+    return x * 2
+
+workflow = Workflow(name="simple_flow").step(multiply)
+
+# Run with a per-run input
+result = await workflow(x=1).collect()   # x is routed to multiply
+print(result.output)  # 2
+
+# Or stream events while using the same input
+async for event in workflow(x=3):
+    print(event)  # Final output will be 6`}/>
+
 
 ---
 
-For more, see the [Flows documentation](/workflows), [Advanced Flow Concepts](/workflows/advanced), and [Examples](/examples).
+## Key Features
+- **Parallel Execution**: Independent steps run concurrently
+- **Error Isolation**: Failed steps skip dependents, others continue
+- **Type Safety**: Automatic parameter validation via Pydantic
+- **Composition**: Workflows can contain other workflows
+
+Check [Context](/workflows_v2/context.md) for data sharing between steps, and [Control Flow](/workflows_v2/control_flow.md) for different step execution behaviors.
+
+
 
 <style>{`
 .cards-container {

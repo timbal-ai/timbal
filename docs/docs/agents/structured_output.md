@@ -1,0 +1,118 @@
+---
+title: Structured Output
+sidebar: 'docsSidebar'
+---
+import CodeBlock from '@site/src/theme/CodeBlock';
+
+# Structured Output
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+Use Pydantic models to structure and validate your agent outputs.
+</h2>
+
+---
+
+Instead of answering in natural language, the agent can return a specific output structure using [Pydantic's BaseModel](https://docs.pydantic.dev/latest/api/base_model/). The agent will use this structure when the user's query relates to it; otherwise, it will disregard it and default to a natural language response.
+
+## Why Using Structured Output?
+Using Pydantic models for structured output ensures your agents return predictable, type-safe responses.
+This approach:
+- Automatically validates and parses responses
+- Guarantees all required fields are present and correctly typed
+- Reduces ambiguity compared to natural-language answers
+
+By defining schemas upfront, you can trust that your agent’s output will always match your expectations.
+
+
+## Usage
+1. Define the desired output schema using a [Pydantic Model](https://docs.pydantic.dev/latest/api/base_model/).
+2. Pass that model to the agent’s `output_model` parameter.
+3. The agent will always return responses that conform to the schema.
+
+
+For example, here’s a schema for a chef assistant agent:
+
+<CodeBlock language="python" code ={
+`from pydantic import BaseModel
+
+
+class Ingredient(BaseModel):
+    name: str = Field(..., description="Name of the ingredient")
+    amount: float = Field(..., description="Amount of the ingredient")
+    unit: str = Field(..., description="Unit of the ingredient")
+
+class Recipe(BaseModel):
+    ingredients: list[Ingredient] = Field(..., description="List of ingredients")
+    total_time: float = Field(..., description="Total time in minutes")
+    steps: list[str] = Field(..., description="Steps to follow")
+
+
+agent = Agent(
+    name="output_model_agent",
+    model="openai/gpt-4o-mini",
+    output_model=Recipe)
+
+response = await agent(
+    prompt="I want to make lasagna, can you generate a lasagna recipe for me?"
+).collect()
+`}/>
+
+
+### Output Example
+
+The response will strictly follow the Recipe structure:
+
+<CodeBlock language="python" code ={`
+  {
+    "ingredients": [
+      {
+        "name": "Egg yolks",
+        "amount": 6,
+        "unit": "pieces"
+      },
+      {
+        "name": "Granulated sugar",
+        "amount": 150,
+        "unit": "grams"
+      },
+      {
+        "name": "Mascarpone cheese",
+        "amount": 500,
+        "unit": "grams"
+      },
+      {
+        "name": "Heavy cream",
+        "amount": 250,
+        "unit": "ml"
+      },
+      {
+        "name": "Strong brewed coffee (cooled)",
+        "amount": 300,
+        "unit": "ml"
+      },
+      {
+        "name": "Ladyfinger biscuits",
+        "amount": 300,
+        "unit": "grams"
+      },
+      {
+        "name": "Unsweetened cocoa powder",
+        "amount": 2,
+        "unit": "tbsp"
+      }
+    ],
+    "total_time": "40 minutes",
+    "steps": [
+      "Whisk egg yolks and sugar together until thick and pale.",
+      "Fold in mascarpone cheese until smooth.",
+      "Whip heavy cream to stiff peaks and gently fold into mascarpone mixture.",
+      "Dip ladyfinger biscuits briefly in brewed coffee and arrange in a single layer in a dish.",
+      "Spread half of the mascarpone cream mixture over the biscuits.",
+      "Add another layer of dipped ladyfingers and top with remaining cream.",
+      "Dust generously with cocoa powder.",
+      "Refrigerate at least 4 hours (preferably overnight) before serving."
+    ]
+  }
+`}
+/>
+
+

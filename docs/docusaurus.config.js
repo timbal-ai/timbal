@@ -68,19 +68,10 @@ const config = {
     [
       '@docusaurus/plugin-content-docs',
       {
-        id: 'docs2',  // Second docs section
-        path: 'docs2',
-        routeBasePath: 'docs2',
-        sidebarPath: './sidebars-v2.js',
-      },
-    ],
-    [
-      '@docusaurus/plugin-content-docs',
-      {
         id: 'examples',  // Second docs section
         path: 'examples',
         routeBasePath: 'examples',
-        sidebarPath: './sidebars-examples.js',
+        sidebarPath: './sidebars_examples.js',
       },
     ],
   ],
@@ -102,15 +93,8 @@ const config = {
         items: [
           {
             type: 'doc',
-            docId: 'introduction/index',
+            docId: 'introduction',
             label: 'Docs',
-            position: 'left',
-          },
-          {
-            type: 'doc',
-            docsPluginId: 'docs2',
-            docId: 'introduction_v2/index',
-            label: 'Docs v2',
             position: 'left',
           },
           {

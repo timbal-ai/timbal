@@ -7,169 +7,122 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 # Understanding Tools
 
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-Give your agents superpowers by adding tools to interact with APIs, perform calculations, and more.
+Give your agents the ability to interact with the outside world through automatic schema generation, parameter validation, and concurrent execution.
 </h2>
 
 ---
 
-Tools are the way to give your Agents superpowers: they allow your agent to interact with the outside world, call APIs, perform calculations, and much more.
+## Basic Usage
 
-## What is a Tool?
-
-A **Tool** is a function (or callable) that your agent can invoke. You can use:
-- Your own Python functions
-- Pre-built tools provided by Timbal
-- Tools defined as objects or dictionaries
-
-## How to Create a Tool
-
-### 1. Define a Python Function
-
-You can start with a simple function:
+Add tools to agents as functions or `Tool` objects:
 
 <CodeBlock language="python" code ={`def get_weather(location: str) -> str:
-    return "The weather is sunny!"`}/>
+    """Get weather for a location."""
+    return f"Weather in {location}: 22°C"
 
-### 2. Wrap it as a Tool
-
-You can wrap your function as a Tool object, or just pass the function directly:
-
-<CodeBlock language="python" code ={`from timbal.core.agent.types.tool import Tool
-
-weather_tool = Tool(
-    runnable=get_weather,
-    description="Get the weather for a location",
+agent = Agent(
+    name="weather_agent",
+    model="openai/gpt-4o-mini",
+    tools=[get_weather]  # Function automatically becomes a tool
 )`}/>
 
-Or, you can use a dictionary:
+## Tool Configuration
 
-<CodeBlock language="python" code ={`weather_tool = {
-    "runnable": get_weather,
-    "description": "Get the weather for a location",
-    # Only required params are exposed to the LLM
-    "params_mode": "required",
-}`}/>
+Use `Tool` for custom descriptions and parameter control:
 
-### 3. Add the Tool to Your Agent
+<CodeBlock language="python" code ={`from timbal import Tool
+
+# Custom description - helpful when function name isn't clear enough
+Tool(
+    handler=get_weather,
+    description="Get current weather information for any location"
+)`}/>
+
+When a tool has many parameters, use `schema_params_mode="required"` to reduce tokens and avoid overwhelming the LLM with unnecessary options:
+
+<CodeBlock language="python" code ={`Tool(
+    handler=search,
+    schema_params_mode="required"  # Only show required params (default: "all")
+)`}/>
+
+You can also include or exclude specific parameters to fine-tune what the LLM sees:
+
+<CodeBlock language="python" code ={`# Include extra parameters even in "required" mode
+Tool(
+    handler=search_function,
+    schema_params_mode="required",
+    schema_include_params=["model"]  # Include this optional param
+)
+
+# Exclude sensitive or internal parameters
+Tool(
+    handler=api_function,
+    schema_exclude_params=["api_key", "debug_mode"]  # Hide from LLM
+)`}/>
+
+Set default values that are automatically applied when the tool is called:
+
+<CodeBlock language="python" code ={`Tool(
+    handler=database_query,
+    default_params={
+        "timeout": 30
+    }  # These values are used when not specified by the LLM
+)`}/>
+
+You can also use functions or environment variables as default parameters:
+
+<CodeBlock language="python" code ={`def get_current_timestamp():
+    return datetime.now().isoformat()
+
+def process_data(data: str, timestamp: str | None = None, user_id: str = "default"):
+    return f"Processed {data} at {timestamp} by {user_id}"
+
+# Tool with dynamic default parameters
+tool = Tool(
+    name="data_processor",
+    handler=process_data,
+    default_params={
+        "timestamp": get_current_timestamp,
+        "user_id": "system_user"
+    }
+)`}/>
+
+## Agent as a Tool
+
+You can use an Agent as a tool within another Agent, enabling hierarchical agent compositions where specialized agents handle specific tasks.
+
+Since `Agent` instances can be treated as `Tool` objects, they inherit the same parameter control configurations available to regular tools.
 
 <CodeBlock language="python" code ={`from timbal import Agent
 
-agent = Agent(
-    tools=[weather_tool]
+def calculate_cost(days: int, hotel_rate: float, flights: float = 0) -> float:
+    """Calculate total trip cost."""
+    return (days * hotel_rate) + flights
+
+# Pricing specialist agent
+pricing_agent = Agent(
+    name="pricing_calculator",
+    description="Calculate travel costs",  # Tool description for other agents
+    model="openai/gpt-4o-mini",
+    system_prompt="Answer only with the price. Any text",
+    tools=[calculate_cost]
+)
+
+# Main travel agent
+travel_agent = Agent(
+    name="travel_assistant", 
+    model="openai/gpt-4o",
+    system_prompt="Help plan trips and provide travel advice.",
+    tools=[pricing_agent]
 )`}/>
-
-## Using Built-in Tools
-
-Timbal comes with many built-in tools, such as `search` using Perplexity or `send_message` using Slack.  
-You can add them directly:
-
-<CodeBlock language="python" code ={`from timbal.steps.perplexity import search
-
-agent = Agent(
-    tools=[search]
-)`}/>
-
-Find more in the [Integrations](/integrations) section.
-
-## Customizing Tool Parameters
-
-You can control which parameters are visible to the LLM and how they are described.
-
-### Field Descriptions and Choices
-
-Use `Field` to add descriptions and choices to your function parameters:
-
-<CodeBlock language="python" code ={`from timbal.types import Field
-
-def get_weather(
-    location: str = Field(description="The location to get the weather for"),
-    unit: str = Field(choices=["celsius", "fahrenheit"], description="Temperature unit")
-) -> str:
-    ...`}/>
-
-### Controlling Parameter Visibility
-
-- **params_mode**: `"all"` (default) exposes all params, `"required"` exposes only required ones.
-- **include_params**: List of param names to always include.
-- **exclude_params**: List of param names to exclude.
-
-#### Only show required params
-
-<CodeBlock language="python" code ={`Tool(
-    runnable=get_weather,
-    description="Get the weather for a location",
-    params_mode="required"
-)`}/>
-
-#### Include extra params
-
-<CodeBlock language="python" code ={`Tool(
-    runnable=get_weather,
-    description="Get the weather for a location",
-    params_mode="required",
-    # Even if not required, 'unit' will be shown
-    include_params=["unit"]  
-)`}/>
-
-#### Exclude params
-
-<CodeBlock language="python" code ={`Tool(
-    runnable=get_weather,
-    description="Get the weather for a location",
-    # 'unit' will not be shown to the LLM
-    exclude_params=["unit"]  
-)`}/>
-
-#### Dictionary style
-
-<CodeBlock language="python" code ={`{
-    "runnable": get_weather,
-    "description": "Get the weather for a location",
-    "params_mode": "required",
-    # You can combine include/exclude
-    "include_params": ["unit"],
-    "exclude_params": ["location"],
-}`}/>
-
-## Adding Descriptions
-
-Always add a `description` to your tool! This helps the LLM understand when and how to use it.
-
-<CodeBlock language="python" code ={`Tool(
-    runnable=get_weather,
-    description="Get the weather for a location"
-)`}/>
-
-## Using Tools in Agents
-
-You can combine multiple tools, both custom and built-in:
-
-<CodeBlock language="python" code ={`from timbal.steps.perplexity import search
-
-agent = Agent(
-    tools=[
-        search,
-        Tool(
-            runnable=get_weather,
-            description="Get the weather of a location",
-            exclude_params=["query"]
-        ),
-        {
-            "runnable": get_time,
-            "description": "Get the time of a location",
-            "params_mode": "required",
-            "include_params": ["model"]
-        }
-    ]
-)`}/>
-
 
 ## Summary
 
-- Tools let your agent interact with the world.
-- You can use your own functions, built-in tools, or dictionaries.
-- Customize which parameters are visible and how they are described.
-- Add clear descriptions for best results.
+- **Automatic Introspection**: Function signatures become tool schemas automatically
+- **Enhanced Validation**: Pydantic-based parameter validation
+- **Execution Flexibility**: Support for all Python callable types
+- **Better Configuration**: Fine-grained parameter control
+- **Performance**: Concurrent execution and optimized patterns
+- **Robustness**: Improved error handling and tracing
 
-For more, see the [Integrations](/integrations) and [Advanced Tools](/agents/tools) docs!
-
+For more advanced patterns, see the [Integrations](/integrations) and explore the built-in tools in the Timbal library!
