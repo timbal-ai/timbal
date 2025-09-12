@@ -108,6 +108,7 @@ const highlightMap = {
   and: 'custom-highlight-pink',
   elif: 'custom-highlight-pink',
   else: 'custom-highlight-pink',
+  type: 'custom-highlight-blue',
   break: 'custom-highlight-pink',
   pass: 'custom-highlight-pink',
   isinstance: 'custom-highlight-blue',
@@ -470,8 +471,8 @@ export default function CodeBlock(props) {
                             }
                           }
 
-                          // Apply custom highlighting
-                          if (typeof content === 'string') {
+                          // Apply custom highlighting (but skip if token is already a string)
+                          if (typeof content === 'string' && !token.types.includes('string')) {
                             const highlightedContent = content.replace(
                               regex,
                               (match) => `<span class="${highlightMap[match]}">${match}</span>`

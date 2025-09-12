@@ -70,4 +70,4 @@ Note that runtime parameters always override default values, including callable 
 
 <CodeBlock language="python" code={`result = await add_tool(a=5, b=10).collect() # Returns 15`}/>
 
-In the above example, `b=10` is passed at runtime and overrides the callable default that would generate a random number.
+> In the above example, `b=10` is passed at runtime and overrides the callable default that would generate a random number.

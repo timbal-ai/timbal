@@ -1,115 +1,134 @@
 ---
-title: Events, Traces & Streaming
+title: Events & Streaming
 sidebar: 'docsSidebar'
 ---
 import CodeBlock from '@site/src/theme/CodeBlock';
 
-# Events, Traces & Streaming
+# Events & Streaming
 
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-Monitor execution in real-time, handle streaming results, debug your Runnables with comprehensive event tracking, and analyze detailed traces of execution flow.
+Monitor execution in real-time and handle streaming results.
 </h2>
 
 ---
 
-## What are Events?
+## Streaming
+
+In the previous [examples](./runnables.md#parameter-handling-and-basic-execution), we used `.collect()` to get the final result. When you call a Runnable, it doesn't just return the answer - it returns a stream of events that tell you what's happening step by step. The `.collect()` method waits for all events and gives you just the final answer.
+
+You can iterate through the async generator to process events in real-time:
+
+<CodeBlock language="python" code={`async for event in add_tool(a=5, b=3):
+    print(event)
+
+# Output:
+# StartEvent(run_id='068c4458-382e-79bb-8000-6dc019ac3039', ...)
+# OutputEvent(run_id='068c4458-382e-79bb-8000-6dc019ac3039', output=8, ...)`}/>
+
+This enables you to:
+- Monitor execution progress in real-time
+- Handle streaming responses from LLMs
+- Debug execution flow
+- Build reactive user interfaces
+
+---
+
+## Understanding Events
+
 Events are the communication mechanism that Runnables use to stream information throughout their execution lifecycle. Every Runnable execution produces a sequence of events that can be consumed in real-time or collected for later processing.
 
+Every execution produces at least a **Start** event (when it begins) and an **Output** event (when it finishes). LLMs and streaming operations also produce **Chunk** events for intermediate results.
 
-### Event Types
+The following examples show what these events look like for an LLM interaction:
 
-#### Start Event
-Signals the beginning of a Runnable execution. 
+### Start Event
+Signals the beginning of an execution. 
 <CodeBlock language="python" code={`from timbal.types.events import StartEvent
 
 start_event = StartEvent(
-    run_id="run_123",
-    parent_run_id="parent_456", 
-    path="workflow.step1",
-    call_id="call_789",
-    parent_call_id="parent_call_101"
+    run_id="068c4458382e79bb80006dc019ac3039",
+    parent_run_id=None, 
+    path="agent.llm",
+    call_id="068c4458383678be800031537a8df42e",
+    parent_call_id="068c4458382e708f8000cc0f9b19d970",
 )`}/>
 
-#### Chunk Event
-Contains streaming or intermediate results during execution (generators, async generators, streaming responses).
+> The `path`, `call_id`, and `run_id` fields help track execution flow and will be explained in detail in the [Tracing](./tracing.md) section.
+
+### Chunk Event
+Contains streaming or intermediate results during execution.
 <CodeBlock language="python" code={`from timbal.types.events import ChunkEvent
 
 chunk_event = ChunkEvent(
-    run_id="run_123",
-    parent_run_id="parent_456",
-    path="workflow.step1", 
-    call_id="call_789",
-    parent_call_id="parent_call_101",
-    chunk="Processing item 1..."
+    run_id="068c4458382e79bb80006dc019ac3039",
+    parent_run_id=None,
+    path="agent.llm", 
+    call_id="068c4458383678be800031537a8df42e",
+    parent_call_id="068c4458382e708f8000cc0f9b19d970",
+    chunk="Hello"
 )`}/>
 
+> The `chunk` property contains each piece of the response as it's generated during streaming.
 
-#### Output Event 
-Contains the final result and execution metadata.
+### Output Event 
+Contains the final result with complete execution information.
 
 <CodeBlock language="python" code={`from timbal.types.events import OutputEvent
 
 output_event = OutputEvent(
-    run_id="run_123",
-    parent_run_id="parent_456",
-    path="workflow.step1",
-    call_id="call_789", 
-    parent_call_id="parent_call_101",
-    input={"name": "Alice"},
-    output="Hello, Alice!",
+    run_id="068c4458382e79bb80006dc019ac3039",
+    parent_run_id=None,
+    path="agent.llm",
+    call_id="068c4458383678be800031537a8df42e", 
+    parent_call_id="068c4458382e708f8000cc0f9b19d970",
+    input={
+        "model": "openai/gpt-4o-mini", 
+        "messages": [{
+            "role": "user", 
+            "content": [{"type": "text", "text": "Hello"}]
+        }], 
+    },
+    output={
+        "role": "assistant", 
+        "content": [{"type": "text", "text": "Hello! How can I assist you today?"}]
+    },
     error=None,
-    t0=1640995200000,  # Start timestamp
-    t1=1640995201000,  # End timestamp
-    usage={"tokens": 150}
+    t0=1640995200000,
+    t1=1640995201000,
+    usage={
+        "gpt-4o-mini-2024-07-18:input_text_tokens": 32, 
+        "gpt-4o-mini-2024-07-18:output_text_tokens": 10,
+    },
+    metadata={
+        "type": "LLM", 
+        "model_provider": "openai", 
+        "model_name": "gpt-4o-mini", 
+        "ttft": 1.218775834015105,  # Time to first token
+        "tps": 103.44992571967803,   # Tokens per second
+    },
 )`}/>
 
-
----
-### Real-time execution
- <!--1. event pipeline, async code  -->
- All Runnables generate at least two events: Input and Output. All events generated by nested Runnables within a parent Runnable are stored and associated with the parent Runnable that initiated the execution.
-
-Iterate over the async generator returned by calling a Runnable to process events in real-time:
-
- <CodeBlock language="python" code={`async for event in runnable(**kwargs):
-    print(event)`}/> 
-
----
-### The `Collect()` Method for Final Result Access
-The `collect()` method extracts the final result from an async generator without manually iterating through all the events. It returns the output value from the Output Event.
-
-<CodeBlock language="python" code={`# Instead of manually iterating through events
-async for event in runnable(**kwargs):
-    if isinstance(event, OutputEvent):
-        result = event.output
-        break
-
-# You can simply use collect()
-result = await runnable(**kwargs).collect()`}/> 
-
+> Contains the `input` that was passed, the final `output` (or `error` if something went wrong), `usage` metrics, and execution `metadata`.
 
 ---
 
-### Handle Errors
-Check for errors in Output Events to handle exceptions:
+## Handling Errors
 
-<CodeBlock language="python" code={`async for event in runnable(**kwargs):
-    if isinstance(event, OutputEvent) and event.error:
-        print(f"Error: {event.error['message']}")
-        print(f"Traceback: {event.error['traceback']}")`}/>
+When a Runnable encounters an error during execution, it **won't raise an exception**. Instead, it will always return an `OutputEvent` with error information. This ensures the event stream continues and you can handle errors gracefully:
 
----
+<CodeBlock language="python" code={`try:
+    result = await runnable(**kwargs).collect()
+except Exception as e:
+    # This won't happen - errors are in the OutputEvent
+    pass
 
-## What are Traces?
+# Result will always be an instance of OutputEvent
+if result.error:
+    print(f"Error: {result.error['message']}")`}/>
 
-Timbal provides comprehensive execution tracing that captures every aspect of runnable execution, **from input parameters to final outputs, including timing data, error states, and usage metrics**. A <span style={{color: 'var(--timbal-purple)'}}><strong>Trace</strong></span> is the core data structure that captures execution information for every runnable execution, providing a complete audit trail of what happened. This tracing system enables complete observability into your application's behavior and performance.
-
-
-### Events vs. Traces:
-Output Events and Traces have a similar data, but serve different purposes. Events are in fact the source data that gets processed into persistent Trace records.
-
-- <span style={{color: 'var(--timbal-purple)'}}><strong>Events</strong></span> are real-time notifications that stream during execution. They provide immediate feedback about what's happening (start, progress chunks, completion) but are not stored permanently. Events are consumed as they're generated and are ideal for real-time monitoring, progress tracking, and streaming responses.
-
-- <span style={{color: 'var(--timbal-purple)'}}><strong>Traces</strong></span> are persistent records that capture the complete execution context. They contain detailed execution metadata, timing information, resource usage, and complete input/output snapshots.
-
-**Memory Management and Persistence**: Traces persistence enable memory management by tracking resource usage patterns, maintaining execution history for debugging, and supporting long-term performance analysis and audit trails.
+Errors will always have this structure:
+<CodeBlock language="python" code={`error = {
+    "type": "ValueError",
+    "message": "Invalid input provided",
+    "traceback": "Traceback (most recent call last):\\n..."
+}`}/>

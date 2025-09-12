@@ -26,6 +26,7 @@ const sidebars = {
         'core_concepts/runnables',
         'core_concepts/events',
         'core_concepts/context',
+        'core_concepts/tracing',
       ],
     },
     {
