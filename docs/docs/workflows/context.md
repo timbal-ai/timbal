@@ -7,12 +7,10 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 # Context
 
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-Store and access information across different steps. 
-This enables data sharing, state management, and complex data flows between workflow steps.
+Share data between Workflow steps.
 </h2>
 
 ---
-
 
 
 ## Step Variables
@@ -22,7 +20,7 @@ Every step in a workflow has access to two built-in variables:
 - **`.input`**: Contains all the parameters passed to the step. They are accessed through their name.
 - **`.output`**: Contains the value(s) returned by the step. Can be a single value, dictionary, array, or custom class.
 
-Additionally, **custom variables** can be linked to a step using the [`get_run_context().set_data`](#the-get_run_context-function) function.
+Additionally, **custom variables** can be linked to a step using the [`get_run_context().set_data`](#the-get_run_context-function) method.
 
 <CodeBlock language="python" highlight="6" code ={`import asyncio
 import datetime
@@ -44,12 +42,12 @@ workflow = (Workflow(name='user_workflow')
 
 After the workflow runs, each step has the following variables:
 
-### Step `process_user_data`
+#### `process_user_data`:
 <CodeBlock language="python" code={`.input.user_id       = 'user_123'
 .output              = 'Processed user: user_123'
 .user_status         = 'active'`}/>
 
-### Step `send_notification`
+#### `send_notification`:
 <CodeBlock language="python" code={`.input.message       = 'Welcome!'
 .input.user          = 'user_123'
 .output[0]           = 'Welcome!'
@@ -58,8 +56,8 @@ After the workflow runs, each step has the following variables:
 
 
 ## Accessing the Context
-### The `get_run_context()` Function
-This function is the primary way to interact with workflow context data. It provides access to the current step's context and allows you to read and write data that can be shared across workflow steps.
+### The `get_run_context()` Method
+This function provides access to the current run context and allows you to read and write data that can be shared across workflow steps.
 
 - **`get_data(path)`**:
   - Returns the value from the specified path.
@@ -72,14 +70,14 @@ This function is the primary way to interact with workflow context data. It prov
 
 
 ### Variable Access
-Context paths use a hierarchical structure. Within a workflow, each step has access to its own data as well as the data produced by other steps, since information is shared across the entire process.
+Context paths use a hierarchical structure, enabling each step to access both its own variables and those from other steps within the workflow.
 
 - **Current step**: Use `.` to access variables from the current step
   - `.input.parameter_name`
   - `.output`
   - `.custom_variable`
 
-- **Parent step**: Use `..` to access data from the parent step in the workflow
+- **Parent step**: Use `..` to access data from the parent run in the workflow
   - `..output`
   - `..custom_variable`
 
@@ -91,13 +89,13 @@ Context paths use a hierarchical structure. Within a workflow, each step has acc
 
 <!-- To access context variables within your step functions, use the `get_run_context()` function: -->
 
-<CodeBlock language="python" code={`async def check_status():
+<CodeBlock language="python" highlight="2" code={`async def check_status():
     status = get_run_context().get_data("process_user_data.user_status")
     print(f"Your current status is: {status}")
-
 
 workflow = (Workflow(name='user_workflow')
     .step(process_user_data, user_id="user_123")
     .step(send_notification, message="Welcome!", user="user_123")
     .step(check_status)
 )`}/>
+

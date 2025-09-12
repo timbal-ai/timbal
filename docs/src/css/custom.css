@@ -94,9 +94,14 @@ div[class^="alert"] .admonition-heading {
   color: #ffffff !important;
 } */
 
+/* Make h3 headings black like other headings */
+article h3 {
+  color: var(--ifm-font-color-base) !important;
+}
+
 /* Change h3 headers color in dark mode */
 [data-theme='dark'] article h3 {
-  color: white;
+  color: var(--ifm-font-color-base) !important;
 }
 
 /* Make the sidebar stay fixed */

@@ -29,7 +29,7 @@
   
   h3 {
     margin: 5px 0;
-    color: var(--ifm-color-primary);
+    color: var(--ifm-font-color-base) !important;
   }
   
   p {
@@ -42,7 +42,7 @@
   }
   
   [data-theme='dark'] h3 {
-    color: var(--ifm-color-primary);
+    color: var(--ifm-font-color-base) !important;
   }
   
   [data-theme='dark'] p {

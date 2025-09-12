@@ -13,7 +13,7 @@ Workflows are broken into multiple steps, which can be executed following differ
 ---
 
 ## Default Execution
-Steps run in parallel by default. If one step produces an output needed by another, **the framework automatically enforces sequential execution between those steps**. The dependency is resolved under the hood.
+Steps run in **parallel** by default. If one step produces an output needed by another, **the framework automatically enforces sequential execution between those steps**. The dependency is resolved under the hood.
 
 <!-- TODO: Add code example of dependencies -->
 
@@ -40,13 +40,14 @@ workflow = (Workflow(name='my_workflow')
 In this example, we have:
 - `func_1` and `func_2` run concurrently.
 - `func_3` starts only after `func_1` has finished.
-- The workflow's final output will be `b`, since `func_2` it is the last to finish.
+- The workflow's final output will be ***b***, since `func_2` it is the last to finish.
 
+---
+## Forcing Sequential Execution
+Steps can be run sequentially even if there is no data dependency with `depends_on` parameter.
+<!-- The `depends_on` parameter allows to explicitly control ordering: -->
 
-## Forcing Sequential Execution:
-Steps can be run sequentially even if there is no data dependency. The `depends_on` parameter allows to explicitly control ordering:
-
-<CodeBlock language="python" code ={`workflow = (Workflow(name='my_workflow')
+<CodeBlock language="python" highlight="3" code ={`workflow = (Workflow(name='my_workflow')
     .step(func_1, x="a")
     .step(func_2, y="b", depends_on=[func_1])
     .step(func_3)
@@ -54,13 +55,13 @@ Steps can be run sequentially even if there is no data dependency. The `depends_
 
 Now, both steps `func_2`and `func_3` must wait for `func_1` to finish.
 
-
+---
 ## Conditional Execution
 
-The `when` ensures that a step is executed only if the specified condition is met.
+The `when` parameter ensures that a step is executed only if the specified condition is met.
 
 
-<CodeBlock language="python" code ={`async def send_alert(message: str):
+<CodeBlock language="python" highlight="10,11" code ={`async def send_alert(message: str):
     print(f"Alert: {message}")
 
 
@@ -75,7 +76,7 @@ workflow = (Workflow(name='my_workflow')
 
 In this case, `send_alert` step will be executed after both `func_1` and `func_2` have been executed and have an output. 
 
-
+---
 ## Summary
 - Parallel execution by default.
 - Sequential execution is applied automatically when parameter dependencies exist between steps.

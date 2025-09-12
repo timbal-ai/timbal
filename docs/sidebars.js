@@ -26,7 +26,6 @@ const sidebars = {
         'core_concepts/runnables',
         'core_concepts/events',
         'core_concepts/context',
-        'core_concepts/tracing',
       ],
     },
     {
@@ -50,8 +49,8 @@ const sidebars = {
       collapsed: false,
       items: [
         'workflows/index',
-        'workflows/control_flow',
         'workflows/context',
+        'workflows/control_flow',
         'workflows/integrating_llms',
       ],
     },
