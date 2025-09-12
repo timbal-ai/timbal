@@ -54,6 +54,17 @@ const sidebars = {
         'workflows/integrating_llms',
       ],
     },
+    {
+      type: 'category',
+      label: 'Platform',
+      collapsed: false,
+      items: [
+        'platform/index',
+        'platform/tables',
+        'platform/indexes',
+        'platform/embeddings',
+      ],
+    },
   ],
 };
 
