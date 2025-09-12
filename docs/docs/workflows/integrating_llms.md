@@ -7,119 +7,82 @@ import CodeBlock from '@site/src/theme/CodeBlock';
 # Integrating LLMs into Workflows
 
 <h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
-Integrate Large Language Models into your workflows for intelligent processing, analysis, and decision-making.
+Use Large Language Models in your workflows for smart processing and decision-making.
 </h2>
 
 ---
 
-
 ## Integration Patterns
+<!-- There are two ways to integrate LLMs into your workflow. -->
 
-There are two primary ways to integrate LLMs into workflows.
+### Using Agents 
+Best for autonomous AI assistants that need to reason, use tools and maintain conversation context.
 
-### 1. Using `llm_router` as a Tool
+<CodeBlock language="python" code={`from timbal import Agent, Workflow
 
-The `llm_router` function is the most flexible way to integrate LLMs into workflows. It allows you to create reusable LLM tools with predefined configurations.
+agent = Agent(
+    name="summarizer",
+    model="openai/gpt-4o-mini",
+    system_prompt="Summarize text in 2-3 sentences."
+)
 
-<CodeBlock language="python" code={`from timbal.core import Tool, Workflow
+workflow = (
+    Workflow(name="text_processor")
+    .step(agent)
+)`}/>
+
+### Using `llm_router` Tools
+Best for single LLM calls with full parameter control.
+<!-- For single LLM calls with full parameter control, use `llm_router` directly: -->
+
+<CodeBlock language="python" highlight="6" code={`from timbal import Tool, Workflow
 from timbal.core.llm_router import llm_router
-from timbal.state import get_run_context
-from timbal.types.message import Message
 
-# Create an LLM tool with default parameters
-summarizer_llm = Tool(
+llm_tool = Tool(
     name="summarizer",
     handler=llm_router,
     default_params={
         "model": "openai/gpt-4o-mini",
-        "system_prompt": "You are a helpful assistant that summarizes text concisely.",
+        "system_prompt": "Summarize text in 2-3 sentences."
     }
 )
 
-# Use in workflow
 workflow = (
     Workflow(name="text_processor")
-    .step(summarizer_llm, messages=lambda: [
-        Message.validate(f"Summarize: {get_run_context().get_data('.input')}")
-    ])
+    .step(llm_tool)
 )`}/>
-
-### 2. Direct Agent Integration
-
-Agents can be used directly as workflow steps.
-<CodeBlock language="python" code={`from timbal.core import Agent, Workflow
-
-# Create an agent
-analysis_agent = Agent(
-    name="data_analyzer",
-    model="openai/gpt-4o-mini",
-    system_prompt="Analyze the provided data and return structured insights."
-)
-
-# Use agent as workflow step
-workflow = (
-    Workflow(name="data_analysis")
-    .step(analysis_agent)
-)`}/>
-
-
-
 
 ---
 
-## Advanced Patterns
+## Smart Workflows: Conditional Processing
 
+Let AI decide which workflow steps to execute:
 
+<CodeBlock language="python" highlight="26,27" code={`from timbal import Agent, Workflow
 
-### Conditional LLM Processing
-
-Use LLMs to make decisions about workflow execution:
-
-<CodeBlock language="python" code={`from timbal.core import Tool, Workflow
-from timbal.core.llm_router import llm_router
-from timbal.state import get_run_context
-from timbal.types.message import Message
-
-# Decision-making LLM
-decision_llm = Tool(
-    name="decision_maker",
-    handler=llm_router,
-    default_params={
-        "model": "openai/gpt-4o-mini",
-        "system_prompt": "Respond with 'urgent' or 'normal' based on the content."
-    }
+# Decision agent
+classifier = Agent(
+    name="classifier",
+    model="openai/gpt-4o-mini",
+    system_prompt="Respond with 'urgent' or 'normal'."
 )
 
-# Processing LLMs
-urgent_processor = Tool(
-    name="urgent_processor",
-    handler=llm_router,
-    default_params={
-        "model": "openai/gpt-4o",
-        "system_prompt": "Process urgent requests with high priority."
-    }
+# Processing agents
+urgent_handler = Agent(
+    name="urgent_handler",
+    model="openai/gpt-4o",
+    system_prompt="Handle urgent requests quickly."
+)
+normal_handler = Agent(
+    name="normal_handler",
+    model="openai/gpt-4o-mini", 
+    system_prompt="Handle normal requests efficiently."
 )
 
-normal_processor = Tool(
-    name="normal_processor",
-    handler=llm_router,
-    default_params={
-        "model": "openai/gpt-4o-mini",
-        "system_prompt": "Process normal requests efficiently."
-    }
-)
-
-# Conditional workflow
-conditional_workflow = (
-    Workflow(name="conditional_processing")
-    .step(decision_llm, messages=lambda: [
-        Message.validate(f"Classify urgency: {get_run_context().get_data('.input')}")
-    ])
-    .step(urgent_processor, 
-          messages=lambda: [Message.validate(f"Process urgently: {get_run_context().get_data('.input')}")],
-          when=lambda: "urgent" in get_run_context().get_data("decision_maker.output").lower())
-    .step(normal_processor,
-          messages=lambda: [Message.validate(f"Process normally: {get_run_context().get_data('.input')}")],
-          when=lambda: "normal" in get_run_context().get_data("decision_maker.output").lower())
+# Smart workflow
+workflow = (
+    Workflow(name="smart_processor")
+    .step(classifier)
+    .step(urgent_handler, when=lambda: "urgent" in classifier.output.lower())
+    .step(normal_handler, when=lambda: "normal" in classifier.output.lower())
 )`}/>
-
