@@ -14,11 +14,11 @@ Executable primitives that provide consistent interfaces for all Timbal componen
 ---
 
 ## What is a Runnable?
-A <span style={{color: 'var(--timbal-purple)'}}><strong>Runnable</strong></span> is an executable unit capable of processing inputs and producing outputs through an async generator interface. It works as a wrapper that turns any callable into a standarized, traceable, and composable execution unit. It supports sync, async, sync generators, and async generators execution patterns.
+A <span style={{color: 'var(--timbal-purple)'}}><strong>Runnable</strong></span> is an executable unit capable of processing inputs and producing outputs through an async generator interface. It works as a wrapper that turns any callable into a standarized, traceable, and composable execution unit.
 
 All runnables provide a unified interface and execution pattern, enabling seamless composition regardless of their underlying implementation:
 
-- **[Tools](../agents/tools)** - Enhanced function wrappers with schema generation and parameter control
+- **[Tools](../agents/tools)** - Function wrappers with automatic schema generation and explicit parameter control
 - **[Agents](../agents/index.md)** - Autonomous execution units that orchestrate LLM interactions with tool calling
 - **[Workflows](../workflows/index.md)** - Programmable execution pipelines that orchestrate step-by-step processing
 
@@ -54,8 +54,20 @@ You can also set default parameter values when creating the runnable:
 
 result = await add_tool(a=5).collect() # Returns 8`}/>
 
-Note that runtime parameters override default values:
+Default parameters can also be callables that are evaluated at runtime:
+
+<CodeBlock language="python" highlight={"6"} code={`import random
+
+add_tool = Tool(
+    name="add_tool",
+    handler=add,
+    default_params={"b": lambda: random.randint(0, 10)}
+)
+
+result = await add_tool(a=5).collect() # Returns a number between 5 - 15`}/>
+
+Note that runtime parameters always override default values, including callable defaults:
 
 <CodeBlock language="python" code={`result = await add_tool(a=5, b=10).collect() # Returns 15`}/>
 
-In the above example, `b=10` is passed at runtime and overrides the default `b=3`.
+In the above example, `b=10` is passed at runtime and overrides the callable default that would generate a random number.
