@@ -1,0 +1,132 @@
+---
+title: Context & State Management
+sidebar: 'docsSidebar'
+---
+import CodeBlock from '@site/src/theme/CodeBlock';
+
+# Context & State Management
+
+<h2 className="subtitle" style={{marginTop: '-17px', fontSize: '1.1rem', fontWeight: 'normal'}}>
+The shared memory that connects everything together across the entire lifetime of a run.
+</h2>
+
+---
+
+We've seen how [Runnables](./runnables.mdx) execute and produce [Events](./events.mdx) that stream in real-time. But what happens when you need to modify inputs before they reach a handler, store and share additional data during execution, or process outputs after they're generated?
+
+This is where the **RunContext** comes in - It acts as a centralized container that maintains execution state, enables data sharing between components, tracks usage metrics, and manages the hierarchical relationships between parent and child runs.
+
+## How to Access the RunContext
+
+The RunContext is accessible from anywhere within a Runnable's execution using `get_run_context()`. 
+
+To illustrate this, we'll introduce the Runnable lifecycle hooks. Every Runnable supports two optional hooks:
+
+- **`pre_hook`**: A function that runs before the main handler
+- **`post_hook`**: A function that runs after the main handler completes
+
+These hooks demonstrate how different parts of your execution can read and write to the same shared context, enabling powerful data transformation and coordination patterns.
+
+## Pre-hooks: Modifying Input and Adding Context
+
+A `pre_hook` runs before your handler and can both modify input parameters and store additional context data:
+
+<CodeBlock language="python" code={`from datetime import datetime
+
+from timbal.state import get_run_context
+
+def pre_hook():
+    run_context = get_run_context()
+    # Get input variable and modify it
+    greet_name = run_context.get_data(".input.name")
+    run_context.set_data(".input.name", greet_name.capitalize())
+    # Directly set input variable
+    run_context.set_data(".input.location", "Barcelona")
+    # Set additional properties
+    run_context.set_data(".greet_time", datetime.now())
+
+def greet(name: str, location: str) -> str:
+    return f"Hello {name} from {location}!"
+
+greet_tool = Tool(
+    name="greet", 
+    pre_hook=pre_hook,
+    handler=greet,
+)
+
+result = await greet_tool(name="alice").collect() # "Hello Alice from Barcelona!"`}/>
+
+Pre-hooks are perfect for:
+- **Data Preparation**: Process raw webhook payloads, parse JSON, or normalize input formats
+- **Input Enhancement**: Enrich data with additional context from databases or APIs
+- **Request Preprocessing**: Extract headers, validate signatures, or decode authentication tokens
+- **State Initialization**: Set up execution context, timestamps, or tracking metadata
+
+## Post-hooks: Processing Output After Completion
+
+A `post_hook` runs after your handler and can access both input and output:
+
+<CodeBlock language="python" code={`def post_hook():
+    run_context = get_run_context()
+    # We can fetch and log any data stored in the context
+    greet_time = run_context.get_data(".greet_time")
+    print(f"Greeting at {greet_time}")
+    # We can also modify the output of the handler directly
+    run_context.set_data(".output", "Greeting overridden!")
+
+greet_tool = Tool(
+    name="greet", 
+    pre_hook=pre_hook,
+    handler=greet,
+    post_hook=post_hook,
+)
+
+result = await greet_tool(name="alice").collect() # "Greeting overridden!"`}/>
+
+Post-hooks are perfect for:
+- **Logging**: Record execution details and results
+- **Metadata Storage**: Store processing metrics, timestamps, or analysis data
+- **Output Modification**: Transform or enrich the final result
+- **Cleanup Tasks**: Handle resource cleanup or state management
+
+:::success[Real World Applications]
+These simple examples show the basics. In practice, hooks excel at:
+
+- **Input manipulation**: Processing webhooks where we don't control the shape of the incoming data.
+- **Agent adaptation**: Converting between modalities (audio ↔ text) for different models.
+
+More advanced patterns in the [Agents](../agents) section.
+:::
+
+## Hierarchical Data Access
+
+The context uses a hierarchical key format that lets you access data from different levels of execution:
+
+### Current Runnable Scope
+<CodeBlock language="python" code={`# Access your own execution data with . prefix
+context.get_data(".input.parameter_name")  # Your input parameters
+context.get_data(".output")                 # Your output (available in post_hook)
+context.get_data(".custom_variable")        # Custom data you stored`}/>
+
+### Parent Runnable Scope
+<CodeBlock language="python" code={`# Access parent execution data with .. prefix
+context.get_data("..input")       # Parent's input
+context.get_data("..output")      # Parent's output
+context.get_data("..custom_var")  # Parent's custom data`}/>
+
+## Data Sharing Between Components
+
+When Tools are used within Agents or Workflows, they can share data through the context:
+
+<CodeBlock language="python" code={`# In a multi-step process, access data from other components
+context.get_data("step1.output.user_data")    # Data from step1
+context.get_data("validation.custom_flags")   # Custom data from validation step
+context.get_data("..shared_session_data")     # Data from parent Agent/Workflow`}/>
+
+## The Source of Traces
+
+The RunContext is also where **Traces** are stored. While [Events](./events.mdx) stream temporarily during execution, the RunContext captures everything permanently for later analysis and debugging.
+
+This trace data will be covered in detail in the [Tracing](./tracing.mdx) section, where you'll see how this persistent data enables complete observability into your Runnable executions.
+
+> **What's Next**: The [Tracing](./tracing.mdx) section will show you how the RunContext creates permanent execution records that enable debugging, analysis, and observability.

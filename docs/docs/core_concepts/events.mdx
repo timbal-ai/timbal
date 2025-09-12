@@ -12,9 +12,9 @@ Monitor execution in real-time and handle streaming results.
 
 ---
 
-## Streaming
+## The Event Stream
 
-In the previous [examples](./runnables.md#parameter-handling-and-basic-execution), we used `.collect()` to get the final result. When you call a Runnable, it doesn't just return the answer - it returns a stream of events that tell you what's happening step by step. The `.collect()` method waits for all events and gives you just the final answer.
+In the previous [examples](./runnables.mdx#parameter-handling-and-basic-execution), we used `.collect()` to get the final result. When you call a Runnable, it doesn't just return the answer - it returns a stream of events that tell you what's happening step by step (an async generator). The `.collect()` method waits for all events and gives you just the final answer.
 
 You can iterate through the async generator to process events in real-time:
 
@@ -22,8 +22,8 @@ You can iterate through the async generator to process events in real-time:
     print(event)
 
 # Output:
-# StartEvent(run_id='068c4458-382e-79bb-8000-6dc019ac3039', ...)
-# OutputEvent(run_id='068c4458-382e-79bb-8000-6dc019ac3039', output=8, ...)`}/>
+# StartEvent(run_id="068c4458382e79bb80006dc019ac3039", ...)
+# OutputEvent(run_id="068c4458382e79bb80006dc019ac3039", output=8, ...)`}/>
 
 This enables you to:
 - Monitor execution progress in real-time
@@ -31,9 +31,7 @@ This enables you to:
 - Debug execution flow
 - Build reactive user interfaces
 
----
-
-## Understanding Events
+## Event Types
 
 Events are the communication mechanism that Runnables use to stream information throughout their execution lifecycle. Every Runnable execution produces a sequence of events that can be consumed in real-time or collected for later processing.
 
@@ -53,7 +51,7 @@ start_event = StartEvent(
     parent_call_id="068c4458382e708f8000cc0f9b19d970",
 )`}/>
 
-> The `path`, `call_id`, and `run_id` fields help track execution flow and will be explained in detail in the [Tracing](./tracing.md) section.
+> The `path`, `call_id`, and `run_id` fields help track execution flow and will be explained in detail in the [Tracing](./tracing.mdx) section.
 
 ### Chunk Event
 Contains streaming or intermediate results during execution.
@@ -110,8 +108,6 @@ output_event = OutputEvent(
 
 > Contains the `input` that was passed, the final `output` (or `error` if something went wrong), `usage` metrics, and execution `metadata`.
 
----
-
 ## Handling Errors
 
 When a Runnable encounters an error during execution, it **won't raise an exception**. Instead, it will always return an `OutputEvent` with error information. This ensures the event stream continues and you can handle errors gracefully:
@@ -132,3 +128,7 @@ Errors will always have this structure:
     "message": "Invalid input provided",
     "traceback": "Traceback (most recent call last):\\n..."
 }`}/>
+
+:::note[Note on persistence]
+Events are **not persisted to memory** - they are temporary notifications that stream during execution and are consumed in real-time. For permanent storage and analysis, this information is captured in **Traces**, which will be explained in detail in the following sections.
+:::
