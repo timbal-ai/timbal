@@ -96,7 +96,7 @@ class Tool(Runnable):
         self._is_coroutine = inspect_result["is_coroutine"]
         self._is_gen = inspect_result["is_gen"]
         self._is_async_gen = inspect_result["is_async_gen"]
-        self._data_keys = inspect_result["data_keys"]
+        self._dependencies = inspect_result["dependencies"]
 
     
     @override

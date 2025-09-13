@@ -225,32 +225,32 @@ class Runnable(ABC, BaseModel):
     """Whether the Runnable handler is a generator."""
     _is_async_gen: bool = PrivateAttr()
     """Whether the Runnable handler is an async generator."""
-    _data_keys: list[str] = PrivateAttr(default_factory=list)
-    """List of data keys that the handler depends on."""
+    _dependencies: list[str] = PrivateAttr(default_factory=list)
+    """List of sibling node names that the handler depends on via step_trace() calls."""
     _default_fixed_params: dict[str, Any] = PrivateAttr(default_factory=dict)
     """Dictionary of static default parameters."""
     _default_runtime_params: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
     """Dictionary mapping parameter names to their callable functions and metadata."""
     _pre_hook_is_coroutine: bool | None = PrivateAttr()
     """Whether the pre_hook is a coroutine."""
-    _pre_hook_data_keys: list[str] = PrivateAttr(default_factory=list)
+    _pre_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
     # ? Can we store all pre_hook related stuff together?
     _post_hook_is_coroutine: bool | None = PrivateAttr()
     """Whether the post_hook is a coroutine."""
-    _post_hook_data_keys: list[str] = PrivateAttr(default_factory=list)
+    _post_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
     # ? Can we store all post_hook related stuff together?
 
 
     @classmethod
     def _inspect_callable(
-        cls, 
-        fn: Any, 
+        cls,
+        fn: Any,
         allow_required_params: bool = False,
         allow_coroutine: bool = True,
         allow_gen: bool = False,
         allow_async_gen: bool = False,
     ) -> dict[str, Any]:
-        """Inspect a runtime callable, return if the callable is a coroutine and its data dependencies."""
+        """Inspect a runtime callable, return if the callable is a coroutine and its step dependencies."""
         if not callable(fn):
             raise ValueError(f"fn must be a callable, got {type(fn)}")
         
@@ -275,7 +275,7 @@ class Runnable(ABC, BaseModel):
             if required_params:
                 raise ValueError(f"Callable must not have any required parameters, got required: {required_params}")
 
-        data_keys = []
+        dependencies = []
         # TODO Fix errors with system prompt callables
         try:
             source_file = inspect.getsourcefile(fn)
@@ -283,13 +283,13 @@ class Runnable(ABC, BaseModel):
                 raise ValueError("Could not determine source file for runtime callable.")
             with open(source_file) as f:
                 full_file_source = f.read()
-            
+
             tree = ast.parse(full_file_source)
             target_node = None
             # Strategy 1: Find by function name (most reliable for decorated functions)
             func_name = fn.__name__
             for node in ast.walk(tree):
-                if (isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and 
+                if (isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and
                     hasattr(node, 'name') and node.name == func_name):
                     target_node = node
                     break
@@ -301,7 +301,7 @@ class Runnable(ABC, BaseModel):
                     for node in ast.walk(tree):
                         if (isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and
                             hasattr(node, 'name') and node.name == func_name and
-                            hasattr(node, 'lineno') and 
+                            hasattr(node, 'lineno') and
                             start_line <= node.lineno <= start_line + len(source_lines)):
                             target_node = node
                             break
@@ -311,23 +311,22 @@ class Runnable(ABC, BaseModel):
             if not target_node:
                 first_line = fn.__code__.co_firstlineno
                 for node in ast.walk(tree):
-                    if (hasattr(node, "lineno") and node.lineno == first_line and 
+                    if (hasattr(node, "lineno") and node.lineno == first_line and
                         isinstance(node, ast.Lambda)):
                         target_node = node
                         break
             if target_node:
                 target_node_analyzer = RunContextDataAccessAnalyzer()
                 target_node_analyzer.visit(target_node)
-                data_keys = target_node_analyzer.data_keys
+                dependencies = target_node_analyzer.dependencies
         except Exception as e:
-            logger.error("Could not determine data dependencies for runtime callable.", exc_info=e)
+            logger.error("Could not determine step dependencies for runtime callable.", exc_info=e)
         
-        # ? Use a model for this?
         return {
             "is_coroutine": is_coroutine,
             "is_gen": is_gen,
             "is_async_gen": is_async_gen,
-            "data_keys": data_keys,
+            "dependencies": dependencies,
         }
 
 
@@ -340,10 +339,10 @@ class Runnable(ABC, BaseModel):
         inspect_result = cls._inspect_callable(v)
         if info.field_name == "pre_hook":
             cls._pre_hook_is_coroutine = inspect_result["is_coroutine"]
-            cls._pre_hook_data_keys = inspect_result["data_keys"]
+            cls._pre_hook_dependencies = inspect_result["dependencies"]
         elif info.field_name == "post_hook":
             cls._post_hook_is_coroutine = inspect_result["is_coroutine"]
-            cls._post_hook_data_keys = inspect_result["data_keys"]
+            cls._post_hook_dependencies = inspect_result["dependencies"]
         return v
 
 

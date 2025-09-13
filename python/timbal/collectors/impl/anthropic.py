@@ -132,9 +132,9 @@ class AnthropicCollector(EventCollector):
     def collect(self) -> Message:
         """Returns structured Anthropic response."""
         ttft = self._first_token - self._start
-        self._run_context.update_metadata("ttft", ttft)
+        self._run_context.current_trace().metadata["ttft"] = ttft
         tps = self._output_tokens / (time.perf_counter() - self._first_token)
-        self._run_context.update_metadata("tps", tps)
+        self._run_context.current_trace().metadata["tps"] = tps
 
         content = []
         if self._content:

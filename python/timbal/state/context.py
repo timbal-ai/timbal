@@ -136,6 +136,38 @@ class RunContext(BaseModel):
         await self._tracing_provider.put(self)
 
 
+    def current_trace(self) -> Trace:
+        """Get the trace for the current call."""
+        from . import get_call_id
+        call_id = get_call_id()
+        trace = self._tracing.get(call_id)
+        if not trace:
+            raise RuntimeError(f"Could not resolve current trace for call ID {call_id}")
+        return trace
+
+    
+    def parent_trace(self) -> Trace:
+        """Get the trace for the parent call."""
+        trace = self.current_trace()
+        parent_call_id = trace.parent_call_id
+        parent_trace = self._tracing.get(parent_call_id)
+        if not parent_trace:
+            raise RuntimeError(f"Could not resolve parent trace for call ID {parent_call_id}")
+        return parent_trace
+
+    
+    def step_trace(self, name: str) -> Trace:
+        """Get the trace for a neighbor step by name."""
+        trace = self.current_trace()
+        parent_call_id = trace.parent_call_id
+        for trace in self._tracing.values():
+            if (trace.parent_call_id == parent_call_id and 
+                # trace.call_id != current_trace.call_id and  # Don't match self
+                trace.path.endswith("." + name)):
+                return trace
+        raise RuntimeError(f"Could not resolve step trace for call ID {parent_call_id} and step name {name}")
+    
+
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics for the current call and all parent calls.
         
@@ -156,116 +188,3 @@ class RunContext(BaseModel):
             current_value = trace.usage.get(key, 0)
             trace.usage[key] = current_value + value
             call_id = trace.parent_call_id
-
-    
-    def update_metadata(self, key: str, value: Any) -> None:
-        """Update metadata for the current call.
-
-        Args:
-            key: The metadata key
-            value: The metadata value
-        """
-        from . import get_call_id
-        call_id = get_call_id()
-        assert call_id in self._tracing, f"RunContext.update_metadata: Call ID {call_id} not found in tracing."
-        self._tracing[call_id].metadata[key] = value
-
-
-    def get_data(self, key: str) -> Any:
-        """Get data using ref key format: .input.field, ..output, step_name.shared.key"""
-        current_trace = self._resolve_current_trace()
-        target_trace, key = self._resolve_target_trace(current_trace, key)
-        source, key = self._resolve_source(target_trace, key)
-        return self._handle_key(source, key)
-
-
-    def set_data(self, key: str, value: Any) -> None:
-        """Set data using ref key format: .input.field, ..output, step_name.shared.key"""
-        current_trace = self._resolve_current_trace()
-        target_trace, key = self._resolve_target_trace(current_trace, key)
-        source, key = self._resolve_source(target_trace, key)
-        self._handle_key(source, key, value)
-
-
-    def _resolve_current_trace(self) -> Trace:
-        """Get the current trace from the call stack."""
-        from . import get_call_id
-        current_call_id = get_call_id()
-        if not current_call_id:
-            raise RuntimeError("{get,set}_data() can only be called within a Runnable execution context")
-        current_trace = self._tracing.get(current_call_id)
-        if not current_trace:
-            raise RuntimeError(f"Call ID {current_call_id} not found in tracing.")
-        return current_trace
-
-
-    def _resolve_target_trace(self, current_trace: Trace, key: str) -> tuple[Trace, str]:
-        """Resolve which trace to get data from and what key to use."""
-        if key.startswith(".."):
-            if not current_trace.parent_call_id:
-                raise ValueError(f"No parent call found for key: {key}")
-            parent_trace = self._tracing.get(current_trace.parent_call_id)
-            if not parent_trace:
-                raise RuntimeError(f"Parent call ID {current_trace.parent_call_id} not found in tracing.")
-            return parent_trace, key[2:]  # Remove ".."
-        elif key.startswith("."):
-            return current_trace, key[1:]  # Remove "."
-        else:
-            key_parts = key.split(".", 1)
-            if len(key_parts) < 2:
-                raise ValueError(f"Invalid key format for sibling reference: {key}")
-            sibling_name = key_parts[0]
-            remaining_key = key_parts[1]
-            sibling_trace = self._resolve_sibling_trace(current_trace, sibling_name)
-            if not sibling_trace:
-                raise ValueError(f"Sibling '{sibling_name}' not found")
-            return sibling_trace, remaining_key
-
-
-    def _resolve_sibling_trace(self, current_trace: Trace, sibling_name: str) -> Trace | None:
-        """Find a sibling trace by name (same parent, path ends with name)."""
-        parent_call_id = current_trace.parent_call_id
-        if not parent_call_id:
-            return None
-        for trace in self._tracing.values():
-            if (trace.parent_call_id == parent_call_id and 
-                # trace.call_id != current_trace.call_id and  # Don't match self
-                trace.path.endswith("." + sibling_name)):
-                return trace
-        return None
-    
-
-    def _resolve_source(self, trace: Trace, key: str) -> tuple[Any, str]:
-        """Navigate nested keys to find the final source object and key."""
-        key_parts = key.split(".")
-        if not key_parts:
-            raise ValueError("Empty key")
-        current_source = trace
-        for key in key_parts[:-1]:
-            current_source = self._handle_key(current_source, key)
-        return current_source, key_parts[-1]
-    
-
-    def _handle_key(self, source: Any, key: str, value: Any = _MISSING) -> Any:
-        """Get or set a key on dict/list/object, returning the current/previous value."""
-        if isinstance(source, dict):
-            current_value = source.get(key)
-            if value is not _MISSING:
-                source[key] = value
-            return current_value
-        elif isinstance(source, list):
-            key = int(key)
-            if key < 0 or key >= len(source):
-                current_value = None
-            else:
-                current_value = source[key]
-            if value is not _MISSING:
-                source[key] = value
-            return current_value
-        else:
-            current_value = None
-            if hasattr(source, key):
-                current_value = getattr(source, key)
-            if value is not _MISSING:
-                setattr(source, key, value)
-            return current_value

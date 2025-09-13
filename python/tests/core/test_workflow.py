@@ -230,17 +230,17 @@ class TestContext:
 
     @staticmethod
     def context_function(x: str) -> str:
-        assert get_run_context().get_data(".input.x") == x
-        get_run_context().set_data(".input.x", "new_input")
-        assert get_run_context().get_data(".input.x") == "new_input"
-        get_run_context().set_data(".new_parameter", "new_parameter")
-        get_run_context().set_data(".second_new_parameter", "second_new_parameter")
+        assert get_run_context().current_trace().input["x"] == x
+        get_run_context().current_trace().input["x"] = "new_input"
+        assert get_run_context().current_trace().input["x"] == "new_input"
+        get_run_context().current_trace().new_parameter = "new_parameter"
+        get_run_context().current_trace().second_new_parameter = "second_new_parameter"
         return x 
 
     @staticmethod
     def check_neighbor_parameters() -> str:
-        assert get_run_context().get_data("context_function.new_parameter") == "new_parameter"
-        assert get_run_context().get_data("context_function.second_new_parameter") == "second_new_parameter"
+        assert get_run_context().step_trace("context_function").new_parameter == "new_parameter"
+        assert get_run_context().step_trace("context_function").second_new_parameter == "second_new_parameter"
 
     @staticmethod
     def multiple_outputs() -> str:
@@ -302,11 +302,11 @@ class TestControlFlow:
 
     @staticmethod
     def context_function() -> str:
-        get_run_context().set_data(".new_parameter", "new_parameter_value")
+        get_run_context().current_trace().new_parameter = "new_parameter_value"
 
     @staticmethod
     def dependent_function() -> str:
-        return get_run_context().get_data("context_function.new_parameter")
+        return get_run_context().step_trace("context_function").new_parameter
 
     async def test_parallel_execution(self):
         """Test parallel execution."""

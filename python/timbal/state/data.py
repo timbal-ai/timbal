@@ -2,12 +2,12 @@ import ast
 
 
 class RunContextDataAccessAnalyzer(ast.NodeVisitor):
-    """Static analyzer to detect RunContext.get_data() access in code."""
-    
+    """Static analyzer to detect RunContext.step_trace() access in code."""
+
     def __init__(self):
         self.scope_stack = [{}]  # Stack of symbol tables for nested scopes
         self.imports = {}  # Track imports: name -> what it refers to
-        self.data_keys = []  # Collect all keys passed to get_data()
+        self.dependencies = []  # Collect all sibling node names passed to step()
     
     def push_scope(self):
         """Enter a new scope (function, class, etc.)."""
@@ -106,42 +106,42 @@ class RunContextDataAccessAnalyzer(ast.NodeVisitor):
         self.generic_visit(node)
     
     def visit_Call(self, node):
-        """Analyze function/method calls for data dependencies."""
-        
-        # Only look for get_data() method calls
-        if isinstance(node.func, ast.Attribute) and node.func.attr == 'get_data':
-            is_valid_get_data = False
-            
-            # Pattern 1: variable.get_data() where variable is RunContext
+        """Analyze function/method calls for step dependencies."""
+
+        # Only look for step() method calls
+        if isinstance(node.func, ast.Attribute) and node.func.attr == 'step_trace':
+            is_valid_step = False
+
+            # Pattern 1: variable.step() where variable is RunContext
             if isinstance(node.func.value, ast.Name):
                 var_name = node.func.value.id
                 var_type = self.get_symbol_type(var_name)
                 if var_type == 'RunContext':
-                    is_valid_get_data = True
-            
-            # Pattern 2: get_run_context().get_data()
+                    is_valid_step = True
+
+            # Pattern 2: get_run_context().step()
             elif isinstance(node.func.value, ast.Call):
                 if isinstance(node.func.value.func, ast.Name):
                     inner_func = node.func.value.func.id
                     if (self.get_symbol_type(inner_func) == 'get_run_context' or
                         inner_func == 'get_run_context'):
-                        is_valid_get_data = True
-                
+                        is_valid_step = True
+
                 elif isinstance(node.func.value.func, ast.Attribute):
                     if node.func.value.func.attr == 'get_run_context':
-                        is_valid_get_data = True
-            
-            # Pattern 3: RunContext.get_data() (static method style)
+                        is_valid_step = True
+
+            # Pattern 3: RunContext.step() (static method style)
             elif isinstance(node.func.value, ast.Name):
                 class_name = node.func.value.id
                 if (self.get_symbol_type(class_name) == 'RunContext' or
                     class_name == 'RunContext'):
-                    is_valid_get_data = True
-            
-            # Extract the key argument if this is a valid get_data call
-            if is_valid_get_data and node.args:
+                    is_valid_step = True
+
+            # Extract the sibling node name argument if this is a valid step call
+            if is_valid_step and node.args:
                 first_arg = node.args[0]
                 if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
-                    self.data_keys.append(first_arg.value)
-        
+                    self.dependencies.append(first_arg.value)
+
         self.generic_visit(node)
