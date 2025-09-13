@@ -32,12 +32,12 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
             return True, [], []
             
         run_context = get_run_context()
-        if not run_context or not run_context.tracing:
+        if not run_context or not run_context._tracing:
             return False, ["No tracing data available"], []
             
         # Extract tool calls from tracing data
         actual_steps = []
-        for call_id, trace in run_context.tracing.items():
+        for call_id, trace in run_context._tracing.items():
             path = trace.path
             # Skip the root agent call (call_id=None or no path separators)
             if call_id is None or not path or "." not in path:

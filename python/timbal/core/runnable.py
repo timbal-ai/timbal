@@ -595,11 +595,11 @@ class Runnable(ABC, BaseModel):
 
         # Generate new context or reset it if appropriate
         run_context = get_or_create_run_context()
-        if not _parent_call_id and run_context.tracing:
+        if not _parent_call_id and run_context._tracing:
             run_context = RunContext(parent_id=run_context.id)
             set_run_context(run_context)
 
-        assert _call_id not in run_context.tracing, f"Call ID {_call_id} already exists in tracing."
+        assert _call_id not in run_context._tracing, f"Call ID {_call_id} already exists in tracing."
         trace = Trace(
             path=self._path,
             call_id=_call_id,
@@ -607,14 +607,14 @@ class Runnable(ABC, BaseModel):
             t0=t0,
             metadata={**self.metadata}, # Shallow copy
         )
-        run_context.tracing[_call_id] = trace
+        run_context._tracing[_call_id] = trace
 
         # Execute the 'when' condition inside the appropriate runnable context
         if hasattr(self, "when") and self.when:
             should_run = await self._execute_runtime_callable(self.when["callable"], self.when["is_coroutine"])
             if not should_run:
                 # Remove the trace entry. As if this was never run
-                run_context.tracing.pop(_call_id)
+                run_context._tracing.pop(_call_id)
                 # Clean exit. The async for loop will complete normally but won't iterate over anything
                 return
 

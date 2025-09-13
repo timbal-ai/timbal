@@ -40,7 +40,7 @@ class PlatformTracingProvider(TracingProvider):
             "version_id": subject.version_id,
             "id": run_context.id,
             "parent_id": run_context.parent_id,
-            "tracing": run_context.tracing.model_dump()
+            "tracing": run_context._tracing.model_dump()
         }
         res = await _platform_api_call(
             method="POST",

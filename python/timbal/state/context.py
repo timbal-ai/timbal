@@ -47,14 +47,8 @@ class RunContext(BaseModel):
         description="Platform configuration for the run.",
         validation_alias="timbal_platform_config", # Legacy
     )
-    tracing: Tracing = Field(
-        default_factory=Tracing,
-        description=(
-            "Execution traces for the run."
-            "Stores detailed execution information including input, output, error, timing, and usage."
-            "Usage data is stored within each trace entry under the 'usage' key."
-        ),
-    )
+
+    _tracing: Tracing = PrivateAttr()
     _tracing_provider: type[TracingProvider] = PrivateAttr()
 
 
@@ -91,7 +85,9 @@ class RunContext(BaseModel):
                         "auth": auth,
                         "subject": subject
                     })
-        # TODO Enable custom providers
+        # ? Crazy idea. Merge RunContext and Tracing classes
+        self._tracing = Tracing()
+        # TODO Enable custom tracingproviders
         if self.platform_config:
             if not self.platform_config.subject:
                 logger.warning(
@@ -155,8 +151,8 @@ class RunContext(BaseModel):
         call_id = get_call_id()
         # Update usage for all parents in the call stack
         while call_id:
-            assert call_id in self.tracing, f"RunContext.update_usage: Call ID {call_id} not found in tracing."
-            trace = self.tracing[call_id]
+            assert call_id in self._tracing, f"RunContext.update_usage: Call ID {call_id} not found in tracing."
+            trace = self._tracing[call_id]
             current_value = trace.usage.get(key, 0)
             trace.usage[key] = current_value + value
             call_id = trace.parent_call_id
@@ -171,8 +167,8 @@ class RunContext(BaseModel):
         """
         from . import get_call_id
         call_id = get_call_id()
-        assert call_id in self.tracing, f"RunContext.update_metadata: Call ID {call_id} not found in tracing."
-        self.tracing[call_id].metadata[key] = value
+        assert call_id in self._tracing, f"RunContext.update_metadata: Call ID {call_id} not found in tracing."
+        self._tracing[call_id].metadata[key] = value
 
 
     def get_data(self, key: str) -> Any:
@@ -197,7 +193,7 @@ class RunContext(BaseModel):
         current_call_id = get_call_id()
         if not current_call_id:
             raise RuntimeError("{get,set}_data() can only be called within a Runnable execution context")
-        current_trace = self.tracing.get(current_call_id)
+        current_trace = self._tracing.get(current_call_id)
         if not current_trace:
             raise RuntimeError(f"Call ID {current_call_id} not found in tracing.")
         return current_trace
@@ -208,7 +204,7 @@ class RunContext(BaseModel):
         if key.startswith(".."):
             if not current_trace.parent_call_id:
                 raise ValueError(f"No parent call found for key: {key}")
-            parent_trace = self.tracing.get(current_trace.parent_call_id)
+            parent_trace = self._tracing.get(current_trace.parent_call_id)
             if not parent_trace:
                 raise RuntimeError(f"Parent call ID {current_trace.parent_call_id} not found in tracing.")
             return parent_trace, key[2:]  # Remove ".."
@@ -231,7 +227,7 @@ class RunContext(BaseModel):
         parent_call_id = current_trace.parent_call_id
         if not parent_call_id:
             return None
-        for trace in self.tracing.values():
+        for trace in self._tracing.values():
             if (trace.parent_call_id == parent_call_id and 
                 # trace.call_id != current_trace.call_id and  # Don't match self
                 trace.path.endswith("." + sibling_name)):

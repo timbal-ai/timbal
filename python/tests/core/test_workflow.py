@@ -199,9 +199,9 @@ class TestStepManagement:
             .step(tool, x="step2_param", depends_on=["async_handler"])
         )
         result = await wf(x="workflow_param").collect()
-        assert get_run_context().tracing.as_records()[0].input['x'] == "workflow_param"
-        assert get_run_context().tracing.as_records()[1].input['x'] == "workflow_param"
-        assert get_run_context().tracing.as_records()[2].input['x'] == "workflow_param"
+        assert get_run_context()._tracing.as_records()[0].input['x'] == "workflow_param"
+        assert get_run_context()._tracing.as_records()[1].input['x'] == "workflow_param"
+        assert get_run_context()._tracing.as_records()[2].input['x'] == "workflow_param"
         assert result.output == "async:workflow_param"
 
     def test_add_step_with_dict(self, simple_workflow):
@@ -250,20 +250,20 @@ class TestContext:
         """Test context levels."""
         wf = Workflow(name="first_workflow").step(async_handler, x="step_param")
         _ = await wf().collect()
-        assert get_run_context().tracing.as_records()[0].input == {}
-        assert get_run_context().tracing.as_records()[1].input['x'] == "step_param"
+        assert get_run_context()._tracing.as_records()[0].input == {}
+        assert get_run_context()._tracing.as_records()[1].input['x'] == "step_param"
 
         # Value overridden
         wf = Workflow(name="second_workflow").step(async_handler, x="step_param")
         _ = await wf(x='workflow_param').collect()
-        assert get_run_context().tracing.as_records()[0].input['x'] == "workflow_param"
-        assert get_run_context().tracing.as_records()[1].input['x'] == "workflow_param"
+        assert get_run_context()._tracing.as_records()[0].input['x'] == "workflow_param"
+        assert get_run_context()._tracing.as_records()[1].input['x'] == "workflow_param"
 
         # Creating new parameter step
         wf = Workflow(name="third_workflow").step(TestContext.context_function, x="old_input")
         _ = await wf().collect()
-        assert get_run_context().tracing.as_records()[1].new_parameter == "new_parameter"   # 0: workflow, 1: step
-        assert get_run_context().tracing.as_records()[1].second_new_parameter == "second_new_parameter"
+        assert get_run_context()._tracing.as_records()[1].new_parameter == "new_parameter"   # 0: workflow, 1: step
+        assert get_run_context()._tracing.as_records()[1].second_new_parameter == "second_new_parameter"
 
         # Checking neighbor parameters
         wf = (Workflow(name="fourth_workflow")
@@ -287,9 +287,9 @@ class TestContext:
             .step(TestContext.multiple_outputs)
         )
         _ = await wf().collect()
-        assert len(get_run_context().tracing.as_records()[0].output) == 2
-        assert get_run_context().tracing.as_records()[0].output[0] == "first_output"
-        assert get_run_context().tracing.as_records()[0].output[1] == "second_output"
+        assert len(get_run_context()._tracing.as_records()[0].output) == 2
+        assert get_run_context()._tracing.as_records()[0].output[0] == "first_output"
+        assert get_run_context()._tracing.as_records()[0].output[1] == "second_output"
 
     def test_nonexistent_dependency_error(self, simple_workflow):
         """Test that depending on nonexistent step raises an error."""
@@ -315,7 +315,7 @@ class TestControlFlow:
             .step(sync_handler, x="output")
         )
         _ = await wf().collect()
-        assert get_run_context().tracing.as_records()[0].output == "async:output"
+        assert get_run_context()._tracing.as_records()[0].output == "async:output"
 
     async def test_depends_on(self):
         wf = (Workflow(name="parallel_workflow")
@@ -323,7 +323,7 @@ class TestControlFlow:
             .step(sync_handler, x="output", depends_on=["async_handler"])
         )
         _ = await wf().collect()
-        assert get_run_context().tracing.as_records()[0].output == "sync:output"
+        assert get_run_context()._tracing.as_records()[0].output == "sync:output"
 
     async def test_when(self):
         wf = (Workflow(name="parallel_workflow")
@@ -331,7 +331,7 @@ class TestControlFlow:
             .step(sync_handler, x="output", when=lambda: True)
         )
         _ = await wf().collect()
-        assert get_run_context().tracing.as_records()[0].output == "async:output"
+        assert get_run_context()._tracing.as_records()[0].output == "async:output"
 
     async def test_when_false(self):
         wf = (Workflow(name="parallel_workflow")
@@ -339,9 +339,9 @@ class TestControlFlow:
             .step(sync_handler, x="output", when=lambda: False)
         )
         _ = await wf().collect()
-        # print(get_run_context().tracing.as_records())
-        assert len(get_run_context().tracing.as_records()) == 2 # sync step never called
-        assert get_run_context().tracing.as_records()[0].output == "async:output"
+        # print(get_run_context()._tracing.as_records())
+        assert len(get_run_context()._tracing.as_records()) == 2 # sync step never called
+        assert get_run_context()._tracing.as_records()[0].output == "async:output"
 
     async def test_automatic_dependency_linking(self):
         wf = (Workflow(name="dependency_linking_wf")
@@ -349,8 +349,8 @@ class TestControlFlow:
             .step(TestControlFlow.dependent_function)
         )
         _ = await wf().collect()
-        print(get_run_context().tracing.as_records())
-        assert get_run_context().tracing.as_records()[0].output == "new_parameter_value"
+        print(get_run_context()._tracing.as_records())
+        assert get_run_context()._tracing.as_records()[0].output == "new_parameter_value"
 
     async def test_automatic_dependency_linking_incorrect_order(self):
         with pytest.raises(ValueError, match="Source step context_function not found in workflow"):
@@ -359,7 +359,7 @@ class TestControlFlow:
                 .step(TestControlFlow.context_function)
             )
             _ = await wf().collect()
-            print(get_run_context().tracing.as_records())
+            print(get_run_context()._tracing.as_records())
 
     def test_invalid_depends_on_type(self, simple_workflow):
         """Test that invalid depends_on type raises an error."""

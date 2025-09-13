@@ -29,5 +29,5 @@ class InMemoryTracingProvider(TracingProvider):
     @override
     async def put(cls, run_context: "RunContext") -> None:
         """See base class."""
-        cls._storage[run_context.id] = run_context.tracing
+        cls._storage[run_context.id] = run_context._tracing
     
