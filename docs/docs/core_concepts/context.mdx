@@ -12,9 +12,7 @@ The shared memory that connects everything together across the entire lifetime o
 
 ---
 
-We've seen how [Runnables](./runnables.mdx) execute and produce [Events](./events.mdx) that stream in real-time. But what happens when you need to modify inputs before they reach a handler, store and share additional data during execution, or process outputs after they're generated?
-
-This is where the **RunContext** comes in - It acts as a centralized container that maintains execution state, enables data sharing between components, tracks usage metrics, and manages the hierarchical relationships between parent and child runs.
+The RunContext is the central storage and state management system for your runs. Beyond storing traces, it enables data sharing between components, input/output manipulation, and hierarchical data access across parent-child relationships.
 
 ## How to Access the RunContext
 
@@ -122,11 +120,3 @@ When Tools are used within Agents or Workflows, they can share data through the 
 context.get_data("step1.output.user_data")    # Data from step1
 context.get_data("validation.custom_flags")   # Custom data from validation step
 context.get_data("..shared_session_data")     # Data from parent Agent/Workflow`}/>
-
-## The Source of Traces
-
-The RunContext is also where **Traces** are stored. While [Events](./events.mdx) stream temporarily during execution, the RunContext captures everything permanently for later analysis and debugging.
-
-This trace data will be covered in detail in the [Tracing](./tracing.mdx) section, where you'll see how this persistent data enables complete observability into your Runnable executions.
-
-> **What's Next**: The [Tracing](./tracing.mdx) section will show you how the RunContext creates permanent execution records that enable debugging, analysis, and observability.

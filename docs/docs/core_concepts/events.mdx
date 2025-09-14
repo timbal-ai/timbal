@@ -33,7 +33,9 @@ This enables you to:
 
 ## Event Types
 
-Events are the communication mechanism that Runnables use to stream information throughout their execution lifecycle. Every Runnable execution produces a sequence of events that can be consumed in real-time or collected for later processing.
+Events are the communication mechanism that Runnables use to stream information throughout their execution lifecycle. Every Runnable execution produces a sequence of events that can be consumed in real-time or collected for later processing. 
+
+Events are designed to be lightweight. For comprehensive execution data, see [Traces](./tracing.mdx).
 
 Every execution produces at least a **Start** event (when it begins) and an **Output** event (when it finishes). LLMs and streaming operations also produce **Chunk** events for intermediate results.
 
@@ -51,7 +53,7 @@ start_event = StartEvent(
     parent_call_id="068c4458382e708f8000cc0f9b19d970",
 )`}/>
 
-> The `path`, `call_id`, and `run_id` fields help track execution flow and will be explained in detail in the [Tracing](./tracing.mdx) section.
+> These fields are present in all events to identify their source - the framework handles this automatically. We'll explore this in greater detail in advanced sections.
 
 ### Chunk Event
 Contains streaming or intermediate results during execution.
@@ -68,8 +70,8 @@ chunk_event = ChunkEvent(
 
 > The `chunk` property contains each piece of the response as it's generated during streaming.
 
-### Output Event 
-Contains the final result with complete execution information.
+### Output Event
+Contains the final result and signals completion.
 
 <CodeBlock language="python" code={`from timbal.types.events import OutputEvent
 
@@ -77,36 +79,16 @@ output_event = OutputEvent(
     run_id="068c4458382e79bb80006dc019ac3039",
     parent_run_id=None,
     path="agent.llm",
-    call_id="068c4458383678be800031537a8df42e", 
+    call_id="068c4458383678be800031537a8df42e",
     parent_call_id="068c4458382e708f8000cc0f9b19d970",
-    input={
-        "model": "openai/gpt-4o-mini", 
-        "messages": [{
-            "role": "user", 
-            "content": [{"type": "text", "text": "Hello"}]
-        }], 
-    },
     output={
-        "role": "assistant", 
+        "role": "assistant",
         "content": [{"type": "text", "text": "Hello! How can I assist you today?"}]
     },
-    error=None,
-    t0=1640995200000,
-    t1=1640995201000,
-    usage={
-        "gpt-4o-mini-2024-07-18:input_text_tokens": 32, 
-        "gpt-4o-mini-2024-07-18:output_text_tokens": 10,
-    },
-    metadata={
-        "type": "LLM", 
-        "model_provider": "openai", 
-        "model_name": "gpt-4o-mini", 
-        "ttft": 1.218775834015105,  # Time to first token
-        "tps": 103.44992571967803,   # Tokens per second
-    },
+    error=None
 )`}/>
 
-> Contains the `input` that was passed, the final `output` (or `error` if something went wrong), `usage` metrics, and execution `metadata`.
+> Contains either the final `output` result (if successful) or `error` information (if something went wrong).
 
 ## Handling Errors
 
@@ -128,7 +110,3 @@ Errors will always have this structure:
     "message": "Invalid input provided",
     "traceback": "Traceback (most recent call last):\\n..."
 }`}/>
-
-:::note[Note on persistence]
-Events are **not persisted to memory** - they are temporary notifications that stream during execution and are consumed in real-time. For permanent storage and analysis, this information is captured in **Traces**, which will be explained in detail in the following sections.
-:::

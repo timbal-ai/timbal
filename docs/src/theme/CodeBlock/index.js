@@ -94,6 +94,7 @@ const monokaiTheme = {
 
 // Custom highlighting for specific keywords
 const highlightMap = {
+  Trace: 'custom-highlight-green',
   Agent: 'custom-highlight-green',
   Workflow: 'custom-highlight-green',
   Tool: 'custom-highlight-green',
