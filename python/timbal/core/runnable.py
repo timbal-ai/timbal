@@ -700,6 +700,11 @@ class Runnable(ABC, BaseModel):
             trace.output = output
             trace._output_dump = await dump(output)
             
+            # Restore the call context to this runnable before executing post_hook
+            # This ensures post_hook modifies the correct trace, not any nested ones
+            set_call_id(_call_id)
+            if self._is_orchestrator:
+                set_parent_call_id(_call_id)
             if self.post_hook is not None:
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
             
