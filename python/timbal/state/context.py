@@ -12,9 +12,6 @@ from .tracing.trace import Trace
 
 logger = structlog.get_logger("timbal.state.context")
 
-# Sentinel value to distinguish between explicitly passing None and not passing anything as function param
-_MISSING = object()
-
 
 class RunContext(BaseModel):
     """Runtime execution context shared across all components in a run.
@@ -25,9 +22,8 @@ class RunContext(BaseModel):
     - Usage tracking and statistics
     - Parent-child run relationships
     
-    This context is automatically created and managed by the framework and is
-    accessible through get_run_context() in runtime callables like system prompt
-    functions and hooks.
+    This context is automatically created and managed by the framework and is accessible
+    through get_run_context() in runtime callables like default param callables and hooks.
     """
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -35,13 +31,14 @@ class RunContext(BaseModel):
     )
 
     id: str = Field(
-        default_factory=lambda: uuid7(as_type="str"),
+        default_factory=lambda: uuid7(as_type="str").replace("-", ""),
         description="Unique identifier for the run.",
     )
     parent_id: str | None = Field(
         None,
         description="Whether this run is a direct child of another run.",
     )
+
     platform_config: PlatformConfig | None = Field(
         None,
         description="Platform configuration for the run.",

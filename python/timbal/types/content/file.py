@@ -30,6 +30,7 @@ def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
     """Convert a PDF file to a list of images files."""
     import tempfile
     from pathlib import Path
+
     import fitz
     pdf.seek(0) # Ensure the pointer is at the start of the file
     doc = fitz.Document(stream=pdf.read())

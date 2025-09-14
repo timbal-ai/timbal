@@ -31,7 +31,7 @@ from ..state import (
     set_run_context,
 )
 from ..state.context import RunContext
-from ..state.data import RunContextDataAccessAnalyzer
+from ..state.dependency_analyzer import RunContextDependencyAnalyzer
 from ..state.tracing.trace import Trace
 from ..types.events import (
     BaseEvent,
@@ -316,7 +316,7 @@ class Runnable(ABC, BaseModel):
                         target_node = node
                         break
             if target_node:
-                target_node_analyzer = RunContextDataAccessAnalyzer()
+                target_node_analyzer = RunContextDependencyAnalyzer()
                 target_node_analyzer.visit(target_node)
                 dependencies = target_node_analyzer.dependencies
         except Exception as e:
