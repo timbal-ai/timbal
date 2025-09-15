@@ -14,40 +14,78 @@ The shared memory that connects everything together across the entire lifetime o
 
 The RunContext is the central storage and state management system for your runs. Beyond storing traces, it enables data sharing between components, input/output manipulation, and hierarchical data access across parent-child relationships.
 
-## How to Access the RunContext
+## Accessing the RunContext
 
-The RunContext is accessible from anywhere within a Runnable's execution using `get_run_context()`. 
+The RunContext is accessible from any callable within a Runnable's execution using `get_run_context()`. This includes:
 
-To illustrate this, we'll introduce the Runnable lifecycle hooks. Every Runnable supports two optional hooks:
+- **Main handlers**: The main function that does the work (_i.e._ the function you pass to a Tool).
+- **Default parameter callables**: Functions used to compute default values at runtime (as shown in [Runnables](./runnables#parameter-handling-and-basic-execution)).
+- **Lifecycle hooks**: Functions that run before or after the main handler.
+
+The `RunContext.current_trace()` method returns the trace object for the currently executing Runnable, containing all execution data - input parameters, output, timing, metadata, and any custom data you store on it. You get direct access to the live trace object being built during execution.
+
+Here's a simple example showing context access from a main handler:
+
+<CodeBlock language="python" highlight="7" code={`from datetime import datetime
+
+import httpx
+from timbal.state import get_run_context
+
+async def api_call(endpoint: str) -> dict:
+    trace = get_run_context().current_trace()
+    # Store request metadata for observability
+    trace.endpoint = endpoint
+    trace.request_start = datetime.now()
+    # Perform actual HTTP request
+    async with httpx.AsyncClient() as client:
+        response = await client.get(endpoint)
+    # Store response metadata for debugging/monitoring
+    trace.response_status = response.status_code
+    trace.request_duration = datetime.now() - trace.request_start
+    return response.json()
+
+api_tool = Tool(
+    name="api_call",
+    handler=api_call,
+)`}/>
+
+:::info[Accessing other traces]{.tight-admonition}
+Beyond `current_trace()`, the RunContext provides methods like `.parent_trace()` and `.step_trace()` to access parent or neighbor traces. We'll explore these methods in future sections when working with multi-step workflows and nested executions.
+:::
+
+## Lifecycle Hooks
+
+Beyond the main handler, Runnables support lifecycle hooks - functions that run at specific points during execution. These provide structured access points for context interaction and enable powerful data transformation patterns.
+
+Every Runnable supports two optional hooks:
 
 - **`pre_hook`**: A function that runs before the main handler
 - **`post_hook`**: A function that runs after the main handler completes
 
-These hooks demonstrate how different parts of your execution can read and write to the same shared context, enabling powerful data transformation and coordination patterns.
+Hooks can modify inputs, store custom data, and transform outputs - all while sharing the same RunContext.
 
-## Pre-hooks: Modifying Input and Adding Context
+### Pre-hooks: Modifying Input and Adding Context
 
 A `pre_hook` runs before your handler and can both modify input parameters and store additional context data:
 
-<CodeBlock language="python" code={`from datetime import datetime
+<CodeBlock language="python" highlight="19" code={`from datetime import datetime
 
 from timbal.state import get_run_context
 
 def pre_hook():
-    run_context = get_run_context()
-    # Get input variable and modify it
-    greet_name = run_context.get_data(".input.name")
-    run_context.set_data(".input.name", greet_name.capitalize())
-    # Directly set input variable
-    run_context.set_data(".input.location", "Barcelona")
-    # Set additional properties
-    run_context.set_data(".greet_time", datetime.now())
+    trace = get_run_context().current_trace()
+    # Modify input parameters that will be passed to the handler
+    trace.input["name"] = trace.input["name"].capitalize()
+    # Add a new parameter
+    trace.input["location"] = "Barcelona"
+    # Store custom data for later use
+    trace.greet_time = datetime.now()
 
 def greet(name: str, location: str) -> str:
     return f"Hello {name} from {location}!"
 
 greet_tool = Tool(
-    name="greet", 
+    name="greet",
     pre_hook=pre_hook,
     handler=greet,
 )
@@ -60,20 +98,20 @@ Pre-hooks are perfect for:
 - **Request Preprocessing**: Extract headers, validate signatures, or decode authentication tokens
 - **State Initialization**: Set up execution context, timestamps, or tracking metadata
 
-## Post-hooks: Processing Output After Completion
+### Post-hooks: Processing Output After Completion
 
 A `post_hook` runs after your handler and can access both input and output:
 
-<CodeBlock language="python" code={`def post_hook():
-    run_context = get_run_context()
-    # We can fetch and log any data stored in the context
-    greet_time = run_context.get_data(".greet_time")
+<CodeBlock language="python" highlight="13" code={`def post_hook():
+    trace = get_run_context().current_trace()
+    # Retrieve custom data stored in pre_hook
+    greet_time = trace.greet_time
     print(f"Greeting at {greet_time}")
-    # We can also modify the output of the handler directly
-    run_context.set_data(".output", "Greeting overridden!")
+    # Modify the output before it's returned
+    trace.output = "Greeting overridden!"
 
 greet_tool = Tool(
-    name="greet", 
+    name="greet",
     pre_hook=pre_hook,
     handler=greet,
     post_hook=post_hook,
@@ -96,27 +134,3 @@ These simple examples show the basics. In practice, hooks excel at:
 More advanced patterns in the [Agents](../agents) section.
 :::
 
-## Hierarchical Data Access
-
-The context uses a hierarchical key format that lets you access data from different levels of execution:
-
-### Current Runnable Scope
-<CodeBlock language="python" code={`# Access your own execution data with . prefix
-context.get_data(".input.parameter_name")  # Your input parameters
-context.get_data(".output")                 # Your output (available in post_hook)
-context.get_data(".custom_variable")        # Custom data you stored`}/>
-
-### Parent Runnable Scope
-<CodeBlock language="python" code={`# Access parent execution data with .. prefix
-context.get_data("..input")       # Parent's input
-context.get_data("..output")      # Parent's output
-context.get_data("..custom_var")  # Parent's custom data`}/>
-
-## Data Sharing Between Components
-
-When Tools are used within Agents or Workflows, they can share data through the context:
-
-<CodeBlock language="python" code={`# In a multi-step process, access data from other components
-context.get_data("step1.output.user_data")    # Data from step1
-context.get_data("validation.custom_flags")   # Custom data from validation step
-context.get_data("..shared_session_data")     # Data from parent Agent/Workflow`}/>
