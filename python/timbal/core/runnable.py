@@ -2,6 +2,7 @@ import ast
 import asyncio
 import contextvars
 import inspect
+import os
 import time
 import traceback
 from abc import ABC, abstractmethod
@@ -43,6 +44,10 @@ from ..types.events import (
 from ..utils import dump, sync_to_async_gen
 
 logger = structlog.get_logger("timbal.core.runnable")
+
+# By default, we only print START and OUTPUT events
+timbal_log_events = os.getenv("TIMBAL_LOG_EVENTS", "START,OUTPUT").split(",")
+timbal_log_events = set(event.strip() for event in timbal_log_events)
 
 
 class CollectableAsyncGenerator:
@@ -630,7 +635,8 @@ class Runnable(ABC, BaseModel):
                 call_id=trace.call_id,
                 parent_call_id=trace.parent_call_id,
             )
-            logger.info("start_event", **start_event.model_dump())
+            if start_event.type in timbal_log_events:
+                logger.info("start_event", **start_event.model_dump())
             yield start_event
 
             # We store the unvalidated input, as sent by the user. 
@@ -692,7 +698,8 @@ class Runnable(ABC, BaseModel):
                                     parent_call_id=trace.parent_call_id,
                                     chunk=processed_chunk,
                                 )
-                                logger.info("chunk_event", **chunk_event.model_dump())
+                                if chunk_event.type in timbal_log_events:
+                                    logger.info("chunk_event", **chunk_event.model_dump())
                                 yield chunk_event
                             else:
                                 yield processed_chunk
@@ -739,7 +746,8 @@ class Runnable(ABC, BaseModel):
                 await run_context._save_tracing()
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
                 set_parent_call_id(None)
-            logger.info("output_event", **output_event.model_dump())
+            if output_event.type in timbal_log_events:
+                logger.info("output_event", **output_event.model_dump())
             yield output_event
 
 

@@ -4,9 +4,9 @@ These tests focus on runtime behavior of RunContext methods like current_trace()
 parent_trace(), step_trace(), and pre_hook integration scenarios.
 """
 import asyncio
-import pytest
 from datetime import datetime
 
+import pytest
 from timbal import Agent, Tool
 from timbal.state import get_run_context
 from timbal.types.file import File
@@ -1285,7 +1285,6 @@ class TestComplexNestedExecution:
         )
 
         # Execute the complex nested scenario
-        from timbal.types.message import Message
         result = superagent(
             system_prompt=(
                 "You are a master orchestrator. You must use the secret_agent tool to find secrets "

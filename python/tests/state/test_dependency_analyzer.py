@@ -389,6 +389,7 @@ class TestRunnableInspectCallable:
     def test_inspect_callable_error_handling(self):
         """Test that inspection gracefully handles errors."""
         import unittest.mock
+
         from timbal.core.runnable import Runnable
 
         # Use a built-in callable without required parameters
