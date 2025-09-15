@@ -31,6 +31,14 @@ This enables you to:
 - Debug execution flow
 - Build reactive user interfaces
 
+## Event Logging
+
+In reality, you don't need to manually print events. By default, events are logged to standard output by the framework. You can control logging behavior with these environment variables:
+
+- `TIMBAL_LOG_EVENTS`: Which events to log (default: `"START,OUTPUT"`)
+- `TIMBAL_LOG_FORMAT`: Log format - `"dev"` for human-readable or `"json"` for structured (default)
+- `TIMBAL_LOG_LEVEL`: Standard log level (default: `"INFO"`)
+
 ## Event Types
 
 Events are the communication mechanism that Runnables use to stream information throughout their execution lifecycle. Every Runnable execution produces a sequence of events that can be consumed in real-time or collected for later processing. 
@@ -53,10 +61,12 @@ start_event = StartEvent(
     parent_call_id="068c4458382e708f8000cc0f9b19d970",
 )`}/>
 
-> These fields are present in all events to identify their source - the framework handles this automatically. We'll explore this in greater detail in advanced sections.
+:::note
+These fields are present in all events to identify their source - **the framework handles this automatically**. We'll explore this in greater detail in advanced sections.
+:::
 
 ### Chunk Event
-Contains streaming or intermediate results during execution.
+Contains streaming or intermediate results during execution. The `chunk` property contains each piece of the response as it's generated during streaming.
 <CodeBlock language="python" code={`from timbal.types.events import ChunkEvent
 
 chunk_event = ChunkEvent(
@@ -68,10 +78,8 @@ chunk_event = ChunkEvent(
     chunk="Hello"
 )`}/>
 
-> The `chunk` property contains each piece of the response as it's generated during streaming.
-
 ### Output Event
-Contains the final result and signals completion.
+Contains the final result and signals completion. Contains either the final `output` result (if successful) or `error` information (if something went wrong).
 
 <CodeBlock language="python" code={`from timbal.types.events import OutputEvent
 
@@ -87,8 +95,6 @@ output_event = OutputEvent(
     },
     error=None
 )`}/>
-
-> Contains either the final `output` result (if successful) or `error` information (if something went wrong).
 
 ## Handling Errors
 
