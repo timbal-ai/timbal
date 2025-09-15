@@ -109,6 +109,8 @@ def create_app(
         set_run_context(req_context)
 
         res_content = await app.state.flow.complete(**req_data)
+        if res_content is None:
+            return Response(status_code=204)
 
         return JSONResponse(
             status_code=200,
