@@ -1,97 +1,113 @@
 ---
 title: "Introduction"
-description: "Welcome to the new home for your documentation"
+description: "Build reliable AI applications (...)"
 ---
 
-## Setting up
+## Overview
 
-Get your documentation site up and running in minutes.
+**Timbal is an open-source framework for designing autonomous AI applications with flexible orchestration, real-time streaming, and multi-provider support.**
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+Timbal empowers developers with both **high-level simplicity** and **precise low-level control**, ideal for creating autonomous AI applications tailored to any scenario.
+
+Timbal provides two main patterns for building AI applications:
+
+- **[Agents](./agents)**: Agents are autonomous execution units that orchestrate LLM interactions with tool calling. 
+  
+  Best for:
+  - Complex reasoning tasks requiring multiple steps
+  - Dynamic tool selection based on context
+  - Open-ended problem solving with autonomous decision making
+  - Multi-turn conversations with memory across iterations
+
+  ```python 
+  from timbal import Agent
+
+  agent = Agent(
+      name="my_agent",
+      model="openai/gpt-4.1",
+      tools=[search_web],
+  )
+  ```
+
+- **[Workflows](./workflows)**: Fine-grained control over your AI pipeline with explicit step-by-step execution. 
+  
+  Best for:
+  - Complex data processing pipelines with multiple stages
+  - Predictable processes with defined execution paths
+  - Performance-critical applications requiring concurrent execution
+  - Workflows where explicit control over step dependencies is needed
+
+  ```python
+  from timbal import Workflow
+
+  workflow = (WorkFlow(name="my_workflow")
+      .step(extract_text)
+      .step(text_processor, raw_text=extract_text.output)
+      .step(convert_to_database, text=text_processor.output, chunk_size=1000)
+  )
+  ```
 
 ## Make it yours
 
 Design a docs site that looks great and empowers your users.
 
-<Columns cols={2}>
+## Key Features
+
+<Columns cols={3}>
   <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
+    title="Memory"
+    icon="database"
+    href="#"
   >
-    Edit your docs locally and preview them in real time.
+    TODO
   </Card>
   <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
+    title="Model Routing"
+    icon="arrow-progress"
+    href="#"
   >
-    Customize the design and colors of your site to match your brand.
+    TODO
   </Card>
     <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
+    title="Composability"
+    icon="puzzle-piece"
+    href="#"
   >
-    Organize your docs to help users find what they need and succeed with your product.
+    TODO
   </Card>
   <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
+    title="Tracing"
+    icon="wave-pulse"
+    href="#"
   >
-    Auto-generate API documentation from OpenAPI specifications.
+    TODO
+  </Card>
+  <Card
+    title="Evals"
+    icon="shield-check"
+    href="#"
+  >
+    TODO
+  </Card>
+  <Card
+    title="Deployment"
+    icon="rocket-launch"
+    href="#"
+  >
+    TODO
   </Card>
 </Columns>
 
-## Create beautiful pages
+## Why are we building this?
 
-Everything you need to create world-class documentation.
+- **Simplicity over complexity**: Unlike LangGraph, CrewAI, and other frameworks that abstract away what's really happening, Timbal keeps things transparent. Under the hood, it's just LLM calls and async function execution - no hidden magic, no opaque abstractions.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+- **Developer experience first**: We believe you shouldn't need to learn a new mental model to build AI applications. If you understand functions and async/await from any modern programming language, you understand Timbal. Most agents are built in 10-20 lines of code.
 
-## Need inspiration?
+- **Battle-tested architecture**: Our core abstractions have been refined through real-world production usage. The framework is designed around proven patterns: async generators, Pydantic validation, and event-driven processing.
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+- **Robust interfaces**: Strong typing and validation make it nearly impossible to break things from the outside, while clean abstractions make internal modifications straightforward. The framework fails fast with clear error messages.
+
+- **Performance by design**: Built for production workloads with concurrent execution, efficient memory management, and minimal overhead. Every design decision prioritizes speed and scalability.
+
+- **Stability in a chaotic ecosystem**: Providers change APIs monthly. Timbal provides a stable abstraction that shields your applications in production.
