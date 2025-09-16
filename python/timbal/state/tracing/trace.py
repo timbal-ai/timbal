@@ -49,6 +49,15 @@ class Trace(BaseModel):
         default_factory=dict,
         description="Flexible metadata storage for run-specific metrics and data.",
     )
+    runnable: Any = Field(
+        None,
+        description=(
+            "A reference to the runnable being executed. "
+            "Can be used to access runnable properties, background tasks, and other runtime attributes. "
+            "Will be None when initializing traces from serialized data."
+        ),
+        exclude=True,
+    )
 
     _input_dump: Any = PrivateAttr()
     """The dumped/serialized version of input for internal use."""

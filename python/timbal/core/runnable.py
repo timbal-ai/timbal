@@ -610,6 +610,7 @@ class Runnable(ABC, BaseModel):
             parent_call_id=_parent_call_id,
             t0=t0,
             metadata={**self.metadata}, # Shallow copy
+            runnable=self,
         )
         run_context._tracing[_call_id] = trace
 
