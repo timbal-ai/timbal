@@ -51,6 +51,7 @@ from pydantic import (
 from pydantic_core import CoreSchema, core_schema
 from uuid_extensions import uuid7
 
+from ..state.context import RunContext, TimbalPlatformConfig
 from ..state import get_run_context
 from ..utils import _platform_api_call
 
@@ -374,17 +375,42 @@ class File(io.IOBase):
         if self.__persisted__ is not None:
             return self.__persisted__
 
-        context = get_run_context()
+        run_context = get_run_context()
+        if not run_context:
+            run_context = RunContext()
+            host = os.getenv("TIMBAL_API_HOST")
+            if host:
+                token = os.getenv("TIMBAL_API_KEY") or os.getenv("TIMBAL_API_TOKEN")
+                if token:
+                    auth = {
+                        "type": "bearer",
+                        "token": token
+                    }
+                    subject = None
+                    subject_org_id = os.getenv("TIMBAL_ORG_ID")
+                    subject_app_id = os.getenv("TIMBAL_APP_ID")
+                    if subject_org_id and subject_app_id:
+                        subject_version_id = os.getenv("TIMBAL_VERSION_ID")
+                        subject = {
+                            "org_id": subject_org_id,
+                            "app_id": subject_app_id,
+                            "version_id": subject_version_id
+                        }
+                    run_context.timbal_platform_config = TimbalPlatformConfig.model_validate({
+                        "host": host,
+                        "auth": auth,
+                        "subject": subject
+                    })
 
         if self.__source_scheme__ == "url":
             url = str(self)
-            if not context or not context.timbal_platform_config:
+            if not run_context.timbal_platform_config:
                 return url
-            elif url.startswith(f"https://{context.timbal_platform_config.cdn}"):
+            elif url.startswith(f"https://{run_context.timbal_platform_config.cdn}"):
                 object.__setattr__(self, "__persisted__", url)
                 return url
 
-        if not context or not context.timbal_platform_config:
+        if not run_context.timbal_platform_config or (not org_id and not run_context.timbal_platform_config.subject):
             if self.__source_scheme__ == "local_path":
                 local_path = str(self)
                 object.__setattr__(self, "__persisted__", local_path)
@@ -400,7 +426,7 @@ class File(io.IOBase):
             object.__setattr__(self, "__persisted__", temp_path)
             return temp_path
 
-        subject = context.timbal_platform_config.subject
+        subject = run_context.timbal_platform_config.subject
         org_id = org_id or subject.org_id
         # ? We could add more subject info here
 
@@ -411,8 +437,9 @@ class File(io.IOBase):
         files = {"file": (self.name, content, self.__content_type__)}
 
         res = await _platform_api_call("POST", path, files=files)
+        res_json = res.json()
         # ? We could use an UploadFileResponse pydantic model
-        url = res.json()["url"]
+        url = res_json["url"]
         object.__setattr__(self, "__persisted__", url)
         return url
 
