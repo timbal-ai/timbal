@@ -1,0 +1,113 @@
+---
+title: "Installation"
+description: "Step-by-step instructions for setting up Timbal CLI and Python package."
+---
+
+## Prerequisites
+
+<Info>
+Before installing **Timbal**, ensure you have:
+- **Docker** installed and running: Check the [documentation](https://docs.docker.com/engine/install/).
+- **Python `3.11` or higher**: Make sure you have the correct version installed before proceeding.
+</Info>
+
+We recommend using `uv` for dependency management and package handling, streamlining project setup and execution for a seamless development experience.
+
+<Info>
+Install uv to manage your Python dependencies.
+
+- On **macOS/Linux**:
+
+  Use `curl` to download the script and execute it with `sh`:
+
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+
+  If your system doesn't have `curl`, you can use `wget`:
+
+  ```bash
+  wget -qO- https://astral.sh/uv/install.sh | sh
+  ```
+  
+- On **Windows**:
+
+  Use `irm` to download the script and `iex` to execute it:
+
+  ```powershell
+  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+  ```
+
+If you run into any issues, refer to **[UV's installation](https://docs.astral.sh/uv/get-started/installation/)** guide for more information.
+</Info>
+
+## Install Timbal CLI
+
+The **Timbal CLI** provides a command-line interface for managing Timbal projects, including initialization, building, deploying, and other project management tasks.
+
+### macOS/Linux
+
+Use `curl` to download and execute the installation script:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.sh | sh
+```
+
+### Windows
+
+Use PowerShell to download and execute the installation script:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.ps1 | iex"
+```
+
+<Tip>
+Once installed, you can use the `timbal` command to manage your projects!
+</Tip>
+
+## Install Timbal Python Package
+
+If you want to use Timbal directly in your Python projects or integrate it into existing code, you can install the Python package directly.
+
+### Basic Installation
+
+You can install the Timbal Python package using either `uv` or `pip`:
+
+```bash
+uv add timbal
+```
+
+```bash
+pip install timbal
+```
+
+### Optional Dependencies
+
+Timbal also has **optional dependencies** for integrations (e.g., MySQL, Google Drive, etc.).
+You can install all optional dependencies at once with:
+
+```bash
+pip install "timbal[all]"
+```
+
+```bash
+uv add "timbal[all]"
+```
+
+Or, you can install only the integrations you need, for example:
+
+```bash
+pip install "timbal[mysql,gdrive]"
+```
+
+```bash
+uv add "timbal[mysql,gdrive]"
+```
+
+We'll cover integrations in more detail in the [Integrations](/integrations) section.
+
+For a complete and up-to-date list of supported extras you can also look at the `pyproject.toml` file on [GitHub](https://github.com/timbal-ai/timbal/blob/main/pyproject.toml).
+
+<Tip>
+You're ready to create your first Timbal project!
+</Tip>
