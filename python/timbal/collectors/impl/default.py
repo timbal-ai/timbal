@@ -6,15 +6,14 @@ try:
 except ImportError:
     from typing_extensions import override
 
-from ...state.context import RunContext
-from ..base import EventCollector
+from ..base import BaseCollector
 
 
-class DefaultCollector(EventCollector):
+class DefaultCollector(BaseCollector):
     """Default fallback collector that handles any event type."""
     
-    def __init__(self, run_context: RunContext, start: float):
-        super().__init__(run_context, start)
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
         self._events: list[Any] = []
     
     @classmethod
@@ -27,7 +26,8 @@ class DefaultCollector(EventCollector):
         """Collects events in array."""
         self._events.append(event)
         return event
-    
+
     @override
-    def collect(self) -> list[Any]:
+    def result(self) -> Any:
+        """Returns all the collected events."""
         return self._events

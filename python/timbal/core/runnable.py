@@ -7,7 +7,7 @@ import time
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable
-from functools import cached_property, wraps
+from functools import cached_property
 from typing import Any, Literal
 
 import structlog
@@ -24,6 +24,7 @@ from pydantic import (
 from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
+from ..collectors.impl.timbal import TimbalCollector
 from ..state import (
     get_or_create_run_context,
     get_parent_call_id,
@@ -48,126 +49,6 @@ logger = structlog.get_logger("timbal.core.runnable")
 # By default, we only print START and OUTPUT events
 timbal_log_events = os.getenv("TIMBAL_LOG_EVENTS", "START,OUTPUT").split(",")
 timbal_log_events = set(event.strip() for event in timbal_log_events)
-
-
-class CollectableAsyncGenerator:
-    """
-    Wrapper that adds collect() method to async generators.
-    
-    This class implements the async iterator protocol by wrapping an existing
-    async generator and adding the ability to collect all results.
-    """
-    
-    def __init__(self, async_gen: AsyncGenerator[Event, None], runnable: 'Runnable', kwargs: dict[str, Any]):
-        """Initialize the CollectableAsyncGenerator wrapper.
-        
-        Args:
-            async_gen: The original async generator from the Runnable's __call__ method
-            runnable: Reference to the Runnable instance that created the generator
-            kwargs: Original keyword arguments passed to the __call__ method
-        """
-        self._async_gen = async_gen  # The original async generator from __call__
-        self._runnable = runnable    # Reference to the Runnable instance
-        self._kwargs = kwargs        # Original kwargs passed to __call__
-        self._collected = False      # Track if the generator has been fully consumed
-        self._output_event = None    # Cache the OutputEvent when we encounter it
-        self._events = []            # Cache all yielded events for later access
-    
-    def __aiter__(self):
-        """Return the async iterator object (self).
-        
-        In Python's async iterator protocol:
-        - __aiter__() is called when you do `async for item in obj:`
-        - It should return an object that implements __anext__()
-        - We return `self` because this class implements __anext__()
-        
-        This is equivalent to how regular iterators work:
-        - __iter__() returns an iterator object with __next__()
-        
-        Returns:
-            Self as the async iterator
-        """
-        return self
-    
-    async def __anext__(self):
-        """Get the next item from the async iterator.
-        
-        This is called by `async for` loops and is the core of the async iterator protocol.
-        When the generator is exhausted, it raises StopAsyncIteration to signal completion.
-        
-        We intercept each event and cache it in self._events for later use by collect().
-        
-        Returns:
-            The next Event from the underlying async generator
-            
-        Raises:
-            StopAsyncIteration: When the generator is exhausted
-        """
-        try:
-            # Get the next event from the wrapped generator
-            event = await self._async_gen.__anext__()
-            # Cache this event so collect() can access it later
-            self._events.append(event)
-            # Cache OutputEvent directly when we encounter it
-            if isinstance(event, OutputEvent) and event.path == self._runnable._path:
-                self._output_event = event
-            return event
-        except StopAsyncIteration:
-            # The generator is exhausted - mark as collected and re-raise
-            self._collected = True
-            raise  # This stops the `async for` loop
-    
-    async def aclose(self):
-        """Close the generator gracefully.
-        
-        This is called when the generator needs to be cleaned up,
-        either explicitly or when the generator is garbage collected.
-        """
-        await self._async_gen.aclose()
-        self._collected = True
-    
-    async def collect(self) -> Any:
-        """Collect the final output by consuming the entire stream.
-        
-        This method consumes all remaining events from the async generator
-        and returns the final OutputEvent. It can be called multiple times
-        safely - subsequent calls return the cached result.
-        
-        How this works:
-        1. If we already have the OutputEvent cached, return it immediately
-        2. Otherwise, consume remaining events using `async for event in self:`
-           - This calls our __anext__() method which caches the OutputEvent when found
-        3. Return the cached OutputEvent
-        
-        Returns:
-            The final OutputEvent from the stream, or None if no OutputEvent was yielded
-        """
-        # If we already found and cached the OutputEvent, return it
-        if self._output_event is not None:
-            return self._output_event
-        
-        # Generator not fully consumed yet - consume remaining events
-        try:
-            # This calls our __aiter__() and __anext__() methods
-            # __anext__() will cache the OutputEvent when it encounters it
-            async for _ in self:
-                # We could break early if we found the OutputEvent, but typically
-                # the OutputEvent is the last event, so we consume everything
-                pass
-        except StopAsyncIteration:
-            pass  # Expected when generator is exhausted
-        
-        # Return the cached OutputEvent (will be None if no OutputEvent was yielded)
-        return self._output_event
-
-
-def collectable(func):
-    """Decorator that wraps async generator return with CollectableAsyncGenerator."""
-    @wraps(func)
-    def wrapper(self, **kwargs) -> CollectableAsyncGenerator:
-        async_gen = func(self, **kwargs)
-        return CollectableAsyncGenerator(async_gen, self, kwargs)
-    return wrapper
 
 
 # TODO Add timeout
@@ -565,7 +446,7 @@ class Runnable(ABC, BaseModel):
         return resolved_params
 
 
-    @collectable
+    @TimbalCollector.wrap
     async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
         """Execute the runnable with the given parameters.
         
@@ -583,7 +464,7 @@ class Runnable(ABC, BaseModel):
             **kwargs: Runtime parameters for the runnable execution.
         
         Returns:
-            A CollectableAsyncGenerator that yields Events and provides collect() method
+            A BaseCollector that yields Events and provides collect() method
             
         Raises:
             ValidationError: If input parameters don't match the params_model
@@ -666,45 +547,48 @@ class Runnable(ABC, BaseModel):
                     def handler_func():
                         return ctx.run(self.handler, **validated_input)
                     output = await loop.run_in_executor(None, handler_func)
-            
             elif self._is_coroutine:
                 output = await self.handler(**validated_input)
-            
             else:
-                if self._is_orchestrator:
-                    async_gen = self.handler(**validated_input)
-                else:
-                    async_gen = self.handler(**validated_input)
+                async_gen = self.handler(**validated_input)
             
             if async_gen:
-                collector = None
-                async for chunk in async_gen:
-                    # Get or create collector for this event type
-                    if collector is None:
-                        collector_type = get_collector_registry().get_collector_type(chunk)
-                        if collector_type:
-                            collector = collector_type(run_context, handler_start)
-                    
-                    if collector:
-                        processed_chunk = collector.process(chunk)
-                        # If the processed chunk is not None, it means we have streaming content
-                        if processed_chunk is not None:
-                            # If it's already a BaseEvent, it means we have already emitted it.
-                            if not isinstance(processed_chunk, BaseEvent):
-                                chunk_event = ChunkEvent(
-                                    run_id=run_context.id,
-                                    parent_run_id=run_context.parent_id,
-                                    path=trace.path,
-                                    call_id=trace.call_id,
-                                    parent_call_id=trace.parent_call_id,
-                                    chunk=processed_chunk,
-                                )
-                                if chunk_event.type in timbal_log_events:
-                                    logger.info("chunk_event", **chunk_event.model_dump())
-                                yield chunk_event
-                            else:
-                                yield processed_chunk
-                output = collector.collect() if collector else None
+                output = None
+                # Peek at first element to determine collector type
+                first_chunk = await async_gen.__anext__()
+                collector_type = get_collector_registry().get_collector_type(first_chunk)
+                if collector_type:
+                    collector = collector_type(async_gen=async_gen, start=handler_start)
+                    def emit_event(event):
+                        # If it's already a BaseEvent, it means we have already emitted it.
+                        if not isinstance(event, BaseEvent):
+                            chunk_event = ChunkEvent(
+                                run_id=run_context.id,
+                                parent_run_id=run_context.parent_id,
+                                path=trace.path,
+                                call_id=trace.call_id,
+                                parent_call_id=trace.parent_call_id,
+                                chunk=event,
+                            )
+                            if chunk_event.type in timbal_log_events:
+                                logger.info("chunk_event", **chunk_event.model_dump())
+                            return chunk_event
+                        return event
+                    # We need to manually process the first chunk, since we removed it from the generator
+                    first_event = collector.process(first_chunk)
+                    if first_event is not None:
+                        yield emit_event(first_event)
+                    # Process remaining events
+                    async for event in collector:
+                        if event is not None:
+                            yield emit_event(event)
+                    # Keep the final result
+                    output = collector.result()
+
+            # If the output is an OutputEvent, we extract the output
+            # to avoid nesting an output event inside another output event
+            if isinstance(output, OutputEvent):
+                output = output.output
             trace.output = output
             trace._output_dump = await dump(output)
             

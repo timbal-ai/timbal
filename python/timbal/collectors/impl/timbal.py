@@ -8,24 +8,23 @@ except ImportError:
 
 import structlog
 
-from ...state.context import RunContext
 from ...types.events.base import BaseEvent as TimbalBaseEvent
 from ...types.events.chunk import ChunkEvent as TimbalChunkEvent
 from ...types.events.output import OutputEvent as TimbalOutputEvent
 from ...types.events.start import StartEvent as TimbalStartEvent
 from .. import register_collector
-from ..base import EventCollector
+from ..base import BaseCollector
 
 logger = structlog.get_logger("timbal.collectors.impl.timbal")
 
 
 @register_collector
-class TimbalCollector(EventCollector):
+class TimbalCollector(BaseCollector):
     """Collector for Timbal events."""
     
-    def __init__(self, run_context: RunContext, start: float):
-        super().__init__(run_context, start)
-        self._output: Any = None
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        self._output_event = None
     
     @classmethod
     @override
@@ -36,28 +35,15 @@ class TimbalCollector(EventCollector):
     def process(self, event: TimbalBaseEvent) -> TimbalBaseEvent | None:
         """Processes Timbal events."""
         if isinstance(event, TimbalStartEvent):
-            return self._handle_start_event(event)
-        
-        if isinstance(event, TimbalChunkEvent):
-            return self._handle_chunk_event(event)
-        
-        if isinstance(event, TimbalOutputEvent):
-            return self._handle_output_event(event)
-        
+            return event
+        elif isinstance(event, TimbalChunkEvent):
+            return event
+        elif isinstance(event, TimbalOutputEvent):
+            self._output_event = event
+            return event
         logger.warning("Unknown Timbal event type", event_type=type(event), event=event.model_dump())
-        return None
-    
-    def _handle_start_event(self, event: TimbalStartEvent) -> TimbalStartEvent:
-        return event
-    
-    def _handle_chunk_event(self, event: TimbalChunkEvent) -> TimbalChunkEvent:
-        return event
-    
-    def _handle_output_event(self, event: TimbalOutputEvent) -> TimbalOutputEvent:
-        """Handle output events with usage statistics and final results."""
-        self._output = event.output
-        return event
-    
+
     @override
-    def collect(self) -> Any:
-        return self._output
+    def result(self) -> Any:
+        """Returns the output of the last output event received."""
+        return self._output_event

@@ -10,21 +10,22 @@ except ImportError:
 from openai.types.chat import ChatCompletionChunk
 from uuid_extensions import uuid7
 
-from ...state.context import RunContext
+from ...state import get_run_context
 from ...types.message import Message
 from .. import register_collector
-from ..base import EventCollector
+from ..base import BaseCollector
 
 # Create a type alias for OpenAI events (in the future we may have more than one)
 OpenAIEvent = ChatCompletionChunk
 
 
 @register_collector
-class OpenAICollector(EventCollector):
+class OpenAICollector(BaseCollector):
     """Collector for OpenAI streaming events."""
     
-    def __init__(self, run_context: RunContext, start: float):
-        super().__init__(run_context, start)
+    def __init__(self, start: float, **kwargs: Any):
+        super().__init__(**kwargs)
+        self._start = start
         self._content: str = ""
         self._tool_calls: list[dict[str, Any]] = []
         self._current_tool_call: dict[str, Any] | None = None
@@ -42,60 +43,49 @@ class OpenAICollector(EventCollector):
         # Handle usage statistics
         if event.usage:
             self._handle_usage(event)
-
         if not len(event.choices):
             return None
-
         # Calculate TTFT (Time To First Token) on first token
         if self._first_token is None:
             self._first_token = time.perf_counter()
-
         # Handle tool calls
         if event.choices[0].delta.tool_calls:
             return self._handle_tool_calls(event)
-
         # Handle text content
         if event.choices[0].delta.content:
             return self._handle_text_content(event)
     
     def _handle_usage(self, event: OpenAIEvent) -> None:
         """Handle usage statistics from OpenAI events."""
+        run_context = get_run_context()
         openai_model = event.model
         openai_usage = event.usage
-
         input_tokens = int(openai_usage.prompt_tokens)
         input_tokens_details = openai_usage.prompt_tokens_details
-        
         if hasattr(input_tokens_details, "cached_tokens"):
             input_cached_tokens = int(input_tokens_details.cached_tokens)
             if input_cached_tokens:
                 input_tokens -= input_cached_tokens
-                self._run_context.update_usage(f"{openai_model}:input_cached_tokens", input_cached_tokens)
-        
+                run_context.update_usage(f"{openai_model}:input_cached_tokens", input_cached_tokens)
         if hasattr(input_tokens_details, "audio_tokens"):
             input_audio_tokens = int(input_tokens_details.audio_tokens)
             if input_audio_tokens:
                 input_tokens -= input_audio_tokens
-                self._run_context.update_usage(f"{openai_model}:input_audio_tokens", input_audio_tokens)
-
-        self._run_context.update_usage(f"{openai_model}:input_text_tokens", input_tokens)
-
+                run_context.update_usage(f"{openai_model}:input_audio_tokens", input_audio_tokens)
+        run_context.update_usage(f"{openai_model}:input_text_tokens", input_tokens)
         output_tokens = int(openai_usage.completion_tokens)
         self._output_tokens += output_tokens
         output_tokens_details = openai_usage.completion_tokens_details
-        
         if hasattr(output_tokens_details, "audio_tokens"):
             output_audio_tokens = int(output_tokens_details.audio_tokens)
             if output_audio_tokens:
                 output_tokens -= output_audio_tokens
-                self._run_context.update_usage(f"{openai_model}:output_audio_tokens", output_audio_tokens)
-
-        self._run_context.update_usage(f"{openai_model}:output_text_tokens", output_tokens)
+                run_context.update_usage(f"{openai_model}:output_audio_tokens", output_audio_tokens)
+        run_context.update_usage(f"{openai_model}:output_text_tokens", output_tokens)
     
     def _handle_tool_calls(self, event: OpenAIEvent) -> None:
         """Handle tool call events from OpenAI."""
         tool_call = event.choices[0].delta.tool_calls[0]
-        
         if tool_call.id:
             # Start new tool call
             self._current_tool_call = {
@@ -118,29 +108,25 @@ class OpenAICollector(EventCollector):
                     "input": ""
                 }
                 self._tool_calls.append(self._current_tool_call)
-            
             self._current_tool_call["input"] += tool_call.function.arguments
-        
-        return None
     
     def _handle_text_content(self, event: OpenAIEvent) -> str:
         """Handle text content from OpenAI events."""
         text_chunk = event.choices[0].delta.content
-        
         # Handle citations if present
         if hasattr(event, "citations"):
             self.citations = event.citations
-
         self._content += text_chunk
         return text_chunk
     
     @override
-    def collect(self) -> Message:
+    def result(self) -> Message:
         """Returns structured OpenAI response."""
+        trace = get_run_context().current_trace()
         ttft = self._first_token - self._start
-        self._run_context.current_trace().metadata["ttft"] = ttft
+        trace.metadata["ttft"] = ttft
         tps = self._output_tokens / (time.perf_counter() - self._first_token)
-        self._run_context.current_trace().metadata["tps"] = tps
+        trace.metadata["tps"] = tps
 
         content = []
         if self._content:

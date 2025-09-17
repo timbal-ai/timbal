@@ -6,18 +6,17 @@ try:
 except ImportError:
     from typing_extensions import override
 
-from ...state.context import RunContext
 from .. import register_collector
-from ..base import EventCollector
+from ..base import BaseCollector
 
 
 @register_collector
-class StringCollector(EventCollector):
+class StringCollector(BaseCollector):
     """Collector for simple string events."""
     
-    def __init__(self, run_context: RunContext, start: float):
-        super().__init__(run_context, start)
-        self._result: str = ""
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs)
+        self._result = ""
     
     @classmethod
     @override
@@ -29,8 +28,8 @@ class StringCollector(EventCollector):
         """Concatenates string events."""
         self._result += event
         return event
-    
+
     @override
-    def collect(self) -> str:
-        """Returns concatenated string."""
+    def result(self) -> Any:
+        """Returns the concatenated string."""
         return self._result

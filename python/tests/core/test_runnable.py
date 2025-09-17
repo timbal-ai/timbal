@@ -2,103 +2,12 @@ import asyncio
 
 import pytest
 from timbal import Tool
-from timbal.core.runnable import CollectableAsyncGenerator
-from timbal.types.events import OutputEvent, StartEvent
+from timbal.collectors.base import BaseCollector
+from timbal.types.events import OutputEvent
 
 from .conftest import (
     Timer,
-    assert_no_errors,
 )
-
-
-class TestCollectableAsyncGenerator:
-    """Test the CollectableAsyncGenerator wrapper functionality."""
-    
-    @pytest.mark.asyncio
-    async def test_async_iteration(self, simple_tool):
-        """Test that CollectableAsyncGenerator supports async iteration."""
-        result = simple_tool(x="test")
-        
-        # Should be a CollectableAsyncGenerator
-        assert isinstance(result, CollectableAsyncGenerator)
-        
-        # Should support async iteration
-        events = []
-        async for event in result:
-            events.append(event)
-        
-        # Should have at least one event
-        assert len(events) >= 1
-        
-        # Should have an output event
-        output_events = [e for e in events if isinstance(e, OutputEvent)]
-        assert len(output_events) >= 1
-        
-        # Verify no errors in the final output
-        final_output = output_events[-1]
-        assert_no_errors(final_output)
-    
-    @pytest.mark.asyncio
-    async def test_collect_method(self, simple_tool):
-        """Test the collect() method returns the final result."""
-        result = simple_tool(x="test")
-        
-        # Should have collect method
-        assert hasattr(result, 'collect')
-        
-        # collect() should return the final output
-        output = await result.collect()
-        assert isinstance(output, OutputEvent)
-        assert output.output == "sync:test"
-    
-    @pytest.mark.asyncio
-    async def test_collect_multiple_calls(self, simple_tool):
-        """Test that collect() can be called multiple times safely."""
-        result = simple_tool(x="test")
-        
-        # First collect
-        output1 = await result.collect()
-        
-        # Second collect should return the same result
-        output2 = await result.collect()
-        
-        assert output1 == output2
-        assert output1.output == "sync:test"
-    
-    @pytest.mark.asyncio
-    async def test_mixed_iteration_and_collect(self, simple_tool):
-        """Test mixing async iteration and collect() calls."""
-        result = simple_tool(x="test")
-        
-        # Partially iterate
-        event_iter = aiter(result)
-        first_event = await anext(event_iter)
-        assert isinstance(first_event, StartEvent)
-        
-        # Then collect should still work
-        output = await result.collect()
-        assert isinstance(output, OutputEvent)
-        assert output.output == "sync:test"
-    
-    @pytest.mark.asyncio
-    async def test_runnable_reference(self, simple_tool):
-        """Test that runnable reference is accessible."""
-        result = simple_tool(x="test")
-        
-        assert hasattr(result, '_runnable')
-        assert result._runnable is simple_tool
-    
-    @pytest.mark.asyncio
-    async def test_aclose(self, simple_tool):
-        """Test graceful closing of the generator."""
-        result = simple_tool(x="test")
-        
-        # Should be able to close without error
-        await result.aclose()
-        
-        # After closing, iteration should raise StopAsyncIteration
-        with pytest.raises(StopAsyncIteration):
-            await anext(aiter(result))
 
 
 class TestRunnableBase:
@@ -181,7 +90,7 @@ class TestRunnableBase:
         
         # Should be able to call with only 'a' parameter
         result = tool(a="test")
-        assert isinstance(result, CollectableAsyncGenerator)
+        assert isinstance(result, BaseCollector)
     
     @pytest.mark.asyncio
     async def test_nested_paths(self):
@@ -200,8 +109,8 @@ class TestRunnableBase:
         assert nested_path == "parent.child"
         
         # Test that the runnable has the correct nested path
-        result = tool(x="test")
-        assert result._runnable._path == "parent.child"
+        result = await tool(x="test").collect()
+        assert result.path == "parent.child"
     
     @pytest.mark.asyncio
     async def test_serialization(self, simple_tool):
