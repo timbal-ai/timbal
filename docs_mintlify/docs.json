@@ -8,6 +8,10 @@
     "dark": "#000000"
   },
   "favicon": "/favicon.png",
+  "banner": {
+    "content": "🚀 Version 1.0 is in beta! Start with our [quickstart guide](/quickstart) or explore [examples](/examples).",
+    "dismissible": true
+  },
   "navigation": {
     "tabs": [
       {
@@ -17,7 +21,8 @@
             "group": "Getting started",
             "pages": [
               "index",
-              "installation"
+              "installation",
+              "quickstart"
             ]
           },
           {
@@ -27,6 +32,18 @@
               "core-concepts/events",
               "core-concepts/tracing",
               "core-concepts/context"
+            ]
+          },
+          {
+            "group": "Agents",
+            "pages": [
+              "agents/index",
+              "agents/memory",
+              "agents/tools",
+              "agents/structured-output",
+              "agents/voice",
+              "agents/dynamic",
+              "agents/evals"
             ]
           },
           {

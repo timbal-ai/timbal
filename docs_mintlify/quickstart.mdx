@@ -1,80 +1,221 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Build your first AI application with Timbal in just 5 lines of code."
 ---
 
-## Get started in three steps
+We'll start implementing an Agent. It will be a simple chatbot and gradually enhance it with advanced features. Let's dive in!
 
-Get your documentation site running locally and make your first customization.
+Before moving forward, ensure you've completed the installation of Timbal. If you haven't set it up yet, follow the [installation guide](/installation) to get started.
 
-### Step 1: Set up your local environment
+## Part 0: Initialize a Timbal Project
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
+  <Step title="Create Project Structure">
+    Run the Timbal CLI command to create a new project:
+    ```bash
+    timbal init my-project
+    ```
+    This creates a complete project structure with all necessary files and dependencies.
+  </Step>
+  <Step title="Project Structure">
+    Your project will look like this:
+    <img
+      src="/images/project-structure.png"
+      alt="Project structure"
+      height="50"
+      noZoom
+      className="rounded-lg"
+    />
+    | File | Purpose |
+    |------|---------|
+    | **.venv** | Python virtual environment directory (automatically created) |
+    | **.dockerignore** | Docker configuration for containerized deployment |
+    | **agent.py** | Main application file where you define your AI agents and workflows |
+    | **pyproject.toml** | Python project configuration and dependency management |
+    | **timbal.yaml** | Timbal framework configuration and settings |
+    | **uv.lock** | Dependency lock file for reproducible builds |
+  </Step>
+  <Step title="Edit Your Agent">
+    Out of all those files, you only need to edit one to customize your agent: `agent.py`. Here's an example:
+    ```python 
+    from datetime import datetime
 
-### Step 2: Deploy your changes
+    from timbal import Agent
+    from timbal.handlers.docx import create_docx
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    def get_datetime() -> str:
+        return datetime.now().isoformat()
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    agent = Agent(
+        name="demo_agent",
+        model="openai/gpt-5-mini",
+        tools=[get_datetime, create_docx]
+    )
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    await agent(prompt="What time is it?").collect()
+    await agent(prompt="Cool, write that down on a word file for me").collect()
+    ```
+    <Info>
+    You'll need to set the appropriate environment variables for your chosen model (e.g., `OPENAI_API_KEY`). Store these in a `.env` file and never commit them to version control.
+    </Info>
+  </Step>
+  <Step title="Run Your Agent">
+    Run your agent using Python:
+    ```bash
+    python agent.py
+    ```
+    Or with uv:
+    ```bash
+    uv run agent.py
+    ```
+    Your agent will start and be ready to receive prompts!
+  </Step>
+</Steps>
 
-### Step 3: Go live
+As you build more complex agents, you'll need additional Python packages for features like database connections, API integrations, or specialized tools.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+<Info>
+Timbal automatically sets up a Python environment using `uv`. You can manage your project dependencies using `uv` commands just like in any other Python project. For example:
 
-## Next steps
+```bash
+uv add package-name
+```
 
-Now that you have your docs running, explore these key features:
+This makes it easy to add new packages and manage your project's dependencies.
+</Info>
 
-<CardGroup cols={2}>
+## Part 1: Build a Simple Chatbot
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+🛠 Let's create a simple chatbot that can respond to user messages.
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+**1. Import the class `Agent` from the `timbal` package.**
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+<CodeBlock language="python" title="agent.py" code ={`from timbal import Agent`}/>
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+**2. Initialize an `Agent` object.**
 
-</CardGroup>
+<CodeBlock language="python" title="agent.py" code ={`agent = Agent(
+    name="my_agent",
+    model="gemini/gemini-2.5-pro-preview-03-25" # provider/model
+)`}/>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+The `name` parameter is required and provides a unique identifier for your agent. The `model` parameter specifies the provider and model to use for the agent.
+
+**3. Set your environment variables**
+Before running your flow, make sure you have the keys needed set as environment variables in your `.env` file:
+
+👀 It will depend on the LLM you're using, in this case we are using a Gemini model
+<CodeBlock language="bash" title=".env" code ={`GEMINI_API_KEY=your_api_key_here`}/>
+
+Only with the `Agent` class we have a flow that represents a llm that receives a `prompt` and returns a `response`.
+
+Now let's run the chatbot!
+
+<CodeBlock language="python" title="agent.py"
+code ={`response = await agent(prompt="What is the capital of Germany?").collect()
+print(response.output.content[0].text)`}/>
+
+
+You will see an output like this:
+
+<CodeBlock language="bash" code ={`The capital of Germany is Berlin.`}/>
+
+
+:::tip[Congratulations!]
+You've just created your first Timbal flow!
+:::
+
+This is the **simplest flow** you can create.
+
+You can modify it as you want. For example, you can add tools to the agent.
+
+## Part 2: Enhancing the Chatbot with Tools
+
+A great feature of Timbal is that you can easily add tools to your agent, allowing it to perform actions or fetch information in real time. 
+
+You can use both <span style={{color: 'var(--timbal-purple)'}}><strong>prebuilt tools</strong></span> (already provided by Timbal or the community) and <span style={{color: 'var(--timbal-purple)'}}><strong>custom tools</strong></span> (functions you create yourself).
+
+Let's see both approaches with practical examples:
+
+### Example 1: Using a Prebuilt Tool
+
+Timbal comes with several tools ready to use. Here are two powerful examples:
+
+#### a) Internet Search
+
+You can use the search tool to let your agent search the internet for up-to-date information:
+
+<CodeBlock language="python" title="agent.py"
+code ={`from timbal.steps.perplexity import search
+
+agent = Agent(
+    name="search_agent",
+    model="gemini/gemini-2.5-pro-preview-03-25",
+    tools=[search]
+)`}/>
+
+#### b) SQL/Postgres Query
+
+Timbal also provides a prebuilt tool to query a Postgres database:
+
+<CodeBlock language="python" title="agent.py"
+code ={`from timbal.steps.sql.postgres import postgres_query, PGConfig
+
+db_config = PGConfig(
+    host="localhost",
+    port=5432,
+    user="youruser",
+    password="yourpassword",
+    database="yourdb"
+)
+
+def run_sql_query(sql: str) -> str:
+    result = postgres_query(sql, db_config=db_config)
+    return str(result)
+
+agent = Agent(
+    name="sql_agent",
+    model="gemini/gemini-2.5-pro-preview-03-25",
+    tools=[run_sql_query]
+)`}/>
+
+
+### Example 2: Creating Your Own Tool
+
+You can also create your own tools. Here's a very simple example: a tool that returns the current date and time.
+
+<CodeBlock language="python" title="agent.py"
+code ={`from datetime import datetime
+
+def get_datetime() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+agent = Agent(
+    name="datetime_agent",
+    model="gemini/gemini-2.5-pro-preview-03-25",
+    tools=[get_datetime]
+)`}/>
+
+With Timbal, you can combine as many tools as you want—prebuilt or custom—to make your agent as powerful as you need!
+
+**That's it!** With 5 lines of code we've created a chatbot with tools.
+
+___
+
+_Looking for the full list of integrations or examples?_
+
+_Head over to [integrations](/integrations)/[examples](/examples) or, even better, check out our_ <a href="https://github.com/timbal-ai/timbal" target="_blank" rel="noopener noreferrer">GitHub</a>! _We're adding new examples as fast as we can._ 
+
+_Want the latest and greatest? Just do a <b>git pull</b> to make sure you have all the newest content! 😄_
+
+___
+
+## Deploying Timbal
+
+The best way to deploy your Timbal project is through the official Timbal Platform. It’s fast, easy, and gives you access to all the latest features and integrations.
+
+👉 Go to the [Timbal Platform] to get started!
+
+Prefer to run things locally or on your own infrastructure?
+
+No problem! You can use `timbal build` to generate a ready-to-use Docker container with your flow and an HTTP server preconfigured. This makes it simple to deploy anywhere Docker runs.

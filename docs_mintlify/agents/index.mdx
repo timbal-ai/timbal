@@ -1,0 +1,54 @@
+---
+title: "Overview"
+description: "Master proven strategies for designing advanced, specialized AI agents using an architecture that work together seamlessly to tackle complex challenges"
+---
+
+## What are Agents?
+
+Agents are autonomous execution units that **orchestrate LLM interactions with tool calling**. 
+
+Without tools, an agent functions as a basic LLM. The simplest agent requires just a name and model:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-5"
+)  # That's it! You've created your first agent!
+```
+
+<Tip>
+For a full step-by-step guide, check the [quickstart section](/quickstart) or see practical examples in the [examples section](/examples).
+</Tip>
+
+## Model Providers
+
+You can specify any model using the "provider/model" format. See all supported models in [Model Capabilities](/getting-started/model_capabilities).
+
+Some models require specific parameters (like `max_tokens` for Claude). Use `model_params` to pass any additional model configuration: 
+
+```python
+agent = Agent(
+    name="claude_agent",
+    model="anthropic/claude-sonnet-4-latest",
+    model_params={
+        "max_tokens": 1024
+    }
+)
+```
+
+**Note:** Make sure to define all required environment variables—such as the API key model that you need—in your `.env` file.
+
+```bash
+OPENAI_API_KEY=your_api_key_here
+ANTHROPIC_API_KEY=your_claude_api_key
+```
+
+Define tools as Python functions - the framework handles schema generation, parameter validation, and execution orchestration.
+
+## Messages
+
+TODO
+
+### Files
