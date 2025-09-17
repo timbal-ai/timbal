@@ -27,6 +27,14 @@
               "core_concepts/tracing",
               "core_concepts/context"
             ]
+          },
+          {
+            "group": "AI Tools",
+            "pages": [
+              "ai-tools/claude-code",
+              "ai-tools/cursor",
+              "ai-tools/windsurf"
+            ]
           }
         ]
       },
