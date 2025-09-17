@@ -2,18 +2,14 @@
 
 > 🚀 **Agents and Workflows**: APIs nearly stable - version 1.0.0 coming soon!
 
-The framework for building and orchestrating agentic AI applications—fast, scalable, and enterprise-ready. Clean async execution with automatic state persistence that enable tool-using agents that think, plan, and act in dynamic environments.
+Timbal is an open-source python framework for building reliable AI applications, battle-tested in production with transparent architecture that eliminates complexity while delivering concurrent execution, robust typing, and interface stability in an ever-changing ecosystem.
 
 ## Overview
 
 Timbal provides two main patterns for building AI applications:
 
 ### 1. Agents
-Autonomous AI agents that orchestrate LLM interactions with tool calling. They implement an execution pattern where an LLM can:
-- Receive a prompt and generate a response
-- Decide to call available tools based on the context
-- Process tool results and continue the conversation
-- Repeat until no more tool calls are needed or max iterations reached
+Autonomous AI agents that orchestrate LLM interactions with tool calling.
 
 Perfect for:
 - Complex reasoning tasks requiring multiple steps
@@ -22,12 +18,7 @@ Perfect for:
 - Multi-turn conversations with memory across iterations
 
 ### 2. Workflows
-Explicit step-by-step execution with full control over data flow and automatic dependency management. Workflows orchestrate multiple steps in a directed acyclic graph (DAG) where:
-
-- **Steps run concurrently** while respecting dependency constraints
-- **Automatic linking** based on data key references
-- **Graceful error handling** with dependent step skipping on failures
-- **Conditional execution** with `when` clauses for dynamic control
+Explicit step-by-step execution with full control over data flow and automatic dependency management.
 
 Perfect for:
 - Complex data processing pipelines with multiple stages

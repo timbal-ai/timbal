@@ -1,55 +1,29 @@
 ---
 title: "Introduction"
-description: "Build reliable AI applications (...)"
+description: "Simple, battle-tested framework for building reliable AI applications"
 ---
 
 ## Overview
 
-**Timbal is an open-source framework for designing autonomous AI applications with flexible orchestration, real-time streaming, and multi-provider support.**
+Timbal is an open-source python framework for building reliable AI applications, battle-tested in production with transparent architecture that eliminates complexity while delivering concurrent execution, robust typing, and interface stability in an ever-changing ecosystem.
 
-Timbal empowers developers with both **high-level simplicity** and **precise low-level control**, ideal for creating autonomous AI applications tailored to any scenario.
-
-Timbal provides two main patterns for building AI applications:
+It offers both autonomous Agents for complex reasoning and explicit Workflows for step-by-step control, all built on unified primitives that make AI applications composable, traceable, and scalable.
 
 - **[Agents](./agents)**: Agents are autonomous execution units that orchestrate LLM interactions with tool calling. 
-  
+
   Best for:
   - Complex reasoning tasks requiring multiple steps
   - Dynamic tool selection based on context
   - Open-ended problem solving with autonomous decision making
   - Multi-turn conversations with memory across iterations
 
-  ```python 
-  from timbal import Agent
-
-  agent = Agent(
-      name="my_agent",
-      model="openai/gpt-4.1",
-      tools=[search_web],
-  )
-  ```
-
 - **[Workflows](./workflows)**: Fine-grained control over your AI pipeline with explicit step-by-step execution. 
-  
+
   Best for:
   - Complex data processing pipelines with multiple stages
   - Predictable processes with defined execution paths
   - Performance-critical applications requiring concurrent execution
   - Workflows where explicit control over step dependencies is needed
-
-  ```python
-  from timbal import Workflow
-
-  workflow = (WorkFlow(name="my_workflow")
-      .step(extract_text)
-      .step(text_processor, raw_text=extract_text.output)
-      .step(convert_to_database, text=text_processor.output, chunk_size=1000)
-  )
-  ```
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
 
 ## Key Features
 
@@ -59,42 +33,42 @@ Design a docs site that looks great and empowers your users.
     icon="database"
     href="#"
   >
-    TODO
+    Persistent context across agent interactions with automatic state management.
   </Card>
   <Card
     title="Model Routing"
     icon="arrow-progress"
     href="#"
   >
-    TODO
+    Seamless multi-provider support with consistent APIs across all models.
   </Card>
     <Card
     title="Composability"
     icon="puzzle-piece"
     href="#"
   >
-    TODO
+    Build complex applications from simple, reusable primitives.
   </Card>
   <Card
     title="Tracing"
     icon="wave-pulse"
     href="#"
   >
-    TODO
+    Complete execution visibility with automatic logging and debugging.
   </Card>
   <Card
     title="Evals"
     icon="shield-check"
     href="#"
   >
-    TODO
+    Built-in evaluation framework for testing and validating AI outputs.
   </Card>
   <Card
     title="Deployment"
     icon="rocket-launch"
     href="#"
   >
-    TODO
+    Production-ready deployment with scaling and monitoring capabilities.
   </Card>
 </Columns>
 
@@ -110,4 +84,4 @@ Design a docs site that looks great and empowers your users.
 
 - **Performance by design**: Built for production workloads with concurrent execution, efficient memory management, and minimal overhead. Every design decision prioritizes speed and scalability.
 
-- **Stability in a chaotic ecosystem**: Providers change APIs monthly. Timbal provides a stable abstraction that shields your applications in production.
+- **Stability in a chaotic ecosystem**: Providers change and release new APIs monthly. Timbal provides a stable abstraction that shields your applications in production.
