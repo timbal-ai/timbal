@@ -4,7 +4,8 @@
   "name": "Timbal",
   "colors": {
     "primary": "#000000",
-    "light": "#ffffff"
+    "light": "#ffffff",
+    "dark": "#000000"
   },
   "favicon": "/favicon.png",
   "navigation": {
@@ -22,10 +23,20 @@
           {
             "group": "Core Concepts",
             "pages": [
-              "core_concepts/runnables",
-              "core_concepts/events",
-              "core_concepts/tracing",
-              "core_concepts/context"
+              "core-concepts/runnables",
+              "core-concepts/events",
+              "core-concepts/tracing",
+              "core-concepts/context"
+            ]
+          },
+          {
+            "group": "Workflows",
+            "tag": "BETA",
+            "pages": [
+              "workflows/index",
+              "workflows/context",
+              "workflows/control-flow",
+              "workflows/integrating-llms"
             ]
           },
           {

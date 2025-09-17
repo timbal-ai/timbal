@@ -1,0 +1,81 @@
+---
+title: "Overview"
+description: "Build multi-step AI pipelines using Workflows"
+---
+
+## What Are Workflows?
+
+Workflows are programmable execution pipelines that **orchestrate step-by-step processing with explicit control flow**.
+
+```python 
+from timbal.core import Workflow
+
+workflow = Workflow(name="my_workflow")
+```
+
+This creates a basic workflow. Next, add steps to build your pipeline.
+
+## Building Blocks of a Workflow: Steps
+
+Steps are the core units of work, which can process data, perform actions and pass results onward.
+
+### Adding Steps to the Workflow
+
+Use `.step()` to add steps to workflows. **Any Runnable is valid to create a step**.
+
+```python
+def celsius_to_fahrenheit(celsius: float) -> float:
+    return (celsius * 9/5) + 32
+
+def check_threshold(temperature: float, threshold: float) -> str:
+    return "Alert!" if temperature > threshold else "Normal"
+    
+workflow = (Workflow(name="temperature_alert")
+    .step(celsius_to_fahrenheit, celsius=35)
+    .step(check_threshold, temperature=80, threshold=lambda: 85)
+)
+```
+
+### Step Names and Reusing Functions
+
+**Each step in a workflow must have a unique name**. Like all Runnables, steps are identified by their names, which must be distinct within the workflow.
+
+To use the same function multiple times in a workflow, wrap it in a new Tool with a distinct name for each usage:
+
+```python
+# Create a Tool to reuse the function
+threshold_checker_tool = Tool(
+    name="threshold_checker",
+    handler=check_threshold
+)
+
+workflow = (Workflow(name="temperature_monitoring", temperature=80)
+    .step(celsius_to_fahrenheit, celsius=35)
+    .step(check_threshold, threshold=lambda: 85)
+    .step(threshold_checker_tool, threshold=lambda: 100)
+)
+```
+
+## Running the Workflow
+
+You can run your Workflow in two different ways:
+
+**Get the final output:**
+```python
+result = await workflow().collect()
+print(result.output)
+```
+
+**Stream events as they happen:**
+```python
+async for event in workflow():
+    print(event)
+```
+
+## Key Features
+- **Composition**: Workflows can contain other workflows
+- **Parallel Execution**: Independent steps run concurrently
+- **Type Safety**: Automatic parameter validation via Pydantic
+- **Error Isolation**: Failed steps skip dependents, others continue
+
+Check [Context](/workflows/context.md) for data sharing between steps, and [Control Flow](/workflows/control_flow.md) for different step execution behaviors.

@@ -1,6 +1,6 @@
 ---
 title: "Tracing & Observability"
-description: "Comprehensive execution tracing with input/output/error/timing capture for complete observability."
+description: "Comprehensive execution tracing with input/output/error/timing capture for complete observability"
 ---
 
 Events are **not persisted to memory** - they are **immutable** temporary notifications that stream during execution. They provide immediate feedback about what's happening (_e.g._ start, progress chunks, completion) but are not stored permanently. Events are consumed as they're generated and are ideal for real-time monitoring, progress tracking, and streaming responses. For permanent storage and analysis, this information is captured in Traces.
