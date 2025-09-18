@@ -25,6 +25,7 @@ from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
 from ..collectors.impl.timbal import TimbalCollector
+from ..errors import EarlyExit
 from ..state import (
     get_or_create_run_context,
     get_parent_call_id,
@@ -42,6 +43,7 @@ from ..types.events import (
     OutputEvent,
     StartEvent,
 )
+from ..types.run_status import RunStatus
 from ..utils import dump, sync_to_async_gen
 
 logger = structlog.get_logger("timbal.core.runnable")
@@ -591,6 +593,11 @@ class Runnable(ABC, BaseModel):
                 output = output.output
             trace.output = output
             trace._output_dump = await dump(output)
+            trace.status = RunStatus(
+                code="success",
+                reason=None, # TODO
+                message=None # TODO
+            )
             
             # Restore the call context to this runnable before executing post_hook
             # This ensures post_hook modifies the correct trace, not any nested ones
@@ -600,6 +607,13 @@ class Runnable(ABC, BaseModel):
             if self.post_hook is not None:
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
             
+        except EarlyExit as early_exit:
+            trace.status = RunStatus(
+                code="cancelled",
+                reason="early_exit",
+                message=str(early_exit)
+            )
+
         except Exception as err:
             error = {
                 "type": type(err).__name__,
@@ -607,6 +621,11 @@ class Runnable(ABC, BaseModel):
                 "traceback": traceback.format_exc(),
             }
             trace.error = error # No need to model dump the error. It's already a json compatible dict
+            trace.status = RunStatus(
+                code="error",
+                reason=None, # TODO
+                message=None # TODO
+            )
         
         finally:
             t1 = int(time.time() * 1000)
@@ -618,6 +637,7 @@ class Runnable(ABC, BaseModel):
                 call_id=trace.call_id,
                 parent_call_id=trace.parent_call_id,
                 input=trace.input,
+                status=trace.status,
                 output=trace.output,
                 error=trace.error,
                 t0=trace.t0,

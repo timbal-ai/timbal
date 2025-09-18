@@ -1,3 +1,4 @@
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from functools import wraps
@@ -46,6 +47,8 @@ class BaseCollector(ABC):
             event = await self._async_gen.__anext__()
             # Cache OutputEvent directly when we encounter it
             processed_event = self.process(event)
+            if asyncio.iscoroutine(processed_event):
+                processed_event = await processed_event
             return processed_event
         except StopAsyncIteration:
             # The generator is exhausted - mark as collected and re-raise

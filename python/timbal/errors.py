@@ -12,3 +12,10 @@ class EvalError(TimbalError):
 
 class PlatformError(TimbalError):
     """Error raised when a platform API call fails."""
+
+class EarlyExit(TimbalError):
+    """Error raised when an early exit is requested."""
+
+def bail(message: str | None = None) -> None:
+    """Raise an EarlyExit error with the given message."""
+    raise EarlyExit(message or "")

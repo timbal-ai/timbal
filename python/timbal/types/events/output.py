@@ -2,6 +2,7 @@ from typing import Any, Literal
 
 from pydantic import PrivateAttr
 
+from ...types.run_status import RunStatus
 from .base import BaseEvent
 
 
@@ -10,20 +11,21 @@ class OutputEvent(BaseEvent):
     type: Literal["OUTPUT"] = "OUTPUT"
 
     input: Any
-    """The input arguments passed to the step."""
+    """The input arguments passed to the runnable."""
+    status: RunStatus
+    """The status summary of the runnable after it completed."""
     output: Any
-    """The result of the step."""
+    """The result of the runnable."""
     error: Any
-    """The error that occurred during the step."""
+    """The error that occurred during the runnable."""
     t0: int 
-    """The start time of the step in milliseconds."""
+    """The start time of the runnable in milliseconds."""
     t1: int 
-    """The end time of the step in milliseconds."""
+    """The end time of the runnable in milliseconds."""
     usage: dict[str, int]
-    """The usage of the step."""
+    """The usage of the runnable."""
     metadata: dict[str, Any]
-    """Additional metadata about the step."""
-
+    """Additional metadata about the runnable."""
     _input_dump: Any = PrivateAttr()
     """The dumped/serialized version of input for internal use."""
     _output_dump: Any = PrivateAttr()
