@@ -1,6 +1,6 @@
 ---
 title: "Quickstart"
-description: "Build your first AI application with Timbal in just 5 lines of code."
+description: "Build your first AI application with Timbal in just 5 lines of code"
 ---
 
 We'll start implementing an Agent. It will be a simple chatbot and gradually enhance it with advanced features. Let's dive in!
@@ -22,7 +22,7 @@ Before moving forward, ensure you've completed the installation of Timbal. If yo
     <img
       src="/images/project-structure.png"
       alt="Project structure"
-      height="50"
+      style={{width: '300px'}}
       noZoom
       className="rounded-lg"
     />
@@ -90,14 +90,18 @@ This makes it easy to add new packages and manage your project's dependencies.
 
 **1. Import the class `Agent` from the `timbal` package.**
 
-<CodeBlock language="python" title="agent.py" code ={`from timbal import Agent`}/>
+```python
+from timbal import Agent
+```
 
 **2. Initialize an `Agent` object.**
 
-<CodeBlock language="python" title="agent.py" code ={`agent = Agent(
+```python
+agent = Agent(
     name="my_agent",
     model="gemini/gemini-2.5-pro-preview-03-25" # provider/model
-)`}/>
+)
+```
 
 The `name` parameter is required and provides a unique identifier for your agent. The `model` parameter specifies the provider and model to use for the agent.
 
@@ -105,25 +109,31 @@ The `name` parameter is required and provides a unique identifier for your agent
 Before running your flow, make sure you have the keys needed set as environment variables in your `.env` file:
 
 👀 It will depend on the LLM you're using, in this case we are using a Gemini model
-<CodeBlock language="bash" title=".env" code ={`GEMINI_API_KEY=your_api_key_here`}/>
+
+```bash
+GEMINI_API_KEY=your_api_key_here
+```
 
 Only with the `Agent` class we have a flow that represents a llm that receives a `prompt` and returns a `response`.
 
 Now let's run the chatbot!
 
-<CodeBlock language="python" title="agent.py"
-code ={`response = await agent(prompt="What is the capital of Germany?").collect()
-print(response.output.content[0].text)`}/>
+```python
+response = await agent(prompt="What is the capital of Germany?").collect()
+print(response.output.content[0].text)
+```
 
 
 You will see an output like this:
 
-<CodeBlock language="bash" code ={`The capital of Germany is Berlin.`}/>
+```bash
+The capital of Germany is Berlin.
+```
 
 
-:::tip[Congratulations!]
+<Tip>
 You've just created your first Timbal flow!
-:::
+</Tip>
 
 This is the **simplest flow** you can create.
 
@@ -133,7 +143,7 @@ You can modify it as you want. For example, you can add tools to the agent.
 
 A great feature of Timbal is that you can easily add tools to your agent, allowing it to perform actions or fetch information in real time. 
 
-You can use both <span style={{color: 'var(--timbal-purple)'}}><strong>prebuilt tools</strong></span> (already provided by Timbal or the community) and <span style={{color: 'var(--timbal-purple)'}}><strong>custom tools</strong></span> (functions you create yourself).
+You can use both **prebuilt tools** (already provided by Timbal or the community) and **custom tools** (functions you create yourself).
 
 Let's see both approaches with practical examples:
 
@@ -145,21 +155,22 @@ Timbal comes with several tools ready to use. Here are two powerful examples:
 
 You can use the search tool to let your agent search the internet for up-to-date information:
 
-<CodeBlock language="python" title="agent.py"
-code ={`from timbal.steps.perplexity import search
+```python
+from timbal.steps.perplexity import search
 
 agent = Agent(
     name="search_agent",
     model="gemini/gemini-2.5-pro-preview-03-25",
     tools=[search]
-)`}/>
+)
+```
 
 #### b) SQL/Postgres Query
 
 Timbal also provides a prebuilt tool to query a Postgres database:
 
-<CodeBlock language="python" title="agent.py"
-code ={`from timbal.steps.sql.postgres import postgres_query, PGConfig
+```python
+from timbal.steps.sql.postgres import postgres_query, PGConfig
 
 db_config = PGConfig(
     host="localhost",
@@ -177,15 +188,16 @@ agent = Agent(
     name="sql_agent",
     model="gemini/gemini-2.5-pro-preview-03-25",
     tools=[run_sql_query]
-)`}/>
+)
+```
 
 
 ### Example 2: Creating Your Own Tool
 
 You can also create your own tools. Here's a very simple example: a tool that returns the current date and time.
 
-<CodeBlock language="python" title="agent.py"
-code ={`from datetime import datetime
+```python
+from datetime import datetime
 
 def get_datetime() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -194,13 +206,12 @@ agent = Agent(
     name="datetime_agent",
     model="gemini/gemini-2.5-pro-preview-03-25",
     tools=[get_datetime]
-)`}/>
+)
+```
 
 With Timbal, you can combine as many tools as you want—prebuilt or custom—to make your agent as powerful as you need!
 
 **That's it!** With 5 lines of code we've created a chatbot with tools.
-
-___
 
 _Looking for the full list of integrations or examples?_
 
@@ -208,14 +219,8 @@ _Head over to [integrations](/integrations)/[examples](/examples) or, even bette
 
 _Want the latest and greatest? Just do a <b>git pull</b> to make sure you have all the newest content! 😄_
 
-___
+## Moving to Production
 
-## Deploying Timbal
+Ready to take your agent to production? Timbal provides enterprise-grade deployment options designed for real-world applications.
 
-The best way to deploy your Timbal project is through the official Timbal Platform. It’s fast, easy, and gives you access to all the latest features and integrations.
-
-👉 Go to the [Timbal Platform] to get started!
-
-Prefer to run things locally or on your own infrastructure?
-
-No problem! You can use `timbal build` to generate a ready-to-use Docker container with your flow and an HTTP server preconfigured. This makes it simple to deploy anywhere Docker runs.
+Whether you need fully managed hosting or complete infrastructure control, we've got you covered. Check out our comprehensive [deployment guide](/deployment) to explore your options and choose the best approach for your needs.

@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "timbal"
 dynamic = ["version"]
-description = "A strongly opinionated framework for building and orchestrating agentic AI applications"
+description = "Simple, battle-tested framework for building reliable AI applications"
 readme = "README.md"
 authors = [{ name = "Timbal", email = "team@timbal.ai" }]
 license.file = "LICENSE"
 urls."Source" = "https://github.com/timbal-ai/timbal"
 
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",

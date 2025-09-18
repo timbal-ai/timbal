@@ -1,0 +1,82 @@
+---
+title: "Self-Hosted"
+description: "Deploy your Timbal AI applications to your own infrastructure"
+---
+
+Deploy your Timbal applications on your own infrastructure using Docker containers. This approach gives you full control over your deployment environment while leveraging the same containerized approach used by the Timbal Platform.
+
+## Prerequisites
+
+Before self-hosting your Timbal application, ensure you have:
+
+- [Timbal CLI](/installation) installed and configured
+- A Timbal project initialized with `timbal init`
+- Your application tested locally
+- Docker installed on your target infrastructure
+
+## Deployment Process
+
+The first two steps are identical to the [Timbal Platform deployment](/deployment/platform#deployment-process):
+
+<Steps>
+  <Step title="Prepare your environment">
+    Configure your `.dockerignore` and `timbal.yaml` files.
+  </Step>
+  <Step title="Build your application">
+    Create your Docker container with `timbal build`.
+  </Step>
+  <Step title="Launch your container">
+    Run your containerized Timbal application using Docker:
+    ```bash
+    docker run -d -p <port>:<port> <image_tag> \
+      uv run -m timbal.server.http --port <port> --import_spec <fqn>
+    ```
+
+    This command starts the Timbal HTTP server directly with your specified agent or workflow. The `--import_spec` parameter should match the `fqn` from your `timbal.yaml` configuration file, defining which component to execute.
+
+    <Note>
+    You can add as many environment variables as needed with the `-e` docker flag.
+    </Note>
+    <Info>
+    A `timbal serve` command will be available soon to simplify this process.
+    </Info>
+  </Step>
+</Steps>
+
+## Accessing Your Application
+
+Once running, your Timbal application exposes a REST API accessible at:
+
+```
+POST http://localhost:<port>/collect
+```
+
+For streaming responses:
+
+```
+POST http://localhost:<port>/stream
+```
+
+For complete API documentation, including request/response formats, visit the [API Reference](/api-reference/introduction).
+
+## Production Considerations
+
+### Container Orchestration
+For production deployments, consider using:
+- **Docker Compose** for multi-container applications
+- **Kubernetes** for scalable, managed deployments
+- **Docker Swarm** for simpler orchestration needs
+
+### Monitoring and Logging
+- Configure log aggregation to collect container logs
+- Set up health checks for container monitoring
+- Implement metrics collection for performance monitoring
+
+<Note>
+Even with self-hosted deployments, you can still use Timbal Platform for tracing, monitoring, and observability by [configuring your application](/core-concepts/tracing) to connect to the platform services.
+</Note>
+
+### Security
+- Run containers with non-root users when possible
+- Use secrets management systems instead of environment variables for sensitive data
+- Keep base images updated for security patches

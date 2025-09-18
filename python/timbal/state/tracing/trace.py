@@ -25,13 +25,17 @@ class Trace(BaseModel):
         ...,
         description="The start time of the runnable.",
     )
+    t1: int | None = Field(
+        None, 
+        description="The end time of the runnable. Will be None if the runnable has not yet completed.",
+    )
     input: Any = Field(
         None,
         description="The input of the runnable. Will be None if the runnable has not yet started or if there was an error gathering the input.",
     )
-    t1: int | None = Field(
-        None, 
-        description="The end time of the runnable. Will be None if the runnable has not yet completed.",
+    status: Any | None = Field( # Any to prevent circular import
+        None,
+        description="The status of the runnable.",
     )
     output: Any = Field(
         None,

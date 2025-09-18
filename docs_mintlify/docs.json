@@ -57,6 +57,14 @@
             ]
           },
           {
+            "group": "Deployment",
+            "pages": [
+              "deployment/index",
+              "deployment/platform",
+              "deployment/self-hosted"
+            ]
+          },
+          {
             "group": "AI Tools",
             "pages": [
               "ai-tools/claude-code",
