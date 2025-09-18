@@ -6,14 +6,13 @@ description: "Build multi-step AI pipelines using Workflows"
 ## What Are Workflows?
 
 Workflows are programmable execution pipelines that **orchestrate step-by-step processing with explicit control flow**.
+The following line creates an empty workflow, ready for steps to be added:
 
 ```python 
 from timbal.core import Workflow
 
 workflow = Workflow(name="my_workflow")
 ```
-
-This creates a basic workflow. Next, add steps to build your pipeline.
 
 ## Building Blocks of a Workflow: Steps
 
@@ -58,15 +57,15 @@ workflow = (Workflow(name="temperature_monitoring", temperature=80)
 
 ## Running the Workflow
 
-You can run your Workflow in two different ways:
+You can run your workflow in two different ways:
 
-**Get the final output:**
+**Getting the final output:**
 ```python
 result = await workflow().collect()
 print(result.output)
 ```
 
-**Stream events as they happen:**
+**Streaming events as they happen:**
 ```python
 async for event in workflow():
     print(event)
@@ -78,4 +77,4 @@ async for event in workflow():
 - **Type Safety**: Automatic parameter validation via Pydantic
 - **Error Isolation**: Failed steps skip dependents, others continue
 
-Check [Context](/workflows/context.md) for data sharing between steps, and [Control Flow](/workflows/control_flow.md) for different step execution behaviors.
+Check [Control Flow](/workflows/control-flow) and [Branching](/workflows/branching) for different step execution behaviors.

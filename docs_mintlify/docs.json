@@ -53,7 +53,7 @@
               "workflows/index",
               "workflows/context",
               "workflows/control-flow",
-              "workflows/integrating-llms"
+              "workflows/branching"
             ]
           },
           {

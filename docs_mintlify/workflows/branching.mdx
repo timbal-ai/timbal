@@ -1,0 +1,60 @@
+---
+title: "Branching"
+description: "Create dynamic workflows with conditional execution using the `when` parameter to control which steps run based on runtime conditions"
+---
+
+## Conditional Execution
+
+The `when` parameter ensures that a step is executed only if the specified condition is met.
+
+```python 
+async def send_alert(message: str):
+    print(f"Alert: {message}")
+
+workflow = (Workflow(name='my_workflow')
+    .step(func_1, x="a")
+    .step(func_2, y="b")
+    .step(func_3)
+    .step(send_alert, message="Process completed",
+        when=lambda: get_run_context().step_trace("func_1").output and 
+            get_run_context().step_trace("func_3").output
+    ) 
+)
+```
+
+In this case, `send_alert` step will be executed after both `func_1` and `func_2` have been executed and have an output. 
+
+
+## Smart Workflows: Conditional Processing using Agents
+
+Let AI decide which workflow steps to execute:
+
+```python 
+# Decision agent
+classifier = Agent(
+    name="classifier",
+    model="openai/gpt-4o-mini",
+    system_prompt="Respond with 'urgent' or 'normal'."
+)
+
+# Processing agents
+urgent_handler = Agent(
+    name="urgent_handler",
+    model="openai/gpt-4o",
+    system_prompt="Handle urgent requests quickly."
+)
+
+normal_handler = Agent(
+    name="normal_handler",
+    model="openai/gpt-4o-mini", 
+    system_prompt="Handle normal requests efficiently."
+)
+
+# Smart workflow
+workflow = (
+    Workflow(name="smart_processor")
+    .step(classifier)
+    .step(urgent_handler, when=lambda: "urgent" in get_run_context().step_trace("classifier").output.content[0].text())
+    .step(normal_handler, when=lambda: "normal" in get_run_context().step_trace("classifier").output.content[0].text())
+)
+```
