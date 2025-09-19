@@ -1,0 +1,306 @@
+---
+title: "Slack"
+description: "Build intelligent Slack bots with Timbal agents"
+---
+
+This guide shows how to create a Slack bot using Timbal that can:
+- Respond to messages in real-time via webhooks
+- Process user requests intelligently with AI agents
+- Handle threaded conversations
+
+## Setup Requirements
+
+<AccordionGroup>
+  <Accordion title="Installing Packages">
+    Install Timbal with Slack integration support:
+    ```bash
+    pip install timbal[slack]
+    ```
+    
+    Or using uv (recommended):
+    ```bash
+    uv add timbal[slack]
+    ```
+    
+    <Note>
+      The `[slack]` extra includes all necessary dependencies for complete Slack integration.
+    </Note>
+  </Accordion>  
+  
+  <Accordion title="Creating a Slack App">
+    <Steps>
+      <Step title="Create a Slack App">
+        1. Go to [Slack API](https://api.slack.com/apps) and click **Create New App**
+        2. Choose **From scratch**
+        3. Enter your app name and select your workspace
+      </Step>
+      
+      <Step title="Configure Bot Token Scopes">
+        1. Go to **OAuth & Permissions**
+        2. Add the following **Bot Token Scopes** based on Timbal handlers you'll use:
+        ```
+        # Message Operations (timbal.handlers.slack.messages)
+        chat:write            # Send messages
+        chat:write.public     # Send messages to channels bot isn't in
+        conversations:history # Get messages from channels
+        
+        # Channel Operations (timbal.handlers.slack.channels)
+        channels:read         # View basic channel information
+        groups:read           # View basic private channel information
+        im:read              # View basic direct message information
+        mpim:read            # View basic group direct message information
+        
+        # File Operations (timbal.handlers.slack.files)
+        files:read           # Download files from Slack
+        ```
+      </Step>
+      
+      <Step title="Install App to Workspace">
+        1. In **OAuth & Permissions**, click **Install to Workspace**
+        2. Copy the **Bot User OAuth Token** (starts with `xoxb-`) or **User OAuth Token** (starts with `xoxp-`) depending on what you want:
+           - Use **Bot Token** if you want messages to appear from your bot
+           - Use **User Token** if you want messages to appear from a specific user
+        3. Set as environment variable: `SLACK_BOT_TOKEN` or `SLACK_USER_TOKEN`
+      </Step>
+      
+      <Step title="Get Bot User ID">
+        1. Go to **App Home** 
+        2. Copy the **App ID** or find your bot's user ID
+        3. Use this ID in your code to prevent infinite loops
+      </Step>
+      
+      <Step title="Enable Event Subscriptions">
+        1. Go to **Event Subscriptions** and toggle **Enable Events**
+        2. Set **Request URL** to your webhook endpoint (e.g., `https://yourapp.com/webhook`)
+        3. Subscribe to **Bot Events**:
+        ```
+        message.channels  # Messages in public channels
+        message.groups    # Messages in private channels  
+        message.im        # Direct messages
+        message.mpim      # Group direct messages
+        ```
+      </Step>
+    </Steps>
+  </Accordion>
+  
+</AccordionGroup>
+
+## Implementation
+
+### Setting up the Slack Bot Configuration
+
+First, configure your bot's user ID (found in your Slack app settings):
+
+```python
+SLACK_BOT_USER_ID = "U12345678"  # Replace with your actual bot user ID
+```
+
+### Creating the Agent
+
+Create the Timbal agent with pre and post hooks for Slack integration:
+
+```python
+from timbal import Agent
+
+agent = Agent(
+    name="SlackAgent",
+    system_prompt="You are a Slack AI assistant. Answer clearly and concisely.",
+    model="openai/gpt-4.1-mini",
+    pre_hook=pre_hook,
+    post_hook=post_hook,
+)
+```
+
+### Pre-hook: Processing Incoming Messages
+
+The pre-hook handles incoming Slack webhook events and extracts relevant information:
+
+```python
+from timbal.state import get_run_context
+from timbal.errors import bail
+
+async def pre_hook():
+    """Process incoming Slack webhook events before agent execution."""
+    trace = get_run_context().current_trace()
+
+    # Check if this is a Slack webhook event
+    if "_webhook" not in trace.input:
+        return  # Not triggered by Slack
+
+    slack_event = trace.input["_webhook"]["event"]
+
+    # Ignore bot's own messages to prevent infinite loops
+    if slack_event.get("user") == SLACK_BOT_USER_ID:
+        raise bail()
+
+    # Extract and validate message text
+    text = slack_event.get("text", "")
+    if not text:
+        raise bail()
+
+    # Store Slack context for response
+    trace.slack_channel = slack_event["channel"]
+    trace.slack_thread_ts = slack_event.get("thread_ts")  # Reply in same thread
+    trace.input["prompt"] = text
+```
+
+### Post-hook: Sending Responses
+
+The post-hook sends the agent's response back to Slack:
+
+```python
+from timbal.handlers.slack.messages import send_message
+from timbal.state import get_run_context
+
+def post_hook():
+    """Send agent response back to Slack channel."""
+    trace = get_run_context().current_trace()
+    
+    # Only process Slack webhook events
+    if "_webhook" not in trace.input:
+        return
+
+    # Extract response context
+    slack_channel = trace.slack_channel
+    slack_thread_ts = trace.slack_thread_ts
+    reply = trace.output.content[0].text
+
+    # Send response if not empty
+    if reply.strip():
+        send_message(
+            channel=slack_channel,
+            text=reply,
+            thread_ts=slack_thread_ts,  # Maintains thread context
+        )
+```
+
+### Complete Example
+
+Here's the full implementation ready to use:
+
+```python
+from timbal import Agent
+from timbal.state import get_run_context
+from timbal.errors import bail
+from timbal.handlers.slack.messages import send_message
+
+# Replace with your bot's actual user ID from Slack app settings
+SLACK_BOT_USER_ID = "U12345678"
+
+async def pre_hook():
+    """Process incoming Slack webhook events before agent execution."""
+    trace = get_run_context().current_trace()
+
+    # Only process Slack webhook events
+    if "_webhook" not in trace.input:
+        return
+
+    slack_event = trace.input["_webhook"]["event"]
+
+    # Prevent infinite loops by ignoring bot's own messages
+    if slack_event.get("user") == SLACK_BOT_USER_ID:
+        raise bail()
+
+    # Extract message text
+    text = slack_event.get("text", "")
+    if not text:
+        raise bail()
+
+    # Store context for response
+    trace.slack_channel = slack_event["channel"]
+    trace.slack_thread_ts = slack_event.get("thread_ts")
+    trace.input["prompt"] = text
+
+def post_hook():
+    """Send agent response back to Slack."""
+    trace = get_run_context().current_trace()
+    
+    if "_webhook" not in trace.input:
+        return
+
+    # Get response and send to Slack
+    reply = trace.output.content[0].text
+    slack_channel = trace.slack_channel
+    slack_thread_ts = trace.slack_thread_ts
+    
+    if reply.strip():
+        send_message(
+            channel=slack_channel,
+            text=reply,
+            thread_ts=slack_thread_ts,
+        )
+
+# Create the Slack agent
+agent = Agent(
+    name="SlackAgent",
+    system_prompt="You are a Slack AI assistant. Answer clearly and concisely.",
+    model="openai/gpt-4o-mini",
+    pre_hook=pre_hook,
+    post_hook=post_hook,
+)
+```
+
+### Running the Agent
+
+Start the Timbal HTTP server to receive Slack webhook events:
+
+```bash
+uv run -m timbal.server.http --port 4454 --import_spec agent.py::agent
+```
+
+Or with Python:
+
+```bash
+python -m timbal.server.http --port 4454 --import_spec agent.py::agent
+```
+
+This command:
+- Starts an HTTP server on port 4454
+- Imports your agent from `agent.py`
+- Creates a webhook endpoint at `/webhook` that Slack will send events to
+
+Make sure your Slack app's **Event Subscriptions** Request URL points to:
+```
+https://yourdomain.com/webhook
+```
+
+<Note>
+For local development, you can use tools like [ngrok](https://ngrok.com/) to expose your local server:
+```bash
+ngrok http 4454
+```
+Then use the ngrok URL in your Slack app settings.
+</Note>
+
+## Key Features
+
+- **Real-time Responses**: Instantly processes Slack messages via webhooks
+- **Thread Support**: Maintains conversation context in Slack threads  
+- **Loop Prevention**: Automatically ignores bot's own messages
+- **Flexible AI**: Uses any LLM model supported by Timbal
+- **Easy Integration**: Minimal setup with existing Slack handlers
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Bot Not Responding">
+    - Check webhook URL is publicly accessible and returns 200 status
+    - Ensure bot has correct permissions in Slack workspace
+    - Confirm `SLACK_BOT_USER_ID` matches your bot's actual user ID
+    - Test webhook endpoint manually with curl or Postman
+  </Accordion>
+  
+  <Accordion title="Infinite Loop Issues">
+    - Double-check `SLACK_BOT_USER_ID` is correct (found in Slack app settings)
+    - Ensure pre-hook properly filters bot messages with `bail()`
+    - Verify webhook events aren't being duplicated
+    - Check that bot doesn't respond to its own message events
+  </Accordion>
+  
+  <Accordion title="Agent Not Processing Messages">
+    - Check that OpenAI API key is valid and has sufficient credits
+    - Verify agent model name is correct (e.g., `openai/gpt-4o-mini`)
+    - Ensure pre-hook is setting `trace.input["prompt"]` correctly
+    - Add logging to debug webhook payload structure
+  </Accordion>
+</AccordionGroup>
