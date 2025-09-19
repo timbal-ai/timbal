@@ -22,7 +22,8 @@
             "pages": [
               "index",
               "installation",
-              "quickstart"
+              "quickstart",
+              "model_capabilities"
             ]
           },
           {

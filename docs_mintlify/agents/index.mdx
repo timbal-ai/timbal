@@ -24,11 +24,11 @@ For a full step-by-step guide, check the [quickstart section](/quickstart) or se
 
 ## Model Providers
 
-You can specify any model using the "provider/model" format. See all supported models in [Model Capabilities](/getting-started/model_capabilities).
+You can specify any model using the "provider/model" format. See all supported models in [Model Capabilities](../model_capabilities).
 
 Some models require specific parameters (like `max_tokens` for Claude). Use `model_params` to pass any additional model configuration: 
 
-```python
+```python highlight={4}
 agent = Agent(
     name="claude_agent",
     model="anthropic/claude-sonnet-4-latest",
@@ -47,8 +47,137 @@ ANTHROPIC_API_KEY=your_claude_api_key
 
 Define tools as Python functions - the framework handles schema generation, parameter validation, and execution orchestration.
 
+## Running Agents
+
+Execute agents by calling them with a `prompt` parameter and using `.collect()` to get the result:
+
+```python
+response = await agent(
+    prompt=Message.validate("What is the capital of Germany?")
+).collect()
+```
+
+For real-time processing, you can stream events as they happen:
+
+```python
+async for event in agent(prompt="Hello"):
+    print(event)
+```
+
+## Input and Output
+
+Agents communicate through `Message` objects - Timbal's data structure that standardizes both input and output.
+
+```python highlight={4}
+from timbal.types.message import Message
+
+response = await agent(
+    prompt=Message.validate("What is the capital of Germany?")
+).collect()
+```
+
+Agents accept multiple input formats, automatically converting them to `Message` objects:
+
+```python highlight={3, 8, 13}
+# String
+response = await agent(
+    prompt="What's the weather?"
+).collect()
+
+# File - Timbal type 
+response = await agent(
+    prompt=File.validate("image.png")
+).collect()
+
+# List
+response = await agent(
+    prompt=["Describe this image", File.validate("image.png")]
+).collect()
+```
+
+Calling `.collect()` returns an `OutputEvent` containing the agent's response. Access the `Message` via the `.output` property:
+
+<Note>
+Learn more about events in [Events & Streaming](/core-concepts/events).
+</Note>
+
+```python
+result = await agent(prompt="What's 2+2?").collect()
+
+# result is an OutputEvent
+print(result.output)
+# Message(role=assistant, content=[TextContent(type='text', text='2 + 2 = 4.')])
+
+# Access the message text
+print(result.output.content[0].text)
+# "2 + 2 = 4."
+```
+
 ## Messages
 
-TODO
+Messages are the structured data format that agents use to communicate. They contain a role and content, with automatic handling of different content types and provider compatibility.
 
-### Files
+```python
+from timbal.types.message import Message
+```
+
+Messages contain a **role** and **content**:
+
+**Role Types:**
+- **user** - Messages from the user
+- **assistant** - Messages from the AI agent
+- **system** - System instructions and context
+- **tool** - Tool execution results
+
+**Content Types:**
+- **TextContent** - Plain text messages
+- **FileContent** - Files like PDFs, images, documents
+- **ToolCallContent** - Function calls to tools
+- **ToolResultContent** - Results from tool executions
+
+Messages can contain different types of content - text, files, tool calls, and tool results. The framework automatically handles complex content structures:
+
+```python
+from timbal.types.content import FileContent, TextContent
+
+# Message with text and file
+mixed_message = Message(
+    role="user",
+    content=[
+        TextContent(text="Analyze this document:"),
+        FileContent(path=File.validate("report.pdf"))
+    ]
+)
+```
+
+The same message above can be created easily using `Message.validate()`:
+
+```python
+message = Message.validate([
+    "Summarize this document:",
+    File.validate("quarterly_report.pdf")
+])
+```
+
+## Files
+
+Agents can process files directly through the message content system. The framework automatically handles file reading, content extraction, and formatting for the AI model.
+
+```python
+from timbal.types.file import File
+```
+
+The framework supports common document and media formats:
+
+- **Text files** (.txt, .md) - Direct content inclusion
+- **PDFs** (.pdf) - Text extraction with structure preservation  
+- **Images** (.png, .jpg, .gif) - Visual analysis through vision-capable models
+- **Spreadsheets** (.xlsx, .csv) - Structured data representation
+- **Documents** (.docx) - Text and formatting extraction
+
+
+Files are automatically converted to Timbal `File` objects using `File.validate()`:
+
+```python
+file = File.validate("quarterly_report.pdf")
+```
