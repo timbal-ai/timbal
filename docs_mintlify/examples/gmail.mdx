@@ -1,0 +1,355 @@
+---
+title: "Gmail"
+description: "Combine Timbal components with your Gmail"
+---
+
+This guide provides two functionalities:
+- Integrate Timbal framework with Gmail API to send, search or manage emails.
+- Get real-time email monitoring via Pub/sub push notifications and **use Agents to draft replies for your incoming messages**.
+
+## Setup Requirements
+
+<AccordionGroup>
+  <Accordion title="Installing Packages">
+    ```python 
+    google-api-core                   
+    google-api-python-client      
+    google-auth                   
+    google-auth-httplib2    
+    google-auth-oauthlib   
+    ```
+    Additional requirements if using Pub/Sub:
+    ```python 
+    google-cloud-pubsub
+    googleapis-common-protos
+    grpc-google-iam-v1
+    ```
+    
+
+  </Accordion>  
+  <Accordion title="Enabling Gmail API to your account">
+    <Steps>
+      <Step title="Create a Google Cloud Project">
+        Go to the [Google Cloud Console](https://console.cloud.google.com/) and create a new project or select an existing one.
+      </Step>
+      <Step title="Enable Gmail API">
+        1. Navigate to **APIs & Services** > **Library**
+        2. Search for "Gmail API"
+        3. Click on **Gmail API** and then **Enable**
+      </Step>
+      <Step title="Create OAuth 2.0 Credentials">
+        1. Go to **APIs & Services** > **Credentials**
+        2. Click **Create Credentials** > **OAuth client ID**
+        3. Choose **Desktop app** as the application type
+        4. Download the credentials JSON file
+      </Step>
+      <Step title="Configure OAuth Scopes">
+        The following scopes are required:
+        ```json
+        SCOPES = [
+          "https://www.googleapis.com/auth/gmail.readonly",
+          "https://www.googleapis.com/auth/gmail.compose",
+          "https://www.googleapis.com/auth/gmail.modify",
+          "https://www.googleapis.com/auth/pubsub"
+        ]
+        ```
+      </Step>
+      <Step title="Generate Access Token">
+        Generate a `token.json` file with your access credentials. 
+        Example:
+        ```python
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from google.auth.transport.requests import Request
+        import os.path
+
+        SCOPES = [
+            'https://www.googleapis.com/auth/gmail.readonly',
+            'https://www.googleapis.com/auth/gmail.compose',
+            'https://www.googleapis.com/auth/gmail.modify',
+            'https://www.googleapis.com/auth/pubsub'
+        ]
+
+        def main():
+            if os.path.exists('token.json'):
+                creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+            
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                else:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        'credentials.json', SCOPES) # Your credentials JSON file name
+                    creds = flow.run_local_server(port=0)
+                
+                with open('token.json', 'w') as token:
+                    token.write(creds.to_json())
+            
+
+        if __name__ == '__main__':
+            main()
+        ```
+        This will open a browser window for Google sign-in and generate the token access to Gmail.
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="Creating Pub/Sub Notifications to track incoming emails">
+    <Info>
+        **Only required** if your application needs to **receive real-time notifications of incoming emails** (using Gmail push or watch functionality). 
+        For basic tasks such as sending messages or searching through existing emails, you can skip this section.
+    </Info>
+    <Steps>
+      <Step title="Enable Pub/Sub API">
+        1. In the Google Cloud Console, go to **APIs & Services** > **Library**
+        2. Search for "Cloud Pub/Sub API"
+        3. Click on **Cloud Pub/Sub API** and then **Enable**
+      </Step>
+      <Step title="Create a Pub/Sub Topic"> 
+        1. Go to **Pub/sub** > **Topics** > **Create Topic**  
+        Topic name used in this guide: *gmail-notifications*
+        
+      </Step>
+        <Step title="Create a Subscription">
+         1. Go to **Subscriptions** > **Create subscription**
+         Subscription for the
+
+         2. In the **delivery type**, you can choose between the following options:
+         - **pull**: Your application actively requests messages from the subscription (used in this guide)
+         - **push**: Pub/Sub delivers messages to your HTTPS endpoint  
+      </Step>
+      <Step title="Grant Gmail permission to publish">
+        Add the service account `gmail-api-push@system.gserviceaccount.com` as a **Publisher** to your topic.
+      </Step>
+      <Step title="Configure Gmail watch request">
+        Use Gmail API's user.watch method to tell Gmail which label(s) you want to monitor and where to send notifications.
+        ```python
+        TOKEN_JSON = "token.json"
+        SCOPES = ['https://www.googleapis.com/auth/gmail.compose', 
+            'https://www.googleapis.com/auth/gmail.readonly',
+            'https://www.googleapis.com/auth/gmail.modify',
+            'https://www.googleapis.com/auth/pubsub']
+
+        def load_credentials():
+            try:
+                creds = Credentials.from_authorized_user_file(TOKEN_JSON, SCOPES)
+            except Exception:
+                raise Exception("No valid credentials found. Please run the authentication script first.")
+            return creds
+
+
+        def setup_gmail_push_notifications():
+            credentials = load_credentials()
+            service = build('gmail', 'v1', credentials=credentials)
+            
+            request = {
+                'labelIds': ['INBOX'],
+                'topicName': 'projects/YOUR_PROJECT_ID/topics/YOUR_TOPIC_NAME',
+                'labelFilterBehavior': 'INCLUDE'
+            }
+            
+            result = service.users().watch(userId='me', body=request).execute()
+            print(f"Push notifications configured: {result}")
+            return result
+        ```
+
+        Gmail will send messages to Pub/Sub whenever there are changes (new emails, label change, etc.).
+        Each Pub/Sub message contains a historyId that tracks the changes since the last history ID.
+      </Step>
+    </Steps>
+  </Accordion>
+</AccordionGroup>
+
+## Implementation
+<Warning>
+    Section in development
+</Warning>
+
+
+### Basic Setup
+
+```python
+from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google.cloud import pubsub_v1
+from timbal import Agent
+
+# Load credentials
+creds = Credentials.from_authorized_user_file("token.json", scopes=[
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/pubsub',
+    'https://www.googleapis.com/auth/gmail.compose',
+    'https://www.googleapis.com/auth/gmail.modify'
+])
+
+gmail = build("gmail", "v1", credentials=creds)
+```
+
+### Real-time Email Processing
+
+The system listens for Pub/Sub notifications and processes new emails in real-time:
+
+```python
+async def handle_pubsub_message_async(message):
+    """Handle incoming Pub/Sub messages from Gmail push notifications."""
+    try:
+        # Parse the Pub/Sub message data
+        data = json.loads(message.data.decode('utf-8'))
+        history_id = data.get('historyId')
+        
+        if not history_id:
+            message.ack()
+            return
+            
+        # Process all changes since the last known history ID
+        await process_history_since(get_last_history_id())
+        message.ack()
+        
+    except Exception as e:
+        print(f"Error processing Pub/Sub message: {e}")
+```
+
+### Intelligent Email Responses
+
+Create an agent that automatically generates draft responses:
+
+```python
+async def create_draft(message_data: dict):
+    """Create a Gmail draft using a Timbal agent to intelligently respond to emails."""
+    
+    agent = Agent(
+        name="gmail_response_agent",
+        model="openai/gpt-4o-mini",
+        system_prompt="""You are a helpful email assistant that creates intelligent, 
+        professional responses to emails. Be polite, address concerns, and maintain 
+        professional relationships.""",
+        tools=[create_gmail_draft],
+        max_iter=3
+    )
+    
+    prompt = f"""Please create a professional email response to this email:
+
+From: {message_data['from_email']}
+Subject: {message_data['subject']}
+Body: {message_data['body'][:500]}
+
+Create a draft response using the create_gmail_draft tool."""
+    
+    result = await agent(prompt=prompt).collect()
+    return result
+```
+
+### 
+
+
+### Real-time Email Notifications
+```python
+async def handle_pubsub_message_async(message: pubsub_v1.subscriber.message.Message):
+    """
+    Handle incoming Pub/Sub messages from Gmail push notifications.
+    
+    Args:
+        message: Pub/Sub message containing Gmail notification data
+    """
+    try:
+        # Parse the Pub/Sub message data
+        data = json.loads(message.data.decode('utf-8'))
+        print(f"Received Pub/Sub notification: {data}")
+        
+        # Extract history ID from the notification
+        history_id = data.get('historyId')
+        email_address = data.get('emailAddress')
+        
+        if not history_id:
+            print("No historyId found in Pub/Sub message")
+            message.ack()
+            return
+            
+        print(f"Processing history ID: {history_id} for email: {email_address}")
+        
+        # Get the last known history ID
+        last_hid = get_last_history_id()
+        print(f"Last known history ID: {last_hid}")
+        
+        # Process all changes since the last known history ID
+        # This is the correct way to handle Gmail push notifications
+        if int(history_id) > int(last_hid):
+            print(f"Processing all changes since history ID: {last_hid}")
+            await process_history_since(last_hid)
+        else:
+            print(f"No new changes since last history ID: {last_hid}")
+        
+        # Acknowledge the message
+        message.ack()
+        print("Message processed successfully")
+        
+    except Exception as e:
+        print(f"Error processing Pub/Sub message: {e}")
+
+
+async def start_pubsub_listener(project_id, subscription_name):
+    """
+    Start listening for Gmail push notifications via Pub/Sub.
+    
+    Args:
+        project_id (str): Your Google Cloud project ID
+        subscription_name (str): Name of the Pub/Sub subscription
+    """
+    try:
+        subscriber = pubsub_v1.SubscriberClient(credentials=creds)
+        subscription_path = subscriber.subscription_path(project_id, subscription_name)
+        
+        print(f"Starting Pub/Sub listener for subscription: {subscription_path}")
+        print("Waiting for Gmail push notifications...")
+        print("Press Ctrl+C to stop")
+        
+        # Use the streaming pull with callback
+        streaming_pull_future = subscriber.subscribe(subscription_path, callback=handle_pubsub_message_sync)
+        
+        # Keep the main thread alive
+        try:
+            streaming_pull_future.result()
+        except KeyboardInterrupt:
+            print("\nStopping Pub/Sub listener...")
+            streaming_pull_future.cancel()
+            streaming_pull_future.result()  # Block until the shutdown is complete
+            
+    except Exception as e:
+        print(f"Error starting Pub/Sub listener: {e}")
+```
+
+## Running the Example
+
+### Start the Pub/Sub Listener
+
+```python
+async def main():
+    project_id = 'your-project-id'
+    subscription_name = 'gmail-notifications-sub'
+    await start_pubsub_listener(project_id, subscription_name)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+
+## Script Key Features
+- **Real-time Processing**: Constantly polls new emails
+- **Intelligent Responses**: Uses AI to generate contextually appropriate draft replies
+- **History Tracking**: Maintains state to avoid processing duplicate emails
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Common Issues">
+    <Accordion title="Authentication Errors">
+      - Ensure `token.json` is valid and not expired
+      - Check that all required scopes are included
+      - Verify OAuth client ID configuration
+    </Accordion>
+    <Accordion title="Pub/Sub Connection Issues">
+      - Verify project ID and subscription name
+      - Check IAM permissions for Pub/Sub
+      - Ensure the topic exists and is accessible
+    </Accordion>
+  </Accordion>
+</AccordionGroup>
