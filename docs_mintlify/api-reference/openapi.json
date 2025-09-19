@@ -14,11 +14,105 @@
     }
   ],
   "paths": {
+    "/orgs/{org_id}/embedding-models": {
+      "get": {
+        "tags": [
+          "embeddings"
+        ],
+        "description": "List all available embedding models for the organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of embedding models",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEmbeddingModelsResBody"
+                },
+                "example": {
+                  "embedding_models": [
+                    "text-embedding-ada-002",
+                    "text-embedding-3-small",
+                    "text-embedding-3-large"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/kbs/{kb_id}/embeddings": {
+      "post": {
+        "tags": [
+          "embeddings"
+        ],
+        "description": "Create a new embedding",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEmbeddingReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Embedding created successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search": {
       "post": {
         "tags": [
-          "crate::handlers::orgs::kbs::tables::search"
+          "tables"
         ],
+        "description": "Search for records in a table",
         "operationId": "handler",
         "parameters": [
           {
@@ -52,7 +146,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ReqBody"
+                "$ref": "#/components/schemas/SearchTableReqBody"
               }
             }
           },
@@ -100,7 +194,56 @@
   },
   "components": {
     "schemas": {
-      "ReqBody": {
+      "CreateEmbeddingReqBody": {
+        "type": "object",
+        "required": [
+          "name",
+          "table_name",
+          "column_name",
+          "model",
+          "with_gin_index"
+        ],
+        "properties": {
+          "column_name": {
+            "type": "string",
+            "description": "Name of the source column"
+          },
+          "model": {
+            "$ref": "#/components/schemas/EmbeddingModel",
+            "description": "Embedding model to use. See the list embedding models endpoint for available options."
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the embedding"
+          },
+          "table_name": {
+            "type": "string",
+            "description": "Name of the source table"
+          },
+          "with_gin_index": {
+            "type": "boolean",
+            "description": "Whether to create a GIN index for the source column for faster hybrid search"
+          }
+        }
+      },
+      "EmbeddingModel": {
+        "type": "string"
+      },
+      "ListEmbeddingModelsResBody": {
+        "type": "object",
+        "required": [
+          "embedding_models"
+        ],
+        "properties": {
+          "embedding_models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EmbeddingModel"
+            }
+          }
+        }
+      },
+      "SearchTableReqBody": {
         "type": "object",
         "required": [
           "query",
@@ -112,7 +255,7 @@
             "items": {
               "type": "string"
             },
-            "description": "List of embedding names to use for semantic search. NOTE: Querying with multiple embeddings is not supported yet, but the API is ready and this feature is coming soon."
+            "description": "List of embedding names to use for semantic search."
           },
           "fts_columns": {
             "type": [
@@ -167,5 +310,15 @@
         "description": "Timbal API key. Obtain your API key from the Timbal platform settings. See [Authentication](/api-reference/authentication) for more information."
       }
     }
-  }
+  },
+  "tags": [
+    {
+      "name": "embeddings",
+      "description": "KB Embeddings operations"
+    },
+    {
+      "name": "tables",
+      "description": "KB Tables operations"
+    }
+  ]
 }

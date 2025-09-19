@@ -60,7 +60,8 @@
             "group": "Knowledge Bases",
             "pages": [
               "knowledge-bases/index",
-              "knowledge-bases/tables"
+              "knowledge-bases/tables",
+              "knowledge-bases/embeddings"
             ]
           },
           {
@@ -88,8 +89,7 @@
             "group": "Examples",
             "pages": [
               "examples/introduction",
-              "examples/gmail",
-              "examples/slack"
+              "examples/gmail"
             ]
           }
         ]
@@ -107,7 +107,19 @@
           {
             "group": "Knowledge Bases",
             "pages": [
-              "api-reference/knowledge-bases/search"
+              {
+                "group": "Tables",
+                "pages": [
+                  "api-reference/knowledge-bases/tables/search"
+                ]
+              },
+              {
+                "group": "Embeddings",
+                "pages": [
+                  "api-reference/knowledge-bases/embeddings/list-embeddings",
+                  "api-reference/knowledge-bases/embeddings/create-embeddings"
+                ]
+              }
             ]
           }
         ]

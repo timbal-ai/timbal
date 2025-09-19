@@ -1,0 +1,64 @@
+---
+title: "Embeddings"
+description: "Enable AI-powered semantic search by converting text data into vector representations that understand meaning and context"
+---
+
+## What are Embeddings?
+
+Embeddings are numerical vector representations of text that capture semantic meaning. When you create an embedding on a column:
+
+- **Text is converted** into high-dimensional vectors using an embedding model
+- **Vectors are stored** alongside your original data
+- **Similar content** gets similar vector representations
+- **Semantic search** becomes possible using natural language queries
+
+## Creating Embeddings
+
+```python
+from timbal.platform.embeddings import create_embedding
+
+# Create an embedding on a text column
+await create_embedding(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    name="product_descriptions",  # Name for this embedding
+    table_name="Products",        # Table containing the text
+    column_name="description",    # Column to create embeddings for
+    model="text-embedding-3-small",  # Embedding model to use
+    with_gin_index=True          # Create index for better performance
+)
+```
+
+You can create multiple embeddings on different columns or even the same column with different models.
+
+<Warning>
+- **Embeddings can only be created on text columns** - they convert text into vector representations
+- **Embedding names must be unique across your entire knowledge base** - two different tables cannot have embeddings with the same name
+- **Only create embeddings on columns you want to search semantically** - unnecessary embeddings waste storage and processing time
+</Warning>
+
+### Available Embedding Models
+
+First, check what models are available for your organization:
+
+```python
+from timbal.platform.embeddings import list_embedding_models
+
+# Get available embedding models
+models = await list_embedding_models(org_id="your-org-id")
+
+print("Available embedding models:")
+for model in models:
+    print(f"  - {model}")
+```
+
+Common embedding models include:
+
+- **`text-embedding-3-small`** - OpenAI's efficient model, good for most use cases
+- **`text-embedding-3-large`** - OpenAI's most powerful model, higher accuracy
+- **`text-embedding-ada-002`** - OpenAI's previous generation model
+- Additional models may be available depending on your organization setup
+
+<Tip>
+Check out [semantic search](/knowledge-bases/tables#semantic-search) to learn how to use embeddings for search.
+</Tip>
