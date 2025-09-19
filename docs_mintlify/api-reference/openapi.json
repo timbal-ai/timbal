@@ -1,72 +1,58 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "OpenAPI Plant Store",
-    "description": "A sample API that uses a plant store as an example to demonstrate features in the OpenAPI specification",
+    "title": "Timbal Platform API",
+    "description": "API documentation for the Timbal platform",
     "license": {
-      "name": "MIT"
+      "name": ""
     },
     "version": "1.0.0"
   },
   "servers": [
     {
-      "url": "http://sandbox.mintlify.com"
-    }
-  ],
-  "security": [
-    {
-      "bearerAuth": []
+      "url": "https://dev.timbal.ai"
     }
   ],
   "paths": {
-    "/plants": {
-      "get": {
-        "description": "Returns all plants from the system that the user has access to",
+    "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search": {
+      "post": {
+        "tags": [
+          "crate::handlers::orgs::kbs::tables::search"
+        ],
+        "operationId": "handler",
         "parameters": [
           {
-            "name": "limit",
-            "in": "query",
-            "description": "The maximum number of results to return",
+            "name": "org_id",
+            "in": "path",
+            "required": true,
             "schema": {
               "type": "integer",
-              "format": "int32"
+              "format": "int64"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "table_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
             }
           }
         ],
-        "responses": {
-          "200": {
-            "description": "Plant response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Plant"
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Unexpected error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "description": "Creates a new plant in the store",
         "requestBody": {
-          "description": "Plant to add to the store",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/NewPlant"
+                "$ref": "#/components/schemas/ReqBody"
               }
             }
           },
@@ -74,143 +60,111 @@
         },
         "responses": {
           "200": {
-            "description": "plant response",
+            "description": "Array of records matching the search query. Structure depends on the table schema and selected columns.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Plant"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "unexpected error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/plants/{id}": {
-      "delete": {
-        "description": "Deletes a single plant based on the ID supplied",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "ID of plant to delete",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Plant deleted",
-            "content": {}
-          },
-          "400": {
-            "description": "unexpected error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  },
-  "webhooks": {
-    "/plant/webhook": {
-      "post": {
-        "description": "Information about a new plant added to the store",
-        "requestBody": {
-          "description": "Plant added to the store",
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/NewPlant"
+                  "type": "array",
+                  "items": {
+
+                  }
+                },
+                "example": [
+                  {
+                    "id": 1,
+                    "name": "Alice Johnson",
+                    "email": "alice@example.com"
+                  },
+                  {
+                    "id": 2,
+                    "name": null,
+                    "email": "bob@example.com"
+                  },
+                  {
+                    "id": 3,
+                    "name": "Carol",
+                    "email": "carol@example.com"
+                  }
+                ]
               }
             }
           }
         },
-        "responses": {
-          "200": {
-            "description": "Return a 200 status to indicate that the data was received successfully"
+        "security": [
+          {
+            "bearer_auth": []
           }
-        }
+        ]
       }
     }
   },
   "components": {
     "schemas": {
-      "Plant": {
-        "required": [
-          "name"
-        ],
+      "ReqBody": {
         "type": "object",
+        "required": [
+          "query",
+          "embedding_names"
+        ],
         "properties": {
-          "name": {
-            "description": "The name of the plant",
-            "type": "string"
+          "embedding_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of embedding names to use for semantic search. NOTE: Querying with multiple embeddings is not supported yet, but the API is ready and this feature is coming soon."
           },
-          "tag": {
-            "description": "Tag to specify the type",
-            "type": "string"
-          }
-        }
-      },
-      "NewPlant": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/Plant"
-          },
-          {
-            "required": [
-              "id"
+          "fts_columns": {
+            "type": [
+              "array",
+              "null"
             ],
-            "type": "object",
-            "properties": {
-              "id": {
-                "description": "Identification number of the plant",
-                "type": "integer",
-                "format": "int64"
-              }
-            }
-          }
-        ]
-      },
-      "Error": {
-        "required": [
-          "error",
-          "message"
-        ],
-        "type": "object",
-        "properties": {
-          "error": {
-            "type": "integer",
-            "format": "int32"
+            "items": {
+              "type": "string"
+            },
+            "description": "List of column names to use for full-text search. When specified together with embedding_names, search will be hybrid (both semantic and full-text)."
           },
-          "message": {
-            "type": "string"
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Maximum number of results to return.",
+            "default": 10
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of results to skip before returning.",
+            "default": 0
+          },
+          "query": {
+            "type": "string",
+            "description": "Semantic search query."
+          },
+          "select_columns": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "List of column names to return in the search results. When not specified, all columns will be returned."
+          },
+          "where_clause": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SQL WHERE clause to apply to the search."
           }
         }
       }
     },
     "securitySchemes": {
-      "bearerAuth": {
+      "bearer_auth": {
         "type": "http",
-        "scheme": "bearer"
+        "scheme": "bearer",
+        "description": "Timbal API key. Obtain your API key from the Timbal platform settings. See [Authentication](/api-reference/authentication) for more information."
       }
     }
   }

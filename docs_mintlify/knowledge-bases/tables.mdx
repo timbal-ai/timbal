@@ -261,7 +261,7 @@ In PostgreSQL, **table names are case-sensitive** - use double quotes to escape 
 
 ### Semantic Search
 
-Performs semantic search on table data using embeddings, you have to specify which is the embedded column that you wanna search on.
+Discover contextually relevant data with semantic search that finds what you're looking for, even when you don't know the exact words.
 
 <Warning>
 For semantic search capabilities, you'll need to [create an embedding](/kb/embeddings) first.
@@ -270,54 +270,33 @@ For semantic search capabilities, you'll need to [create an embedding](/kb/embed
 ```python
 from timbal.platform.tables import search_table
 
+# Pure semantic search
 results = await search_table(
-    org_id="your-org-id",
-    kb_id="your-kb-id",
-    name="Documents",
-    query="artificial intelligence and machine learning",
-    embedding_names=["content_embeddings"],
-    limit=10,
-    offset=0
+  org_id="your-org-id",
+  kb_id="your-kb-id",
+  name="Documents",
+  query="artificial intelligence and machine learning",
+  embedding_names=["content_embeddings"],
+)
+
+# Hybrid search (semantic + full-text)
+results = await search_table(
+  org_id="your-org-id",
+  kb_id="your-kb-id",
+  name="Documents",
+  query="artificial intelligence and machine learning",
+  embedding_names=["content_embeddings"],
+  fts_columns=["title", "content"],  # Full-text search columns
 )
 ```
 
-<ParamField path="name" type="str" required>
-  Table name.
-</ParamField>
+Use `fts_columns` to specify which columns should be included in full-text search. When combined with `embedding_names`, you get hybrid search that leverages both semantic understanding and keyword matching.
 
-<ParamField path="query" type="str" required>
-  Semantic search query.
-</ParamField>
+For a complete list of parameters and their descriptions, see the [API reference](/api-reference/knowledge-bases/search).
 
-<ParamField path="embedding_names" type="string[]" required>
-  List of embedding names to use for semantic search.
-  <Warning>
-    Querying with multiple embeddings is not supported yet, but the API is ready and this feature is coming soon.
-  </Warning>
-</ParamField>
-
-<ParamField path="fts_columns" type="string[]">
-  List of column names to use for full-text search. 
-  <Note>
-    When specified together with `embedding_names`, search will be hybrid (both semantic and full-text).
-  </Note>
-</ParamField>
-
-<ParamField path="select_columns" type="string[]">
-  List of column names to return in the search results. When not specified, all columns will be returned.
-</ParamField>
-
-<ParamField path="where_clauses" type="string[]">
-  List of SQL WHERE clauses to apply to the search.
-</ParamField>
-
-<ParamField path="limit" type="int" default="10">
-  Maximum number of results to return.
-</ParamField>
-
-<ParamField path="offset" type="int" default="0">
-  Number of results to skip before returning.
-</ParamField>
+<Warning>
+Querying with multiple embeddings is not supported yet, but the API is ready and this feature is coming soon.
+</Warning>
 
 ## Managing Tables
 
