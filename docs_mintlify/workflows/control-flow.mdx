@@ -3,11 +3,24 @@ title: "Control Flow"
 description: "Workflows are broken into multiple steps, which can be executed following different behaviours"
 ---
 
+## Dependencies between Steps
+
+We have previously seen how to access the [Run Context](../core-concepts/context/#accessing-the-runcontext) to store additional data of the run.
+Additionally, steps can access the data from their parent run or neighbour steps within the workflow.
+
+- `current_trace()` - Access the current step's data
+- `parent_trace()` - Access the parent workflow's data
+- `step_trace("step_name")` - Access any specific neighbour step's data
+
+Referencing data from another run creates dependencies within the Workflow.
+**Timbal automatically resolves these dependencies** to ensure proper execution.
+
+
 ## Default Execution
 
 Steps run in **parallel** by default. If one step produces an output needed by another, **the framework automatically enforces sequential execution between those steps**. The dependency is resolved under the hood.
 
-```python
+```python highlight={13}
 import asyncio
 from timbal import Workflow
 

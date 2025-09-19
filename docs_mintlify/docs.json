@@ -51,7 +51,6 @@
             "tag": "BETA",
             "pages": [
               "workflows/index",
-              "workflows/context",
               "workflows/control-flow",
               "workflows/branching"
             ]

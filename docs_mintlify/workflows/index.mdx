@@ -9,7 +9,7 @@ Workflows are programmable execution pipelines that **orchestrate step-by-step p
 The following line creates an empty workflow, ready for steps to be added:
 
 ```python 
-from timbal.core import Workflow
+from timbal import Workflow
 
 workflow = Workflow(name="my_workflow")
 ```
@@ -57,19 +57,37 @@ workflow = (Workflow(name="temperature_monitoring", temperature=80)
 
 ## Running the Workflow
 
-You can run your workflow in two different ways:
+The workflow's final output is automatically determined by the **last executed step** in the dependency graph. 
+To run the workflow and receive directly the final output, use the `collect()` method:
 
-**Getting the final output:**
 ```python
 result = await workflow().collect()
-print(result.output)
+print(result.output)  # Output from the final executed step
 ```
 
-**Streaming events as they happen:**
+However, you can also **stream all events** as they happen:
 ```python
 async for event in workflow():
     print(event)
 ```
+
+The input and output from each step is stored in its Run Context, accessible via:
+
+- **`.input`**: Dictionary of parameters passed to the step
+- **`.output`**: Value(s) returned by the step. Can be a single value, dictionary, array, or custom class.
+
+You can also store additional custom variables:
+
+```python
+from timbal.state import get_run_context
+
+async def process_user_data(user_id: str):
+    # New variable saved in the step context:
+    get_run_context().current_trace().user_status = "active"
+    return f"Processed user: {user_id}"
+```
+
+
 
 ## Key Features
 - **Composition**: Workflows can contain other workflows
