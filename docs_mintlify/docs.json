@@ -56,6 +56,13 @@
             ]
           },
           {
+            "group": "Knowledge Bases",
+            "pages": [
+              "knowledge-bases/index",
+              "knowledge-bases/tables"
+            ]
+          },
+          {
             "group": "Deployment",
             "pages": [
               "deployment/index",

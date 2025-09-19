@@ -1,0 +1,591 @@
+---
+title: "Tables"
+description: "Create and manage structured data tables with defined schemas, data types, and constraints"
+---
+
+A Table in a Knowledge Base is a structured container for your data with:
+
+- **Defined columns** with specific data types
+- **Constraints** like nullable, unique, and default values  
+- **Comments** for documentation
+- **PostgreSQL compatibility** for familiar SQL operations
+
+## Creating Tables
+
+Creates a new structured table in a Knowledge Base - Defines a table schema with columns, data types, constraints, and documentation.
+
+```python
+from timbal.platform.tables import Column, create_table
+
+await create_table(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    name="Users",
+    columns=[
+        Column(
+            name="id",
+            data_type="int", 
+            is_nullable=False,
+            is_unique=True,
+            is_primary=True,
+        ),
+        Column(
+            name="name",
+            data_type="text",
+            is_nullable=True,
+            is_unique=False,
+            is_primary=False,
+        ),
+        Column(
+            name="email",
+            data_type="text",
+            is_nullable=False,
+            is_unique=True,
+            is_primary=False,
+            comment="User's email address. Must be unique.",
+        ),
+        Column(
+            name="is_active",
+            data_type="boolean",
+            is_nullable=False,
+            is_unique=False,
+            is_primary=False,
+            default_value="true",
+            comment="Whether the user account is active.",
+        ),
+        # Add more columns as needed
+    ],
+    comment="Table for storing user information"
+)
+```
+
+The previous code creates a table named "Users" with three columns: "id", "name", and "email". You can add more columns by simply adding more `Column` objects to the `columns` list.
+
+### Columns
+
+Each column can have the following properties:
+
+<ParamField path="name" type="str" required>
+The name of the column.
+</ParamField>
+
+<ParamField path="data_type" type="str" required>
+The PostgreSQL data type of the column.
+</ParamField>
+
+<ParamField path="is_nullable" type="bool" required>
+Whether the column can contain NULL values.
+</ParamField>
+
+<ParamField path="is_unique" type="bool" required>
+Whether the column values must be unique.
+</ParamField>
+
+<ParamField path="default_value" type="str">
+Default value for the column (can use SQL functions like NOW()).
+</ParamField>
+
+<ParamField path="comment" type="str">
+Description or comment about the column.
+</ParamField>
+
+### Data Types
+
+The following PostgreSQL data types are supported:
+
+**Integer**
+- **`int`** - 32-bit integer
+- **`smallint`** - 16-bit integer  
+- **`bigint`** - 64-bit integer
+
+**Numeric**
+- **`real`** - 32-bit floating point
+- **`double_precision`** - 64-bit floating point
+- **`numeric(p,s)`** - Decimal with precision and scale (e.g., `numeric(10,2)`)
+
+**Text**
+- **`text`** - Variable-length character strings
+- **`varchar(n)`** - Variable character with length limit (e.g., `varchar(255)`)
+- **`char(n)`** - Fixed-length character (e.g., `char(10)`)
+- **`ltree`** - Hierarchical tree-like structures
+
+**Boolean**
+- **`boolean`** - True/false values
+
+**Date/Time**
+- **`date`** - Date only
+- **`timestamp`** - Date and time (without timezone)
+- **`timestamptz`** - Date and time with timezone
+
+**JSON**
+- **`json`** - JSON data
+- **`jsonb`** - Binary JSON data (more efficient)
+
+## Importing Data
+
+When importing data, you can specify how the new data should be handled with the `mode` parameter:
+
+- **`overwrite`**: Deletes all existing data in the table and replaces it with the new data.
+
+- **`append`**: Adds the new data to the existing table without removing any existing records. This is useful for adding new rows while preserving all current data.
+
+- **`upsert`**: Updates existing records if they match (based on primary key) and inserts new records if they don't exist. When updating, **all non-matching fields are updated** with the new values from your import data.
+
+  <Note>For more granular control over update behavior (like updating only specific fields), use [SQL queries](#sql-queries) with custom UPDATE statements.</Note>
+
+### Import from Records
+
+Takes a list of dictionaries and inserts them as rows in the specified table. You can omit columns that have default values and are nullable (like `is_active` in our example).
+```python
+from timbal.platform.tables import import_records
+
+await import_records(
+    org_id="your-org-id",
+    kb_id="your-kb-id", 
+    table_name="Users",
+    mode="overwrite",
+    records=[
+        {
+            "id": 1,
+            "name": "Alice Johnson",
+            "email": "alice@example.com"
+        },
+        {
+            "id": 2, 
+            "name": None,
+            "email": "bob@example.com"
+        },
+        {
+            "id": 3,
+            "name": "Carol",
+            "email": "carol@example.com", 
+        },
+        # Add more records here
+    ]
+)
+```
+
+### Import from CSV
+
+Reads CSV files and loads the data into existing tables with schema validation.
+
+```python
+from timbal.steps.timbal.tables import import_csv
+
+await import_csv(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users", 
+    mode="overwrite",
+    csv_path="./users_data.csv",
+)
+```
+
+The CSV file should have column headers that match your table schema. You can omit columns that have default values and are nullable (like `is_active` in our example).
+
+```csv users.csv icon="file-csv"
+id,name,email
+1,Alice Johnson,alice@example.com
+2,,bob@example.com
+3,Carol,carol@example.com
+```
+
+<Note>
+**CSV Requirements**:
+- **Null Values**: Leave cells empty (as shown in row 2 for the `name` field) to represent NULL values. Do not use text like "null" or "NULL" - these will be treated as literal strings.
+- **Encoding**: Files must be UTF-8 encoded. Other encodings or UTF-8 variants will not be accepted.
+</Note>
+
+### Troubleshooting
+
+Common issues you might encounter when importing data:
+
+<AccordionGroup>
+  <Accordion title="Record Structure Issues">
+    **Problem**: Missing fields or inconsistent data structure errors.
+
+    **Solution**: Ensure all records have identical field structures. The first record determines the expected schema for all subsequent records.
+  </Accordion>
+
+  <Accordion title="Foreign Key Constraint Violations">
+    **Problem**: "Foreign key constraint fails" during import.
+
+    **Solution**: Import data in dependency order:
+    1. Parent tables first (referenced tables)
+    2. Child tables second (tables with foreign keys)
+
+    **Alternative**: Use `append` or `upsert` modes to avoid deletion-related constraints.
+  </Accordion>
+
+  <Accordion title="Duplicate Key Violations">
+    **Problem**: "Duplicate key" or "unique constraint" errors during append operations.
+
+    **Solution**: Before appending, verify new records don't conflict with:
+    - Primary key values
+    - Unique constraint columns
+    - Foreign key references
+
+    **Alternative**: Use `upsert` mode to update existing records instead of failing on duplicates.
+  </Accordion>
+</AccordionGroup>
+
+
+## Querying Data
+
+### SQL
+
+Unleash the full power of PostgreSQL against your knowledge base tables. Execute sophisticated queries with advanced functions, window operations, CTEs, joins, aggregations, and everything PostgreSQL has to offer.
+
+<Note>
+**Available Extensions**:
+- `postgis`: geography operations
+- `pg_trgm`: trigram matching
+- `unaccent`: accent-insensitive text operations
+- `ltree`: hierarchical tree-like structures
+- `vector`: vector similarity operations
+</Note>
+
+```python
+from timbal.platform.tables import query
+
+results = await query(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    sql="""SELECT * FROM "Users" WHERE id = 1"""
+)
+```
+
+<Info>
+In PostgreSQL, **table names are case-sensitive** - use double quotes to escape them.
+</Info>
+
+### Semantic Search
+
+Performs semantic search on table data using embeddings, you have to specify which is the embedded column that you wanna search on.
+
+<Warning>
+For semantic search capabilities, you'll need to [create an embedding](/kb/embeddings) first.
+</Warning>
+
+```python
+from timbal.platform.tables import search_table
+
+results = await search_table(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    name="Documents",
+    query="artificial intelligence and machine learning",
+    embedding_names=["content_embeddings"],
+    limit=10,
+    offset=0
+)
+```
+
+<ParamField path="name" type="str" required>
+  Table name.
+</ParamField>
+
+<ParamField path="query" type="str" required>
+  Semantic search query.
+</ParamField>
+
+<ParamField path="embedding_names" type="string[]" required>
+  List of embedding names to use for semantic search.
+  <Warning>
+    Querying with multiple embeddings is not supported yet, but the API is ready and this feature is coming soon.
+  </Warning>
+</ParamField>
+
+<ParamField path="fts_columns" type="string[]">
+  List of column names to use for full-text search. 
+  <Note>
+    When specified together with `embedding_names`, search will be hybrid (both semantic and full-text).
+  </Note>
+</ParamField>
+
+<ParamField path="select_columns" type="string[]">
+  List of column names to return in the search results. When not specified, all columns will be returned.
+</ParamField>
+
+<ParamField path="where_clauses" type="string[]">
+  List of SQL WHERE clauses to apply to the search.
+</ParamField>
+
+<ParamField path="limit" type="int" default="10">
+  Maximum number of results to return.
+</ParamField>
+
+<ParamField path="offset" type="int" default="0">
+  Number of results to skip before returning.
+</ParamField>
+
+## Managing Tables
+
+### List All Tables
+
+Returns metadata for all tables in the specified knowledge base.
+
+```python
+from timbal.steps.timbal.tables import get_tables
+
+# Get all tables in the knowledge base
+tables = await get_tables(
+    org_id="your-org-id",
+    kb_id="your-kb-id"
+)
+
+for table in tables:
+    print(f"Table: {table.name}")
+    print(f"Comment: {table.comment}")
+    print(f"Columns: {len(table.columns)}")
+    print("---")
+```
+
+### Get Table Details
+
+Retrieves the complete definition of a specific table - Returns table metadata including column definitions, constraints, and comments.
+
+```python
+from timbal.steps.timbal.tables import get_table
+
+# Get detailed information about a specific table
+table = await get_table(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    name="Users"
+)
+
+print(f"Table name: {table.name}")
+print(f"Columns:")
+for column in table.columns:
+    print(f"  - {column.name}: {column.data_type} (nullable: {column.is_nullable})")
+```
+
+### Get Table SQL Definition
+
+Returns the exact SQL definition that would recreate the table.
+
+```python
+from timbal.steps.timbal.tables import get_table_sql
+
+# Get the CREATE TABLE statement
+sql_definition = await get_table_sql(
+    org_id="your-org-id", 
+    kb_id="your-kb-id",
+    name="Users"
+)
+
+print(sql_definition)
+```
+
+### Get All Tables SQL Definition
+
+Returns the SQL definitions for all tables in the knowledge base.
+
+```python
+from timbal.steps.timbal.tables import get_tables_sql
+
+# Get the CREATE TABLE statements for all tables
+sql_definitions = await get_tables_sql(
+    org_id="your-org-id", 
+    kb_id="your-kb-id"
+)
+
+for sql in sql_definitions:
+    print(sql)
+    print("---")
+```
+
+### Delete Table
+
+Completely removes the table structure and data from the knowledge base.
+
+```python
+from timbal.steps.timbal.tables import delete_table
+
+# Delete a table (be careful!)
+await delete_table(
+    org_id="your-org-id",
+    kb_id="your-kb-id", 
+    name="Users",
+    cascade=True  # Also delete associated indexes and embeddings
+)
+```
+
+## Modifying Tables
+
+### Add Column
+
+Adds a new column to an existing table.
+
+```python
+from timbal.steps.timbal.tables import add_column, Column
+
+# Add a new column to an existing table
+await add_column(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    column=Column(
+        name="phone_number",
+        data_type="varchar(20)",
+        is_nullable=True,
+        is_unique=False,
+        is_primary=False,
+        comment="User's phone number"
+    )
+)
+```
+
+### Drop Column
+
+Removes a column from an existing table.
+
+```python
+from timbal.steps.timbal.tables import drop_column
+
+# Remove a column from the table
+await drop_column(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="phone_number",
+    cascade=True  # Also drop dependent objects
+)
+```
+
+### Rename Column
+
+Changes the name of an existing column.
+
+```python
+from timbal.steps.timbal.tables import rename_column
+
+# Rename a column
+await rename_column(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="name",
+    new_name="full_name"
+)
+```
+
+### Rename Table
+
+Changes the name of an existing table.
+
+```python
+from timbal.steps.timbal.tables import rename_table
+
+# Rename the entire table
+await rename_table(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    name="Users",
+    new_name="Customers"
+)
+```
+
+## Adding Constraints
+
+### Add Foreign Key
+
+Creates a foreign key relationship between tables.
+
+```python
+from timbal.steps.timbal.tables import add_fk
+
+# Add a foreign key constraint
+await add_fk(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Posts",
+    column_names=["customer_id"],
+    fk_table_name="Users",
+    fk_column_names=["id"],
+    name="fk_posts_customer_id",
+    on_delete_action="CASCADE",
+    on_update_action="NO ACTION"
+)
+```
+
+This creates a relationship between the two tables as shown:
+
+<div style={{ display: 'flex', justifyContent: 'center', gap: '20px', alignItems: 'center' }}>
+  <img src="/img/add_fk.png" alt="Foreign Key Relationship" style={{ maxWidth: '660px', height: 'auto' }} />
+</div>
+
+<br/>
+
+What happens with this constraint:
+
+- **Data integrity**: You can only insert `customer_id` values in Posts that exist as `id` values in Users
+- **Cascade delete**: When a User is deleted, all their Posts are automatically deleted too
+- **Referential consistency**: The database ensures the relationship between tables is always valid
+- **Query optimization**: The database can optimize joins between these tables more efficiently
+
+### Add Check Constraint
+
+Adds a validation rule to ensure data meets specific conditions.
+
+```python
+from timbal.steps.timbal.tables import add_check
+
+# Add a check constraint
+await add_check(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="check_email_format",
+    expression="email LIKE '%@%'"
+)
+```
+
+<br/>
+
+What happens with this constraint:
+
+- **Data validation**: Every insert or update must satisfy the check condition
+- **Automatic rejection**: Records that don't meet the criteria are automatically rejected
+
+### Add Unique Constraint
+
+Ensures that values in specified columns are unique across rows.
+
+```python
+from timbal.steps.timbal.tables import add_unique
+
+# Add a unique constraint across multiple columns
+await add_unique(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="unique_email_domain",
+    columns=["email", "domain"]
+)
+```
+
+<br/>
+
+What happens with this constraint:
+
+- **Uniqueness enforcement**: No two rows can have the same combination of values in the specified columns
+- **Composite uniqueness**: When multiple columns are specified, the combination must be unique (individual columns can still have duplicates)
+
+### Drop Constraint
+
+Removes any type of constraint from a table.
+
+```python
+from timbal.steps.timbal.tables import drop_constraint
+
+# Remove a constraint
+await drop_constraint(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="check_email_format",
+    cascade=True # Also drop dependent objects
+)
+```
