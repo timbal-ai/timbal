@@ -149,5 +149,8 @@
       "github": "https://github.com/timbal-ai",
       "linkedin": "https://linkedin.com/company/timbal-ai"
     }
+  },
+  "styling": {
+    "codeblocks": "dark"
   }
 }
