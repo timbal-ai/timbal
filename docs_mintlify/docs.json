@@ -84,12 +84,13 @@
       },
       {
         "tab": "Examples",
-        "groups": [
+        "pages": [
+          "examples/index",
           {
-            "group": "Examples",
+            "group": "Guides",
             "pages": [
-              "examples/introduction",
-              "examples/gmail"
+              "examples/guides/gmail",
+              "examples/guides/slack"
             ]
           }
         ]
