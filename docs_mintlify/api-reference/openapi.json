@@ -107,6 +107,55 @@
         ]
       }
     },
+    "/orgs/{org_id}/kbs/{kb_id}/indexes": {
+      "post": {
+        "tags": [
+          "indexes"
+        ],
+        "description": "Create a new index on a table",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateIndexReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Index created successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search": {
       "post": {
         "tags": [
@@ -226,8 +275,54 @@
           }
         }
       },
+      "CreateIndexReqBody": {
+        "type": "object",
+        "required": [
+          "table_name",
+          "name",
+          "column_names",
+          "type",
+          "is_unique"
+        ],
+        "properties": {
+          "column_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of column names to index"
+          },
+          "is_unique": {
+            "type": "boolean",
+            "description": "Whether the index should enforce uniqueness"
+          },
+          "name": {
+            "type": "string",
+            "description": "Index name. This must be unique in the entire Knowledge Base."
+          },
+          "table_name": {
+            "type": "string",
+            "description": "Table name"
+          },
+          "type": {
+            "$ref": "#/components/schemas/IndexType",
+            "description": "Index type"
+          }
+        }
+      },
       "EmbeddingModel": {
         "type": "string"
+      },
+      "IndexType": {
+        "type": "string",
+        "enum": [
+          "btree",
+          "hash",
+          "gin",
+          "gist",
+          "brin",
+          "hnsw"
+        ]
       },
       "ListEmbeddingModelsResBody": {
         "type": "object",
@@ -315,6 +410,10 @@
     {
       "name": "embeddings",
       "description": "KB Embeddings operations"
+    },
+    {
+      "name": "indexes",
+      "description": "KB Indexes operations"
     },
     {
       "name": "tables",

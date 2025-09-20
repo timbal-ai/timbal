@@ -1,0 +1,121 @@
+---
+title: "Indexes"
+description: "Optimize query performance and enable advanced search capabilities with database indexes on your table columns"
+---
+
+## What are Indexes?
+
+**Indexes** are data structures that improve query performance by creating optimized access paths to your data:
+
+- **Speed up queries** - Find data faster instead of scanning entire tables
+- **Enable advanced searches** - Support complex search patterns and operations
+- **Optimize specific use cases** - Different index types for different needs
+- **Trade-off storage for speed** - Use extra storage to achieve faster queries
+
+## Index Types
+
+Timbal supports several PostgreSQL index types, each optimized for different use cases:
+
+<Columns cols={2}>
+  <Card title="B-tree (btree)" icon="tree" href="#">
+    Best for equality and range queries on sortable data, _e.g._ IDs, dates, names, prices.
+  </Card>
+  <Card title="Hash" icon="hash" href="#">
+    Optimized for exact equality comparisons, _e.g._ status codes, categories.
+  </Card>
+  <Card title="GIN (Generalized Inverted Index)" icon="tree" href="#">
+    Good for full-text search, arrays, and JSON data, _e.g._ long texts, tags, metadata.
+  </Card>
+  <Card title="GiST (Generalized Search Tree)" icon="tree" href="#">
+    Good for geometric data, full-text search, and nearest-neighbor searches, _e.g._ locations, nearest neighbors.
+  </Card>
+  <Card title="BRIN (Block Range Index)" icon="tree" href="#">
+    Efficient for very large tables where data has natural clustering, _e.g._ time series, log data.
+  </Card>
+</Columns>
+
+## Creating Indexes
+
+<Info>
+**Only create indexes for columns you actually query** - unnecessary indexes waste storage and slow down writes
+</Info>
+
+```python
+from timbal.platform.indexes import create_index
+
+# Create a basic B-tree index on a single column
+await create_index(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Users",
+    name="idx_users_email",        # Index name
+    column_names=["email"],        # Columns to index
+    type="btree",                  # Index type
+    is_unique=True                 # Enforce uniqueness
+)
+```
+
+<Info>
+**Index names must be unique across your entire knowledge base** - two different tables cannot have indexes with the same name
+</Info>
+
+### Composite Indexes
+
+```python
+# Create a composite index on multiple columns
+await create_index(
+    org_id="your-org-id",
+    kb_id="your-kb-id",
+    table_name="Orders",
+    name="idx_orders_customer_date",
+    column_names=["customer_id", "order_date"],  # Multiple columns
+    type="btree",
+    is_unique=False
+)
+```
+
+**Column order is critical:** Put the most selective columns first (columns with many unique values) before less selective ones.
+
+- **High selectivity** = Many unique values (user_id, email, timestamps)
+- **Low selectivity** = Few unique values (status, boolean flags, categories)
+
+<Tabs>
+  <Tab title="Good Example">
+    ```python
+    # user_id eliminates most rows immediately
+    ["user_id", "status", "created_at"]
+    ```
+    `user_id` has thousands of unique values, so the database can quickly narrow down to just a few rows.
+  </Tab>
+
+  <Tab title="Poor Example">
+    ```python
+    # status only eliminates ~50% of rows
+    ["status", "user_id", "created_at"]
+    ```
+    `status` might only have 2-3 values (active/inactive), so the database still has to scan millions of rows.
+  </Tab>
+</Tabs>
+
+<Info>
+**Composite indexes can only be used from left to right** - you can't skip the first columns.
+
+Given an index `["customer_id", "order_date", "status"]`:
+
+**These queries work efficiently:**
+```sql
+WHERE customer_id = 123 AND order_date > '2024-01-01' AND status = 'shipped'
+WHERE customer_id = 123
+WHERE customer_id = 123 AND order_date > '2024-01-01'
+```
+
+**These queries won't be as efficient:**
+```sql
+WHERE order_date > '2024-01-01'  -- skips first column
+WHERE order_date = '2024-01-01' AND customer_id = 123  -- wrong order
+```
+</Info>
+
+<Tip>
+See the [API Reference](/api-reference/knowledge-bases/indexes/list) for endpoints to **list, delete, monitor, and configure** indexes to help you manage them as your data grows.
+</Tip>

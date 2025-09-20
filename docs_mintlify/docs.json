@@ -9,7 +9,7 @@
   },
   "favicon": "/favicon.png",
   "banner": {
-    "content": "🚀 Version 1.0 is in beta! Start with our [quickstart guide](/quickstart) or explore [examples](/examples).",
+    "content": "🚀 Version 1.0 is live! Start with the [quickstart guide](/quickstart) or explore our [examples](/examples).",
     "dismissible": true
   },
   "navigation": {
@@ -49,7 +49,6 @@
           },
           {
             "group": "Workflows",
-            "tag": "BETA",
             "pages": [
               "workflows/index",
               "workflows/control-flow",
@@ -61,7 +60,8 @@
             "pages": [
               "knowledge-bases/index",
               "knowledge-bases/tables",
-              "knowledge-bases/embeddings"
+              "knowledge-bases/embeddings",
+              "knowledge-bases/indexes"
             ]
           },
           {
@@ -119,6 +119,12 @@
                 "pages": [
                   "api-reference/knowledge-bases/embeddings/list-embeddings",
                   "api-reference/knowledge-bases/embeddings/create-embeddings"
+                ]
+              },
+              {
+                "group": "Indexes",
+                "pages": [
+                  "api-reference/knowledge-bases/indexes/create"
                 ]
               }
             ]
