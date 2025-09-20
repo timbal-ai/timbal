@@ -2,7 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ...utils import _platform_api_call, resolve_default
+from ...utils import resolve_default
+from ..utils import _request
 
 EmbeddingStatus = Literal["pending", "queued", "processing", "success", "error"]
 
@@ -46,7 +47,7 @@ async def list_embedding_models(
     """
     path = f"orgs/{org_id}/embedding-models"
 
-    res = await _platform_api_call("GET", path)
+    res = await _request("GET", path)
     return res.json().get("embedding_models", [])
     
 
@@ -107,7 +108,7 @@ async def create_embedding(
         "with_gin_index": with_gin_index,
     }
 
-    await _platform_api_call("POST", path, json=payload)
+    await _request("POST", path, json=payload)
 
 
 async def list_embeddings(
@@ -145,7 +146,7 @@ async def list_embeddings(
     if table_name is not None:
         params["table_name"] = table_name
 
-    res = await _platform_api_call("GET", path, params=params)
+    res = await _request("GET", path, params=params)
     return [Embedding.model_validate(embedding) for embedding in res.json().get("embeddings", [])]
 
 
@@ -176,4 +177,4 @@ async def delete_embedding(
 
     path = f"orgs/{org_id}/kbs/{kb_id}/embeddings/{name}"
 
-    await _platform_api_call("DELETE", path)
+    await _request("DELETE", path)

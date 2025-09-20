@@ -2,7 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ...utils import _platform_api_call, resolve_default
+from ...utils import resolve_default
+from ..utils import _request
 
 
 class Index(BaseModel):
@@ -77,7 +78,7 @@ async def create_index(
         "is_unique": is_unique,
     }
 
-    await _platform_api_call("POST", path, json=payload)
+    await _request("POST", path, json=payload)
 
     
 async def list_indexes(
@@ -114,7 +115,7 @@ async def list_indexes(
     if table_name:
         params["table_name"] = table_name
 
-    res = await _platform_api_call("GET", path, params=params)
+    res = await _request("GET", path, params=params)
     return [Index.model_validate(index) for index in res.json().get("indexes", [])]
 
 
@@ -145,4 +146,4 @@ async def delete_index(
 
     path = f"orgs/{org_id}/kbs/{kb_id}/indexes/{name}"
 
-    await _platform_api_call("DELETE", path)
+    await _request("DELETE", path)

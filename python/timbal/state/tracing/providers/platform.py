@@ -20,9 +20,9 @@ class PlatformTracingProvider(TracingProvider):
     @override
     async def get(cls, run_context: "RunContext") -> Tracing | None:
         """See base class."""
-        from ....utils import _platform_api_call
+        from ....platform.utils import _request
         subject = run_context.platform_config.subject
-        res = await _platform_api_call(
+        res = await _request(
             method="GET",
             path=f"orgs/{subject.org_id}/apps/{subject.app_id}/tracing",
             params={"run_id": run_context.parent_id},
@@ -34,7 +34,7 @@ class PlatformTracingProvider(TracingProvider):
     @override
     async def put(cls, run_context: "RunContext") -> None:
         """See base class."""
-        from ....utils import _platform_api_call
+        from ....platform.utils import _request
         subject = run_context.platform_config.subject
         payload = {
             "version_id": subject.version_id,
@@ -42,7 +42,7 @@ class PlatformTracingProvider(TracingProvider):
             "parent_id": run_context.parent_id,
             "tracing": run_context._tracing.model_dump()
         }
-        res = await _platform_api_call(
+        res = await _request(
             method="POST",
             path=f"orgs/{subject.org_id}/apps/{subject.app_id}/tracing",
             json=payload,

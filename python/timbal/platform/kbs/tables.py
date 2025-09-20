@@ -3,7 +3,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ...utils import _platform_api_call, resolve_default
+from ...utils import resolve_default
+from ..utils import _request
 
 
 class Column(BaseModel):
@@ -77,7 +78,7 @@ async def create_table(
         "comment": comment,
     }
 
-    await _platform_api_call("POST", path, json=payload)
+    await _request("POST", path, json=payload)
 
 
 async def delete_table(
@@ -112,7 +113,7 @@ async def delete_table(
     path = f"orgs/{org_id}/kbs/{kb_id}/tables/{name}?"
     payload = {"cascade": cascade}
 
-    await _platform_api_call("DELETE", path, json=payload)
+    await _request("DELETE", path, json=payload)
 
 
 async def get_table(
@@ -143,7 +144,7 @@ async def get_table(
     path = f"orgs/{org_id}/kbs/{kb_id}/tables/{name}"
     params = {"format": "full"}
     
-    res = await _platform_api_call("GET", path, params=params)
+    res = await _request("GET", path, params=params)
     return Table.model_validate(res.json().get("table"))
 
 
@@ -175,7 +176,7 @@ async def get_table_sql(
     path = f"orgs/{org_id}/kbs/{kb_id}/tables/{name}"
     params = {"format": "definition"}
     
-    res = await _platform_api_call("GET", path, params=params)
+    res = await _request("GET", path, params=params)
     return res.json().get("table")
 
 
@@ -202,7 +203,7 @@ async def get_tables(
     path = f"orgs/{org_id}/kbs/{kb_id}/tables"
     params = {"format": "full"}
     
-    res = await _platform_api_call("GET", path, params=params)
+    res = await _request("GET", path, params=params)
     return [Table.model_validate(table) for table in res.json().get("tables", [])]
 
 
@@ -230,7 +231,7 @@ async def get_tables_sql(
     path = f"orgs/{org_id}/kbs/{kb_id}/tables"
     params = {"format": "definition"}
     
-    res = await _platform_api_call("GET", path, params=params)
+    res = await _request("GET", path, params=params)
     return res.json().get("tables", [])
 
 
@@ -276,7 +277,7 @@ async def import_records(
     path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/records"
     payload = {"records": records}
 
-    await _platform_api_call("POST", path, json=payload)
+    await _request("POST", path, json=payload)
 
 
 async def import_csv(
@@ -323,7 +324,7 @@ async def import_csv(
     with open(csv_path, "rb") as f:
         csv_data = f.read()
     
-    await _platform_api_call("POST", path, headers=headers, content=csv_data)
+    await _request("POST", path, headers=headers, content=csv_data)
 
 
 async def search_table(
@@ -388,7 +389,7 @@ async def search_table(
         "offset": offset,
     }
 
-    res = await _platform_api_call("POST", path, json=payload)
+    res = await _request("POST", path, json=payload)
     return res.json()
 
 
@@ -433,7 +434,7 @@ async def query(
     path = f"orgs/{org_id}/kbs/{kb_id}/query"
     payload = {"sql": sql}
 
-    res = await _platform_api_call("POST", path, json=payload)
+    res = await _request("POST", path, json=payload)
     return res.json()
     
 
@@ -470,7 +471,7 @@ async def add_column(
     path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}"
     payload = {"operations": [{"add_column": column.model_dump()}]}
 
-    await _platform_api_call("PATCH", path, json=payload)
+    await _request("PATCH", path, json=payload)
     
 
 async def drop_column(
@@ -513,7 +514,7 @@ async def drop_column(
         "cascade": cascade
     }}]}
 
-    await _platform_api_call("PATCH", path, json=payload)
+    await _request("PATCH", path, json=payload)
 
 
 async def rename_column(
@@ -554,7 +555,7 @@ async def rename_column(
         "new_name": new_name
     }}]}
 
-    await _platform_api_call("PATCH", path, json=payload)
+    await _request("PATCH", path, json=payload)
 
 
 async def rename_table(
@@ -587,7 +588,7 @@ async def rename_table(
     path = f"orgs/{org_id}/kbs/{kb_id}/tables/{name}"
     payload = {"operations": [{"rename_table": {"new_name": new_name}}]}
 
-    await _platform_api_call("PATCH", path, json=payload)
+    await _request("PATCH", path, json=payload)
 
 
 async def add_fk(
@@ -657,7 +658,7 @@ async def add_fk(
         }]
     }
 
-    await _platform_api_call("PATCH", path, json=payload)
+    await _request("PATCH", path, json=payload)
 
 
 async def drop_constraint(
@@ -704,7 +705,7 @@ async def drop_constraint(
         }]
     }
 
-    await _platform_api_call("PATCH", path, json=payload)
+    await _request("PATCH", path, json=payload)
 
 
 async def add_check(
@@ -750,7 +751,7 @@ async def add_check(
         }]
     }
 
-    await _platform_api_call("PATCH", path, json=payload)
+    await _request("PATCH", path, json=payload)
 
 
 async def add_unique(
@@ -796,5 +797,5 @@ async def add_unique(
         }]
     }
 
-    await _platform_api_call("PATCH", path, json=payload)
+    await _request("PATCH", path, json=payload)
     
