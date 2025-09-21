@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Timbal Platform API",
-    "description": "API documentation for the Timbal platform",
+    "description": "Public API documentation for the Timbal platform",
     "license": {
       "name": ""
     },
@@ -108,6 +108,62 @@
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/indexes": {
+      "get": {
+        "tags": [
+          "indexes"
+        ],
+        "description": "List indexes for a KB",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "table_name",
+            "in": "query",
+            "description": "Table name to filter indexes by",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of indexes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListIndexesResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
       "post": {
         "tags": [
           "indexes"
@@ -290,7 +346,7 @@
             "items": {
               "type": "string"
             },
-            "description": "List of column names to index"
+            "description": "List of column names to index. At least one column is required. Multiple columns will create a composite index"
           },
           "is_unique": {
             "type": "boolean",
@@ -298,7 +354,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Index name. This must be unique in the entire Knowledge Base."
+            "description": "Index name. This must be unique in the entire Knowledge Base"
           },
           "table_name": {
             "type": "string",
@@ -312,6 +368,40 @@
       },
       "EmbeddingModel": {
         "type": "string"
+      },
+      "Index": {
+        "type": "object",
+        "required": [
+          "table",
+          "name",
+          "columns",
+          "type",
+          "is_unique",
+          "definition"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "definition": {
+            "type": "string"
+          },
+          "is_unique": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/IndexType"
+          }
+        }
       },
       "IndexType": {
         "type": "string",
@@ -334,6 +424,20 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/EmbeddingModel"
+            }
+          }
+        }
+      },
+      "ListIndexesResBody": {
+        "type": "object",
+        "required": [
+          "indexes"
+        ],
+        "properties": {
+          "indexes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Index"
             }
           }
         }

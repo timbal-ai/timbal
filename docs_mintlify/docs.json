@@ -124,6 +124,7 @@
               {
                 "group": "Indexes",
                 "pages": [
+                  "api-reference/knowledge-bases/indexes/list",
                   "api-reference/knowledge-bases/indexes/create"
                 ]
               }
