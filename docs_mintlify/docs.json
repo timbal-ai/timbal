@@ -117,15 +117,18 @@
               {
                 "group": "Embeddings",
                 "pages": [
-                  "api-reference/knowledge-bases/embeddings/list-embeddings",
-                  "api-reference/knowledge-bases/embeddings/create-embeddings"
+                  "api-reference/knowledge-bases/embeddings/list-models",
+                  "api-reference/knowledge-bases/embeddings/list",
+                  "api-reference/knowledge-bases/embeddings/create",
+                  "api-reference/knowledge-bases/embeddings/delete"
                 ]
               },
               {
                 "group": "Indexes",
                 "pages": [
                   "api-reference/knowledge-bases/indexes/list",
-                  "api-reference/knowledge-bases/indexes/create"
+                  "api-reference/knowledge-bases/indexes/create",
+                  "api-reference/knowledge-bases/indexes/delete"
                 ]
               }
             ]

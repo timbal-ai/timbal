@@ -59,6 +59,61 @@
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/embeddings": {
+      "get": {
+        "tags": [
+          "embeddings"
+        ],
+        "description": "List embeddings",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "table_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Embeddings listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEmbeddingsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
       "post": {
         "tags": [
           "embeddings"
@@ -98,6 +153,53 @@
         "responses": {
           "204": {
             "description": "Embedding created successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/kbs/{kb_id}/embeddings/{embedding_name}": {
+      "delete": {
+        "tags": [
+          "embeddings"
+        ],
+        "description": "Delete an embedding",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "embedding_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Embedding deleted successfully"
           }
         },
         "security": [
@@ -203,6 +305,53 @@
         "responses": {
           "204": {
             "description": "Index created successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/kbs/{kb_id}/indexes/{index_name}": {
+      "delete": {
+        "tags": [
+          "indexes"
+        ],
+        "description": "Delete an index",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "index_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Index deleted successfully"
           }
         },
         "security": [
@@ -366,8 +515,153 @@
           }
         }
       },
+      "Embedding": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EmbeddingStatus"
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "table_name",
+              "column_name",
+              "model",
+              "created_at",
+              "updated_at"
+            ],
+            "properties": {
+              "column_name": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "model": {
+                "$ref": "#/components/schemas/EmbeddingModel"
+              },
+              "name": {
+                "type": "string"
+              },
+              "table_name": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        ]
+      },
       "EmbeddingModel": {
         "type": "string"
+      },
+      "EmbeddingStatus": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "details",
+              "status"
+            ],
+            "properties": {
+              "details": {
+                "type": "object"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "details",
+              "status"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "properties": {
+                  "processed_rows": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  },
+                  "total_rows": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64"
+                  }
+                }
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "processing"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "details",
+              "status"
+            ],
+            "properties": {
+              "details": {
+                "type": "object"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "success"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "details",
+              "status"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "error"
+                ],
+                "properties": {
+                  "error": {
+                    "type": "string"
+                  }
+                }
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              }
+            }
+          }
+        ]
       },
       "Index": {
         "type": "object",
@@ -424,6 +718,20 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/EmbeddingModel"
+            }
+          }
+        }
+      },
+      "ListEmbeddingsResBody": {
+        "type": "object",
+        "required": [
+          "embeddings"
+        ],
+        "properties": {
+          "embeddings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Embedding"
             }
           }
         }
