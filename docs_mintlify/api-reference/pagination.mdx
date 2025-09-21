@@ -1,0 +1,23 @@
+---
+title: "Pagination"
+description: "How to paginate through resources"
+---
+
+The Timbal API uses **cursor-based pagination** with page tokens for efficient navigation through large collections.
+
+## Making Requests
+
+**Initial request:**
+```http
+GET /apps
+```
+
+**Subsequent requests:**
+When a response includes a `next_page_token`, use it as the `page_token` query parameter:
+```http
+GET /apps?page_token=eyJpZCI6IjEyMyIsInRzIjoxNjk...
+```
+
+<Tip>
+Page tokens are opaque strings—never parse or modify them.
+</Tip>

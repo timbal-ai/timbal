@@ -3,6 +3,23 @@ title: "Authentication"
 description: "How to authenticate to the Timbal API"
 ---
 
+The Timbal API uses API keys to authenticate requests. You can create and manage your API keys by navigating to **Profile → API Keys** in the dashboard.
+
+API keys are **personal to your user account** and inherit all your permissions across organizations. Each key carries the same privileges as your user account, so be sure to keep them secure! Do not share your API keys in publicly accessible areas such as GitHub, client-side code, and so forth.
+
 <Warning>
-TODO
+**Important:** For security, we do not store your API keys after creation. Make sure to copy and store them in a secure location immediately—you will not be able to recover them later.
+</Warning>
+
+When using the Timbal framework, you can set these environment variables for automatic authentication:
+
+```bash
+export TIMBAL_API_KEY="your_api_key_here"
+export TIMBAL_API_HOST="https://dev.timbal.ai"
+```
+
+The framework will automatically use these values, eliminating the need to pass credentials in your code.
+
+<Warning>
+All API requests must be made over HTTPS. Calls made over plain HTTP will fail. API requests without authentication will also fail.
 </Warning>

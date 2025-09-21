@@ -102,7 +102,9 @@
             "group": "API documentation",
             "pages": [
               "api-reference/introduction",
-              "api-reference/authentication"
+              "api-reference/authentication",
+              "api-reference/errors",
+              "api-reference/pagination"
             ]
           },
           {
