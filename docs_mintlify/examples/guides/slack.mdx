@@ -42,43 +42,50 @@ This guide shows how to create a Slack bot using Timbal that can:
         # Message Operations
         chat:write            # Send messages
         chat:write.public     # Send messages to channels bot isn't in
-        conversations:history # Get messages from channels
+        im:write             # Send direct messages
         
-        # Channel Operations
-        channels:read         # View basic channel information
-        groups:read           # View basic private channel information
+        # Channel & Conversation Operations
+        channels:read        # View basic channel information
+        channels:history     # Get messages from channels
+        groups:read          # View basic private channel information
         im:read              # View basic direct message information
-        mpim:read            # View basic group direct message information
+        im:history           # Get direct message history
+ 
+        # App Mentions & Reactions
+        app_mentions:read    # Receive app mention events
+        reactions:read       # Read message reactions
         
         # File Operations
         files:read           # Download files from Slack
+        files:write          # Upload files to Slack
         ```
+        
+        <Note>
+          After adding or modifying scopes, you'll need to reinstall the app to your workspace for the changes to take effect.
+        </Note>
+      </Step>
+      
+      <Step title="Enable Home Tab (for Direct Messages)">
+        1. Go to **App Home** in your Slack app settings
+        2. Under **Show Tabs**, enable **Home Tab**
+        3. This allows users to send direct messages to your bot
       </Step>
       
       <Step title="Install App to Workspace">
         1. In **OAuth & Permissions**, click **Install to Workspace**
-        2. Copy the **Bot User OAuth Token** (starts with `xoxb-`) or **User OAuth Token** (starts with `xoxp-`) depending on what you want:
-           - Use **Bot Token** if you want messages to appear from your bot
-           - Use **User Token** if you want messages to appear from a specific user
-        3. Set as environment variable: `SLACK_BOT_TOKEN` or `SLACK_USER_TOKEN`
+        2. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
+        3. Set as environment variable: `SLACK_BOT_TOKEN`
       </Step>
       
       <Step title="Get Bot User ID">
-        1. Go to **App Home** 
-        2. Copy the **App ID** or find your bot's user ID
-        3. Use this ID in your code to prevent infinite loops
-      </Step>
-      
-      <Step title="Enable Event Subscriptions">
-        1. Go to **Event Subscriptions** and toggle **Enable Events**
-        2. Set **Request URL** to your webhook endpoint (e.g., `https://yourapp.com/webhook`)
-        3. Subscribe to **Bot Events**:
-        ```
-        message.channels  # Messages in public channels
-        message.groups    # Messages in private channels  
-        message.im        # Direct messages
-        message.mpim      # Group direct messages
-        ```
+        1. In your Slack workspace, start a direct message with your bot
+        2. Click on the bot's name at the top of the chat
+        3. In the profile panel, find the **Member ID** (format: `U12345678`)
+        4. Set this as environment variable: `SLACK_BOT_USER_ID=U12345678`
+        
+        <Note>
+          The Bot User ID is required to prevent infinite loops by filtering out the bot's own messages.
+        </Note>
       </Step>
     </Steps>
   </Accordion>
@@ -95,22 +102,22 @@ Create a `.env` file in your project root:
 ```bash .env
 SLACK_BOT_USER_ID=U12345678  # Your actual bot user ID
 SLACK_BOT_TOKEN=xoxb-your-bot-token-here  # Your bot token
-# OR use user token instead:
-# SLACK_USER_TOKEN=xoxp-your-user-token-here
 ```
 
 Then configure your Python code:
 
 ```python
 import os
+
+from dotenv import load_dotenv
 from slack_sdk import WebClient
 
-# Get configuration from environment variables
+# Load environment variables from .env
+load_dotenv()
+
 SLACK_BOT_USER_ID = os.getenv("SLACK_BOT_USER_ID")
 
-# Configure Slack client with your token
-token = os.getenv("SLACK_BOT_TOKEN") # or os.getenv("SLACK_USER_TOKEN")
-client = WebClient(token=token)
+client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 ```
 
 ### Creating the Agent
@@ -197,18 +204,19 @@ Here's the full implementation ready to use:
 
 ```python agent.py
 import os
+
+from dotenv import load_dotenv
 from slack_sdk import WebClient
-
 from timbal import Agent
-from timbal.state import get_run_context
 from timbal.errors import bail
+from timbal.state import get_run_context
 
-# Replace with your bot's actual user ID from Slack app settings
-SLACK_BOT_USER_ID = "U12345678"
+# Load environment variables from .env
+load_dotenv()
 
-# Configure Slack client with your token
-token = os.getenv("SLACK_BOT_TOKEN") or os.getenv("SLACK_USER_TOKEN")
-client = WebClient(token=token)
+SLACK_BOT_USER_ID = os.getenv("SLACK_BOT_USER_ID")
+
+client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 
 async def pre_hook():
     """Process incoming Slack webhook events before agent execution."""
@@ -263,37 +271,87 @@ agent = Agent(
 )
 ```
 
-### Running the Agent
+## Running the Agent
 
-Start the Timbal HTTP server to receive Slack webhook events:
+Timbal provides built-in ngrok integration for easy local development. To use this feature:
 
-```bash
-uv run -m timbal.server.http --port 4454 --import_spec agent.py::agent
-```
+<Steps>
+  <Step title="Set up ngrok account and authtoken">
+    1. Create an account at [ngrok.com](https://ngrok.com/)
+    2. Install ngrok on your system
+    3. Configure your authtoken:
+    ```bash
+    ngrok config add-authtoken YOUR_AUTHTOKEN
+    ```
+  </Step>
 
-Or with Python:
+  <Step title="Create FastAPI Webhook Handler">
+    Create a simple FastAPI server to handle Slack's URL verification and webhook events:
+    
+    ```python server.py
+    import uvicorn
+    from dotenv import load_dotenv
+    from fastapi import FastAPI, Request
+    from pyngrok import ngrok
 
-```bash
-python -m timbal.server.http --port 4454 --import_spec agent.py::agent
-```
+    # Import our Slack agent to handle webhook events
+    from agent import agent
 
-This command:
-- Starts an HTTP server on port 4454
-- Imports your agent from `agent.py`
-- Creates a webhook endpoint at `/webhook` that Slack will send events to
+    load_dotenv()
 
-Make sure your Slack app's **Event Subscriptions** Request URL points to:
-```
-https://yourdomain.com/webhook
-```
+    app = FastAPI()
 
-<Note>
-For local development, you can use tools like [ngrok](https://ngrok.com/) to expose your local server:
-```bash
-ngrok http 4454
-```
-Then use the ngrok URL in your Slack app settings.
-</Note>
+    @app.post("/")
+    async def slack_events(request: Request):
+        body = await request.json()
+        
+        if body.get("type") == "url_verification":
+            return {"challenge": body.get("challenge")}
+        
+        # Process actual Slack events here
+        if body.get("type") == "event_callback":
+            await agent(_webhook=body).collect()
+            
+        return {"status": "ok"}
+
+    if __name__ == "__main__":
+        port = 8000
+        public_url = ngrok.connect(port, "http")
+        print(f"Public URL: {public_url}")
+        
+        uvicorn.run(app, host="0.0.0.0", port=port)
+    ```
+    
+  </Step>
+
+  <Step title="Run the Server and Get ngrok URL">
+    1. Run the script to start your Slack bot:
+    ```bash
+    python server.py
+    ```
+    
+    Or using uv (recommended):
+    ```bash
+    uv run server.py
+    ```
+    2. Copy the ngrok public URL displayed in the terminal (e.g., `https://abc123.ngrok-free.app`)
+  </Step>
+      
+  <Step title="Enable Event Subscriptions">
+        1. Go to **Event Subscriptions** and toggle **Enable Events**
+        2. Set **Request URL** to our webhook endpoint (e.g., `https://abc123.ngrok-free.app/`)
+        3. Subscribe to **Bot Events** - these determine what events Slack will send to your bot:
+        ```
+        message.channels  # Bot receives messages in public channels it's added to
+        message.groups    # Bot receives messages in private channels it's added to
+        message.im        # Bot receives direct messages sent to it
+        app_mention       # Bot receives messages that mention it (@botname)
+        reaction_added    # Bot receives events when reactions are added to messages
+        ```
+      </Step>
+</Steps>
+
+Your Slack bot is now ready! 🚀 Start a direct message with your bot or mention it in a channel to begin chatting with your AI assistant.
 
 ## Key Features
 
@@ -325,5 +383,12 @@ Then use the ngrok URL in your Slack app settings.
     - Verify agent model name is correct (e.g., `openai/gpt-4o-mini`)
     - Ensure pre-hook is setting `trace.input["prompt"]` correctly
     - Add logging to debug webhook payload structure
+  </Accordion>
+  
+    <Accordion title="Server Won't Start">
+    - Ensure all required packages are installed (`slack-sdk fastapi uvicorn pyngrok python-dotenv`)
+    - Verify ngrok is installed and configured with authtoken
+    - Make sure port 8000 is not already in use by another process
+    - Ensure Slack Request URL matches your POST endpoint route with "/" (e.g., `https://abc123.ngrok-free.app/`)
   </Accordion>
 </AccordionGroup>
