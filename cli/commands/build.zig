@@ -219,7 +219,7 @@ fn writeDockerfile(
         \\
         \\ENV PATH=".venv/bin:$PATH"
         \\
-        \\ENV TIMBAL_FLOW={s}
+        \\ENV TIMBAL_RUNNABLE={s}
         \\
         \\CMD ["tail", "-f", "/dev/null"]
         \\

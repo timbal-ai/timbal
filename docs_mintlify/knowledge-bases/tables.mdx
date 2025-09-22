@@ -123,27 +123,23 @@ The following PostgreSQL data types are supported:
 
 ## Importing Data
 
-When importing data, you can specify how the new data should be handled with the `mode` parameter:
+When importing data, all modes use an **upsert** strategy. This means that for every row in your import:
 
-- **`overwrite`**: Deletes all existing data in the table and replaces it with the new data.
+- If a record with the same primary key already exists in the table, it will be updated with the new values from your import (all fields are replaced by the new data).
+- If no matching record exists, a new record will be inserted.
 
-- **`append`**: Adds the new data to the existing table without removing any existing records. This is useful for adding new rows while preserving all current data.
-
-- **`upsert`**: Updates existing records if they match (based on primary key) and inserts new records if they don't exist. When updating, **all non-matching fields are updated** with the new values from your import data.
-
-  <Note>For more granular control over update behavior (like updating only specific fields), use [SQL queries](#sql-queries) with custom UPDATE statements.</Note>
+<Note>For more granular control over update behavior (like updating only specific fields), use [SQL queries](#sql-queries) with custom UPDATE statements.</Note>
 
 ### Import from Records
 
-Takes a list of dictionaries and inserts them as rows in the specified table. You can omit columns that have default values and are nullable (like `is_active` in our example).
+Takes a list of dictionaries and inserts them as rows in the specified table.
 ```python
-from timbal.platform.tables import import_records
+from timbal.platform.kbs.tables import import_records
 
 await import_records(
     org_id="your-org-id",
     kb_id="your-kb-id", 
     table_name="Users",
-    mode="overwrite",
     records=[
         {
             "id": 1,
@@ -170,18 +166,17 @@ await import_records(
 Reads CSV files and loads the data into existing tables with schema validation.
 
 ```python
-from timbal.steps.timbal.tables import import_csv
+from timbal.platform.kbs.tables import import_csv
 
 await import_csv(
     org_id="your-org-id",
     kb_id="your-kb-id",
     table_name="Users", 
-    mode="overwrite",
-    csv_path="./users_data.csv",
+    csv_path="users.csv",
 )
 ```
 
-The CSV file should have column headers that match your table schema. You can omit columns that have default values and are nullable (like `is_active` in our example).
+The CSV file should have column headers that match your table schema.
 
 ```csv users.csv icon="file-csv"
 id,name,email
@@ -207,26 +202,15 @@ Common issues you might encounter when importing data:
     **Solution**: Ensure all records have identical field structures. The first record determines the expected schema for all subsequent records.
   </Accordion>
 
-  <Accordion title="Foreign Key Constraint Violations">
-    **Problem**: "Foreign key constraint fails" during import.
+  <Accordion title="Constraint Violations (Foreign Key & Duplicate Key)">
+    **Problem**: Import fails due to constraint errors, such as "foreign key constraint fails," "duplicate key," or "unique constraint" violations.
 
-    **Solution**: Import data in dependency order:
-    1. Parent tables first (referenced tables)
-    2. Child tables second (tables with foreign keys)
-
-    **Alternative**: Use `append` or `upsert` modes to avoid deletion-related constraints.
-  </Accordion>
-
-  <Accordion title="Duplicate Key Violations">
-    **Problem**: "Duplicate key" or "unique constraint" errors during append operations.
-
-    **Solution**: Before appending, verify new records don't conflict with:
-    - Primary key values
-    - Unique constraint columns
-    - Foreign key references
-
-    **Alternative**: Use `upsert` mode to update existing records instead of failing on duplicates.
-  </Accordion>
+    **Solution**:
+    - **Foreign Key Constraints**: Import data in dependency order:
+        1. Parent tables first (referenced tables)
+        2. Child tables second (tables with foreign keys)
+    - **Duplicate/Unique Constraints**: Before importing, verify that new records do not conflict with unique constraints.
+    </Accordion>
 </AccordionGroup>
 
 

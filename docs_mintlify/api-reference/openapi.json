@@ -361,6 +361,60 @@
         ]
       }
     },
+    "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/csv": {
+      "post": {
+        "tags": [
+          "tables"
+        ],
+        "description": "Insert or update rows into a table from a CSV file",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "table_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/csv": {
+
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Rows inserted successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/records": {
       "post": {
         "tags": [
@@ -819,7 +873,7 @@
             "items": {
               "type": "string"
             },
-            "description": "List of embedding names to use for semantic search."
+            "description": "List of embedding names to use for semantic search. Only a single column is supported at the moment."
           },
           "fts_columns": {
             "type": [
@@ -857,12 +911,12 @@
             },
             "description": "List of column names to return in the search results. When not specified, all columns will be returned."
           },
-          "where_clause": {
+          "where": {
             "type": [
               "string",
               "null"
             ],
-            "description": "SQL WHERE clause to apply to the search."
+            "description": "SQL WHERE expression to apply to the search. This feature is _experimental_ and may be removed or changed in the future."
           }
         }
       },
