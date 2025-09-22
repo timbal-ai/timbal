@@ -90,7 +90,8 @@
             "group": "Guides",
             "pages": [
               "examples/guides/gmail",
-              "examples/guides/slack"
+              "examples/guides/slack",
+              "examples/guides/whatsapp"
             ]
           }
         ]
