@@ -361,6 +361,63 @@
         ]
       }
     },
+    "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/records": {
+      "post": {
+        "tags": [
+          "tables"
+        ],
+        "description": "Insert or update records into a table",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "table_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertRecordsReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Records upserted successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search": {
       "post": {
         "tags": [
@@ -806,6 +863,27 @@
               "null"
             ],
             "description": "SQL WHERE clause to apply to the search."
+          }
+        }
+      },
+      "UpsertRecordsReqBody": {
+        "type": "object",
+        "required": [
+          "records"
+        ],
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {
+
+              },
+              "propertyNames": {
+                "type": "string"
+              }
+            },
+            "description": "Array of records to insert or update (at least one record is required)"
           }
         }
       }

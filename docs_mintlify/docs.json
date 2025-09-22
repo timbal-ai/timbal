@@ -114,6 +114,7 @@
               {
                 "group": "Tables",
                 "pages": [
+                  "api-reference/knowledge-bases/tables/upsert",
                   "api-reference/knowledge-bases/tables/search"
                 ]
               },
