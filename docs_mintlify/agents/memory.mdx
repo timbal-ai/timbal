@@ -3,19 +3,64 @@ title: "Memory"
 description: "Understand and manage how Agent memory works"
 ---
 
-TODO Add how the memory works
+Memory in Timbal agents enables multi-turn conversations and context persistence across agent interactions. **Agents automatically maintain conversation history without requiring additional configuration**.
+
+## How Memory Works
+
+Timbal implements memory through its [tracing system](/core-concepts/tracing), which captures conversation history during agent execution. When an agent runs, it automatically resolves memory from previous interactions to maintain conversational context.
+
+### Automatic Memory Resolution
+
+During each agent execution:
+
+1. The agent checks for previous conversation context
+2. If found, it retrieves conversation history from the tracing data
+3. Previous messages are automatically included in the current conversation
+4. The agent processes the new input with full conversation context
+
+This happens transparently - agents receive conversation memory without any code changes.
+
+### Storage Options
+
+Memory storage depends on your deployment environment:
+
+- **Timbal Platform**: Conversation history is automatically persisted with high availability and cross-instance sharing
+- **Local Development**: Uses in-memory storage that's fast but cleared on restart
+
+## Nested Agent Memory
+
+When agents call other agents, memory flows seamlessly between them. Child agents automatically receive conversation context from their parent, enabling sophisticated multi-agent workflows while maintaining conversation continuity.
+
+```python
+# Parent agent
+class SupportAgent(Agent):
+    model = "anthropic/claude-3-sonnet"
+    tools = [billing_agent, technical_agent]
+
+# Child agents automatically inherit conversation context
+class BillingAgent(Agent):
+    model = "anthropic/claude-3-haiku"
+    # Receives full conversation history from parent
+```
+
+## Configuration
+
+Memory is automatically configured based on your deployment:
+
+- **Platform Deployment**: No configuration needed
+- **Self-Hosted**: Uses in-memory storage by default, with platform integration available
+
+<Tip>
+Memory works automatically. For deeper understanding of the underlying mechanisms, see [Tracing](/core-concepts/tracing) and [Context](/core-concepts/context).
+</Tip>
 
 ## Rewind
 
-The rewind feature allows you to go back to any point in a conversation and explore different paths. This creates branching conversations where you can test alternative responses or recover from errors.
+Timbal supports conversation branching, allowing you to rewind to any previous point and explore alternative conversation paths.
 
-### How It Works
+### How Branching Works
 
-Every agent interaction creates a **RunContext** with a unique `run_id`. The framework automatically traces each step, allowing you to reference any previous point in the conversation.
-
-#### Creating Branches
-
-You can create new branches by setting `RunContext(parent_id=...)` to rewind to any previous point. The agent will only remember the conversation up to that specific point, ignoring everything that happened after.
+Each agent interaction creates a unique run with its own context. You can branch from any previous run by referencing its `run_id`, creating independent conversation paths that diverge from that point.
 
 ```python
 from timbal import Agent
@@ -23,38 +68,34 @@ from timbal.state import RunContext, set_run_context
 
 agent = Agent(name="example", model="openai/gpt-4o-mini")
 
-# Main conversation path
-print("=== Main Path ===")
+# Main conversation
 step1 = await agent(prompt="Hello").collect()
 step2 = await agent(prompt="My name is David").collect() 
 step3 = await agent(prompt="What's my name?").collect()
-print(f"Normal: {step3.output.content[0].text}")  # "Your name is David"
+# Output: "Your name is David"
 
-# Branch from step 1 (skip the name introduction)
-print("\\n=== Branch 1: Rewind to Hello ===")
+# Branch from step 1 (before name was shared)
 context = RunContext(parent_id=step1.run_id)
 set_run_context(context)
 
-branch1 = await agent(prompt="What's my name?").collect()
-print(f"Branch 1: {branch1.output.content[0].text}")  # "I don't know your name"
+branch = await agent(prompt="What's my name?").collect()
+# Output: "I don't know your name"
 ```
 
-This creates a branching structure:
-
-```bash
-Root: "Hello"
-├── Main Path: "My name is David" → "What's my name?" → "David"
-└── Branch 1: "What's my name?" → "I don't know"  
+This creates branching conversations:
+```
+"Hello"
+├── "My name is David" → "What's my name?" → "David"
+└── "What's my name?" → "I don't know"
 ```
 
-Each branch maintains independent memory from the rewind point.
+### Common Use Cases
 
-### Use Cases
+- **A/B Testing**: Compare different conversation strategies
+- **Error Recovery**: Return to a state before an error occurred
+- **Debugging**: Isolate specific conversation states for testing
+- **Exploration**: Test "what if" scenarios without affecting the main conversation
 
-- **Testing**: Try different conversation paths
-- **Error Recovery**: Go back before an error occurred  
-- **Exploration**: Explore "what if" scenarios
-- **A/B Testing**: Compare different response strategies
-- **Debugging**: Isolate specific conversation states
-
-Rewind gives you full control over conversation flow and memory management.
+<Note>
+Each branch maintains independent memory from the branching point. Learn more about the underlying mechanisms in [Context](/core-concepts/context).
+</Note>
