@@ -297,10 +297,6 @@ async def import_csv(
         ...,
         description="The path to the CSV file."
     ),
-    mode: Literal["append", "overwrite"] =  Field(
-        "overwrite", 
-        description="The mode to use for the import.",
-    ),
 ) -> None:
     """
     Upload a CSV file to a table in a knowledge base.
@@ -314,11 +310,8 @@ async def import_csv(
         kb_id (str): The ID of the knowledge base containing the table.
         table_name (str): The name of the table to upload the CSV to.
         csv_path (str | Path): The path to the CSV file on disk.
-        mode (Literal["append", "overwrite"], optional): Import mode. Use "overwrite" to replace all existing data in the table, or "append" to add to it. Default is "overwrite".
     """
-    mode = resolve_default("mode", mode)
-
-    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/csv?mode={mode}"
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/csv"
     headers = {"Content-Type": "text/csv"}
 
     with open(csv_path, "rb") as f:
@@ -336,19 +329,22 @@ async def search_table(
         ...,
         description="The ID of the knowledge base containing the table."
     ),
-    name: str = Field(
+    table_name: str = Field(
         ...,
         description="The name of the table to search."
-    ),
-    query: str = Field(
-        ...,
-        description="The query to search for."
     ),
     embedding_names: list[str] = Field(
         ...,
         description="The names of the embeddings to use for the search."
     ),
-    # TODO Add more params
+    query: str = Field(
+        ...,
+        description="Semantic search query"
+    ),
+    fts_columns: list[str] = Field(
+        None,
+        description="List of column names to use for full-text search. When specified together with embedding_names, search will be hybrid."
+    ),
     limit: int = Field(
         10,
         description="The maximum number of results to return.",
@@ -356,6 +352,14 @@ async def search_table(
     offset: int = Field(
         0,
         description="The offset to use for pagination.",
+    ),
+    select_columns: list[str] = Field(
+        None,
+        description="The columns to select."
+    ),
+    where: str = Field(
+        None,
+        description="SQL WHERE expression to apply to the search. ."
     ),
 ) -> list[dict[str, Any]]:
     """
@@ -368,25 +372,34 @@ async def search_table(
     Args:
         org_id (str): The organization ID.
         kb_id (str): The ID of the knowledge base containing the table.
-        name (str): The name of the table to search.
-        query (str): The natural language query or search phrase.
+        table_name (str): The name of the table to search.
         embedding_names (list[str]): The names of the embedding models to use for the search.
+        query (str): The natural language query or search phrase.
+        fts_columns (list[str], optional): List of column names to use for full-text search. When specified together with embedding_names, search will be hybrid.
         limit (int, optional): The maximum number of results to return. Defaults to 10.
         offset (int, optional): The offset for pagination. Defaults to 0.
+        select_columns (list[str], optional): The columns to select. Defaults to all columns.
+        where (str, optional): SQL WHERE expression to apply to the search.
 
     Returns:
         list[dict[str, Any]]: A list of ordered records, each as a dictionary. The structure of each record
         depends on the table schema and the specified select columns.
     """
+    fts_columns = resolve_default("fts_columns", fts_columns)
     limit = resolve_default("limit", limit)
     offset = resolve_default("offset", offset)
+    select_columns = resolve_default("select_columns", select_columns)
+    where = resolve_default("where", where)
 
-    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{name}/search"
+    path = f"orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search"
     payload = {
         "query": query,
         "embedding_names": embedding_names,
+        "fts_columns": fts_columns,
         "limit": limit,
         "offset": offset,
+        "select_columns": select_columns,
+        "where": where,
     }
 
     res = await _request("POST", path, json=payload)
