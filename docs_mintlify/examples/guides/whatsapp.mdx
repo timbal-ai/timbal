@@ -1,11 +1,11 @@
 ---
 title: "WhatsApp"
-description: "Build a WhatsApp assistant with Timbal: webhook handling, persistence (KB/CSV), and media."
+description: "Build a WhatsApp assistant with Timbal: webhook handling, persistence (KB/JSONL), and media."
 ---
 
 This guide shows how to create a WhatsApp assistant with Timbal that can:
 - Respond to messages in real time via webhooks
-- Persist conversations using Timbal Knowledge Bases or CSV
+- Persist conversations using Timbal Knowledge Bases or JSONL
 - Handle text, audio, images, and documents
 
 ## Setup Requirements
@@ -14,7 +14,7 @@ This guide shows how to create a WhatsApp assistant with Timbal that can:
   <Accordion title="Meta WhatsApp App and Webhook">
     <Steps>
       <Step title="Create or open your WhatsApp App">
-        Go to the Meta console and open your app's WhatsApp section: [Meta WhatsApp App Dashboard](https://developers.facebook.com/apps/796517512790442/whatsapp-business/wa-dev-console/?business_id=143503003811209).
+        Go to the Meta console and open your app's WhatsApp section: [Meta WhatsApp App Dashboard](https://developers.facebook.com/apps/).
       </Step>
       <Step title="Set Callback URL and Verify Token">
         1. Set the **Callback URL** to your endpoint, e.g., `https://yourdomain.com/`  
@@ -39,18 +39,18 @@ This guide shows how to create a WhatsApp assistant with Timbal that can:
     WHATSAPP_ACCESS_TOKEN=your_long_lived_token
     WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
     
-    # Storage mode for this template: csv | timbal
+    # Storage mode for this template: JSONL | timbal
     WHATSAPP_STORAGE_MODE=timbal
     
     # Webhook verification
     WHATSAPP_VERIFY_TOKEN=your_verify_token
     
     # Server
-    WHATSAPP_HOST=0.0.0.0
-    WHATSAPP_PORT=4343
+    HOST=0.0.0.0
+    PORT=4343
     
     # Optional: enable ngrok tunnel
-    WHATSAPP_ENABLE_NGROK=true
+    ENABLE_NGROK=true
     ```
     <Note>
       The included `whatsapp_tools.send_whatsapp_message` currently references `WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_PHONE_NUMBER_ID`. Ensure these are set. If you see mismatched names in your local template (e.g., `WHATSAPP_TOKEN`, `PHONE_NUMBER_ID`), set both pairs to be safe.
@@ -90,7 +90,7 @@ async def webhook(request: Request):
     return {"status": "ok"}
 
 def _maybe_start_ngrok(port: int) -> None:
-    enable = os.getenv("WHATSAPP_ENABLE_NGROK", os.getenv("TIMBAL_ENABLE_NGROK", "false")).lower()
+    enable = os.getenv("ENABLE_NGORK", "false")
     if enable != "true":
         return
     try:
@@ -101,9 +101,9 @@ def _maybe_start_ngrok(port: int) -> None:
         print(f"Failed to start ngrok: {e}")
 
 if __name__ == "__main__":
-    host = os.getenv("WHATSAPP_HOST", "0.0.0.0")
+    host = os.getenv("HOST", "0.0.0.0")
     try:
-        port = int(os.getenv("WHATSAPP_PORT", "4343"))
+        port = int(os.getenv("PORT", "4343"))
     except Exception:
         port = 4343
     _maybe_start_ngrok(port)
@@ -184,23 +184,27 @@ def _recent_history(path: str, user_phone: str, limit: int = 10) -> list[str]:
         return []
 
 def pre_hook():
-    """Parse webhook, set prompt, and persist inbound to JSONL."""
+    """Build professional prompt from WhatsApp metadata, message, and optional history."""
     trace = get_run_context().current_trace()
     payload = trace.input.get("_webhook")
     if not payload:
-        return
-    value = _value(payload)
+        bail("No payload found in webhook")
+
+    value = _get_value_from_webhook(payload)
     if not value:
-        return
+        bail("No value found in webhook")
+
     messages = value.get("messages", [])
-    contacts = value.get("contacts", [])
     if not messages:
-        return
-    cm = _contact_name_map(contacts)
+        bail("No messages found in webhook")
+
+    contacts = value.get("contacts", [])
+    profile = contacts[0].get("profile", {})
+    name = profile.get("name", "")
     msg = messages[0]
     from_number = msg.get("from")
-    name = cm.get(from_number, from_number)
-    phone_number_id = (value.get("metadata") or {}).get("phone_number_id")
+    message_id = msg.get("id")
+    phone_number_id = value.get("metadata").get("phone_number_id")
     prompt = _prompt_from_message(msg)
 
     rec = {
@@ -261,7 +265,7 @@ agent = Agent(
 
 ### Optional: Timbal KB persistence and history
 
-If you prefer using Timbal Knowledge Bases instead of CSV, you can import and query records with the platform helpers. These are async functions; adapt their usage to your environment accordingly.
+If you prefer using Timbal Knowledge Bases instead of JSONL, you can import and query records with the platform helpers. These are async functions; adapt their usage to your environment accordingly.
 
 ```python
 from timbal.platform.kbs.tables import import_records, query
@@ -320,6 +324,6 @@ Expose with ngrok, then verify the webhook in the Meta console. New messages sho
   </Accordion>
   <Accordion title="No context/history">
     - Check `ORG_ID` and `KB_ID` if using Timbal KB
-    - If using CSV, verify the CSV file path and write permissions
+    - If using JSONL, verify the JSONL file path and write permissions
   </Accordion>
 </AccordionGroup>
