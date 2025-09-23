@@ -131,15 +131,6 @@ def _value(payload: dict) -> dict | None:
     except Exception:
         return None
 
-def _contact_name_map(contacts: list[dict]) -> dict[str, str]:
-    m = {}
-    for c in contacts:
-        wa_id = c.get("wa_id")
-        name = (c.get("profile") or {}).get("name", wa_id)
-        if wa_id:
-            m[wa_id] = name
-    return m
-
 def _prompt_from_message(msg: dict) -> str:
     t = msg.get("type")
     if t == "text":
@@ -190,7 +181,7 @@ def pre_hook():
     if not payload:
         bail("No payload found in webhook")
 
-    value = _get_value_from_webhook(payload)
+    value = payload["entry"][0]["changes"][0]["value"]
     if not value:
         bail("No value found in webhook")
 
@@ -206,27 +197,28 @@ def pre_hook():
     message_id = msg.get("id")
     phone_number_id = value.get("metadata").get("phone_number_id")
     prompt = _prompt_from_message(msg)
+    msg_type = msg.get("type")
 
     rec = {
-        "id": msg.get("id") or f"inbound_{from_number}_{msg.get('timestamp')}",
+        "id": msg.get("id"),
         "user_phone": from_number,
         "direction": "inbound",
-        "message_type": msg.get("type"),
-        "message": json.dumps({"type": msg.get("type"), "content": prompt}, ensure_ascii=False),
+        "message_type": msg_type,
+        "message": json.dumps({"type": msg_type, "content": prompt}, ensure_ascii=False),
         "timestamp": msg.get("timestamp"),
         "conversation_id": f"{phone_number_id}_{from_number}",
         "user_name": name,
     }
     _append_jsonl("whatsapp_messages.jsonl", rec)
 
-    hist = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
-    if hist:
-        trace.memory.insert(0, {"role": "system", "content": ["Previous conversation:\n" + "\n".join(hist)]})
-
-    trace.input["prompt"] = prompt
+    trace.input["prompt"] = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
     trace.input["whatsapp_from_number"] = from_number
     trace.input["name"] = name
+```
 
+The `pre_hook` runs before invoking the agent. It extracts metadata from the webhook, builds a prompt from the incoming message, persists the inbound event, and sets values in `trace.input` for the agent to use during inference.
+
+```python agent.py
 def post_hook():
     """Send the agent response via WhatsApp and persist outbound to JSONL."""
     trace = get_run_context().current_trace()
@@ -244,16 +236,20 @@ def post_hook():
     except Exception:
         pass
     _append_jsonl("whatsapp_messages.jsonl", {
-        "id": f"outbound_{from_number}",
+        "id": f"outbound_{from_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         "user_phone": from_number,
         "direction": "outbound",
         "message_type": "agent",
         "message": json.dumps({"type": "text", "content": response_text}, ensure_ascii=False),
-        "timestamp": "",
+        "timestamp": datetime.now().isoformat(),
         "conversation_id": "",
         "user_name": trace.input.get("name", ""),
     })
+```
 
+The `post_hook` runs after obtaining the agent's response. It sends the text via WhatsApp and persists the outbound event to JSONL.
+
+```python agent.py
 agent = Agent(
     name="WhatsAppAgent",
     description="A minimal WhatsApp agent for Timbal",
@@ -262,6 +258,34 @@ agent = Agent(
     post_hook=post_hook,
 )
 ```
+
+### Optional: system prompt example
+
+<Accordion title="Show example system_prompt">
+```text
+title: "WHATSAPP AGENT from {{YOUR_BRAND}}",
+description: "You are a WhatsApp agent from {{YOUR_BRAND}}. Your goal is to help users find the perfect vehicle and manage all their automotive needs.",
+
+## WhatsApp message format
+You are responding to messages in WhatsApp. Use WhatsApp's text formatting syntax when appropriate:
+
+Text format:
+- *text* = bold (for important information)
+- _text_ = italic (for clarifications or soft emphasis)
+- ~text~ = strikethrough (for corrections or obsolete information)
+- `text` = monospace (for code, commands or technical text)
+- Use triple backticks for code blocks (for longer fragments)
+- > text = quote (for references or highlighted information)
+- Important: Never use [View here](url) or ![Image](url). Send the direct link instead; WhatsApp does not render these markdown forms.
+
+Important rules:
+- Symbols must be attached to the text (no spaces)
+- Every opening symbol must have its closing symbol
+- You can combine formats: *_text_* for bold+italic
+- Use sparingly; only when it adds value
+- For lists use bullets (•), numbers (1.), or hyphens (-)
+```
+</Accordion>
 
 ### Optional: Timbal KB persistence and history
 
@@ -273,7 +297,7 @@ from timbal.platform.kbs.tables import import_records, query
 ORG_ID = int(os.getenv("ORG_ID"))
 KB_ID = int(os.getenv("KB_ID"))
 
-async def save_inbound_to_kb(record: dict) -> None:
+async def save_record_to_kb(record: dict) -> None:
     await import_records(ORG_ID, KB_ID, "whatsapp_messages", [record])
 
 async def fetch_recent_history_from_kb(user_phone: str, limit: int = 10) -> list[str]:
@@ -301,6 +325,138 @@ async def fetch_recent_history_from_kb(user_phone: str, limit: int = 10) -> list
 - **Documents**: You receive basic metadata (e.g., filename). Decide whether to fetch and analyze content or treat as a reference.
 
 Keep the `pre_hook` minimal: extract the message type, create a concise prompt, and persist the event.
+
+## Complete implementation reference
+
+For a full, end-to-end reference (webhook app, helpers, and utilities), see the official WhatsApp examples in the Timbal repository:
+
+- [timbal/examples/whatsapp](https://github.com/timbal-ai/timbal/tree/e978458d75b6f6632d624977d9b07cf4e2f4b4fd/examples/whatsapp)
+
+## Possible Improvements
+
+<AccordionGroup>
+  <Accordion title="Delay response to batch context (debounce)">
+    Each WhatsApp webhook creates a separate agent instance. Persist every inbound message immediately (JSONL or KB), then wait a short debounce window. After that window, if storage shows a newer message for the same user, bail this run so the most recent instance answers with full context. No in-memory buffer is required.
+
+    - **Why it helps**: avoids replying to partial context when the user is still typing or sending media.
+    - **Trade-offs**: adds small latency; choose a short window (e.g., 800–1500 ms).
+    - **Example approach (JSONL)**:
+    ```python
+    import os, json, time
+
+    DEBOUNCE_MS = int(os.getenv("WHATSAPP_DEBOUNCE_MS", "1200"))
+
+    def _message_ts(msg: dict) -> int:
+        try:
+            return int(msg.get("timestamp") or 0)
+        except Exception:
+            return 0
+
+    def _newer_exists_in_jsonl(path: str, user_phone: str, after_ts: int) -> bool:
+        try:
+            if not os.path.exists(path):
+                return False
+            with open(path, "r", encoding="utf-8") as f:
+                rows = [json.loads(l) for l in f if l.strip()]
+            for rec in reversed(rows):
+                if rec.get("user_phone") != user_phone:
+                    continue
+                if rec.get("direction") != "inbound":
+                    continue
+                try:
+                    ts = int(rec.get("timestamp") or 0)
+                except Exception:
+                    continue
+                if ts > after_ts:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def pre_hook():
+        trace = get_run_context().current_trace()
+        payload = trace.input.get("_webhook") or {}
+        value = (payload.get("entry") or [{}])[0].get("changes", [{}])[0].get("value", {})
+        msg = (value.get("messages") or [None])[0] or {}
+        from_number = msg.get("from", "")
+        current_ts = _message_ts(msg)
+
+        # 1) Persist inbound immediately (example: JSONL)
+        _append_jsonl("whatsapp_messages.jsonl", {
+            "id": msg.get("id"),
+            "user_phone": from_number,
+            "direction": "inbound",
+            "message_type": msg.get("type"),
+            "message": json.dumps({"type": msg.get("type"), "content": _prompt_from_message(msg)}, ensure_ascii=False),
+            "timestamp": str(current_ts),
+            "conversation_id": (value.get("metadata") or {}).get("phone_number_id", ""),
+            "user_name": (value.get("contacts") or [{}])[0].get("profile", {}).get("name", ""),
+        })
+
+        # 2. Wait a small window, then check for a newer message
+        asyncio.sleep(DEBOUNCE_MS / 1000.0) 
+        if _newer_exists_in_jsonl("whatsapp_messages.jsonl", from_number, current_ts):
+            bail("Newer message detected; aborting this run")
+
+        # 3. Proceed with prompt building from recent history
+        trace.input["prompt"] = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
+    ```
+  </Accordion>
+
+  <Accordion title="Mark inbound message as read">
+    Use the WhatsApp Cloud API to mark messages as read. This improves UX and clears unread indicators for the user.
+    ```python
+    import os, requests
+
+    def mark_as_read(message_id: str) -> None:
+        token = os.getenv("WHATSAPP_ACCESS_TOKEN")
+        phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+        try:
+            requests.post(
+                f"https://graph.facebook.com/v21.0/{phone_id}/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "messaging_product": "whatsapp",
+                    "status": "read",
+                    "message_id": message_id,
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass
+    ```
+    Call `mark_as_read(message_id)` right after parsing the webhook.
+  </Accordion>
+
+  <Accordion title="Progress updates while thinking">
+    WhatsApp Cloud API does not provide an official typing indicator. As an alternative, you can send a short, friendly acknowledgement quickly (e.g., "Got it—working on your request...") and follow up with the final answer.
+
+    - Consider sending this ack only when tool calls are expected to take >1–2 seconds.
+    - Avoid excessive interim messages to prevent notification noise.
+  </Accordion>
+
+  <Accordion title="Persist and reuse media in the KB">
+    Persist metadata for images, audio, videos, and documents so the agent can reuse them as context later (e.g., to re-attach an image or analyze it again).
+
+    Suggested fields to store: `id`, `user_phone`, `direction`, `message_type`, `media_id`, `media_url` (or object store key), `mime_type`, `caption`, `timestamp`.
+
+    ```python
+    async def save_media_example(record: dict) -> None:
+        # Merge this idea with your existing save flow
+        await save_record_to_kb({
+            **record,
+            "message_type": "image",  # or "video", "audio", "document"
+            # e.g. values fetched via Graph API media URL endpoint
+            "media_id": record.get("media_id"),
+            "media_url": record.get("media_url"),
+            "mime_type": record.get("mime_type"),
+            "caption": record.get("caption", ""),
+        })
+    ```
+
+    Later, query recent media by `user_phone` or `conversation_id` and inject URLs or file handles into the agent context as needed.
+  </Accordion>
+</AccordionGroup>
 
 ## Running
 
