@@ -428,11 +428,51 @@ For a full, end-to-end reference (webhook app, helpers, and utilities), see the 
     Call `mark_as_read(message_id)` right after parsing the webhook.
   </Accordion>
 
-  <Accordion title="Progress updates while thinking">
-    WhatsApp Cloud API does not provide an official typing indicator. As an alternative, you can send a short, friendly acknowledgement quickly (e.g., "Got it—working on your request...") and follow up with the final answer.
+  <Accordion title="Progress updates (typing indicator and ack)">
+    You can mark the message as read and briefly show a typing indicator while the agent thinks or uses tools. Optionally send a short acknowledgement, then follow up with the final answer.
 
-    - Consider sending this ack only when tool calls are expected to take >1–2 seconds.
-    - Avoid excessive interim messages to prevent notification noise.
+    ```python
+    import os, httpx
+
+    def send_typing_and_read(message_id: str) -> dict:
+        token = os.getenv("WHATSAPP_ACCESS_TOKEN")
+        phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+        if not token or not phone_id:
+            return {}
+
+        url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        with httpx.Client() as client:
+            # Mark as read
+            client.post(
+                url,
+                headers=headers,
+                json={
+                    "messaging_product": "whatsapp",
+                    "status": "read",
+                    "message_id": message_id,
+                },
+                timeout=10,
+            )
+            # Show typing indicator briefly
+            resp = client.post(
+                url,
+                headers=headers,
+                json={
+                    "messaging_product": "whatsapp",
+                    "typing_indicator": {"type": "typing_on"},
+                },
+                timeout=10,
+            )
+            return resp.json()
+    ```
+
+    - Call this right after parsing the webhook and before long operations.
+    - Keep interim notifications minimal to avoid noise.
   </Accordion>
 
   <Accordion title="Persist and reuse media in the KB">
@@ -461,7 +501,7 @@ For a full, end-to-end reference (webhook app, helpers, and utilities), see the 
 ## Running
 
 ```bash
-python templates/whatsapp-template/app.py
+python app.py
 ```
 Expose with ngrok, then verify the webhook in the Meta console. New messages should invoke your agent and send responses via WhatsApp.
 

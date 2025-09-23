@@ -8,7 +8,7 @@ load_dotenv()
 
 app = FastAPI()
 
-VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")  # set the same in Meta webhook settings
+VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 
 @app.get("/")
 async def verify(request: Request):
@@ -25,7 +25,7 @@ async def webhook(request: Request):
     return {"status": "ok"}
 
 def _maybe_start_ngrok(port: int) -> None:
-    enable = os.getenv("WHATSAPP_ENABLE_NGROK", os.getenv("TIMBAL_ENABLE_NGROK", "false")).lower()
+    enable = os.getenv("ENABLE_NGORK", "false")
     if enable != "true":
         return
     try:
@@ -35,14 +35,12 @@ def _maybe_start_ngrok(port: int) -> None:
     except Exception as e:
         print(f"Failed to start ngrok: {e}")
 
-
 if __name__ == "__main__":
-    load_dotenv()
-    host = os.getenv("WHATSAPP_HOST", "0.0.0.0")
+    host = os.getenv("HOST", "0.0.0.0")
     try:
-        port = int(os.getenv("WHATSAPP_PORT", "4343"))
+        port = int(os.getenv("PORT", "4343"))
     except Exception:
         port = 4343
     _maybe_start_ngrok(port)
     uvicorn.run("app:app", host=host, port=port, log_level="info")
-
+    
