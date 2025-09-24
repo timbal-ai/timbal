@@ -89,9 +89,24 @@
           {
             "group": "Guides",
             "pages": [
-              "examples/guides/gmail",
-              "examples/guides/slack",
-              "examples/guides/whatsapp"
+              "examples/guides/mail-assistant",
+              "examples/guides/tech-support",
+              "examples/guides/sales-agent",
+              "examples/guides/customer-support",
+              "examples/guides/ai-engineer",
+              "examples/guides/data-scientist"
+            ]
+          },
+          {
+            "group": "Agents",
+            "pages": [
+              "examples/agents/images"
+            ]
+          },
+          {
+            "group": "Workflows",
+            "pages": [
+              "examples/workflows/sequential-steps"
             ]
           }
         ]
@@ -140,26 +155,7 @@
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Community",
-          "href": "https://mintlify.com/community",
-          "icon": "slack"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
+    ]
   },
   "logo": {
     "light": "/logo/light-small-1.svg",
