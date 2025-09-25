@@ -27,7 +27,7 @@ from ..state import get_run_context
 from ..types.content import ToolUseContent
 from ..types.events import OutputEvent
 from ..types.message import Message
-from .llm_router import Model, llm_router
+from .llm_router import Model, _llm_router
 from .runnable import Runnable, RunnableLike
 from .tool import Tool
 
@@ -65,7 +65,7 @@ class Agent(Runnable):
     - Multi-turn conversations with memory across iterations
     - Concurrent tool execution for efficiency
     - Flexible tool definition (functions, dicts, or Runnable objects)
-    - Integration with multiple LLM providers via llm_router
+    - Integration with multiple LLM providers via _llm_router
     """
 
     model: Model
@@ -167,7 +167,7 @@ class Agent(Runnable):
         # Create internal LLM tool for model interactions
         self._llm = Tool(
             name="llm",
-            handler=llm_router,
+            handler=_llm_router,
             default_params=self.model_params,
             metadata={
                 "type": "LLM",
@@ -398,7 +398,7 @@ class Agent(Runnable):
                         raise RuntimeError(event.error)
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
                     # Add LLM response to conversation for next iteration
-                    messages.append(event.output)
+                    messages = messages + [event.output]
                 yield event
             
             tool_calls = [

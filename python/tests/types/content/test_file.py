@@ -21,7 +21,7 @@ def test_basic_file_content_validation(tmp_path: pathlib.Path) -> None:
     with pytest.raises(ValueError):
         content_factory({"type": "file", "file": "not a file"})
 
-def test_file_to_openai_input(tmp_path: pathlib.Path) -> None:
+def test_file_to_openai_chat_completions_input(tmp_path: pathlib.Path) -> None:
     test_file = tmp_path / "image.png"
     png_content = bytes.fromhex(
         '89504e470d0a1a0a'  # PNG signature
@@ -35,7 +35,7 @@ def test_file_to_openai_input(tmp_path: pathlib.Path) -> None:
         base64_content = base64.b64encode(png_content).decode("utf-8")
         data_url = f"data:image/png;base64,{base64_content}"
 
-    assert file_content.to_openai_input() == {"type": "image_url", "image_url": {"url": data_url}}
+    assert file_content.to_openai_chat_completions_input() == {"type": "image_url", "image_url": {"url": data_url}}
 
 
 def test_file_to_anthropic_input(tmp_path: pathlib.Path) -> None:

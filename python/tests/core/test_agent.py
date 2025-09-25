@@ -505,10 +505,10 @@ class TestAgentIntegration:
             description="A calculator agent"
         )
         
-        # Check OpenAI schema
-        openai_schema = agent.openai_schema
-        assert openai_schema["function"]["name"] == "calc_agent"
-        assert openai_schema["function"]["description"] == "A calculator agent"
+        # Check OpenAI chat completions schema
+        openai_chat_completions_schema = agent.openai_chat_completions_schema
+        assert openai_chat_completions_schema["function"]["name"] == "calc_agent"
+        assert openai_chat_completions_schema["function"]["description"] == "A calculator agent"
         
         # Check Anthropic schema
         anthropic_schema = agent.anthropic_schema

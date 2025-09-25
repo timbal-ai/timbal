@@ -2,12 +2,12 @@ import functools
 import json
 import re
 
-from ..core.llm_router import llm_router
+from ..core.llm_router import _llm_router
 from ..core.tool import Tool
 from ..errors import EvalError
 from ..types.message import Message
 
-llm_router = Tool(name="llm_router", handler=llm_router)
+llm_router = Tool(name="llm_router", handler=_llm_router)
 
 
 class Validator:

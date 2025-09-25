@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 from timbal import Tool
-from timbal.core import llm_router
+from timbal.core.llm_router import _llm_router
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
@@ -269,7 +269,7 @@ class TestToolSchemas:
         assert int_tool.return_model == int
         assert str_tool.return_model == str
     
-    def test_openai_schema_format(self):
+    def test_openai_chat_completions_schema_format(self):
         """Test OpenAI schema generation."""
         def handler(query: str, limit: int = 10) -> list:
             return []
@@ -280,7 +280,7 @@ class TestToolSchemas:
             handler=handler
         )
         
-        schema = tool.openai_schema
+        schema = tool.openai_chat_completions_schema
         assert schema["type"] == "function"
         assert schema["function"]["name"] == "search"
         assert schema["function"]["description"] == "Search for items"
@@ -413,7 +413,7 @@ class TestLLMIntegration:
     @pytest.mark.asyncio
     async def test_llm_router_tool(self):
         """Test that llm_router works as a tool."""
-        tool = Tool(handler=llm_router)
+        tool = Tool(handler=_llm_router)
         
         # Create a simple message using Message.validate()
         message = Message.validate({
@@ -520,7 +520,7 @@ class TestToolSchemaConfiguration:
         assert "d" not in schema["properties"]  # Excluded overrides included
         assert len(schema["properties"]) == 3
     
-    def test_openai_schema_with_configuration(self):
+    def test_openai_chat_completions_schema_with_configuration(self):
         """Test OpenAI schema generation with parameter configuration."""
         def handler(required_param: str, optional_param: int = 10) -> str:
             return f"{required_param}:{optional_param}"
@@ -532,7 +532,7 @@ class TestToolSchemaConfiguration:
             schema_params_mode="required"
         )
         
-        schema = tool.openai_schema
+        schema = tool.openai_chat_completions_schema
         assert schema["type"] == "function"
         assert schema["function"]["name"] == "configured_tool"
         assert schema["function"]["description"] == "A configured tool"

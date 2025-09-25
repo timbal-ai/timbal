@@ -9,9 +9,9 @@ def test_basic_tool_result_content_validation() -> None:
     assert content.content[0].text == "Hello, World!"
     assert content.type == "tool_result"
 
-def test_tool_result_to_openai_input() -> None:
+def test_tool_result_to_openai_chat_completions_input() -> None:
     tool_result_content = ToolResultContent(id="123", content=[TextContent(text="Hello, World!")])
-    assert tool_result_content.to_openai_input() == {"role": "tool", "content": [{"type": "text", "text": "Hello, World!"}], "tool_call_id": "123"}
+    assert tool_result_content.to_openai_chat_completions_input() == {"role": "tool", "content": [{"type": "text", "text": "Hello, World!"}], "tool_call_id": "123"}
 
 def test_tool_result_to_anthropic_input() -> None:
     tool_result_content = ToolResultContent(id="123", content=[TextContent(text="Hello, World!")])

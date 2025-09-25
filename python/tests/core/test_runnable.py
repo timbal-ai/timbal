@@ -16,13 +16,13 @@ class TestRunnableBase:
     def test_schema_generation(self, simple_tool):
         """Test that schemas are generated correctly."""
         # Should have both OpenAI and Anthropic schemas
-        assert hasattr(simple_tool, 'openai_schema')
+        assert hasattr(simple_tool, 'openai_chat_completions_schema')
         assert hasattr(simple_tool, 'anthropic_schema')
         
-        openai_schema = simple_tool.openai_schema
-        assert openai_schema['type'] == 'function'
-        assert openai_schema['function']['name'] == 'simple'
-        assert 'parameters' in openai_schema['function']
+        openai_chat_completions_schema = simple_tool.openai_chat_completions_schema
+        assert openai_chat_completions_schema['type'] == 'function'
+        assert openai_chat_completions_schema['function']['name'] == 'simple'
+        assert 'parameters' in openai_chat_completions_schema['function']
         
         anthropic_schema = simple_tool.anthropic_schema
         assert anthropic_schema['name'] == 'simple'

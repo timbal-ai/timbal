@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -7,11 +8,18 @@ from timbal.types import File
 
 @pytest.fixture(params=[
     "openai/gpt-4o-mini",
+    "openai/gpt-4o-mini-responses",
     # "google/gemini-2.0-flash-lite",
-    # "anthropic/claude-3-5-sonnet-20241022",
+    "anthropic/claude-sonnet-4-0",
     # ? Add more tests for other models.
 ])
 def model(request):
+    if request.param.startswith("openai"):
+        if request.param.endswith("-responses"):
+            os.environ["TIMBAL_ENABLE_OPENAI_RESPONSES_API"] = "true"
+            return request.param.replace("-responses", "")
+        else:
+            os.environ.pop("TIMBAL_ENABLE_OPENAI_RESPONSES_API", None)
     return request.param
 
 
@@ -25,7 +33,7 @@ def pdf(request):
 
 @pytest.mark.asyncio
 async def test_pdf(model, pdf) -> None:
-    agent = Agent(name="agent", model=model)
+    agent = Agent(name="agent", model=model, model_params={"max_tokens": 10000})
 
     prompt = [File.validate(pdf), "What's Bob's score?"]
 
@@ -44,7 +52,7 @@ def md(request):
 
 @pytest.mark.asyncio
 async def test_md(model, md) -> None:
-    agent = Agent(name="agent", model=model)
+    agent = Agent(name="agent", model=model, model_params={"max_tokens": 10000})
 
     prompt = [File.validate(md), "What's Alice's age?"]
 
@@ -61,7 +69,7 @@ def csv(request):
 
 @pytest.mark.asyncio
 async def test_csv(model, csv) -> None:
-    agent = Agent(name="agent", model=model)
+    agent = Agent(name="agent", model=model, model_params={"max_tokens": 10000})
 
     prompt = [File.validate(csv), "What's Bob's full name?"]
 
@@ -78,7 +86,7 @@ def tsv(request):
 
 @pytest.mark.asyncio
 async def test_tsv(model, tsv) -> None:
-    agent = Agent(name="agent", model=model)
+    agent = Agent(name="agent", model=model, model_params={"max_tokens": 10000})
 
     prompt = [File.validate(tsv), "What's Bob's full name?"]
 
@@ -96,7 +104,7 @@ def jsonl(request):
 
 @pytest.mark.asyncio
 async def test_jsonl(model, jsonl) -> None:
-    agent = Agent(name="agent", model=model)
+    agent = Agent(name="agent", model=model, model_params={"max_tokens": 10000})
 
     prompt = [File.validate(jsonl), "What's Alice's score?"]
 
@@ -114,7 +122,7 @@ def json(request):
 
 @pytest.mark.asyncio
 async def test_json(model, json) -> None:
-    agent = Agent(name="agent", model=model)
+    agent = Agent(name="agent", model=model, model_params={"max_tokens": 10000})
 
     prompt = [File.validate(json), "Is Bob still active?"]
 
@@ -132,7 +140,7 @@ def xlsx(request):
 
 @pytest.mark.asyncio
 async def test_xlsx(model, xlsx) -> None:
-    agent = Agent(name="agent", model=model)
+    agent = Agent(name="agent", model=model, model_params={"max_tokens": 10000})
 
     prompt = [File.validate(xlsx), "What's Alice's score?"]
 
@@ -150,7 +158,7 @@ def docx(request):
 
 @pytest.mark.asyncio
 async def test_docx(model, docx) -> None:
-    agent = Agent(name="agent", model=model)
+    agent = Agent(name="agent", model=model, model_params={"max_tokens": 10000})
 
     prompt = [File.validate(docx), "What's Bob's full name?"]
 

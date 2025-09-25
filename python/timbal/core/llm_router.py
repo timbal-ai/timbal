@@ -1,5 +1,15 @@
+"""
+INTERNAL USE ONLY
+
+This module is intended for internal use and will be subject to frequent changes
+as LLM providers constantly update their APIs and add new features. The external
+APIs (Runnables, Agents, Workflows) will remain stable, but this module will
+evolve to match provider changes.
+
+Do not rely on this module's interface in external code.
+"""
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
@@ -65,7 +75,7 @@ Model = Literal[
 
 
 # TODO Add more parameters
-async def llm_router(
+async def _llm_router(
     model: Model = Field(
         ...,
         description="Provider/Name of the LLM model to use.",
@@ -86,26 +96,20 @@ async def llm_router(
         None,
         description="Maximum number of tokens to generate.",
     ),
+    thinking: Any = Field(
+        None,
+        description=(
+            "Thinking configuration for the LLM. Provider-specific. "
+            "For OpenAI models, this should be a dictionary with 'effort' and 'summary' keys. "
+            "For Anthropic models, this should be a dictionary with 'budget_tokens' key."
+        ),
+    ),
 ) -> Message: # type: ignore
-    """Route LLM requests to appropriate providers based on model prefix.
+    """
+    Internal LLM router function.
 
-    Handles automatic provider detection and client initialization for OpenAI, Anthropic,
-    Gemini, and TogetherAI models. Converts messages and tools to provider-specific formats
-    and streams responses back as async chunks.
-
-    Args:
-        model: Provider-prefixed model name (e.g., 'openai/gpt-4o', 'anthropic/claude-3-5-sonnet')
-        system_prompt: Optional system instructions to guide model behavior
-        messages: Conversation history as Message objects
-        tools: Available Runnable tools for function calling
-        max_tokens: Response length limit (required for Anthropic models)
-
-    Returns:
-        Message: Streaming response chunks from the selected provider
-
-    Raises:
-        ValueError: If model format is invalid or required parameters are missing
-        APIKeyNotFoundError: If required API key environment variable is not set
+    WARNING: This function is for internal use only and may change frequently
+    as LLM providers update their APIs. Use the stable Agent/Workflow APIs instead.
     """
     model = resolve_default("model", model)
     system_prompt = resolve_default("system_prompt", system_prompt)
@@ -152,38 +156,8 @@ async def llm_router(
 
     else:
         raise ValueError(f"Unsupported provider: {provider}")
-
-    # TODO Probably we'll move to google ai sdk
-    if provider in ["openai", "gemini", "togetherai"]:
-        openai_messages = []
-        if system_prompt:
-            openai_messages.append({"role": "system", "content": system_prompt})
-        for message in messages:
-            openai_message = message.to_openai_input()
-            openai_messages.append(openai_message)
-
-        openai_kwargs = {
-            "model": model_name,
-            "messages": openai_messages,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-
-        openai_tools = []
-        for tool in tools:
-            openai_tools.append(tool.openai_schema)
-        if openai_tools:
-            openai_kwargs["tools"] = openai_tools
-
-        if max_tokens:
-            openai_kwargs["max_completion_tokens"] = max_tokens
-
-        res = await client.chat.completions.create(**openai_kwargs)
-
-        async for res_chunk in res:
-            yield res_chunk
-
-    elif provider == "anthropic":
+    
+    if provider == "anthropic":
         anthropic_messages = []
         for message in messages:
             anthropic_message = message.to_anthropic_input()
@@ -205,7 +179,72 @@ async def llm_router(
         if anthropic_tools:
             anthropic_kwargs["tools"] = anthropic_tools
 
+        if thinking:
+            # {"type": "enabled", "budget_tokens": int}
+            # budget_tokens must be >= 1024
+            anthropic_kwargs["thinking"] = thinking
+
         res = await client.messages.create(**anthropic_kwargs)
+
+        async for res_chunk in res:
+            yield res_chunk
+
+    elif provider == "openai" and os.getenv("TIMBAL_ENABLE_OPENAI_RESPONSES_API", "false") == "true":
+        responses_kwargs = {
+            "model": model_name,
+            "stream": True,
+            "store": False,
+            "include": ["web_search_call.action.sources"]
+        }
+
+        if system_prompt:
+            responses_kwargs["instructions"] = system_prompt
+
+        responses_kwargs["input"] = sum([message.to_openai_responses_input() for message in messages], [])
+
+        responses_tools = [tool.openai_responses_schema for tool in tools]
+        if responses_tools:
+            responses_kwargs["tools"] = responses_tools
+            responses_kwargs["parallel_tool_calls"] = True
+
+        if max_tokens:
+            responses_kwargs["max_output_tokens"] = max_tokens
+
+        if thinking:
+            # {"effort": "", "summary": ""}
+            responses_kwargs["reasoning"] = thinking
+
+        res = await client.responses.create(**responses_kwargs)
+
+        async for res_chunk in res:
+            yield res_chunk
+
+    # Try with OpenAI Chat Completions compatible providers
+    else:
+        chat_completions_messages = []
+        if system_prompt:
+            chat_completions_messages.append({"role": "system", "content": system_prompt})
+        for message in messages:
+            chat_completions_message = message.to_openai_chat_completions_input()
+            chat_completions_messages.append(chat_completions_message)
+
+        chat_completions_kwargs = {
+            "model": model_name,
+            "messages": chat_completions_messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+
+        chat_completions_tools = []
+        for tool in tools:
+            chat_completions_tools.append(tool.openai_chat_completions_schema)
+        if chat_completions_tools:
+            chat_completions_kwargs["tools"] = chat_completions_tools
+
+        if max_tokens:
+            chat_completions_kwargs["max_completion_tokens"] = max_tokens
+
+        res = await client.chat.completions.create(**chat_completions_kwargs)
 
         async for res_chunk in res:
             yield res_chunk

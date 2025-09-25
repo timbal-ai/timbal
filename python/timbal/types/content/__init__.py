@@ -1,5 +1,3 @@
-import json
-from ast import literal_eval
 from typing import Any
 
 import structlog
@@ -12,26 +10,6 @@ from .tool_result import ToolResultContent
 from .tool_use import ToolUseContent
 
 logger = structlog.get_logger("timbal.types.content")
-
-
-def _parse_tool_use_input(input: Any) -> dict[str, Any]:
-    """Aux function to parse tool use input (output from LLMs) into python objects."""
-    input_arguments = {}
-    if isinstance(input, dict):
-        input_arguments = input
-    else:
-        try:
-            input_arguments = json.loads(input)
-        except Exception:
-            try:
-                input_arguments = literal_eval(input)
-            except Exception:
-                logger.error(
-                    "Both json.loads and literal_eval failed when parsing tool_use input", 
-                    input=input,
-                    exc_info=True
-                )
-    return input_arguments
 
 
 def content_factory(value: Any) -> BaseContent:
@@ -52,7 +30,7 @@ def content_factory(value: Any) -> BaseContent:
             return ToolUseContent(
                 id=value.get("id"), 
                 name=value.get("name"), 
-                input=_parse_tool_use_input(value.get("input")),
+                input=value.get("input"),
             )
         elif content_type == "tool_result":
             tool_result_content = value.get("content")
@@ -60,6 +38,7 @@ def content_factory(value: Any) -> BaseContent:
                 tool_result_content = [tool_result_content]
             return ToolResultContent(
                 id=value.get("id"), 
+                # TODO Change this
                 content=[content_factory(item) for item in tool_result_content],
             )
     # By default try to convert whatever python object we have into a string.

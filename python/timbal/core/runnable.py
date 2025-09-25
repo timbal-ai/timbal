@@ -370,14 +370,14 @@ class Runnable(ABC, BaseModel):
     
     @computed_field
     @cached_property
-    def openai_schema(self) -> dict[str, Any]:
+    def openai_chat_completions_schema(self) -> dict[str, Any]:
         """Generate OpenAI-compatible tool schema for this runnable.
         
         Returns:
             A dictionary conforming to OpenAI's function calling schema format
         """
         formatted_params_model_schema = self.format_params_model_schema()
-        openai_schema = {
+        schema = {
             "type": "function",
             "function": {
                 "name": self.name,
@@ -385,7 +385,25 @@ class Runnable(ABC, BaseModel):
                 "parameters": formatted_params_model_schema,
             }
         }
-        return openai_schema
+        return schema
+    
+
+    @computed_field
+    @cached_property
+    def openai_responses_schema(self) -> dict[str, Any]:
+        """Generate OpenAI-compatible tool schema for this runnable.
+        
+        Returns:
+            A dictionary conforming to OpenAI's function calling schema format
+        """
+        formatted_params_model_schema = self.format_params_model_schema()
+        schema = {
+            "type": "function",
+            "name": self.name,
+            "description": self.description or "",
+            "parameters": formatted_params_model_schema,
+        }
+        return schema
 
     
     @computed_field

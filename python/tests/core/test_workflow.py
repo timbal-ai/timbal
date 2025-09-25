@@ -453,14 +453,10 @@ class TestWorkflowIntegration:
         simple_workflow.step(step1_handler)
         
         # Should generate valid schemas
-        openai_schema = simple_workflow.openai_schema
+        openai_chat_completions_schema = simple_workflow.openai_chat_completions_schema
         anthropic_schema = simple_workflow.anthropic_schema
         
-        assert "function" in openai_schema
+        assert "function" in openai_chat_completions_schema
         assert "name" in anthropic_schema
-        assert openai_schema["function"]["name"] == "simple_workflow"
+        assert openai_chat_completions_schema["function"]["name"] == "simple_workflow"
         assert anthropic_schema["name"] == "simple_workflow"
-
-    
-
-

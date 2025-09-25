@@ -8,7 +8,7 @@ from typing import Any
 class BaseCollector(ABC):
     """Base abstract class for all event collectors with internal state management."""
     
-    def __init__(self, async_gen: AsyncGenerator[Any, None], **kwargs: Any):
+    def __init__(self, async_gen: AsyncGenerator[Any, None], **kwargs: Any): # noqa: ARG002
         self._async_gen = async_gen
         self._collected = False
 

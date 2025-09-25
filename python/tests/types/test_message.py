@@ -2,6 +2,7 @@ import base64
 import pathlib
 
 import pytest
+from pydantic import ValidationError
 from timbal.types import File, Message
 from timbal.types.content import FileContent, TextContent, ToolResultContent, ToolUseContent
 
@@ -20,9 +21,9 @@ def test_message_text_validation() -> None:
         Message.validate({"role": "assistant", "content": [{"type": "text", "text": 123}]})
 
 
-def test_message_text_to_openai_input() -> None:
+def test_message_text_to_openai_chat_completions_input() -> None:
     message = Message(role="assistant", content=[TextContent(text="Hello, World!")])
-    assert message.to_openai_input() == {"role": "assistant", "content": [{"type": "text", "text": "Hello, World!"}]}
+    assert message.to_openai_chat_completions_input() == {"role": "assistant", "content": [{"type": "text", "text": "Hello, World!"}]}
 
 
 def test_message_text_to_anthropic_input() -> None:
@@ -47,7 +48,7 @@ def test_message_file_validation(tmp_path: pathlib.Path) -> None:
         Message.validate({"role": "assistant", "content": [{"type": "file", "file": {"url": "not a file"}}]})
     
 
-def test_message_file_to_openai_input(tmp_path: pathlib.Path) -> None:
+def test_message_file_to_openai_chat_completions_input(tmp_path: pathlib.Path) -> None:
     test_file = tmp_path / "image.png"
     png_content = bytes.fromhex(
         '89504e470d0a1a0a'  # PNG signature
@@ -57,7 +58,7 @@ def test_message_file_to_openai_input(tmp_path: pathlib.Path) -> None:
     encoded_image = base64.b64encode(png_content).decode("utf-8")
 
     message = Message(role="assistant", content=[FileContent(file=File.validate(str(test_file)))])
-    assert message.to_openai_input() == {
+    assert message.to_openai_chat_completions_input() == {
         "role": "assistant", 
         "content": [{
             "type": "image_url", 
@@ -82,15 +83,13 @@ def test_message_tool_use_validation() -> None:
     assert message.role == "assistant"
     assert message.content == [ToolUseContent(id="123", name="get_weather", input={"city": "London"})]
 
-    # input that can't be parsed becomes empty dict
-    message = Message.validate({"role": "assistant", "content": [{"type": "tool_use", "id": "123", "name": "get_weather", "input": "not a dict"}]})
-    assert isinstance(message, Message)
-    assert message.content[0].input == {}
+    with pytest.raises(ValidationError):
+        Message.validate({"role": "assistant", "content": [{"type": "tool_use", "id": "123", "name": "get_weather", "input": "not a dict"}]})
 
 
-def test_message_with_tool_use_to_openai_input() -> None:
+def test_message_with_tool_use_to_openai_chat_completions_input() -> None:
     message = Message(role="assistant", content=[ToolUseContent(id="123", name="get_weather", input={"city": "London"})])
-    assert message.to_openai_input() == {"role": "assistant", "tool_calls": [{"id": "123", "type": "function", "function": {"arguments": '{"city": "London"}', "name": "get_weather"}}]}
+    assert message.to_openai_chat_completions_input() == {"role": "assistant", "tool_calls": [{"id": "123", "type": "function", "function": {"arguments": '{"city": "London"}', "name": "get_weather"}}]}
 
 
 def test_message_with_tool_use_to_anthropic_input() -> None:
@@ -107,9 +106,9 @@ def test_message_tool_result_validation() -> None:
     Message.validate({"role": "assistant", "content": [{"type": "tool_result", "id": "123", "content": 123}]})
 
 
-def test_message_with_tool_result_to_openai_input() -> None:
+def test_message_with_tool_result_to_openai_chat_completions_input() -> None:
     message = Message(role="user", content=[ToolResultContent(id="123", content=[TextContent(text="Hello, World!")])])
-    assert message.to_openai_input() == {"role": "tool", "tool_call_id": "123", "content": [{"type": "text", "text": "Hello, World!"}]}
+    assert message.to_openai_chat_completions_input() == {"role": "tool", "tool_call_id": "123", "content": [{"type": "text", "text": "Hello, World!"}]}
 
 
 def test_message_with_tool_result_to_anthropic_input() -> None:

@@ -41,19 +41,35 @@ class Message:
     def __repr__(self) -> str:
         return f"Message(role={self.role}, content={self.content})"
 
-    def to_openai_input(self) -> dict[str, Any]:
-        """Convert the message to OpenAI's expected input format."""
+    def to_openai_responses_input(self) -> list[dict[str, Any]]:
+        """Convert the message to OpenAI's responses api expected input format."""
+        inputs = []
+        message_content = []
+        for content_item in self.content:
+            if isinstance(content_item, ToolUseContent):
+                inputs.append(content_item.to_openai_responses_input())
+            elif isinstance(content_item, ToolResultContent):
+                inputs.append(content_item.to_openai_responses_input())
+            else:
+                message_content.append(content_item.to_openai_responses_input(role=self.role))
+        if message_content:
+            # Role here should only be 'user' or 'assistant'
+            inputs.append({"role": self.role, "content": message_content})
+        return inputs
+
+    def to_openai_chat_completions_input(self) -> dict[str, Any]:
+        """Convert the message to OpenAI's chat completions api expected input format."""
         role = self.role
-        # OpenAI expects tool calls to be in a separate field in the message
+        # OpenAI chat completions api expects tool calls to be in a separate field in the message
         content = []
         tool_calls = []
         for content_item in self.content:
             if isinstance(content_item, ToolUseContent):
-                tool_calls.append(content_item.to_openai_input())
+                tool_calls.append(content_item.to_openai_chat_completions_input())
             elif isinstance(content_item, ToolResultContent):
-                return content_item.to_openai_input()
+                return content_item.to_openai_chat_completions_input()
             else:
-                openai_input = content_item.to_openai_input() 
+                openai_input = content_item.to_openai_chat_completions_input() 
                 # Enabling splitting files into multiple pages or chunks.
                 if isinstance(openai_input, list):
                     content.extend(openai_input)
