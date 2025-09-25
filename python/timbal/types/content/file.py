@@ -49,6 +49,27 @@ def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
     return pages
 
 
+def _extract_docx_content(docx: File) -> str:
+    doc = Document(io.BytesIO(docx.read()))
+    text_content = []
+    # Process document elements in order to maintain structure
+    for element in doc.element.body:
+        if element.tag.endswith("p"):
+            paragraph = doc.paragraphs[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith("p")])]
+            if paragraph.text.strip():
+                text_content.append(paragraph.text.strip())
+        elif element.tag.endswith("tbl"):
+            table = doc.tables[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('tbl')])]
+            table_content = []
+            for row in table.rows:
+                row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if row_text:
+                    table_content.append(",".join(row_text))
+            text_content.append("\n".join(table_content))
+    text_content = "\n".join(text_content)
+    return text_content
+
+
 def _extract_email_body(raw_email_content: str) -> str:
     """Extract only the body content from an EML email, excluding headers and metadata."""
     msg = email.message_from_string(raw_email_content)
@@ -181,6 +202,7 @@ class FileContent(BaseContent):
             }
             self._cached_openai_responses_input = openai_responses_input
             return openai_responses_input
+
         elif self.file.__source_extension__ == ".xlsx":
             df = pd.read_excel(io.BytesIO(self.file.read()))
             openai_responses_input = {
@@ -189,30 +211,19 @@ class FileContent(BaseContent):
             }
             self._cached_openai_responses_input = openai_responses_input
             return openai_responses_input
+
+        elif self.file.__source_extension__ == ".eml":
+            raise NotImplementedError("TODO - Parse EML files into openai responses api.")
+
         elif self.file.__source_extension__ == ".docx":
-            doc = Document(io.BytesIO(self.file.read()))
-            text_content = []
-            # Process document elements in order to maintain structure
-            for element in doc.element.body:
-                if element.tag.endswith("p"):
-                    paragraph = doc.paragraphs[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith("p")])]
-                    if paragraph.text.strip():
-                        text_content.append(paragraph.text.strip())
-                elif element.tag.endswith("tbl"):
-                    table = doc.tables[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('tbl')])]
-                    table_content = []
-                    for row in table.rows:
-                        row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                        if row_text:
-                            table_content.append(",".join(row_text))
-                    text_content.append("\n".join(table_content))
-            text_content = "\n".join(text_content)
+            content = _extract_docx_content(self.file)
             openai_responses_input = {
                 "type": "input_text",
-                "text": text_content,
+                "text": content,
             }
             self._cached_openai_responses_input = openai_responses_input
             return openai_responses_input
+
         elif mime and mime.startswith("image/"):
             url = self.file.to_data_url()
             openai_responses_input = {
@@ -221,6 +232,7 @@ class FileContent(BaseContent):
             }
             self._cached_openai_responses_input = openai_responses_input
             return openai_responses_input
+
         elif mime == "application/pdf":
             # TODO Review this one
             url = self.file.to_data_url()
@@ -231,6 +243,7 @@ class FileContent(BaseContent):
             }
             self._cached_openai_responses_input = openai_responses_input
             return openai_responses_input
+
         elif mime and mime.startswith("audio/"):
             # Some gpt models accept audio files as input. If the user is using a model that doesn't have this capability, the sdk will raise an error
             if self.file.__source_scheme__ == "data":
@@ -246,6 +259,7 @@ class FileContent(BaseContent):
                     "format": "wav" if "wav" in mime else "mp3",
                 },
             }
+
         raise ValueError(f"Unsupported file {self.file}.")
 
     @override
@@ -283,6 +297,7 @@ class FileContent(BaseContent):
             }
             self._cached_openai_chat_completions_input = openai_input
             return openai_input
+
         elif self.file.__source_extension__ == ".xlsx":
             df = pd.read_excel(io.BytesIO(self.file.read()))
             openai_input = {
@@ -291,36 +306,23 @@ class FileContent(BaseContent):
             }
             self._cached_openai_chat_completions_input = openai_input
             return openai_input
+
         elif self.file.__source_extension__ == ".docx":
-            doc = Document(io.BytesIO(self.file.read()))
-            text_content = []
-            # Process document elements in order to maintain structure
-            for element in doc.element.body:
-                if element.tag.endswith("p"):
-                    paragraph = doc.paragraphs[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith("p")])]
-                    if paragraph.text.strip():
-                        text_content.append(paragraph.text.strip())
-                elif element.tag.endswith("tbl"):
-                    table = doc.tables[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('tbl')])]
-                    table_content = []
-                    for row in table.rows:
-                        row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                        if row_text:
-                            table_content.append(",".join(row_text))
-                    text_content.append("\n".join(table_content))
-            text_content = "\n".join(text_content)
+            content = _extract_docx_content(self.file)
             openai_input = {
                 "type": "text",
-                "text": text_content,
+                "text": content,
             }
             self._cached_openai_chat_completions_input = openai_input
             return openai_input
+
         elif mime and mime.startswith("image/"):
             url = self.file.to_data_url()
             return {
                 "type": "image_url", 
                 "image_url": {"url": url},
             }
+
         elif mime == "application/pdf":
             # TODO Review openai sdk "file" type
             # OpenAI internally gets an image of each page and complements it with the extracted text.
@@ -340,11 +342,10 @@ class FileContent(BaseContent):
                 })
             self._cached_openai_chat_completions_input = pages_input
             return pages_input
+
         elif self.file.__source_extension__ == ".eml":
-            print("EML file")
             # EML files are text-based email files - extract body content and attachments
             raw_bytes = self.file.read()
-            
             raw_content = None
             for encoding in AVAILABLE_ENCODINGS:
                 try:
@@ -352,20 +353,15 @@ class FileContent(BaseContent):
                     break
                 except UnicodeDecodeError:
                     continue
-            
             if raw_content is None:
                 raise ValueError(f"Could not decode EML file {self.file} with any of: {AVAILABLE_ENCODINGS}")
-
             # Extract email body content and attachments
             body_content = _extract_email_body(raw_content)
             attachments = _extract_email_attachments(raw_content)
-            
             msg = email.message_from_string(raw_content)
-
             processed_attachments = set()
             attachment_counter = 1
             openai_input = []
-            
             if msg.is_multipart():
                 for part in msg.walk():
                     content_id = part.get('Content-ID')
@@ -377,56 +373,46 @@ class FileContent(BaseContent):
                             if attachment.get('content_id') == cid and i not in processed_attachments:
                                 # Replace CID reference with descriptive placeholder
                                 filename = attachment['filename']
-                                
                                 placeholder = f"[File {attachment_counter}: {filename}]"
-                                
                                 # Replace CID reference in body
                                 cid_pattern = f"[cid:{cid}]"
                                 body_content = body_content.replace(cid_pattern, placeholder)
-                                
                                 # Add the attachment as FileContent
                                 attachment_file = io.BytesIO(attachment['data'])
                                 attachment_file.name = attachment['filename']
                                 extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
                                 file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
-                                converted = FileContent(file=file_obj).to_openai_input()
+                                converted = FileContent(file=file_obj).to_openai_chat_completions_input()
                                 if isinstance(converted, list):
                                     openai_input.extend(converted)
                                 else:
                                     openai_input.append(converted)
-                                
                                 processed_attachments.add(i)
                                 attachment_counter += 1
                                 break
-            
             # Process attachments without CID references (like standalone PDFs)
             for i, attachment in enumerate(attachments):
                 if not attachment.get('content_id') and i not in processed_attachments:
                     filename = attachment['filename']
                     placeholder = f"[File {attachment_counter}: {filename}]"
-                    
                     # Add placeholder to body content
                     body_content += f"\n\n{placeholder}"
-                    
                     # Add the attachment as FileContent
                     attachment_file = io.BytesIO(attachment['data'])
                     attachment_file.name = attachment['filename']
                     extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
                     file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
-                    converted = FileContent(file=file_obj).to_openai_input()
+                    converted = FileContent(file=file_obj).to_openai_chat_completions_input()
                     if isinstance(converted, list):
                         openai_input.extend(converted)
                     else:
                         openai_input.append(converted)
-                    
                     processed_attachments.add(i)
                     attachment_counter += 1
-
-            openai_input.append(TextContent(text=body_content).to_openai_input())
-
+            openai_input.append(TextContent(text=body_content).to_openai_chat_completions_input())
             self._cached_openai_input = openai_input
-            print(openai_input)
             return openai_input
+
         elif mime and mime.startswith("audio/"):
             # Some gpt models accept audio files as input. If the user is using a model that doesn't have this capability, the sdk will raise an error
             if self.file.__source_scheme__ == "data":
@@ -442,7 +428,9 @@ class FileContent(BaseContent):
                     "format": "wav" if "wav" in mime else "mp3",
                 },
             }
+
         raise ValueError(f"Unsupported file {self.file}.")
+
 
     @override
     def to_anthropic_input(self, **kwargs: Any) -> dict[str, Any] | list[dict[str, Any]]:
@@ -479,6 +467,7 @@ class FileContent(BaseContent):
             }
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
+
         elif self.file.__source_extension__ == ".xlsx":
             df = pd.read_excel(io.BytesIO(self.file.read()))
             anthropic_input = {
@@ -487,30 +476,16 @@ class FileContent(BaseContent):
             }
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
+
         elif self.file.__source_extension__ == ".docx":
-            doc = Document(io.BytesIO(self.file.read()))
-            text_content = []
-            # Process document elements in order to maintain structure
-            for element in doc.element.body:
-                if element.tag.endswith("p"):
-                    paragraph = doc.paragraphs[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('p')])]
-                    if paragraph.text.strip():
-                        text_content.append(paragraph.text.strip())
-                elif element.tag.endswith("tbl"):
-                    table = doc.tables[len([e for e in doc.element.body[:doc.element.body.index(element)] if e.tag.endswith('tbl')])]
-                    table_content = []
-                    for row in table.rows:
-                        row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                        if row_text:
-                            table_content.append(",".join(row_text))
-                    text_content.append("\n".join(table_content))
-            text_content = "\n".join(text_content)
+            content = _extract_docx_content(self.file)
             anthropic_input = {
                 "type": "text",
-                "text": text_content,
+                "text": content,
             }
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
+
         elif mime and mime.startswith("image/"):
             # TODO Review this one
             url = self.file.to_data_url()
@@ -532,6 +507,7 @@ class FileContent(BaseContent):
                         "url": url,
                     }
                 }
+
         elif mime == "application/pdf":
             # TODO Review this one
             url = self.file.to_data_url()
@@ -553,10 +529,10 @@ class FileContent(BaseContent):
                         "url": url,
                     }
                 }
+
         elif self.file.__source_extension__ == ".eml":
             # EML files are text-based email files - extract body content and attachments
             raw_bytes = self.file.read()
-            
             raw_content = None
             for encoding in AVAILABLE_ENCODINGS:
                 try:
@@ -564,20 +540,15 @@ class FileContent(BaseContent):
                     break
                 except UnicodeDecodeError:
                     continue
-            
             if raw_content is None:
                 raise ValueError(f"Could not decode EML file {self.file} with any of: {AVAILABLE_ENCODINGS}")
-
             # Extract email body content and attachments
             body_content = _extract_email_body(raw_content)
             attachments = _extract_email_attachments(raw_content)
-            
             msg = email.message_from_string(raw_content)
-
             processed_attachments = set()
             attachment_counter = 1
             anthropic_input = []
-            
             if msg.is_multipart():
                 for part in msg.walk():
                     content_id = part.get('Content-ID')
@@ -589,13 +560,10 @@ class FileContent(BaseContent):
                             if attachment.get('content_id') == cid and i not in processed_attachments:
                                 # Replace CID reference with descriptive placeholder
                                 filename = attachment['filename']
-                                
                                 placeholder = f"[File {attachment_counter}: {filename}]"
-                                
                                 # Replace CID reference in body
                                 cid_pattern = f"[cid:{cid}]"
                                 body_content = body_content.replace(cid_pattern, placeholder)
-                                
                                 # Add the attachment as FileContent
                                 attachment_file = io.BytesIO(attachment['data'])
                                 attachment_file.name = attachment['filename']
@@ -613,16 +581,13 @@ class FileContent(BaseContent):
                                 processed_attachments.add(i)
                                 attachment_counter += 1
                                 break
-            
             # Process attachments without CID references (like standalone PDFs)
             for i, attachment in enumerate(attachments):
                 if not attachment.get('content_id') and i not in processed_attachments:
                     filename = attachment['filename']
                     placeholder = f"[File {attachment_counter}: {filename}]"
-                    
                     # Add placeholder to body content
                     body_content += f"\n\n{placeholder}"
-                    
                     # Add the attachment as FileContent
                     attachment_file = io.BytesIO(attachment['data'])
                     attachment_file.name = attachment['filename']
@@ -636,13 +601,11 @@ class FileContent(BaseContent):
                         anthropic_input.extend(converted)
                     else:
                         anthropic_input.append(converted)
-                    
                     processed_attachments.add(i)
                     attachment_counter += 1
-
             # Add text content at the beginning
             anthropic_input.insert(0, TextContent(text=body_content).to_anthropic_input())
-
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
+
         raise ValueError(f"Unsupported file {self.file}.")
