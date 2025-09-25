@@ -309,8 +309,8 @@ async def run_turn(
                 f"{msg.role}: {msg.content[0].text if msg.content else ''}" 
                 for msg in conversation_history
             ])
-            system_context = f"Previous conversation:\n{history_text}\n\n{agent.instructions or ''}"
-            agent_output_event = await agent(prompt=user_message, system_context=system_context).collect()
+            system_context = f"Previous conversation:\n{history_text}\n\n{agent.system_prompt or ''}"
+            agent_output_event = await agent(prompt=user_message, system_prompt=system_context).collect()
         else:
             agent_output_event = await agent(prompt=user_message).collect()
         agent_usage = agent_output_event.usage
