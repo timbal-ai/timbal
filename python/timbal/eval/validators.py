@@ -2,12 +2,11 @@ import functools
 import json
 import re
 
-from ..core.llm_router import _llm_router
+from ..core.agent import Agent
 from ..core.tool import Tool
 from ..errors import EvalError
+from ..state import RunContext, set_run_context
 from ..types.message import Message
-
-llm_router = Tool(name="llm_router", handler=_llm_router)
 
 
 class Validator:
@@ -216,25 +215,15 @@ You must respond with a valid JSON object containing:
         # Newlines in f-strings were introduced in python >= 3.12
         prompt = "<output>\n" + str(message_text) + "\n</output>\n\n"
         prompt += "\n".join(["<reference>\n" + str(v) + "\n</reference>\n" for v in ref])
-        messages = [Message.validate(prompt)]
 
-        json_schema = {
-            "name": "SemanticEval",
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "explanation": {"type": "string"}, 
-                    "is_valid": {"type": "boolean"}
-                }, 
-            }
-        }
-
-        res = await llm_router(
+        # Create agent in fresh context without parent
+        set_run_context(RunContext())
+        agent = Agent(
+            name="SemanticOutputValidator",
             model="openai/gpt-4.1-mini",
             system_prompt=system_prompt,
-            messages=messages,
-            json_schema=json_schema,
-        ).collect()
+        )
+        res = await agent(prompt=Message.validate(prompt)).collect()
         res = res.output.content[0].text
         res = json.loads(res)
 
@@ -332,25 +321,15 @@ You must respond with a valid JSON object containing:
         # Newlines in f-strings were introduced in python >= 3.12
         prompt = "<steps>\n" + str(steps_text) + "\n</steps>\n\n"
         prompt += "\n".join(["<reference>\n" + str(v) + "\n</reference>\n" for v in ref])
-        messages = [Message.validate(prompt)]
 
-        json_schema = {
-            "name": "SemanticEval",
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "explanation": {"type": "string"}, 
-                    "is_valid": {"type": "boolean"}
-                }, 
-            }
-        }
-
-        res = await llm_router(
+        # Create agent in fresh context without parent
+        set_run_context(RunContext())
+        agent = Agent(
+            name="SemanticStepsValidator",
             model="openai/gpt-4.1-mini",
             system_prompt=system_prompt,
-            messages=messages,
-            json_schema=json_schema,
-        ).collect()
+        )
+        res = await agent(prompt=Message.validate(prompt)).collect()
         res = res.output.content[0].text
         res = json.loads(res)
 

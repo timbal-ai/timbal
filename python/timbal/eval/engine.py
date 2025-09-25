@@ -280,22 +280,28 @@ async def run_turn(
         
         msg_dicts = [await dump(msg) for msg in conversation_history]
         
+        # Input messages should be the conversation history (user messages + previous assistant responses)
+        # Output message should be the last assistant response (if any)
+        output_message = msg_dicts[-1]
+        input_messages = msg_dicts[:-1]  # Remove the last assistant message from input
+        
         trace = Trace(
-            path="fake_agent",
+            path=agent._llm._path,
             call_id="fake_call_conversation",
             parent_call_id=None,
             t0=1000,  # Fake timestamp
-            input={"messages": msg_dicts},
+            input={"messages": input_messages},
             t1=1500,
-            output=msg_dicts[-1] if msg_dicts else {},
+            output=output_message or {},
             usage={}
         )
         parent_tracing["fake_call_conversation"] = trace
         
         # Store the fake parent tracing in the provider
-        await run_context._tracing_provider.put(
-            RunContext(id=fake_parent_id, tracing=parent_tracing)
-        )
+        # We need to store it with the fake_parent_id as the key so it can be retrieved later
+        fake_parent_context = RunContext(id=fake_parent_id)
+        fake_parent_context._tracing = parent_tracing
+        await run_context._tracing_provider.put(fake_parent_context)
         
     set_run_context(run_context)
 
@@ -303,16 +309,7 @@ async def run_turn(
     try:
         # Convert Input to Message to properly handle files
         user_message = user_input.to_message(role="user", test_file_dir=test_file_dir)
-        
-        if conversation_history:
-            history_text = "\n".join([
-                f"{msg.role}: {msg.content[0].text if msg.content else ''}" 
-                for msg in conversation_history
-            ])
-            system_context = f"Previous conversation:\n{history_text}\n\n{agent.system_prompt or ''}"
-            agent_output_event = await agent(prompt=user_message, system_prompt=system_context).collect()
-        else:
-            agent_output_event = await agent(prompt=user_message).collect()
+        agent_output_event = await agent(prompt=user_message).collect()
         agent_usage = agent_output_event.usage
         if agent_output_event.output and agent_output_event.output.content and len(agent_output_event.output.content) > 0:
             agent_output = agent_output_event.output.content[0].text
@@ -422,7 +419,8 @@ async def eval_file(
             await run_turn(_agent, turn, test, conversation_history, test_results, str(path.name), test_file_dir)
             # Add to conversation history after processing
             conversation_history.append(turn.input.to_message(role="user", test_file_dir=test_file_dir))
-            if turn.output:
+            # Only add expected output to conversation history if there are no validators
+            if turn.output and not turn.output.validators:
                 conversation_history.append(turn.output.to_message(role="assistant", test_file_dir=test_file_dir))
     
     return test_results
