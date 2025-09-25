@@ -127,6 +127,7 @@ class Runnable(ABC, BaseModel):
     """Whether the post_hook is a coroutine."""
     _post_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
     # ? Can we store all post_hook related stuff together?
+    _bg_tasks: dict[str, Any] = PrivateAttr(default_factory=dict)
 
 
     @classmethod

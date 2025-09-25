@@ -51,6 +51,17 @@ class Bash(Tool):
         )
         self.cmd = cmd
 
+    
+    async def _manage_background_tasks(self):
+        agent = get_run_context().parent_trace().runnable
+
+        if _get_process_output_tool.name not in agent._tools_by_name:
+            for tool in [_get_process_output_tool, _terminate_process_tool]:
+                # Nest the tools under the agent's path
+                tool.nest(agent._path)
+                agent.tools.append(tool)
+                agent._tools_by_name[tool.name] = tool      
+
 
     async def _execute_command(
         self,
@@ -98,22 +109,25 @@ class Bash(Tool):
         # If command is already a string, use it as-is
          
         try:
-            # if background:
-            #     # Start process in background
-            #     process = subprocess.Popen(command, **kwargs)
-            #     get_run_context().parent_trace().runnable._bg_tasks[process.pid] = process 
-            #     logger.info(
-            #         "Added background process to _bg_tasks",
-            #         pid=process.pid,
-            #         process=command,
-            #         ALL=get_run_context().parent_trace().runnable._bg_tasks
-            #     )    
-            #     return {
-            #         'pid': process.pid,
-            #         'background': True,
-            #         'process': process,
-            #         'message': f'Process started with PID {process.pid}'
-            #     }
+            if background:
+                # Start process in background
+                kwargs['shell'] = True
+                process = subprocess.Popen(command, **kwargs)
+                get_run_context().parent_trace().runnable._bg_tasks[process.pid] = process
+                await self._manage_background_tasks()
+
+                logger.info(
+                    "Added background process to _bg_tasks",
+                    pid=process.pid,
+                    process=command,
+                    ALL=get_run_context().parent_trace().runnable._bg_tasks
+                )    
+                return {
+                    'pid': process.pid,
+                    'background': True,
+                    # 'process': process,
+                    'message': f'Process started with PID {process.pid}'
+                }
 
             # Not background execution
             process = await asyncio.create_subprocess_shell(
@@ -143,88 +157,97 @@ class Bash(Tool):
             }
 
 
-# def _get_process_output(process_pid: int = Field(description="Process ID to get output from")) -> dict[str, Any]:
-#     """
-#     Get the output of a running process.
+async def _get_process_output(process_pid: int = Field(description="Process ID to get output from")) -> dict[str, Any]:
+    """
+    Get the output of a running process.
     
-#     Args:
-#         process_pid: Process ID to get output from
-#     """
-#     logger.info(
-#         "INFO",
-#         ALL=get_run_context().parent_trace().runnable._bg_tasks
-#     )  
-#     try:
-#         process = get_run_context().parent_trace().runnable._bg_tasks[process_pid]
-#         status = process.poll()
-#         # Not finished yet
-#         if status is None:
-#             return {
-#                 'pid': process_pid,
-#                 'output': "Process is still running"
-#             }
-#         stdout, stderr = process.communicate()
-#         # Terminate process (avoid zombie)
-#         del get_run_context().parent_trace().runnable._bg_tasks[process_pid]
-#         # Remove process
-#         return {
-#             'pid': process_pid,
-#             'output': stdout,
-#             'error': stderr
-#         }
-#     except Exception as e:  
-#         if get_run_context().parent_trace().runnable._bg_tasks[process_pid]:
-#             del get_run_context().parent_trace().runnable._bg_tasks[process_pid]
-#         return {
-#             'pid': process_pid,
-#             'message': f'Failed to get process output: {str(e)}'
-#         }
+    Args:
+        process_pid: Process ID to get output from
+    """
+    logger.info(
+        "INFO",
+        ALL=get_run_context().parent_trace().runnable._bg_tasks
+    )  
+    try:
+        process = get_run_context().parent_trace().runnable._bg_tasks[process_pid]
+        status = process.poll()
+        # Not finished yet
+        if status is None:
+            return {
+                'pid': process_pid,
+                'output': "Process is still running"
+            }
+        stdout, stderr = process.communicate()
+        # Terminate process (avoid zombie)
+        del get_run_context().parent_trace().runnable._bg_tasks[process_pid]
+        # Remove process
+        return {
+            'pid': process_pid,
+            'output': stdout,
+            'error': stderr
+        }
+    except Exception as e:  
+        if get_run_context().parent_trace().runnable._bg_tasks[process_pid]:
+            del get_run_context().parent_trace().runnable._bg_tasks[process_pid]
+        return {
+            'pid': process_pid,
+            'message': f'Failed to get process output: {str(e)}'
+        }
 
+async def _check_background_tasks():
+    agent = get_run_context().parent_trace().runnable
+    if not agent._bg_tasks and _get_process_output_tool.name in agent._tools_by_name:
+        for tool in [_get_process_output_tool, _terminate_process_tool]:
+            agent.tools.remove(tool)
+            del agent._tools_by_name[tool.name]
 
-# def _terminate_process(
-#     pid: int = Field(description="Process ID to terminate"),
-#     method: Literal["kill", "terminate"] = Field(
-#         default="terminate",
-#         description="Method to terminate the process"
-#     ),
-# ) -> dict[str, Any]:
-#     """
-#     Terminate a running process.
+async def _terminate_process(
+    pid: int = Field(description="Process ID to terminate"),
+    method: Literal["kill", "terminate"] = Field(
+        default="terminate",
+        description="Method to terminate the process"
+    ),
+) -> dict[str, Any]:
+    """
+    Terminate a running process.
     
-#     Args:
-#         pid: Process ID to terminate
-#         method: Method to terminate the process
+    Args:
+        pid: Process ID to terminate
+        method: Method to terminate the process
         
-#     Returns:
-#         Termination result
-#     """
-#     try:
-#         if psutil.pid_exists(pid):
-#             process = psutil.Process(pid)
-#             if method == "kill":
-#                 process.kill()
-#                 method = 'killed'
-#             else:
-#                 process.terminate()
-#                 method = 'terminated'
-#             # Remove process from _bg_tasks
-#             del get_run_context().parent_trace().runnable._bg_tasks[pid]
-#             return f'Process {pid} {method} successfully'
-#         else:
-#             return f'Process {pid} not found'
-#     except Exception as e:
-#         return f'Error terminating process {pid}: {str(e)}'
+    Returns:
+        Termination result
+    """
+    try:
+        if psutil.pid_exists(pid):
+            process = psutil.Process(pid)
+            if method == "kill":
+                process.kill()
+                method = 'killed'
+            else:
+                process.terminate()
+                method = 'terminated'
+            # Remove process from _bg_tasks
+            del get_run_context().parent_trace().runnable._bg_tasks[pid]
+            # Check if there are background tasks
+            await _check_background_tasks()
+            
+            return f'Process {pid} {method} successfully'
+        else:
+            return f'Process {pid} not found'
+    except Exception as e:
+        return f'Error terminating process {pid}: {str(e)}'
 
 
-# # Private tools for managing background tasks
-# _terminate_process_tool = Tool(
-#     name="terminate_process",
-#     description="Use it always to terminate or kill a process.",
-#     handler=_terminate_process
-# )
+# Private tools for managing background tasks
+_terminate_process_tool = Tool(
+    name="terminate_process",
+    description="Use it always to terminate or kill a process.",
+    handler=_terminate_process
+)
 
-# _get_process_output_tool = Tool(
-#     name="get_process_output", 
-#     description="Get the output of a running process.",
-#     handler=_get_process_output
-# )
+_get_process_output_tool = Tool(
+    name="get_process_output", 
+    description="Get the output of a running process.",
+    handler=_get_process_output
+)
