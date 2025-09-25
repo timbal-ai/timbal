@@ -18,16 +18,28 @@ class ToolResultContent(BaseContent):
     content: list[TextContent | FileContent]
 
     @override
-    def to_openai_input(self) -> dict[str, Any]:
+    def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any]:
+        """See base class."""
+        # TODO Refactor this
+        import json
+        output = json.dumps([item.to_openai_responses_input(role="tool") for item in self.content])
+        return {
+            "type": "function_call_output",
+            "call_id": self.id,
+            "output": output,
+        }
+
+    @override
+    def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any]:
         """See base class."""
         return {
             "role": "tool",
             "tool_call_id": self.id,
-            "content": [item.to_openai_input() for item in self.content],
+            "content": [item.to_openai_chat_completions_input() for item in self.content],
         }
 
     @override
-    def to_anthropic_input(self) -> dict[str, Any]:
+    def to_anthropic_input(self, **kwargs: Any) -> dict[str, Any]:
         """See base class."""
         return {
             "type": "tool_result",
