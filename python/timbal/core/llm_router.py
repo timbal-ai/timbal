@@ -61,6 +61,17 @@ Model = Literal[
     "gemini/gemini-2.0-flash-preview-image-generation",
     "gemini/gemini-2.0-flash",
     "gemini/gemini-2.0-flash-lite",
+    # x.ai/Grok models
+    "xai/grok-4",
+    "xai/grok-4-fast-reasoning",
+    "xai/grok-4-fast-non-reasoning",
+    "xai/grok-3",
+    "xai/grok-3-mini",
+    "xai/grok-3-fast",
+    "xai/grok-2",
+    "xai/grok-2-vision",
+    "xai/grok-2-image",
+    "xai/grok-beta",
 ]
 
 
@@ -86,6 +97,10 @@ async def llm_router(
         None,
         description="Maximum number of tokens to generate.",
     ),
+    search_parameters: dict | None = Field(
+        None,
+        description="Parameters for Live Search (Grok models only).",
+    ),
 ) -> Message: # type: ignore
     """Route LLM requests to appropriate providers based on model prefix.
 
@@ -99,6 +114,7 @@ async def llm_router(
         messages: Conversation history as Message objects
         tools: Available Runnable tools for function calling
         max_tokens: Response length limit (required for Anthropic models)
+        search_parameters: Optional parameters for Live Search (Grok models only)
 
     Returns:
         Message: Streaming response chunks from the selected provider
@@ -112,6 +128,7 @@ async def llm_router(
     messages = resolve_default("messages", messages)
     tools = resolve_default("tools", tools)
     max_tokens = resolve_default("max_tokens", max_tokens)
+    search_parameters = resolve_default("search_parameters", search_parameters)
 
     if "/" not in model:
         raise ValueError("Model must be in format 'provider/model_name'")
@@ -150,11 +167,20 @@ async def llm_router(
             base_url="https://api.together.xyz/v1",
         )
 
+    elif provider == "xai":
+        api_key = os.getenv("XAI_API_KEY")
+        if not api_key:
+            raise APIKeyNotFoundError("XAI_API_KEY not found.")
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url="https://api.x.ai/v1",
+        )
+
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
     # TODO Probably we'll move to google ai sdk
-    if provider in ["openai", "gemini", "togetherai"]:
+    if provider in ["openai", "gemini", "togetherai", "xai"]:
         openai_messages = []
         if system_prompt:
             openai_messages.append({"role": "system", "content": system_prompt})
@@ -177,6 +203,12 @@ async def llm_router(
 
         if max_tokens:
             openai_kwargs["max_completion_tokens"] = max_tokens
+        
+        # specific features for grok models
+        if provider == "xai" and search_parameters is not None:
+            openai_kwargs["extra_body"] = {
+                "search_parameters": search_parameters
+            }
 
         res = await client.chat.completions.create(**openai_kwargs)
 
