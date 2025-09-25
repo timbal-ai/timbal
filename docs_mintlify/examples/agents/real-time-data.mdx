@@ -1,0 +1,40 @@
+---
+title: "Real-time Data Integration"
+description: "AI agents can integrate live data sources using dynamic system prompts for up-to-date responses"
+---
+
+Agents can automatically include real-time data in their system prompts using dynamic functions. This ensures responses are always current and contextually relevant:
+
+```python
+from timbal import Agent
+from datetime import datetime
+
+# Custom function to get current time
+def get_current_time():
+    """Get current date and time."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# Create agent with dynamic system prompt
+agent = Agent(
+    name="TimeAgent",
+    model="openai/gpt-4o-mini",
+    system_prompt="""You are a helpful assistant with access to current time information.
+
+Current context:
+- Time: {__main__::get_current_time}
+
+Use this information to provide accurate, time-aware responses."""
+)
+
+# Agent automatically includes live data in responses
+result = await agent(
+    prompt="What time is it right now?"
+).collect()
+```
+
+## Key Features
+
+- **Live Data Integration**: Automatically fetch and include real-time information
+- **Automatic Updates**: System prompt refreshes with current data on each run
+- **Simple Implementation**: Easy to add custom functions for any data source
+- **Performance**: Template resolution is fast and cached for efficiency

@@ -100,7 +100,47 @@
           {
             "group": "Agents",
             "pages": [
-              "examples/agents/images"
+              {
+                "group": "Calling Agents",
+                "pages": [
+                  "examples/agents/images",
+                  "examples/agents/docx",
+                  "examples/agents/csv",
+                  "examples/agents/pdf",
+                  "examples/agents/emls",
+                  "examples/agents/audio"
+                ]
+              },
+              {
+                "group": "Tools",
+                "pages": [
+                  "examples/agents/search",
+                  "examples/agents/tts",
+                  "examples/agents/image-generation"
+                ]
+              },
+              {
+                "group": "Knowledge Bases",
+                "pages": [
+                  "examples/agents/sql-queries",
+                  "examples/agents/semantic-search"
+                ]
+              },
+              {
+                "group": "Dynamic Agents",
+                "pages": [
+                  "examples/agents/real-time-data",
+                  "examples/agents/context-aware"
+                ]
+              },
+              {
+                "group": "Evals",
+                "pages": [
+                  "examples/agents/output-validation",
+                  "examples/agents/tool-usage-validation",
+                  "examples/agents/multi-turn-conversation"
+                ]
+              }
             ]
           },
           {

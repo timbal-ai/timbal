@@ -1,0 +1,84 @@
+---
+title: "Image Generation"
+description: "AI agents can generate images from text descriptions using OpenAI's image generation tools"
+---
+
+Agents can create images from text prompts using image generation tools. This example uses a post hook to save generated images to disk and return file paths:
+
+```python
+import os
+
+from openai import AsyncOpenAI
+from pydantic import Field
+from timbal import Agent, Tool
+from timbal.state import get_run_context
+from timbal.types.file import File
+
+async def gen_images(
+    prompt: str = Field(
+        ...,
+        description="A text description of the desired image(s). Max length: 32000 characters.",
+        max_length=32000,
+    ),
+) -> list[File]:
+    
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+    kwargs = {}
+
+    if prompt is not None:
+        kwargs["prompt"] = prompt
+
+    res = await client.images.generate(
+        model="gpt-image-1",
+        **kwargs,
+    )
+
+    files = [File.validate(f"data:image/png;base64,{image.b64_json}") for image in res.data]
+    return files
+
+
+def post_hook():
+    """Simple post hook to save files to disk."""
+    trace = get_run_context().current_trace()
+    
+    if hasattr(trace.output, '__iter__') and trace.output:
+        saved_files = []
+        for i, file_obj in enumerate(trace.output):
+            if hasattr(file_obj, 'to_disk'):
+                # Save to specific directory
+                output_dir = Path("generated_images")
+                output_dir.mkdir(exist_ok=True)
+                file_path = output_dir / f"image_{i+1}.png"
+                file_obj.to_disk(file_path)
+                saved_files.append(str(file_path))
+        
+        if saved_files:
+            trace.output = saved_files
+
+# Create tool with post hook
+gen_images_with_save = Tool(
+    name="gen_images",
+    handler=gen_images,
+    post_hook=post_hook
+)
+
+agent = Agent(
+    name="ImageAgent",
+    model="openai/gpt-4.1",
+    tools=[gen_images_with_save],
+    system_prompt="Generate images from text descriptions when requested."
+)
+
+result = await agent(
+    prompt="Create a picture of a cat."
+).collect()
+print("Generated image saved to:", result.output.content[0].text)
+```
+
+## Key Features
+
+- **High Quality**: Generate professional-quality images
+- **Customizable**: Control size, style, and format
+- **File Output**: Returns image files ready for use
+- **Post Hooks**: Automatically save files to disk and return file paths

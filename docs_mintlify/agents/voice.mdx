@@ -12,7 +12,7 @@ You can add voice capabilities to your agent using a single provider, such as Op
 Speech-to-Text (STT): Convert audio to text.
 
 ```python
-from timbal.steps.elevenlabs import stt
+from timbal.handlers.elevenlabs import stt
 from timbal.types import File
 
 audio_file = File.validate("path/to/audio.wav")
@@ -23,7 +23,7 @@ print(transcription)
 Text-to-Speech (TTS): Convert text to audio.
 
 ```python
-from timbal.steps.elevenlabs import tts
+from timbal.handlers.elevenlabs import tts
 
 audio_file = await tts(
     text="Hello, how are you?",
@@ -37,8 +37,8 @@ audio_file = await tts(
 You can mix and match providers for STT and TTS. For example, use OpenAI for transcription and ElevenLabs for speech generation.
 
 ```python
-from timbal.steps.openai import stt as openai_stt
-from timbal.steps.elevenlabs import tts as elevenlabs_tts
+from timbal.handlers.openai import stt as openai_stt
+from timbal.handlers.elevenlabs import tts as elevenlabs_tts
 from timbal.types import File
 
 # Transcribe with OpenAI
@@ -58,7 +58,7 @@ You can build agents that both understand and respond in audio. For example, an 
 
 ```python
 from timbal import Agent
-from timbal.steps.elevenlabs import stt, tts
+from timbal.handlers.elevenlabs import stt, tts
 
 agent = Agent(
     name="agent",

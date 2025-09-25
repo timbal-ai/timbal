@@ -289,7 +289,7 @@ Querying with multiple embeddings is not supported yet, but the API is ready and
 Returns metadata for all tables in the specified knowledge base.
 
 ```python
-from timbal.steps.timbal.tables import get_tables
+from timbal.platform.kbs.tables import get_tables
 
 # Get all tables in the knowledge base
 tables = await get_tables(
@@ -309,7 +309,7 @@ for table in tables:
 Retrieves the complete definition of a specific table - Returns table metadata including column definitions, constraints, and comments.
 
 ```python
-from timbal.steps.timbal.tables import get_table
+from timbal.platform.kbs.tables import get_table
 
 # Get detailed information about a specific table
 table = await get_table(
@@ -329,7 +329,7 @@ for column in table.columns:
 Returns the exact SQL definition that would recreate the table.
 
 ```python
-from timbal.steps.timbal.tables import get_table_sql
+from timbal.platform.kbs.tables import get_table_sql
 
 # Get the CREATE TABLE statement
 sql_definition = await get_table_sql(
@@ -346,7 +346,7 @@ print(sql_definition)
 Returns the SQL definitions for all tables in the knowledge base.
 
 ```python
-from timbal.steps.timbal.tables import get_tables_sql
+from timbal.platform.kbs.tables import get_tables_sql
 
 # Get the CREATE TABLE statements for all tables
 sql_definitions = await get_tables_sql(
@@ -364,7 +364,7 @@ for sql in sql_definitions:
 Completely removes the table structure and data from the knowledge base.
 
 ```python
-from timbal.steps.timbal.tables import delete_table
+from timbal.platform.kbs.tables import delete_table
 
 # Delete a table (be careful!)
 await delete_table(
@@ -382,7 +382,7 @@ await delete_table(
 Adds a new column to an existing table.
 
 ```python
-from timbal.steps.timbal.tables import add_column, Column
+from timbal.platform.kbs.tables import add_column, Column
 
 # Add a new column to an existing table
 await add_column(
@@ -405,7 +405,7 @@ await add_column(
 Removes a column from an existing table.
 
 ```python
-from timbal.steps.timbal.tables import drop_column
+from timbal.platform.kbs.tables import drop_column
 
 # Remove a column from the table
 await drop_column(
@@ -422,7 +422,7 @@ await drop_column(
 Changes the name of an existing column.
 
 ```python
-from timbal.steps.timbal.tables import rename_column
+from timbal.platform.kbs.tables import rename_column
 
 # Rename a column
 await rename_column(
@@ -439,7 +439,7 @@ await rename_column(
 Changes the name of an existing table.
 
 ```python
-from timbal.steps.timbal.tables import rename_table
+from timbal.platform.kbs.tables import rename_table
 
 # Rename the entire table
 await rename_table(
@@ -457,7 +457,7 @@ await rename_table(
 Creates a foreign key relationship between tables.
 
 ```python
-from timbal.steps.timbal.tables import add_fk
+from timbal.platform.kbs.tables import add_fk
 
 # Add a foreign key constraint
 await add_fk(
@@ -493,7 +493,7 @@ What happens with this constraint:
 Adds a validation rule to ensure data meets specific conditions.
 
 ```python
-from timbal.steps.timbal.tables import add_check
+from timbal.platform.kbs.tables import add_check
 
 # Add a check constraint
 await add_check(
@@ -517,7 +517,7 @@ What happens with this constraint:
 Ensures that values in specified columns are unique across rows.
 
 ```python
-from timbal.steps.timbal.tables import add_unique
+from timbal.platform.kbs.tables import add_unique
 
 # Add a unique constraint across multiple columns
 await add_unique(
@@ -541,7 +541,7 @@ What happens with this constraint:
 Removes any type of constraint from a table.
 
 ```python
-from timbal.steps.timbal.tables import drop_constraint
+from timbal.platform.kbs.tables import drop_constraint
 
 # Remove a constraint
 await drop_constraint(

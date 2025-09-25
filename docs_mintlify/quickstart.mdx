@@ -156,7 +156,7 @@ Timbal comes with several tools ready to use. Here are two powerful examples:
 You can use the search tool to let your agent search the internet for up-to-date information:
 
 ```python
-from timbal.steps.perplexity import search
+from timbal.handlers.perplexity import search
 
 agent = Agent(
     name="search_agent",
@@ -170,7 +170,7 @@ agent = Agent(
 Timbal also provides a prebuilt tool to query a Postgres database:
 
 ```python
-from timbal.steps.sql.postgres import postgres_query, PGConfig
+from timbal.handlers.sql.postgres import postgres_query, PGConfig
 
 db_config = PGConfig(
     host="localhost",

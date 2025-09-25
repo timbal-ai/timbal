@@ -1,0 +1,66 @@
+---
+title: "SQL Queries & Data Management"
+description: "AI agents can add data to knowledge bases and then query it through natural conversation"
+---
+
+Agents can manage your knowledge base data through simple conversations. Add records naturally, then ask questions about your data - the agent handles all the complex SQL operations behind the scenes:
+
+<Warning>
+Knowledge Bases are only available in the Timbal Platform. You must create your Knowledge Base from the Timbal Platform, and a valid API key is required to access it. Throughout this documentation, any references to org_id and kb_id refer to the identifiers provided by the Timbal Platform for your organization and knowledge base.
+
+Learn more about setting up and using Knowledge Bases in our [Knowledge Bases documentation](/knowledge-bases).
+</Warning>
+
+```python
+from timbal import Agent, Tool
+from timbal.platform.kbs.tables import create_table, import_records, query, get_tables, get_table
+
+agent = Agent(
+    name="SupportAnalyst",
+    model="openai/gpt-4.1-mini",
+    system_prompt=("""
+        You are a support data manager. Help users add tickets to the database and analyze the data. Be conversational and helpful.
+        
+        Configuration:
+        - org_id: 'your-org-id'
+        - kb_id: 'your-kb-id' 
+        - table_name: 'tickets'
+        
+        If the tickets table doesn't exist, create it immediately without asking for confirmation.
+        Always use these configuration values when calling KB functions.
+    """),
+    tools=[
+        Tool(handler=get_tables, description="Use it to check if a table it is already created"),
+        Tool(handler=get_table, description="Use it to get the table definition"),
+        Tool(handler=create_table, description="Use it to create the table"),
+        Tool(handler=query, description="Use it to query the table"),
+        Tool(handler=import_records, description="Use it to import records to the table")
+    ]  # Add multiple KB functions as tools
+) 
+
+# First conversation: Adding records to the knowledge base
+await agent(
+    prompt="I need to add a new support ticket. Customer ID 103 reported a login issue with high priority."
+).collect()
+
+# Second conversation: Querying the data we just added
+result2 = await agent(
+    prompt="How many high priority tickets do we have from customer 103?"
+).collect()
+
+print(result2.output.content[0].text)
+
+# There is currently 1 high priority ticket from customer 103. Would you like to see more details or do anything else?
+```
+
+![Tickets table in Timbal Platform](/images/sql.png)
+
+*The tickets table as it appears in the Timbal Platform interface, showing the record added by the agent.*
+
+## Key Features
+
+- **Natural Conversations**: Add data and ask questions in plain English
+- **Automatic SQL Generation**: Agent converts your requests into complex SQL queries
+- **Data Management**: Add individual records or import bulk CSV files
+- **Real-time Analysis**: Get instant insights from your data
+- **PostgreSQL Power**: Full database capabilities behind simple conversations

@@ -1,0 +1,29 @@
+---
+title: "Web Search"
+description: "AI agents can search the web for real-time information using Perplexity's search capabilities"
+---
+
+Agents can search the web for current information using built-in search tools. Add the search tool to your agent's tools list:
+
+```python
+from timbal import Agent
+from timbal.handlers.perplexity.search import search
+
+agent = Agent(
+    name="SearchAgent",
+    model="openai/gpt-4.1-mini",
+    tools=[search],
+    system_prompt="Search the web for current information and provide accurate answers."
+)
+
+# Agent will automatically use search when needed
+result = await agent(
+    prompt="When was the last match of Liverpool?"
+).collect()
+```
+
+## Key Features
+
+- **Real-time Information**: Access current web data and news
+- **Automatic Tool Selection**: Agent decides when to search
+- **Citation Support**: Includes source links in responses

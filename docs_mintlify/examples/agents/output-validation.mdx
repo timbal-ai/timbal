@@ -1,0 +1,128 @@
+---
+title: "Output Validation"
+description: "Test agent responses using semantic validation, content checks, and format validation"
+---
+
+Evals can validate agent outputs using multiple validation strategies. Test whether your agent provides correct, well-formatted responses:
+
+## Creative Writing Agent
+
+```python agent.py
+from timbal import Agent
+
+agent = Agent(
+    name="creative_writer",
+    model="openai/gpt-4.1-mini",
+    system_prompt="""You are a creative writing assistant.
+For any story request, always provide:
+1. A compelling title
+2. A complete short story (2 sentences)
+3. A moral or lesson
+
+Format your response as:
+Title: [story title]
+Story: [complete narrative]
+Lesson: [moral or takeaway]"""
+)
+```
+
+## Running Evaluations
+
+```bash
+python -m timbal.eval --fqn agent.py::agent --tests evals.yaml
+```
+
+## Validation Configuration
+
+```yaml evals.yaml
+- name: eval_creative_writer_response
+  description: Test creative writing agent provides well-structured, engaging stories
+  turns:
+    - input: "Write a story about a robot learning to paint"
+      output:
+        validators:
+          contains:
+            - "Title"
+            - "Story"
+            - "Lesson"
+```
+
+## Example Evaluation Output
+
+### Successful Validation
+
+```json summary.json
+{
+  "total_files": 1,
+  "total_tests": 1,
+  "total_turns": 1,
+  "outputs_passed": 1,
+  "outputs_failed": 0,
+  "steps_passed": 0,
+  "steps_failed": 0,
+  "usage_passed": 0,
+  "usage_failed": 0,
+  "execution_errors": 0,
+  "tests_failed": []
+}
+```
+
+### Failed Validation
+
+```json summary.json
+{
+  "total_files": 1,
+  "total_tests": 1,
+  "total_turns": 1,
+  "outputs_passed": 0,
+  "outputs_failed": 1,
+  "steps_passed": 0,
+  "steps_failed": 0,
+  "usage_passed": 0,
+  "usage_failed": 0,
+  "execution_errors": 0,
+  "tests_failed": [
+    {
+      "test_name": "eval_creative_writer_response",
+      "test_path": "evals.yaml::eval_creative_writer_response",
+      "input": {
+        "text": "Write a story about a robot learning to paint"
+      },
+      "reason": [
+        "output"
+      ],
+      "execution_error": null,
+      "output_passed": false,
+      "output_explanations": [
+        "Message does not contain 'Story'."
+      ],
+      "actual_output": {
+        "text": "Title: The Artist Within the Machine\n\nAfter countless attempts and failures, the robot finally created a vibrant painting that captured the warmth of a sunset, surprising even its human creators. In that moment, it realized creativity was not just about perfect algorithms but embracing imperfection and emotion. \n\nMoral: True artistry comes from heart and persistence, not just technical skill.",
+        "files": []
+      },
+      "expected_output": {
+        "validators": {
+          "contains": [
+            "Title",
+            "Story",
+            "Lesson"
+          ]
+        }
+      },
+      "steps_passed": null,
+      "steps_explanations": [],
+      "actual_steps": [],
+      "expected_steps": null,
+      "usage_passed": true,
+      "usage_explanations": []
+    }
+  ]
+}
+```
+
+## Key Features
+
+- **Content Validation**: Verify agent responses include required keywords and exclude unwanted content
+- **Format Checking**: Ensure responses follow expected structure and patterns
+- **Semantic Evaluation**: Use LLM to validate response quality and relevance
+- **Comprehensive Testing**: Test both successful and failed validation scenarios

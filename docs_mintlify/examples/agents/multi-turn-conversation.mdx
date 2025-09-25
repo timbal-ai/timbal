@@ -1,0 +1,148 @@
+---
+title: "Multi-turn Conversation Testing"
+description: "Test agent memory, context retention, and complex conversational flows across multiple interactions"
+---
+
+Evals can test complex multi-turn conversations to ensure agents maintain context and provide coherent responses throughout extended interactions:
+
+```python agent.py
+from timbal import Agent
+
+def get_weather(location: str) -> str:
+    """Get current weather information for a specific location."""
+    # Simulate weather data - in real implementation this would call a weather API
+    weather_data = {
+        "New York": "15°C",
+        "London": "12°C",
+        "Tokyo": "22°C"
+    }
+    return weather_data.get(location, f"Weather data not available for {location}")
+
+agent = Agent(
+    name="weather_agent",
+    model="openai/gpt-4.1",
+    system_prompt="You are a helpful weather assistant.",
+    tools=[get_weather],    
+)
+```
+
+## Running Evaluations
+
+```bash
+python -m timbal.eval --fqn agent.py::agent --tests evals.yaml
+```
+
+## Multi-turn Memory Testing
+
+```yaml evals.yaml
+- name: eval_weather_advice
+  description: Test agent uses weather data to provide appropriate advice
+  turns:
+    - input: "What's the weather like in New York?"
+      output: "It's currently 15°C and raining in New York."
+    - input: "Should I bring an umbrella?"
+      steps:
+        validators:
+          not_contains:
+            - name: get_weather
+      output:
+        validators:
+          contains:
+          - "Yes"
+```
+
+## Example Evaluation Output
+
+### Successful Validation
+
+```json summary.json
+{
+  "total_files": 1,
+  "total_tests": 1,
+  "total_turns": 2,
+  "outputs_passed": 1,
+  "outputs_failed": 0,
+  "steps_passed": 1,
+  "steps_failed": 0,
+  "usage_passed": 0,
+  "usage_failed": 0,
+  "execution_errors": 0,
+  "tests_failed": []
+}
+```
+
+### Failed Validation
+
+```json summary.json
+{
+  "total_files": 1,
+  "total_tests": 1,
+  "total_turns": 2,
+  "outputs_passed": 0,
+  "outputs_failed": 1,
+  "steps_passed": 0,
+  "steps_failed": 1,
+  "usage_passed": 0,
+  "usage_failed": 0,
+  "execution_errors": 0,
+  "tests_failed": [
+    {
+      "test_name": "eval_weather_advice",
+      "test_path": "evals.yaml::eval_weather_advice",
+      "input": {
+        "text": "Should I bring an umbrella?"
+      },
+      "reason": [
+        "output",
+        "steps"
+      ],
+      "execution_error": null,
+      "output_passed": false,
+      "output_explanations": [
+        "Message does not contain 'Yes'."
+      ],
+      "actual_output": {
+        "text": "Could you please tell me your location or the location where you want to know the weather? This will help me determine if you need an umbrella.",
+        "files": []
+      },
+      "expected_output": {
+        "validators": {
+          "contains": [
+            "Yes"
+          ]
+        }
+      },
+      "steps_passed": false,
+      "steps_explanations": [
+        "Tool 'get_weather' was called when it should not have been"
+      ],
+      "actual_steps": [
+        {
+          "tool": "get_weather",
+          "input": {
+            "location": "New York"
+          }
+        }
+      ],
+      "expected_steps": {
+        "validators": {
+          "not_contains": [
+            {
+              "name": "get_weather"
+            }
+          ]
+        }
+      },
+      "usage_passed": true,
+      "usage_explanations": []
+    }
+  ]
+}
+```
+
+## Key Features
+
+- **Memory Testing**: Verify agents remember information from previous turns
+- **Context Continuity**: Ensure responses build logically on previous interactions
+- **Task Progression**: Test agents guide users through multi-step processes
+- **Conversation Flow**: Validate natural, coherent dialogue progression

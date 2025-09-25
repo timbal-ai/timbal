@@ -1,0 +1,35 @@
+---
+title: "Audio"
+description: "AI agents can process audio files for transcription and analysis using speech-to-text capabilities"
+---
+
+Agents automatically handle audio files when included in prompts. First validate your audio file with Timbal's `File` type, then pass it alongside text in a list:
+
+```python
+from timbal import Agent
+from timbal.types.file import File
+
+agent = Agent(
+    name="AudioAgent",
+    model="openai/gpt-4o-audio-preview", # Audio-capable model
+    system_prompt="Transcribe and analyze audio content."
+)
+
+# Validate audio file and analyze
+audio_file = File.validate("path/to/recording.mp3")
+result = await agent(
+    prompt=["Transcribe this audio and summarize the key points", audio_file]
+).collect()
+
+print(result.output.content[0].text)
+```
+
+<Warning>
+Use vision-capable models for audio processing. Check [Model Capabilities](/model_capabilities) to see which models support audio input.
+</Warning>
+
+## Key Features
+
+- **Automatic Processing**: Audio files are automatically transcribed to text
+- **Speech Analysis**: Extract content, sentiment, and insights from audio recordings
+- **File Support**: Works with local files, URLs, and base64 data

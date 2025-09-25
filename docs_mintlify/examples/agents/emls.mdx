@@ -1,0 +1,31 @@
+---
+title: "Email"
+description: "AI agents can process and summarize email files for quick content extraction and analysis"
+---
+
+Agents can analyze EML files to extract key information and provide summaries. First validate your EML file with Timbal's `File` type, then pass it alongside text in a list:
+
+```python
+from timbal import Agent
+from timbal.types.file import File
+
+agent = Agent(
+    name="EmailSummarizer",
+    model="openai/gpt-4.1-mini",
+    system_prompt="Summarize emails and extract key information like sender, subject, main points, and action items."
+)
+
+# Validate EML file and summarize
+eml_file = File.validate("path/to/email.eml")
+result = await agent(
+    prompt=["Summarize this email and extract the key points", eml_file]
+).collect()
+
+print(result.output.content[0].text)
+```
+
+## Key Features
+
+- **Email Summarization**: Extract key information from email content
+- **Structured Analysis**: Identify sender, subject, main points, and action items
+- **File Support**: Works with local files, URLs, and base64 data

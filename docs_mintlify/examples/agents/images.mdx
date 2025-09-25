@@ -3,6 +3,37 @@ title: "Images"
 description: "AI agents can analyze and understand images by processing visual content alongside text instructions"
 ---
 
+Agents automatically handle image files when included in prompts. First validate your image file with Timbal's `File` type, then pass it alongside text in a list:
+
+```python
+from timbal import Agent
+from timbal.types.file import File
+
+agent = Agent(
+    name="VisionAgent",
+    model="anthropic/claude-3-7-sonnet-latest",  # Vision-capable model
+    model_params={"max_tokens": 256},
+    system_prompt="Analyze images and provide detailed descriptions."
+)
+
+# Validate multiple image files and analyze
+image1 = File.validate("path/to/image1.jpg")
+image2 = File.validate("path/to/image2.png")
+image3 = File.validate("path/to/image3.jpeg")
+
+result = await agent(
+    prompt=["Analyze these images and provide a description of each one", image1, image2, image3]
+).collect()
+
+print(result.output.content[0].text)
+```
+
 <Warning>
-This example is currently in development.
+Use vision-capable models for image processing. Check [Model Capabilities](/model_capabilities) to see which models support image input.
 </Warning>
+
+## Key Features
+
+- **Automatic Processing**: Images are automatically converted to the correct format for vision models
+- **Multi-modal**: Combine text and images in the same conversation
+- **File Support**: Works with local files, URLs, and base64 data

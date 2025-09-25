@@ -1,0 +1,31 @@
+---
+title: "CSV"
+description: "AI agents can analyze and process CSV data files for insights and data manipulation"
+---
+
+Agents automatically handle CSV files when included in prompts. First validate your CSV file with Timbal's `File` type, then pass it alongside text in a list:
+
+```python
+from timbal import Agent
+from timbal.types.file import File
+
+agent = Agent(
+    name="DataAgent",
+    model="openai/gpt-5",
+    system_prompt="Analyze CSV data and provide insights."
+)
+
+# Validate CSV file and analyze
+csv_file = File.validate("path/to/data.csv")
+result = await agent(
+    prompt=["What insights can you find in this data?", csv_file]
+).collect()
+
+print(result.output.content[0].text)
+```
+
+## Key Features
+
+- **Automatic Processing**: CSV files are automatically parsed and converted to the correct format
+- **Data Analysis**: Extract insights, patterns, and summaries from structured data
+- **File Support**: Works with local files, URLs, and base64 data

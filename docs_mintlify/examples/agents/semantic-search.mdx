@@ -1,0 +1,75 @@
+---
+title: "Semantic Search with Embeddings"
+description: "AI agents can create embeddings and perform intelligent semantic search through natural conversation"
+---
+
+Agents can set up semantic search capabilities and find relevant content through simple conversations. The agent handles embedding creation and meaning-based search automatically:
+
+<Warning>
+Knowledge Bases are only available in the Timbal Platform. You must create your Knowledge Base from the Timbal Platform, and a valid API key is required to access it. Throughout this documentation, any references to org_id and kb_id refer to the identifiers provided by the Timbal Platform for your organization and knowledge base.
+
+Learn more about setting up and using Knowledge Bases in our [Knowledge Bases documentation](/knowledge-bases).
+</Warning>
+
+```python
+from timbal import Agent, Tool
+from timbal.platform.kbs.embeddings import create_embedding, list_embedding_models
+from timbal.platform.kbs.tables import create_table, get_table, get_tables, import_csv, search_table
+from timbal.state import RunContext, set_run_context
+from timbal.types.file import File
+
+agent = Agent(
+    name="ResearchAgent",
+    model="openai/gpt-4.1-mini",
+    system_prompt=("""
+        You are a research assistant. Help users set up semantic search and find relevant articles. Be conversational and helpful.
+        
+        Configuration:
+        - org_id: '1'
+        - kb_id: '70'
+        
+        If a table doesn't exist, create it immediately without asking for confirmation.
+        If an embedding already exists, skip creating it and proceed with the search.
+        Always use these configuration values when calling KB functions.
+    """),
+    tools=[
+        Tool(handler=create_table, description="Use it to create the articles table. ALWAYS use 'text' data type for all columns. Match exactly the CSV file columns."),
+        Tool(handler=import_csv, description="Use it to import the CSV file itself to the table."),
+        Tool(handler=list_embedding_models, description="Use it to list the available embedding models."),
+        Tool(handler=create_embedding, description="Use it to create embeddings for semantic search. Only create if they don't already exist. Use an available model."),
+        Tool(handler=search_table, description="Use it to search articles using semantic search. First you have to know the column name of the embeddings."),
+        Tool(handler=get_table, description="Use it to get the table definitio."),
+        Tool(handler=get_tables, description="Use it to get the table definition"),
+    ]
+)
+
+# First conversation: Setting up the knowledge base
+csv_file = File.validate("/Users/estherfanyanasropero/Downloads/documents.csv")
+result1 = await agent(
+    prompt=["I need to set up a technical support knowledge base. Create an 'articles' table with the columns from the CSV file /Users/estherfanyanasropero/Downloads/documents.csv and add the CSV file to the table.", csv_file]
+).collect()
+
+# Second conversation: Creating embeddings for semantic search
+result2 = await agent(
+    prompt="Now create embeddings for the technical content so I can do semantic search on support documents."
+).collect()
+
+# Reset context to simulate a fresh conversation (no memory of previous steps)
+run_context = RunContext()  # Creates a new empty context
+set_run_context(run_context)  # Replaces current context, wiping all memory
+
+# Third conversation: Performing semantic search
+result3 = await agent(
+    prompt="Search in articles table for 'How can I install music software on my computer?'"
+).collect()
+
+print(result3.output.content[0].text)
+```
+
+## Key Features
+
+- **Natural Setup**: Create tables, add content, and set up embeddings through conversation
+- **Semantic Understanding**: Find content by meaning, not exact keywords
+- **Automatic Embeddings**: Agent creates vector embeddings for intelligent search
+- **Contextual Matching**: Understand synonyms, related concepts, and intent
+- **Flexible Queries**: Natural language queries work better than keyword searches
