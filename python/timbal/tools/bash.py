@@ -1,7 +1,6 @@
 import asyncio
 import subprocess
 from typing import Any, Literal
-from webbrowser import get
 
 import psutil
 import structlog
