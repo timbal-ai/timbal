@@ -1,11 +1,12 @@
 import asyncio
 import contextvars
 import importlib.util
+import inspect
 import math
 import socket
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, create_model
@@ -100,13 +101,19 @@ async def dump(value: Any) -> Any:
     return value
 
 
-def create_model_from_argspec(name: str, argspec: NamedTuple) -> BaseModel:
+def create_model_from_handler(name: str, handler: Callable[..., Any]) -> BaseModel:
     """Create a dynamic pydantic model from the argspec of a function."""
+    argspec = inspect.getfullargspec(handler)
+
+    # If the handler is a bound method, we need to skip the first argument (normally self or cls)
+    is_bound = inspect.ismethod(handler)
+    skip_args_idx = 1 if is_bound else 0
+
     fields = {}
     defaults = {}
     if argspec.defaults:
         defaults = dict(zip(argspec.args[-len(argspec.defaults):], argspec.defaults, strict=True))
-    for field_name in argspec.args:
+    for field_name in argspec.args[skip_args_idx:]:
         field_info = defaults.get(field_name, ...) # Pydantic will use ... to mark this field as required.
         if not isinstance(field_info, FieldInfo):
             field_info = Field(field_info)

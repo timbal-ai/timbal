@@ -3,7 +3,6 @@ import json
 import re
 
 from ..core.agent import Agent
-from ..core.tool import Tool
 from ..errors import EvalError
 from ..state import RunContext, set_run_context
 from ..types.message import Message
