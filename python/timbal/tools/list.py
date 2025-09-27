@@ -24,7 +24,7 @@ class List(Tool):
         
         super().__init__(
             name="list",
-            description="List all files and subdirectories in the given directory path",
+            description="List directory contents. Returns structured data with full paths. Supports path expansion (~, $VAR)",
             handler=_list,
             **kwargs
         )

@@ -60,17 +60,17 @@ Model = Literal[
     "togetherai/deepseek-ai/DeepSeek-V3.1",
     "togetherai/deepseek-ai/DeepSeek-R1",
     # Gemini models
-    "gemini/gemini-2.5-pro",
-    "gemini/gemini-2.5-flash",
-    "gemini/gemini-2.5-flash-lite",
-    "gemini/gemini-2.5-flash-preview-native-audio-dialog",
-    "gemini/gemini-2.5-flash-exp-native-audio-thinking-dialog",
-    "gemini/gemini-2.5-flash-image-preview",
-    "gemini/gemini-2.5-flash-preview-tts",
-    "gemini/gemini-2.5-pro-preview-tts",
-    "gemini/gemini-2.0-flash-preview-image-generation",
-    "gemini/gemini-2.0-flash",
-    "gemini/gemini-2.0-flash-lite",
+    "google/gemini-2.5-pro",
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-flash-lite",
+    "google/gemini-2.5-flash-preview-native-audio-dialog",
+    "google/gemini-2.5-flash-exp-native-audio-thinking-dialog",
+    "google/gemini-2.5-flash-image-preview",
+    "google/gemini-2.5-flash-preview-tts",
+    "google/gemini-2.5-pro-preview-tts",
+    "google/gemini-2.0-flash-preview-image-generation",
+    "google/gemini-2.0-flash",
+    "google/gemini-2.0-flash-lite",
 ]
 
 
@@ -136,7 +136,7 @@ async def _llm_router(
             raise APIKeyNotFoundError("ANTHROPIC_API_KEY not found.")
         client = AsyncAnthropic(api_key=api_key)
 
-    elif provider == "gemini":
+    elif provider == "google":
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise APIKeyNotFoundError("GEMINI_API_KEY not found.")

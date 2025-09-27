@@ -26,7 +26,11 @@ class ToolUseContent(BaseContent):
     @field_validator("input", mode="before")
     def validate_input(cls, v: Any):
         """Aux function to parse tool use input (output from LLMs) into python objects."""
-        if not isinstance(v, dict):
+        if isinstance(v, dict):
+            return v
+        elif isinstance(v, str):
+            if v.strip() == "":
+                return {}
             try:
                 v = json.loads(v)
             except Exception:
@@ -38,7 +42,9 @@ class ToolUseContent(BaseContent):
                         input=v,
                         exc_info=True
                     )
-        return v
+            return v
+        else:
+            raise ValueError(f"Invalid tool_use input: {v}")
 
     @override
     def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any]:

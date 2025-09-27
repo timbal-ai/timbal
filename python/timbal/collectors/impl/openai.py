@@ -108,12 +108,12 @@ class ChatCompletionCollector(BaseCollector):
         openai_usage = event.usage
         input_tokens = int(openai_usage.prompt_tokens)
         input_tokens_details = openai_usage.prompt_tokens_details
-        if hasattr(input_tokens_details, "cached_tokens"):
+        if hasattr(input_tokens_details, "cached_tokens") and input_tokens_details.cached_tokens is not None:
             input_cached_tokens = int(input_tokens_details.cached_tokens)
             if input_cached_tokens:
                 input_tokens -= input_cached_tokens
                 run_context.update_usage(f"{openai_model}:input_cached_tokens", input_cached_tokens)
-        if hasattr(input_tokens_details, "audio_tokens"):
+        if hasattr(input_tokens_details, "audio_tokens") and input_tokens_details.audio_tokens is not None:
             input_audio_tokens = int(input_tokens_details.audio_tokens)
             if input_audio_tokens:
                 input_tokens -= input_audio_tokens
@@ -122,7 +122,7 @@ class ChatCompletionCollector(BaseCollector):
         output_tokens = int(openai_usage.completion_tokens)
         self._output_tokens += output_tokens
         output_tokens_details = openai_usage.completion_tokens_details
-        if hasattr(output_tokens_details, "audio_tokens"):
+        if hasattr(output_tokens_details, "audio_tokens") and output_tokens_details.audio_tokens is not None:
             output_audio_tokens = int(output_tokens_details.audio_tokens)
             if output_audio_tokens:
                 output_tokens -= output_audio_tokens
@@ -132,28 +132,17 @@ class ChatCompletionCollector(BaseCollector):
     def _handle_tool_calls(self, event: ChatCompletionEvent) -> None:
         """Handle tool call events from OpenAI."""
         tool_call = event.choices[0].delta.tool_calls[0]
+        # TODO Review this for parallel tool calls
         if tool_call.id:
             # Start new tool call
             self._current_tool_call = {
                 "type": "tool_use",
                 "id": tool_call.id,
                 "name": tool_call.function.name,
-                "input": ""
+                "input": tool_call.function.arguments
             }
             self._tool_calls.append(self._current_tool_call)
         else:
-            # Continue current tool call
-            if not self._current_tool_call:
-                # TODO Review this
-                # ? Gemini (via openai sdk) doesn't add an id to the tool call
-                tool_call_id = f"tc_{uuid7(as_type='str').replace('-', '')}"
-                self._current_tool_call = {
-                    "type": "tool_use",
-                    "id": tool_call_id,
-                    "name": tool_call.function.name,
-                    "input": ""
-                }
-                self._tool_calls.append(self._current_tool_call)
             self._current_tool_call["input"] += tool_call.function.arguments
     
     def _handle_text_content(self, event: ChatCompletionEvent) -> str:
