@@ -34,10 +34,10 @@ class BaseCollector(ABC):
         This is called by `async for` loops and is the core of the async iterator protocol.
         When the generator is exhausted, it raises StopAsyncIteration to signal completion.
         
-        We intercept each event and cache it in self._events for later use by collect().
+        We intercept each event and process it through the process() method.
         
         Returns:
-            The next Event from the underlying async generator
+            The next processed event from the underlying async generator
             
         Raises:
             StopAsyncIteration: When the generator is exhausted
@@ -45,7 +45,7 @@ class BaseCollector(ABC):
         try:
             # Get the next event from the wrapped generator
             event = await self._async_gen.__anext__()
-            # Cache OutputEvent directly when we encounter it
+            # Process the event through the subclass implementation
             processed_event = self.process(event)
             if asyncio.iscoroutine(processed_event):
                 processed_event = await processed_event
@@ -65,35 +65,34 @@ class BaseCollector(ABC):
         self._collected = True
     
     async def collect(self) -> Any:
-        """Collect the final output by consuming the entire stream.
-        
+        """Collect the final result by consuming the entire stream.
+
         This method consumes all remaining events from the async generator
-        and returns the final OutputEvent. It can be called multiple times
-        safely - subsequent calls return the cached result.
-        
+        and returns the final result as determined by the result() method.
+        It can be called multiple times safely - subsequent calls return the cached result.
+
         How this works:
-        1. If we already have the OutputEvent cached, return it immediately
+        1. If the stream is already collected, return the result immediately
         2. Otherwise, consume remaining events using `async for event in self:`
-           - This calls our __anext__() method which caches the OutputEvent when found
-        3. Return the cached OutputEvent
-        
+           - This calls our __anext__() method which processes events via process()
+        3. Return the final result via result()
+
         Returns:
-            The final OutputEvent from the stream, or None if no OutputEvent was yielded
+            The final result from the stream as determined by the result() method
         """
-        # If we already found and cached the OutputEvent, return it
+        # If we already collected the stream, return the result
         if self._collected:
             return self.result()
         # Generator not fully consumed yet - consume remaining events
         try:
             # This calls our __aiter__() and __anext__() methods
-            # __anext__() will cache the OutputEvent when it encounters it
+            # __anext__() will process events and update internal state
             async for _ in self:
-                # We could break early if we found the OutputEvent, but typically
-                # the OutputEvent is the last event, so we consume everything
+                # Continue consuming all events to ensure complete processing
                 pass
         except StopAsyncIteration:
             pass  # Expected when generator is exhausted
-        # Return the cached OutputEvent (will be None if no OutputEvent was yielded)
+        # Return the final result from the collector's internal state
         return self.result()
 
     @classmethod

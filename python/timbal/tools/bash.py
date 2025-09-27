@@ -1,15 +1,47 @@
 """
 Bash tool for secure shell command execution with pattern validation.
 
-Supports shell-style wildcards (*, ?, []) for command pattern matching.
-Commands must match allowed patterns before execution.
+Args:
+    allowed_patterns: String or list of strings defining allowed command patterns.
+                     Supports shell-style wildcards where '*' matches any sequence.
+                     Use "*" to allow any command (use with caution).
+
+Pattern Matching:
+    - '*' in patterns is converted to regex that matches quoted strings or word characters
+    - Command chains (&&, ||, |, ;) are validated by checking each part separately
+    - Patterns are anchored (must match entire command)
+
+Security Features:
+    - Commands are validated against patterns before execution
+    - Async subprocess execution with stdout/stderr capture
+    - Return code and output tracking
 
 Examples:
-    Bash("echo *")  # Allow any echo command
-    Bash(["ls *", "pwd"])  # Allow ls and pwd commands
-    Bash("cd * && ls *")  # Allow a specific command chain
-"""
+    Basic usage:
+        Bash("echo *")              # Allow any echo command
+        Bash(["ls *", "pwd"])       # Allow ls with args and pwd
+        Bash("git status")          # Allow only exact git status
 
+    Command chains:
+        Bash("cd * && ls *")        # Allow cd followed by ls
+        Bash("make && make test")   # Allow specific build sequence
+
+    Wildcard patterns:
+        Bash("python *.py")         # Allow python with .py files
+        Bash("*")                   # Allow any command (dangerous)
+
+Returns:
+    Dict containing:
+        - stdout: Command output as string
+        - stderr: Error output as string
+        - returncode: Process exit code
+
+Warning:
+    Pattern matching uses regex conversion and may not catch all edge cases.
+    Complex shell syntax, escape sequences, or unusual command structures might
+    bypass validation. Please submit issues or pull requests if you encounter
+    commands that behave unexpectedly with the pattern matching system.
+"""
 import asyncio
 import re
 from typing import Any
