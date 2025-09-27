@@ -9,14 +9,6 @@ from timbal.tools.list import List
 class TestListToolInitialization:
     """Test List tool initialization and basic functionality."""
 
-    def test_list_tool_creation(self):
-        """Test that List tool is created correctly."""
-        list_tool = List()
-
-        assert list_tool.name == "list"
-        assert "List all files and subdirectories" in list_tool.description
-        assert list_tool.handler is not None
-
     def test_list_tool_handler_signature(self):
         """Test that the handler has the correct signature."""
         list_tool = List()

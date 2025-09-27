@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from timbal import Agent
-from timbal.tools import Bash, List #, WebSearch
+from timbal.tools import Bash, List  #, WebSearch
 
 
 @pytest.fixture(params=[
@@ -17,11 +17,35 @@ from timbal.tools import Bash, List #, WebSearch
 def model(request):
     if request.param.startswith("openai"):
         if request.param.endswith("-responses"):
-            os.environ["TIMBAL_ENABLE_OPENAI_RESPONSES_API"] = "true"
+            # Responses API is now the default, so remove any disable flag
+            os.environ.pop("TIMBAL_DISABLE_OPENAI_RESPONSES_API", None)
             return request.param.replace("-responses", "")
         else:
-            os.environ.pop("TIMBAL_ENABLE_OPENAI_RESPONSES_API", None)
+            # Disable responses API for non-responses tests
+            os.environ["TIMBAL_DISABLE_OPENAI_RESPONSES_API"] = "true"
     return request.param
+
+
+# class TestReadToolIntegration:
+#     """Test Read tool integration with agents across different models."""
+
+#     @pytest.mark.asyncio
+#     async def test_read_file(self, model):
+#         """Test agent using Read tool to read a file."""
+#         model_params = {}
+#         if model.startswith("anthropic"):
+#             model_params["max_tokens"] = 2048
+#         agent = Agent(
+#             name="file_reader",
+#             model=model,
+#             model_params=model_params,
+#             tools=[Read()]
+#         )
+
+#         response = await agent(
+#             prompt="The image in ./python/tests/core/fixtures/test.png contains tabular data. You MUST use the read tool to open the file"
+#         ).collect()
+
 
 
 class TestBashToolIntegration:

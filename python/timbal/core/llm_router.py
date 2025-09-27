@@ -189,7 +189,7 @@ async def _llm_router(
         async for res_chunk in res:
             yield res_chunk
 
-    elif provider == "openai" and os.getenv("TIMBAL_ENABLE_OPENAI_RESPONSES_API", "false") == "true":
+    elif provider == "openai" and os.getenv("TIMBAL_DISABLE_OPENAI_RESPONSES_API", "false") != "true":
         responses_kwargs = {
             "model": model_name,
             "stream": True,

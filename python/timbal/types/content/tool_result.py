@@ -20,18 +20,18 @@ class ToolResultContent(BaseContent):
     @override
     def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any]:
         """See base class."""
-        # TODO Refactor this
-        import json
-        output = json.dumps([item.to_openai_responses_input(role="tool") for item in self.content])
         return {
             "type": "function_call_output",
             "call_id": self.id,
-            "output": output,
+            "output": [item.to_openai_responses_input(role="tool") for item in self.content]
         }
 
     @override
     def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any]:
         """See base class."""
+        # ! For file contents that are not convertible to text, e.g. images:
+        # ! Openai directly ignores contents with type 'image_url'
+        # ! Gemini raises 400 error
         return {
             "role": "tool",
             "tool_call_id": self.id,

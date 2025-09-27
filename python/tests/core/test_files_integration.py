@@ -9,18 +9,39 @@ from timbal.types import File
 @pytest.fixture(params=[
     "openai/gpt-4o-mini",
     "openai/gpt-4o-mini-responses",
-    # "google/gemini-2.0-flash-lite",
+    "google/gemini-2.5-flash-lite",
     "anthropic/claude-sonnet-4-0",
     # ? Add more tests for other models.
 ])
 def model(request):
     if request.param.startswith("openai"):
         if request.param.endswith("-responses"):
-            os.environ["TIMBAL_ENABLE_OPENAI_RESPONSES_API"] = "true"
+            # Responses API is now the default, so remove any disable flag
+            os.environ.pop("TIMBAL_DISABLE_OPENAI_RESPONSES_API", None)
             return request.param.replace("-responses", "")
         else:
-            os.environ.pop("TIMBAL_ENABLE_OPENAI_RESPONSES_API", None)
+            # Disable responses API for non-responses tests
+            os.environ["TIMBAL_DISABLE_OPENAI_RESPONSES_API"] = "true"
     return request.param
+
+
+@pytest.fixture(params=[
+    Path(__file__).parent / "fixtures" / "test.png",
+    "https://content.timbal.ai/tests/test.png",
+])
+def png(request):
+    return request.param
+
+
+@pytest.mark.asyncio
+async def test_png(model, png) -> None:
+    agent = Agent(name="agent", model=model, model_params={"max_tokens": 10000})
+
+    prompt = [File.validate(png), "What's Bob's score?"]
+
+    res = await agent(prompt=prompt).collect()
+    print(res)
+    assert "87" in res.output.content[0].text
 
 
 @pytest.fixture(params=[
