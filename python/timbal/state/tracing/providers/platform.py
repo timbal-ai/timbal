@@ -24,11 +24,13 @@ class PlatformTracingProvider(TracingProvider):
         subject = run_context.platform_config.subject
         res = await _request(
             method="GET",
-            path=f"orgs/{subject.org_id}/apps/{subject.app_id}/runs/traces",
-            params={"run_id": run_context.parent_id},
+            path=f"orgs/{subject.org_id}/apps/{subject.app_id}/runs/{run_context.parent_id}",
         )
         res_json = res.json()
-        return Tracing(res_json["trace"])
+        trace = res_json.get("trace")
+        if not trace:
+            return None
+        return Tracing(trace)
     
     @classmethod
     @override
@@ -38,18 +40,16 @@ class PlatformTracingProvider(TracingProvider):
         subject = run_context.platform_config.subject
         payload = {
             "version_id": subject.version_id,
-            "run_id": run_context.id,
-            "run_parent_id": run_context.parent_id,
+            "parent_id": run_context.parent_id,
             "trace": run_context._tracing.model_dump()
         }
         res = await _request(
-            method="POST",
-            path=f"orgs/{subject.org_id}/apps/{subject.app_id}/runs/traces",
+            method="PATCH",
+            path=f"orgs/{subject.org_id}/apps/{subject.app_id}/runs/{run_context.id}",
             json=payload,
         )
         res_json = res.json()
         # We'll need to update the run_context id with the one returned by the platform,
         # so we can link run ids with parent ids in subsequent runs
         # ? We'll have the logs with the auto-generated ids, but they will be persisted with different ones
-        if "run_id" in res_json:
-            run_context.id = res_json["run_id"]
+        run_context.id = res_json.get("id", run_context.id)
