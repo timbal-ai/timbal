@@ -6,7 +6,7 @@ try:
 except ImportError:
     from typing_extensions import override
 
-from .. import Tracing
+from ..trace import Trace
 from .base import TracingProvider
 
 if TYPE_CHECKING:
@@ -18,7 +18,7 @@ class PlatformTracingProvider(TracingProvider):
     
     @classmethod
     @override
-    async def get(cls, run_context: "RunContext") -> Tracing | None:
+    async def get(cls, run_context: "RunContext") -> Trace | None:
         """See base class."""
         from ....platform.utils import _request
         subject = run_context.platform_config.subject
@@ -30,7 +30,7 @@ class PlatformTracingProvider(TracingProvider):
         trace = res_json.get("trace")
         if not trace:
             return None
-        return Tracing(trace)
+        return Trace(trace)
     
     @classmethod
     @override
@@ -41,7 +41,7 @@ class PlatformTracingProvider(TracingProvider):
         payload = {
             "version_id": subject.version_id,
             "parent_id": run_context.parent_id,
-            "trace": run_context._tracing.model_dump()
+            "trace": run_context._trace.model_dump()
         }
         res = await _request(
             method="PATCH",

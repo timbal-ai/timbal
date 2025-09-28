@@ -83,7 +83,7 @@ from timbal.state import get_run_context
 
 async def process_user_data(user_id: str):
     # New variable saved in the step context:
-    get_run_context().current_trace().user_status = "active"
+    get_run_context().current_span().user_status = "active"
     return f"Processed user: {user_id}"
 ```
 

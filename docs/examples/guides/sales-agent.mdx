@@ -176,7 +176,7 @@ def _recent_history(path: str, user_phone: str, limit: int = 10) -> list[str]:
 
 def pre_hook():
     """Build professional prompt from WhatsApp metadata, message, and optional history."""
-    trace = get_run_context().current_trace()
+    trace = get_run_context().current_span()
     payload = trace.input.get("_webhook")
     if not payload:
         bail("No payload found in webhook")
@@ -221,7 +221,7 @@ The `pre_hook` runs before invoking the agent. It extracts metadata from the web
 ```python agent.py
 def post_hook():
     """Send the agent response via WhatsApp and persist outbound to JSONL."""
-    trace = get_run_context().current_trace()
+    trace = get_run_context().current_span()
     from_number = trace.input.get("whatsapp_from_number")
     if not from_number:
         return
@@ -374,7 +374,7 @@ For a full, end-to-end reference (webhook app, helpers, and utilities), see the 
             return False
 
     def pre_hook():
-        trace = get_run_context().current_trace()
+        trace = get_run_context().current_span()
         payload = trace.input.get("_webhook") or {}
         value = (payload.get("entry") or [{}])[0].get("changes", [{}])[0].get("value", {})
         msg = (value.get("messages") or [None])[0] or {}

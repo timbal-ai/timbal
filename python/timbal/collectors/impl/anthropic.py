@@ -165,11 +165,11 @@ class AnthropicCollector(BaseCollector):
     @override
     def result(self) -> Message:
         """Returns structured Anthropic response."""
-        trace = get_run_context().current_trace()
+        span = get_run_context().current_span()
         ttft = self._first_token - self._start
-        trace.metadata["ttft"] = ttft
+        span.metadata["ttft"] = ttft
         tps = self._output_tokens / (time.perf_counter() - self._first_token)
-        trace.metadata["tps"] = tps
+        span.metadata["tps"] = tps
 
         # Check if this is an output_model_tool call and intercept it
         content = []

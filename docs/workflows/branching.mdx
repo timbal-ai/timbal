@@ -17,8 +17,8 @@ workflow = (Workflow(name='my_workflow')
     .step(func_2, y="b")
     .step(func_3)
     .step(send_alert, message="Process completed",
-        when=lambda: get_run_context().step_trace("func_1").output and 
-            get_run_context().step_trace("func_3").output
+        when=lambda: get_run_context().step_span("func_1").output and 
+            get_run_context().step_span("func_3").output
     ) 
 )
 ```
@@ -48,10 +48,10 @@ workflow = (
     Workflow(name="conditional_workflow")
     .step(api_call)
     .step(success_handler, 
-          data=lambda: get_run_context().step_trace("api_call").output["data"],
-          when=lambda: get_run_context().step_trace("api_call").output["status"] == "ok")
+          data=lambda: get_run_context().step_span("api_call").output["data"],
+          when=lambda: get_run_context().step_span("api_call").output["status"] == "ok")
     .step(error_handler,
-          when=lambda: get_run_context().step_trace("api_call").output["status"] == "error")
+          when=lambda: get_run_context().step_span("api_call").output["status"] == "error")
 )
 ```
 
@@ -88,7 +88,7 @@ normal_handler = Agent(
 workflow = (
     Workflow(name="smart_processor")
     .step(classifier)
-    .step(urgent_handler, when=lambda: "urgent" in get_run_context().step_trace("classifier").output.content[0].text())
-    .step(normal_handler, when=lambda: "normal" in get_run_context().step_trace("classifier").output.content[0].text())
+    .step(urgent_handler, when=lambda: "urgent" in get_run_context().step_span("classifier").output.content[0].text())
+    .step(normal_handler, when=lambda: "normal" in get_run_context().step_span("classifier").output.content[0].text())
 )
 ```

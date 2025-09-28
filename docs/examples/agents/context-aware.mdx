@@ -11,7 +11,7 @@ from timbal.state import get_run_context
 
 def get_origin_specific_prompt():
     """Get system prompt based on detected origin."""
-    client_chain = get_run_context().current_trace().client_chain
+    client_chain = get_run_context().current_span().client_chain
     
     prompts = {
         "whatsapp": """You are a WhatsApp business assistant. Keep responses concise and friendly. 
@@ -24,7 +24,7 @@ def get_origin_specific_prompt():
     return prompts.get(client_chain, """You are a helpful assistant. Adapt your response style based on the context.""")
 
 def pre_hook():
-    trace = get_run_context().current_trace()
+    trace = get_run_context().current_span()
     # Detect client chain from the prompt content
     if "whatsapp" in trace.input["prompt"]:
         trace.client_chain = "whatsapp"

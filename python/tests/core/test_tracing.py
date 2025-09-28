@@ -424,7 +424,7 @@ class TestTracingContextPropagation:
             return {
                 "run_id": str(run_context.id),
                 "parent_id": str(run_context.parent_id) if run_context.parent_id else None,
-                "has_tracing": run_context._tracing is not None
+                "has_tracing": run_context._trace is not None
             }
         
         agent = Agent(

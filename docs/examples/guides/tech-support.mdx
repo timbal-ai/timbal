@@ -146,7 +146,7 @@ from timbal.errors import bail
 
 async def pre_hook():
     """Process incoming Slack webhook events before agent execution."""
-    trace = get_run_context().current_trace()
+    trace = get_run_context().current_span()
 
     # Check if this is a Slack webhook event
     if "_webhook" not in trace.input:
@@ -178,7 +178,7 @@ from timbal.state import get_run_context
 
 def post_hook():
     """Send agent response back to Slack channel."""
-    trace = get_run_context().current_trace()
+    trace = get_run_context().current_span()
     
     # Only process Slack webhook events
     if "_webhook" not in trace.input:
@@ -220,7 +220,7 @@ client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 
 async def pre_hook():
     """Process incoming Slack webhook events before agent execution."""
-    trace = get_run_context().current_trace()
+    trace = get_run_context().current_span()
 
     # Only process Slack webhook events
     if "_webhook" not in trace.input:
@@ -244,7 +244,7 @@ async def pre_hook():
 
 def post_hook():
     """Send agent response back to Slack."""
-    trace = get_run_context().current_trace()
+    trace = get_run_context().current_span()
     
     if "_webhook" not in trace.input:
         return

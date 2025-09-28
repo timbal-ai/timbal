@@ -285,17 +285,17 @@ class Agent(Runnable):
         run_context = get_run_context()
         if run_context.parent_id:
             # Try to get tracing data from parent execution
-            parent_tracing = await run_context._get_parent_tracing()
-            if parent_tracing is None:
-                logger.error("Parent tracing not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
+            parent_trace = await run_context._get_parent_trace()
+            if parent_trace is None:
+                logger.error("Parent trace not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
             else:
                 # Extract conversation history from parent's LLM calls
                 # TODO: Handle multiple call_ids for this subagent
-                llm_tracing = parent_tracing.get_path(self._llm._path)
-                assert len(llm_tracing) >= 1, f"Agent trace does not have any records for path {self._llm._path}"
+                llm_spans = parent_trace.get_path(self._llm._path)
+                assert len(llm_spans) >= 1, f"Agent trace does not have any records for path {self._llm._path}"
                 # Get the most recent LLM interaction
-                llm_input_messages = llm_tracing[-1].input.get("messages", []) # TODO Put an assertion in here
-                llm_output_message = llm_tracing[-1].output
+                llm_input_messages = llm_spans[-1].input.get("messages", []) # TODO Put an assertion in here
+                llm_output_message = llm_spans[-1].output
                 # Reconstruct conversation: input messages + LLM response
                 memory = [
                     *[Message.validate(m) for m in llm_input_messages], 

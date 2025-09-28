@@ -66,8 +66,8 @@ def _recent_history(path: str, user_phone: str, limit: int = 10) -> list[str]:
 
 def pre_hook():
     """Build professional prompt from WhatsApp metadata, message, and optional history."""
-    trace = get_run_context().current_trace()
-    payload = trace.input.get("_webhook")
+    span = get_run_context().current_span()
+    payload = span.input.get("_webhook")
     if not payload:
         bail("No payload found in webhook")
 
@@ -101,19 +101,19 @@ def pre_hook():
     }
     _append_jsonl("whatsapp_messages.jsonl", rec)
 
-    trace.input["prompt"] = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
-    trace.input["whatsapp_from_number"] = from_number
-    trace.input["name"] = name
+    span.input["prompt"] = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
+    span.input["whatsapp_from_number"] = from_number
+    span.input["name"] = name
 
 
 def post_hook():
     """Send WhatsApp response and persist outbound to JSONL."""
-    trace = get_run_context().current_trace()
+    span = get_run_context().current_span()
 
     # Extract assistant text output (best-effort)
     response_text = ""
     try:
-        response_text = (trace.output.content[0].text or "").strip()
+        response_text = (span.output.content[0].text or "").strip()
     except Exception:
         raise ValueError("No response text found")
     
@@ -121,7 +121,7 @@ def post_hook():
     if not response_text:
         return
 
-    from_number = trace.input.get("whatsapp_from_number")
+    from_number = span.input.get("whatsapp_from_number")
     if not from_number:
         return
 
@@ -138,7 +138,7 @@ def post_hook():
         "message": json.dumps({"type": "text", "content": response_text}, ensure_ascii=False),
         "timestamp": datetime.now().isoformat(),
         "conversation_id": "",
-        "user_name": trace.input.get("name", ""),
+        "user_name": span.input.get("name", ""),
     }
     _append_jsonl("whatsapp_messages.jsonl", outbound_record)
 

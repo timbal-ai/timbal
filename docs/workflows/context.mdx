@@ -18,7 +18,7 @@ from timbal import Workflow
 from timbal.state import get_run_context
 
 async def process_user_data(user_id: str):
-    get_run_context().current_trace().user_status = "active"   # New variable
+    get_run_context().current_span().user_status = "active"   # New variable
     return f"Processed user: {user_id}"
 
 async def send_notification(message: str, user: str):
@@ -55,13 +55,13 @@ After the workflow runs, each step has the following variables in their context:
 We have previously seen how to access the [Run Context](../core-concepts/context/#accessing-the-runcontext) to store additional data of the run.
 Additionally, we can access the data from the parent and neighbour steps within the workflow.
 
-- `current_trace()` - Access the current step's data
-- `parent_trace()` - Access the parent workflow's data
-- `step_trace("step_name")` - Access any specific neighbour step's data
+- `current_span()` - Access the current step's data
+- `parent_span()` - Access the parent workflow's data
+- `step_span("step_name")` - Access any specific neighbour step's data
 
 ```python
 async def check_status():
-    status = get_run_context().step_trace("process_user_data").user_status
+    status = get_run_context().step_span("process_user_data").user_status
     print(f"Your current status is: {status}")
 
 workflow = (Workflow(name='user_workflow')

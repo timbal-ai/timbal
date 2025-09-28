@@ -6,7 +6,7 @@ try:
 except ImportError:
     from typing_extensions import override
 
-from .. import Tracing
+from ..trace import Trace
 from .base import TracingProvider
 
 if TYPE_CHECKING:
@@ -16,12 +16,12 @@ if TYPE_CHECKING:
 class InMemoryTracingProvider(TracingProvider):
     """In-memory tracing provider using system-wide storage."""
 
-    # Class-level storage: run_id -> Tracing
-    _storage: dict[str, Tracing] = {}
+    # Class-level storage: run_id -> Trace
+    _storage: dict[str, Trace] = {}
     
     @classmethod
     @override
-    async def get(cls, run_context: "RunContext") -> Tracing | None:
+    async def get(cls, run_context: "RunContext") -> Trace | None:
         """See base class."""
         return cls._storage.get(run_context.parent_id)
     
@@ -29,5 +29,5 @@ class InMemoryTracingProvider(TracingProvider):
     @override
     async def put(cls, run_context: "RunContext") -> None:
         """See base class."""
-        cls._storage[run_context.id] = run_context._tracing
+        cls._storage[run_context.id] = run_context._trace
     

@@ -157,11 +157,11 @@ class ChatCompletionCollector(BaseCollector):
     @override
     def result(self) -> Message:
         """Returns structured OpenAI response."""
-        trace = get_run_context().current_trace()
+        span = get_run_context().current_span()
         ttft = self._first_token - self._start
-        trace.metadata["ttft"] = ttft
+        span.metadata["ttft"] = ttft
         tps = self._output_tokens / (time.perf_counter() - self._first_token)
-        trace.metadata["tps"] = tps
+        span.metadata["tps"] = tps
 
         content = []
         if self._content:
@@ -345,11 +345,11 @@ class ResponseCollector(BaseCollector):
     @override
     def result(self) -> Message:
         """Returns structured OpenAI response."""
-        trace = get_run_context().current_trace()
+        span = get_run_context().current_span()
         ttft = self._first_token - self._start
-        trace.metadata["ttft"] = ttft
+        span.metadata["ttft"] = ttft
         tps = self._output_tokens / (time.perf_counter() - self._first_token)
-        trace.metadata["tps"] = tps
+        span.metadata["tps"] = tps
 
         content = []
         for content_block in self.content.values(): # Python dicts are ordered

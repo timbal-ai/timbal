@@ -8,9 +8,9 @@ description: "Workflows are broken into multiple steps, which can be executed fo
 We have previously seen how to access the [Run Context](../core-concepts/context/#accessing-the-runcontext) to store additional data of the run.
 Additionally, steps can access the data from their parent run or neighbour steps within the workflow.
 
-- `current_trace()` - Access the current step's data
-- `parent_trace()` - Access the parent workflow's data
-- `step_trace("step_name")` - Access any specific neighbour step's data
+- `current_span()` - Access the current step's data
+- `parent_span()` - Access the parent workflow's data
+- `step_span("step_name")` - Access any specific neighbour step's data
 
 Referencing data from another run creates dependencies within the Workflow.
 **Timbal automatically resolves these dependencies** to ensure proper execution.
@@ -33,7 +33,7 @@ async def func_2(y: str):
     return y
 
 async def func_3():
-    return get_run_context().step_trace("func_1").output    # output from func_1
+    return get_run_context().step_span("func_1").output    # output from func_1
 
 workflow = (Workflow(name='my_workflow')
     .step(func_1, x="a")
