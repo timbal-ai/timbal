@@ -24,11 +24,11 @@ class PlatformTracingProvider(TracingProvider):
         subject = run_context.platform_config.subject
         res = await _request(
             method="GET",
-            path=f"orgs/{subject.org_id}/apps/{subject.app_id}/tracing",
+            path=f"orgs/{subject.org_id}/apps/{subject.app_id}/runs/traces",
             params={"run_id": run_context.parent_id},
         )
         res_json = res.json()
-        return Tracing(res_json["tracing"])
+        return Tracing(res_json["trace"])
     
     @classmethod
     @override
@@ -38,13 +38,13 @@ class PlatformTracingProvider(TracingProvider):
         subject = run_context.platform_config.subject
         payload = {
             "version_id": subject.version_id,
-            "id": run_context.id,
-            "parent_id": run_context.parent_id,
-            "tracing": run_context._tracing.model_dump()
+            "run_id": run_context.id,
+            "run_parent_id": run_context.parent_id,
+            "trace": run_context._tracing.model_dump()
         }
         res = await _request(
             method="POST",
-            path=f"orgs/{subject.org_id}/apps/{subject.app_id}/tracing",
+            path=f"orgs/{subject.org_id}/apps/{subject.app_id}/runs/traces",
             json=payload,
         )
         res_json = res.json()

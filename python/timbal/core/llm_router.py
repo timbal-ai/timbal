@@ -20,6 +20,8 @@ from ..types.message import Message
 from ..utils import resolve_default
 from .runnable import Runnable
 
+OPENAI_API = os.getenv("TIMBAL_OPENAI_API", "responses")
+
 # Model type with provider prefixes
 Model = Literal[
     # OpenAI models
@@ -189,7 +191,7 @@ async def _llm_router(
         async for res_chunk in res:
             yield res_chunk
 
-    elif provider == "openai" and os.getenv("TIMBAL_DISABLE_OPENAI_RESPONSES_API", "false") != "true":
+    elif provider == "openai" and OPENAI_API == "responses":
         responses_kwargs = {
             "model": model_name,
             "stream": True,
