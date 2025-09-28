@@ -14,6 +14,62 @@
     }
   ],
   "paths": {
+    "/orgs/{org_id}/apps/{app_id}/runs/traces": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "description": "Insert or update a trace for a run",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "app_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpsertTraceReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Trace inserted or updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpsertTraceResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/embedding-models": {
       "get": {
         "tags": [
@@ -940,6 +996,50 @@
             "description": "Array of records to insert or update (at least one record is required)"
           }
         }
+      },
+      "UpsertTraceReqBody": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "trace"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "description": "Run identifier (if any)"
+          },
+          "run_parent_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Parent run identifier (if any)"
+          },
+          "trace": {
+            "description": "Trace data"
+          },
+          "version_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Version identifier (if any)"
+          }
+        }
+      },
+      "UpsertTraceResBody": {
+        "type": "object",
+        "required": [
+          "run_id"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       }
     },
     "securitySchemes": {
@@ -958,6 +1058,10 @@
     {
       "name": "indexes",
       "description": "KB Indexes operations"
+    },
+    {
+      "name": "runs",
+      "description": "Execution operations"
     },
     {
       "name": "tables",

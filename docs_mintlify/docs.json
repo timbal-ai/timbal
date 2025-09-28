@@ -164,6 +164,12 @@
             ]
           },
           {
+            "group": "Runs",
+            "pages": [
+              "api-reference/runs/upsert-trace"
+            ]
+          },
+          {
             "group": "Knowledge Bases",
             "pages": [
               {
