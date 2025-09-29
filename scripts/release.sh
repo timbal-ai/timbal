@@ -7,10 +7,32 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
+# Check if git tag exists and get commit hash
+if ! TAG_COMMIT=$(git rev-parse "v$VERSION" 2>/dev/null); then
+    echo "Error: Git tag v$VERSION does not exist. Please create the tag first."
+    exit 1
+fi
+
 # TODO Add building the python package.
 
 cd cli
-zig build -Dversion="$VERSION" -Doptimize=ReleaseSmall
+
+# Check if build output already exists
+if [ -d "zig-out/$VERSION" ]; then
+    echo "Build output for version $VERSION already exists."
+    read -p "Do you want to rebuild? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Skipping build step..."
+        # Skip to asset handling
+    else
+        echo "Rebuilding..."
+        zig build -Dversion="$VERSION" -Doptimize=ReleaseSmall
+    fi
+else
+    zig build -Dversion="$VERSION" -Doptimize=ReleaseSmall
+fi
+
 cd ..
 
 # All release assets are going to be uploaded here.
@@ -42,7 +64,7 @@ MANIFEST_PATH="$ASSETS_PATH/manifest.json"
 cat > "$MANIFEST_PATH" <<EOF
 {
     "name": "timbal",
-    "description": "Framework for building and orchestrating agentic AI applications—fast, scalable, and enterprise-ready. With flow-based execution, built-in memory and state management, it enables resilient, tool-using agents that think, plan, and act in dynamic environments.",
+    "description": "Timbal is an open-source python framework for building reliable AI applications, battle-tested in production with simple, transparent architecture that eliminates complexity while delivering blazing fast performance, robust typing, and API stability in an ever-changing ecosystem.",
     "version": "$VERSION",
     "binaries": {
         "linux": {
@@ -84,14 +106,23 @@ ASSETS=(
     "$MANIFEST_PATH"
 )
 
-# Upsert the release on github. We'll be able to update the release notes afterwards.
+# Check if GitHub release already exists
 if gh release view "v$VERSION" > /dev/null 2>&1; then
-    echo "Cleaning up existing release v$VERSION..."
-    gh release delete "v$VERSION" --yes
+    echo "GitHub release v$VERSION already exists."
+    read -p "Do you want to override it? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "Deleting existing release v$VERSION..."
+        gh release delete "v$VERSION" --yes
+    else
+        echo "Aborting release creation."
+        exit 0
+    fi
 fi 
 
-echo "Creating release v$VERSION..."
+echo "Creating release v$VERSION from tag (commit: $TAG_COMMIT)..."
 gh release create "v$VERSION" \
     "${ASSETS[@]}" \
     --title "v$VERSION" \
-    --notes "Release v$VERSION"
+    --notes "Release v$VERSION" \
+    --target "$TAG_COMMIT"

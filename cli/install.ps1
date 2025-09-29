@@ -110,35 +110,34 @@ function Test-DockerInstallation() {
         Write-Information "Docker command found successfully."
     } catch [System.Management.Automation.CommandNotFoundException] {
         # Specific catch for command not found
-        $errorMessage = @"
-Docker command not found in PATH. Timbal requires Docker for container management.
+        $warningMessage = @"
+Warning: Docker command not found in PATH.
+Docker is required for 'timbal build' and 'timbal push' commands.
 
 Please follow the instructions in: https://docs.docker.com/desktop/setup/install/windows-install/
 "@
-        Write-Error $errorMessage
-        Exit 1
+        Write-Warning $warningMessage
+        return
     } catch {
         # Catch any other unexpected errors during the check
-        Write-Error "An unexpected error occurred while checking for 'docker': $($_.Exception.Message)"
-        Exit 1
+        Write-Warning "An unexpected error occurred while checking for 'docker': $($_.Exception.Message)"
+        return
     }
 
-    # Check if docker command is usable by running hello-world
-    Write-Information "Checking Docker connectivity by running 'hello-world' container..."
+    # Test Docker connectivity
+    Write-Information "Testing Docker connectivity by running 'hello-world' container..."
     # Attempt to run hello-world, suppress output, and check exit status
     # *> $null redirects both stdout (1) and stderr (2) streams to null
     docker run --rm hello-world *> $null
     if ($LASTEXITCODE -ne 0) {
-        # Use Write-Warning for non-critical issues
-        $errorMessage = @"
-Docker engine appears to be not running, or the current user lacks permissions.
+        $warningMessage = @"
+Warning: Docker engine appears to be not running, or the current user lacks permissions.
 Failed to run the 'hello-world' container (Exit Code: $LASTEXITCODE).
 You might need to start Docker Desktop or configure user permissions.
 For Windows, ensure Docker Desktop is running. For Linux/WSL, you might need to add your user to the 'docker' group.
 See relevant documentation: https://docs.docker.com/desktop/setup/install/windows-install/
 "@
-        Write-Error $errorMessage
-        Exit 1
+        Write-Warning $warningMessage
     } else {
         Write-Information "Docker connection successful ('hello-world' container ran successfully)."
     }
@@ -288,6 +287,8 @@ function Install-Binary($install_args) {
     } else {
         Write-Information "'$InstallDir' is already in your user PATH."
     }
+
+    Write-Information "Successfully installed timbal. Setup 'TIMBAL_API_KEY' env variable to configure Timbal Platform access."
 }
 
 
