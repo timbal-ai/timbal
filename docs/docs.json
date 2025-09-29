@@ -166,7 +166,13 @@
           {
             "group": "Runs",
             "pages": [
-              "api-reference/runs/upsert-trace"
+              "api-reference/runs/upsert"
+            ]
+          },
+          {
+            "group": "Files",
+            "pages": [
+              "api-reference/files/upload"
             ]
           },
           {

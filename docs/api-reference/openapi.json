@@ -14,12 +14,12 @@
     }
   ],
   "paths": {
-    "/orgs/{org_id}/apps/{app_id}/runs/traces": {
-      "post": {
+    "/orgs/{org_id}/apps/{app_id}/runs/{run_id}": {
+      "patch": {
         "tags": [
           "runs"
         ],
-        "description": "Insert or update a trace for a run",
+        "description": "Update an existing platform run or link a local run with the platform",
         "operationId": "handler",
         "parameters": [
           {
@@ -39,13 +39,22 @@
               "type": "integer",
               "format": "int64"
             }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "This can be a platform-defined id or a custom id.\nThe platform will map the custom id to an internal one afterwards.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpsertTraceReqBody"
+                "$ref": "#/components/schemas/UpdateRunReqBody"
               }
             }
           },
@@ -53,11 +62,11 @@
         },
         "responses": {
           "200": {
-            "description": "Trace inserted or updated successfully",
+            "description": "Run updated successfully",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UpsertTraceResBody"
+                  "$ref": "#/components/schemas/RunPreview"
                 }
               }
             }
@@ -102,6 +111,67 @@
                     "text-embedding-3-small",
                     "text-embedding-3-large"
                   ]
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/files": {
+      "post": {
+        "tags": [
+          "files"
+        ],
+        "description": "Upload a file to an org",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "format": "int32",
+                      "minimum": 0
+                    },
+                    "contentMediaType": "application/octet-stream"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "File uploaded successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/File"
                 }
               }
             }
@@ -682,6 +752,17 @@
           }
         }
       },
+      "Deployment": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        }
+      },
       "Embedding": {
         "allOf": [
           {
@@ -830,6 +911,54 @@
           }
         ]
       },
+      "File": {
+        "type": "object",
+        "required": [
+          "content_length",
+          "content_type",
+          "created_at",
+          "name",
+          "id",
+          "url"
+        ],
+        "properties": {
+          "content_length": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The content length of the file in bytes"
+          },
+          "content_type": {
+            "type": "string",
+            "description": "The content type of the file"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The time the file was created"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The time the file expires at"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unique identifier for the file"
+          },
+          "name": {
+            "type": "string",
+            "description": "The name of the file"
+          },
+          "url": {
+            "type": "string",
+            "description": "The URL where the file can be accessed"
+          }
+        }
+      },
       "Index": {
         "type": "object",
         "required": [
@@ -917,6 +1046,73 @@
           }
         }
       },
+      "RunPreview": {
+        "type": "object",
+        "required": [
+          "id",
+          "user",
+          "version",
+          "status",
+          "cost_usd",
+          "created_at"
+        ],
+        "properties": {
+          "cost_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "group_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_reaction_sentiment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "status": {
+            "type": "string"
+          },
+          "trace": {
+
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "version": {
+            "$ref": "#/components/schemas/VersionRef"
+          }
+        },
+        "additionalProperties": {
+
+        }
+      },
       "SearchTableReqBody": {
         "type": "object",
         "required": [
@@ -976,6 +1172,33 @@
           }
         }
       },
+      "UpdateRunReqBody": {
+        "type": "object",
+        "required": [
+          "trace"
+        ],
+        "properties": {
+          "parent_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Parent run identifier (if any)"
+          },
+          "trace": {
+            "description": "Trace data"
+          },
+          "version_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Version identifier (if any)"
+          }
+        }
+      },
       "UpsertRecordsReqBody": {
         "type": "object",
         "required": [
@@ -997,47 +1220,59 @@
           }
         }
       },
-      "UpsertTraceReqBody": {
+      "UserRef": {
         "type": "object",
         "required": [
-          "run_id",
-          "trace"
+          "id",
+          "name",
+          "email"
         ],
         "properties": {
-          "run_id": {
-            "type": "string",
-            "description": "Run identifier (if any)"
+          "email": {
+            "type": "string"
           },
-          "run_parent_id": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "photo_url": {
             "type": [
-              "integer",
+              "string",
               "null"
-            ],
-            "format": "int64",
-            "description": "Parent run identifier (if any)"
-          },
-          "trace": {
-            "description": "Trace data"
-          },
-          "version_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Version identifier (if any)"
+            ]
           }
         }
       },
-      "UpsertTraceResBody": {
+      "VersionRef": {
         "type": "object",
         "required": [
-          "run_id"
+          "id",
+          "name",
+          "is_prod"
         ],
         "properties": {
-          "run_id": {
+          "deployment": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Deployment"
+              }
+            ]
+          },
+          "id": {
             "type": "integer",
             "format": "int64"
+          },
+          "is_prod": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
           }
         }
       }
@@ -1054,6 +1289,10 @@
     {
       "name": "embeddings",
       "description": "KB Embeddings operations"
+    },
+    {
+      "name": "files",
+      "description": "File operations"
     },
     {
       "name": "indexes",
