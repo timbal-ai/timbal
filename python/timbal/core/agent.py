@@ -68,7 +68,7 @@ class Agent(Runnable):
     - Integration with multiple LLM providers via _llm_router
     """
 
-    model: Model
+    model: Model | str
     """The LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-3-sonnet')."""
     system_prompt: str | None = None
     """System prompt to provide context for the agent."""

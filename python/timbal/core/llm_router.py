@@ -48,6 +48,7 @@ Model = Literal[
     "anthropic/claude-opus-4-1",
     "anthropic/claude-opus-4-0",
     "anthropic/claude-sonnet-4-0",
+    "anthropic/claude-sonnet-4-5",
     "anthropic/claude-3-7-sonnet-latest",
     "anthropic/claude-3-5-haiku-latest",
     # TogetherAI models
@@ -78,7 +79,7 @@ Model = Literal[
 
 # TODO Add more parameters
 async def _llm_router(
-    model: Model = Field(
+    model: Model | str = Field(
         ...,
         description="Provider/Name of the LLM model to use.",
     ),
