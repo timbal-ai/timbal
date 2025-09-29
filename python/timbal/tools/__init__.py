@@ -3,3 +3,4 @@ from .bash import Bash
 from .list import List
 from .read import Read
 from .web_search import WebSearch
+from .write import Write
