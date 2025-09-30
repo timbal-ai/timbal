@@ -286,10 +286,12 @@ class ResponseCollector(BaseCollector):
             "citations": [],
             "text": event.part.text,
         }
+        return event.part.text
 
     def _handle_text_delta(self, event: ResponseTextDeltaEvent) -> None:
         """Handle text delta events from OpenAI."""
         self.content[event.item_id]["text"] += event.delta
+        return event.delta
 
     def _handle_output_text_annotation_added(self, event: ResponseOutputTextAnnotationAddedEvent) -> None:
         """Handle output text annotation added events from OpenAI."""

@@ -48,10 +48,6 @@ from ..utils import dump, sync_to_async_gen
 
 logger = structlog.get_logger("timbal.core.runnable")
 
-# By default, we only print START and OUTPUT events
-timbal_log_events = os.getenv("TIMBAL_LOG_EVENTS", "START,OUTPUT").split(",")
-timbal_log_events = set(event.strip() for event in timbal_log_events)
-
 
 # TODO Add timeout
 class Runnable(ABC, BaseModel):
@@ -127,6 +123,8 @@ class Runnable(ABC, BaseModel):
     """Whether the post_hook is a coroutine."""
     _post_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
     # ? Can we store all post_hook related stuff together?
+    _log_events: set[str] = PrivateAttr()
+    """Which timbal events to log."""
 
 
     @classmethod
@@ -251,6 +249,8 @@ class Runnable(ABC, BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize the Runnable after Pydantic model creation."""
+        log_events = os.getenv("TIMBAL_LOG_EVENTS", "START,OUTPUT").split(",")
+        self._log_events = set(event.strip() for event in log_events)
         self._prepare_default_params(self.default_params)
         # Allow users to override the type in metadata if desired. Else, use the class name.
         if "type" not in self.metadata:
@@ -537,7 +537,7 @@ class Runnable(ABC, BaseModel):
                 call_id=span.call_id,
                 parent_call_id=span.parent_call_id,
             )
-            if start_event.type in timbal_log_events:
+            if start_event.type in self._log_events:
                 logger.info("start_event", **start_event.model_dump())
             yield start_event
 
@@ -590,7 +590,7 @@ class Runnable(ABC, BaseModel):
                                 parent_call_id=span.parent_call_id,
                                 chunk=event,
                             )
-                            if chunk_event.type in timbal_log_events:
+                            if chunk_event.type in self._log_events:
                                 logger.info("chunk_event", **chunk_event.model_dump())
                             return chunk_event
                         return event
@@ -669,7 +669,7 @@ class Runnable(ABC, BaseModel):
                 await run_context._save_trace()
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
                 set_parent_call_id(None)
-            if output_event.type in timbal_log_events:
+            if output_event.type in self._log_events:
                 logger.info("output_event", **output_event.model_dump())
             yield output_event
 
