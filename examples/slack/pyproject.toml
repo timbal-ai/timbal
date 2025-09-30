@@ -1,0 +1,9 @@
+[project]
+name = "slack"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "pyngrok>=7.4.0",
+    "slack-sdk>=3.36.0",
+    "timbal",
+]
