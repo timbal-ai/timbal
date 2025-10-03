@@ -8,6 +8,7 @@ except ImportError:
 
 import structlog
 
+from ...errors import InterruptError
 from ...types.events.base import BaseEvent as TimbalBaseEvent
 from ...types.events.chunk import ChunkEvent as TimbalChunkEvent
 from ...types.events.output import OutputEvent as TimbalOutputEvent
@@ -41,7 +42,10 @@ class TimbalCollector(BaseCollector):
         elif isinstance(event, TimbalOutputEvent):
             self._output_event = event
             return event
-        logger.warning("Unknown Timbal event type", event_type=type(event), event=event.model_dump())
+        elif isinstance(event, InterruptError):
+            pass
+        else:
+            logger.warning("Unknown Timbal event type", event_type=type(event), event=event)
 
     @override
     def result(self) -> Any:

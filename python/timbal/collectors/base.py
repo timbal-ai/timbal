@@ -43,13 +43,14 @@ class BaseCollector(ABC):
             StopAsyncIteration: When the generator is exhausted
         """
         try:
-            # Get the next event from the wrapped generator
-            event = await self._async_gen.__anext__()
-            # Process the event through the subclass implementation
-            processed_event = self.process(event)
-            if asyncio.iscoroutine(processed_event):
-                processed_event = await processed_event
-            return processed_event
+            while True:
+                event = await self._async_gen.__anext__()
+                processed = self.process(event)
+                if asyncio.iscoroutine(processed):
+                    processed = await processed
+                if processed is None:
+                    continue
+                return processed
         except StopAsyncIteration:
             # The generator is exhausted - mark as collected and re-raise
             self._collected = True

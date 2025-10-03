@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 
 class RunStatus(BaseModel):
-    code: Literal["success", "error", "cancelled", "timeout"]
+    code: Literal["success", "error", "cancelled", "timeout", "interrupted"]
     """The code associated with the run status."""
     reason: str | None = None
     """The reason for the run status."""

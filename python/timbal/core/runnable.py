@@ -25,7 +25,7 @@ from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
 from ..collectors.impl.timbal import TimbalCollector
-from ..errors import EarlyExit
+from ..errors import EarlyExit, InterruptError
 from ..state import (
     get_or_create_run_context,
     get_parent_call_id,
@@ -529,6 +529,7 @@ class Runnable(ABC, BaseModel):
         span.input = input
         span._input_dump = None # ? await dump(input)
         span._output_dump = None
+        collector = None
         try:
             start_event = StartEvent(
                 run_id=run_context.id,
@@ -605,17 +606,20 @@ class Runnable(ABC, BaseModel):
                     # Keep the final result
                     output = collector.result()
 
-            # If the output is an OutputEvent, we extract the output
-            # to avoid nesting an output event inside another output event
-            if isinstance(output, OutputEvent):
-                output = output.output
-            span.output = output
-            span._output_dump = await dump(output)
             span.status = RunStatus(
                 code="success",
                 reason=None, # TODO
                 message=None # TODO
             )
+            # If the output is an OutputEvent, we extract the output
+            # to avoid nesting an output event inside another output event
+            if isinstance(output, OutputEvent):
+                if output.status.code == "cancelled":
+                    span.status = output.status
+                output = output.output
+
+            span.output = output
+            span._output_dump = await dump(output)
             
             # Restore the call context to this runnable before executing post_hook
             # This ensures post_hook modifies the correct span, not any nested ones
@@ -631,6 +635,19 @@ class Runnable(ABC, BaseModel):
                 reason="early_exit",
                 message=str(early_exit)
             )
+
+        except (asyncio.CancelledError, InterruptError):
+            logger.warning("Interrupted", run_id=run_context.id, call_id=span.call_id)
+            # Create a message with collected chunks or cancellation info
+            if collector is not None:
+                span.output = collector.result()
+                span._output_dump = await dump(span.output)
+            span.status = RunStatus(
+                code="interrupted",
+                reason="interrupted",
+                message="Interrupted"
+            )
+            yield InterruptError(_call_id)
 
         except Exception as err:
             error = {
