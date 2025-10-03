@@ -223,8 +223,14 @@ You must respond with a valid JSON object containing:
             system_prompt=system_prompt,
         )
         res = await agent(prompt=Message.validate(prompt)).collect()
-        res = res.output.content[0].text
-        res = json.loads(res)
+        if not res.output or not res.output.content or not res.output.content[0].text:
+            raise EvalError("Semantic validator agent failed to generate a response. This may be due to missing API key or other configuration issues.")
+        
+        res_text = res.output.content[0].text
+        try:
+            res = json.loads(res_text)
+        except json.JSONDecodeError as e:
+            raise EvalError(f"Semantic validator agent returned invalid JSON: {res_text}. Error: {str(e)}")
 
         if not res["is_valid"]:
             raise EvalError(res["explanation"])
@@ -329,8 +335,14 @@ You must respond with a valid JSON object containing:
             system_prompt=system_prompt,
         )
         res = await agent(prompt=Message.validate(prompt)).collect()
-        res = res.output.content[0].text
-        res = json.loads(res)
+        if not res.output or not res.output.content or not res.output.content[0].text:
+            raise EvalError("Semantic validator agent failed to generate a response. This may be due to missing API key or other configuration issues.")
+        
+        res_text = res.output.content[0].text
+        try:
+            res = json.loads(res_text)
+        except json.JSONDecodeError as e:
+            raise EvalError(f"Semantic validator agent returned invalid JSON: {res_text}. Error: {str(e)}")
 
         if not res["is_valid"]:
             raise EvalError(res["explanation"])
