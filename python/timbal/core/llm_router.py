@@ -91,7 +91,7 @@ async def _llm_router(
         default_factory=list,
         description="Chat history containing user and LLM messages.",
     ),
-    tools: list[Runnable] = Field(
+    tools: list[Runnable] | None = Field(
         default_factory=list,
         description="List of tools/functions the LLM can call.",
     ),
@@ -119,6 +119,7 @@ async def _llm_router(
     messages = resolve_default("messages", messages)
     tools = resolve_default("tools", tools)
     max_tokens = resolve_default("max_tokens", max_tokens)
+    thinking = resolve_default("thinking", thinking)
 
     if "/" not in model:
         raise ValueError("Model must be in format 'provider/model_name'")
