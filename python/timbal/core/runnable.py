@@ -636,16 +636,16 @@ class Runnable(ABC, BaseModel):
                 message=str(early_exit)
             )
 
-        except (asyncio.CancelledError, InterruptError):
+        except (asyncio.CancelledError, InterruptError) as e:
             logger.warning("Interrupted", run_id=run_context.id, call_id=span.call_id)
             # Create a message with collected chunks or cancellation info
             if collector is not None:
                 span.output = collector.result()
                 span._output_dump = await dump(span.output)
             span.status = RunStatus(
-                code="interrupted",
+                code="cancelled",
                 reason="interrupted",
-                message="Interrupted"
+                message=str(e)
             )
             yield InterruptError(_call_id)
 

@@ -149,7 +149,7 @@ class TestToolInterruption:
         
         # Verify interruption
         assert isinstance(result, OutputEvent)
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
         assert result.output is None
     
     @pytest.mark.asyncio
@@ -167,7 +167,7 @@ class TestToolInterruption:
         
         # Verify interruption
         assert isinstance(result, OutputEvent)
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
         assert result.output is None
     
     @pytest.mark.asyncio
@@ -185,7 +185,7 @@ class TestToolInterruption:
         
         # Verify interruption
         assert isinstance(result, OutputEvent)
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
         assert result.output is not None  # Should have partial output
     
     @pytest.mark.asyncio
@@ -203,7 +203,7 @@ class TestToolInterruption:
         
         # Verify interruption
         assert isinstance(result, OutputEvent)
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
         assert result.output is not None  # Should have partial output
     
     
@@ -216,7 +216,7 @@ class TestToolInterruption:
         task1.cancel()
         result1 = await task1
         
-        assert result1.status.code == "interrupted"
+        assert result1.status.code == "cancelled"
         
         # Second execution - let it complete
         result2 = await long_running_async_tool(duration=0.1).collect()
@@ -237,7 +237,7 @@ class TestToolInterruption:
         task.cancel()
         result = await task
         
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
 
 
 class TestAgentInterruption:
@@ -268,7 +268,7 @@ class TestAgentInterruption:
         
         # Verify interruption
         assert isinstance(result, OutputEvent)
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
     
     @pytest.mark.asyncio
     async def test_agent_interruption_during_tool_execution(self):
@@ -301,7 +301,7 @@ class TestAgentInterruption:
         
         # Verify interruption
         assert isinstance(result, OutputEvent)
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
     
     @pytest.mark.asyncio
     async def test_agent_reusability_after_interruption(self):
@@ -321,7 +321,7 @@ class TestAgentInterruption:
         task1.cancel()
         result1 = await task1
         
-        assert result1.status.code == "interrupted"
+        assert result1.status.code == "cancelled"
         
         # Second call - should work normally
         prompt2 = Message.validate({
@@ -354,7 +354,7 @@ class TestAgentInterruption:
         
         # Verify interruption
         assert isinstance(result, OutputEvent)
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
     
     @pytest.mark.asyncio
     async def test_agent_interruption_preserves_partial_results(self):
@@ -383,7 +383,7 @@ class TestAgentInterruption:
         result = await task
         
         # Should have interrupted status but may have partial output
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
         assert result.output is not None
 
 
@@ -407,7 +407,7 @@ class TestWorkflowInterruption:
         
         # Verify interruption
         assert isinstance(result, OutputEvent)
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
     
     @pytest.mark.asyncio
     async def test_workflow_interruption_during_sequential_steps(self):
@@ -439,7 +439,7 @@ class TestWorkflowInterruption:
         result = await task
         
         # Verify interruption
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
     
     @pytest.mark.asyncio
     async def test_workflow_interruption_during_parallel_steps(self):
@@ -462,7 +462,7 @@ class TestWorkflowInterruption:
         
         # Verify interruption
         assert isinstance(result, OutputEvent)
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
     
 
     @pytest.mark.asyncio
@@ -495,7 +495,7 @@ class TestWorkflowInterruption:
         result = await task
         
         # Verify interruption
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
     
     @pytest.mark.asyncio
     async def test_workflow_reusability_after_interruption(self):
@@ -512,7 +512,7 @@ class TestWorkflowInterruption:
         task1.cancel()
         result1 = await task1
         
-        assert result1.status.code == "interrupted"
+        assert result1.status.code == "cancelled"
         
         # Second execution - use shorter duration
         async def quick_step(x: str) -> str:
@@ -551,7 +551,7 @@ class TestWorkflowInterruption:
         result = await task
         
         # Verify interruption
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
     
     @pytest.mark.asyncio
     async def test_workflow_interruption_with_when_clause(self):
@@ -596,7 +596,7 @@ class TestWorkflowInterruption:
         result = await task
         
         # Verify interruption
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
         
         # Verify that step_a was executed
         assert "step_a" in executed_steps
@@ -645,7 +645,7 @@ class TestWorkflowInterruption:
         result = await task
         
         # Verify interruption during function step
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
         assert "tool" in executed_steps
         assert "function" in executed_steps
         assert "agent" not in executed_steps
@@ -690,7 +690,7 @@ class TestWorkflowInterruption:
         result = await task
         
         # Verify interruption during tool step
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
         assert "function" in executed_steps
         assert "tool" in executed_steps
         assert "agent" not in executed_steps
@@ -728,7 +728,7 @@ class TestWorkflowInterruption:
         result = await task
         
         # Verify interruption during agent step
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
         assert "function" in executed_steps
         assert "tool" in executed_steps
         # Note: Agent doesn't add to executed_steps, but we verify it was interrupted
@@ -749,7 +749,7 @@ class TestInterruptionEdgeCases:
         task.cancel()
         result = await task
         
-        assert result.status.code == "interrupted"
+        assert result.status.code == "cancelled"
     
     @pytest.mark.asyncio
     async def test_multiple_interruptions(self):
@@ -761,14 +761,14 @@ class TestInterruptionEdgeCases:
         await asyncio.sleep(1)
         task1.cancel()
         result1 = await task1
-        assert result1.status.code == "interrupted"
+        assert result1.status.code == "cancelled"
         
         # Second interruption
         task2 = asyncio.create_task(tool(duration=10).collect())
         await asyncio.sleep(1)
         task2.cancel()
         result2 = await task2
-        assert result2.status.code == "interrupted"
+        assert result2.status.code == "cancelled"
         
         # Finally let it complete
         result3 = await tool(duration=0.1).collect()
@@ -797,7 +797,7 @@ class TestInterruptionEdgeCases:
         # All should be interrupted
         for result in results:
             assert isinstance(result, OutputEvent)
-            assert result.status.code == "interrupted"
+            assert result.status.code == "cancelled"
 
 
 class TestInterruptionPerformance:
@@ -869,14 +869,12 @@ class TestComprehensiveInterruptionVerification:
         # ====================================================================
         
         # 1. STATUS CODE - Most basic check
-        assert output_event.status.code == "interrupted", \
+        assert output_event.status.code == "cancelled", \
             "Status code should be 'interrupted'"
         
         # 2. STATUS DETAILS - Check reason and message
         assert output_event.status.reason == "interrupted", \
             "Status reason should indicate interruption"
-        assert output_event.status.message == "Interrupted", \
-            "Status message should be descriptive"
         
         # 3. PARTIAL OUTPUT PRESERVATION - Chunks collected before interruption
         # For generators that yield strings, the collector concatenates them
@@ -969,7 +967,7 @@ class TestComprehensiveInterruptionVerification:
         # WORKFLOW-SPECIFIC VERIFICATIONS
         
         # 1. Workflow status
-        assert result.status.code == "interrupted", \
+        assert result.status.code == "cancelled", \
             "Workflow should be marked as interrupted"
         
         # 2. Partial execution tracking - verify which steps ran

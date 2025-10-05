@@ -311,7 +311,7 @@ class Agent(Runnable):
                     for tool_result_span in tool_result_spans:
                         if tool_result_span.metadata.get("tool_call_id") == content.id:
                             tool_result_content = tool_result_span.output.content if isinstance(tool_result_span.output, Message) else tool_result_span.output
-                            if tool_result_span.status["code"] == "interrupted":
+                            if tool_result_span.status["code"] == "cancelled" and tool_result_span.status["reason"] == "interrupted":
                                 tool_result_content = "</interrupted>"
                             tool_result_message = Message.validate({
                                 "role": "tool",
@@ -416,7 +416,7 @@ class Agent(Runnable):
                     if event.error is not None:
                         raise RuntimeError(event.error)
                     # If the LLM was interrupted, propagate the interruption
-                    if event.status.code == "interrupted":
+                    if event.status.code == "cancelled" and event.status.reason == "interrupted":
                         raise InterruptError(event.call_id)
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
                     # Add LLM response to conversation for next iteration
@@ -445,6 +445,6 @@ class Agent(Runnable):
                     })
                     messages.append(message)
                 yield event
-            if event.status.code == "interrupted":
+            if event.status.code == "cancelled" and event.status.code == "interrupted":
                 break
             i += 1
