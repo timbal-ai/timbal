@@ -1,10 +1,8 @@
 import os
-import tempfile
-from pathlib import Path
 
 import pytest
 from timbal import Agent
-from timbal.tools import Bash, List  #, WebSearch
+from timbal.tools import Bash  #, WebSearch
 
 
 @pytest.fixture(params=[

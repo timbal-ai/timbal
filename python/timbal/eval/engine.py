@@ -9,8 +9,8 @@ import yaml
 from ..core.agent import Agent
 from ..errors import EvalError
 from ..state import RunContext, get_run_context, set_run_context
-from ..state.tracing.trace import Trace
 from ..state.tracing.span import Span
+from ..state.tracing.trace import Trace
 from ..types.content import TextContent
 from ..types.message import Message
 from ..utils import dump

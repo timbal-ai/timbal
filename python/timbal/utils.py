@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import importlib.util
 import inspect
+import json
 import math
 import socket
 from collections.abc import AsyncGenerator, Callable, Generator
@@ -98,6 +99,11 @@ async def dump(value: Any) -> Any:
             "message": str(value),
             # "traceback": traceback.format_exc()
         }
+    # Try to serialize the value as JSON, if it fails, convert it to a string
+    try:
+        json.dumps(value)
+    except:
+        value = str(value)
     return value
 
 

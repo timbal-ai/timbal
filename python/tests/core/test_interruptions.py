@@ -4,14 +4,13 @@ from collections.abc import AsyncGenerator, Generator
 
 import pytest
 from timbal import Agent, Tool, Workflow
-from timbal.types.events import ChunkEvent, OutputEvent, StartEvent
-from timbal.errors import InterruptError
+from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
 from .conftest import (
+    Timer,
     assert_has_output_event,
     assert_no_errors,
-    Timer,
 )
 
 # ==============================================================================
