@@ -119,3 +119,6 @@ addopts = [
     "--color=yes",
     "-W ignore::DeprecationWarning"
 ]
+testpaths = [
+    "python/tests"
+]
