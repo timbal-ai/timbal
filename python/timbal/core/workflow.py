@@ -61,7 +61,7 @@ class Workflow(Runnable):
         """See base class."""
         self._path = f"{parent_path}.{self.name}"
         # Update paths for internal LLM and all tools
-        for step in self._steps:
+        for step in self._steps.values():
             step.nest(self._path)
     
 
