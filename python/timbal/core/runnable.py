@@ -635,6 +635,8 @@ class Runnable(ABC, BaseModel):
                 reason="early_exit",
                 message=str(early_exit)
             )
+            span.output = None
+            span._output_dump = None
 
         except (asyncio.CancelledError, InterruptError) as e:
             logger.warning("Interrupted", run_id=run_context.id, call_id=span.call_id)

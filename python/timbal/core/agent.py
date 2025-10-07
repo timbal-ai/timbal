@@ -23,7 +23,7 @@ from pydantic import (
     computed_field,
 )
 
-from ..errors import InterruptError
+from ..errors import InterruptError, bail
 from ..state import get_run_context
 from ..types.content import ToolUseContent
 from ..types.events import OutputEvent
@@ -435,6 +435,9 @@ class Agent(Runnable):
             async for tool_call, event in self._multiplex_tools(tool_calls):
                 # Only process events from immediate children (not nested subagents)
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
+                    # Propagate bail
+                    if event.status.code == "cancelled" and event.status.reason == "early_exit":
+                        bail(event.status.message)
                     message = Message.validate({
                         "role": "tool",
                         "content": [{
@@ -445,6 +448,4 @@ class Agent(Runnable):
                     })
                     messages.append(message)
                 yield event
-            if event.status.code == "cancelled" and event.status.code == "interrupted":
-                break
             i += 1
