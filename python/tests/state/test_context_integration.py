@@ -1445,61 +1445,29 @@ class TestTraceDumpedVersions:
 
     @pytest.mark.asyncio
     async def test_output_modification_preserves_dumped_original(self):
-        """Test that when post_hook modifies output, the dumped version contains the original."""
-        original_outputs = []
-        dumped_outputs = []
-
-        def generate_output() -> str:
-            """Generate some output."""
-            return "UNIQUE_ORIGINAL_OUTPUT_12345"
-
+        """Test that when post_hook modifies output, the dumped version contains the modified output."""
         async def output_modifying_post_hook():
             """Post-hook that modifies the output."""
             trace = get_run_context().current_span()
-
-            # Capture original output before modification
-            if trace.output:
-                original_outputs.append(str(trace.output))
-
-            # Capture the dumped version if it exists
-            if hasattr(trace, '_output_dump'):
-                dumped_outputs.append(str(trace._output_dump))
-
-            # Modify the output
-            if hasattr(trace.output, 'content'):
-                # For Message objects
-                trace.output.content = f"[POST-MODIFIED] {trace.output.content}"
-            elif isinstance(trace.output, str):
-                # For string outputs
-                trace.output = f"[POST-MODIFIED] {trace.output}"
-            else:
-                # For other types
-                trace.output = {"modified_output": str(trace.output), "was_post_modified": True}
+            trace.output.content[0] = f"[POST-MODIFIED] {trace.output.content[0]}"
 
         agent = Agent(
             name="output_modification_agent",
             model="openai/gpt-4o-mini",
             post_hook=output_modifying_post_hook,
-            tools=[generate_output]
         )
 
         from timbal.types.message import Message
-        prompt = Message.validate({"role": "user", "content": "Use generate_output"})
+        prompt = Message.validate({"role": "user", "content": "Hello world"})
         result = agent(prompt=prompt)
         output = await result.collect()
 
         # Verify execution completed
         assert hasattr(output, 'output')
 
-        # Verify we captured the original output
-        assert len(original_outputs) >= 1
-
-        # The dumped version should preserve the original output
+        # The dumped version should contain the MODIFIED output (dump happens after post_hook)
         if hasattr(output, '_output_dump') and output._output_dump:
-            dumped_content = str(output._output_dump)
-            # The dumped version should contain the original, not the modified version
-            assert "[POST-MODIFIED]" not in dumped_content
-            assert "UNIQUE_ORIGINAL_OUTPUT_12345" in dumped_content
+            assert "[POST-MODIFIED]" in output._output_dump["content"][0]
 
     @pytest.mark.asyncio
     async def test_audio_stt_input_modification_scenario(self):

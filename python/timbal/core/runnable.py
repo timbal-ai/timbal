@@ -617,9 +617,7 @@ class Runnable(ABC, BaseModel):
                 if output.status.code == "cancelled":
                     span.status = output.status
                 output = output.output
-
             span.output = output
-            span._output_dump = await dump(output)
             
             # Restore the call context to this runnable before executing post_hook
             # This ensures post_hook modifies the correct span, not any nested ones
@@ -628,6 +626,9 @@ class Runnable(ABC, BaseModel):
                 set_parent_call_id(_call_id)
             if self.post_hook is not None:
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+
+            # Post hook might modify the output, so we dump afterwards 
+            span._output_dump = await dump(output)
             
         except EarlyExit as early_exit:
             span.status = RunStatus(
