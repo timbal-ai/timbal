@@ -40,12 +40,6 @@ param (
 $InformationPreference = 'Continue'
 
 
-function Write-ErrorAndExit($message) {
-    Write-Error $message
-    Exit 1
-}
-
-
 function Initialize-Environment() {
     If (($PSVersionTable.PSVersion.Major) -lt 5) {
         throw @"
@@ -188,14 +182,14 @@ function Get-Arch() {
 
 function Get-Executable($DestinationPath) {
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
-        Write-ErrorAndExit "Get-Executable requires a non-empty -DestinationPath parameter."
+        throw "Get-Executable requires a non-empty -DestinationPath parameter."
     }
 
     $arch = Get-Arch
     Write-Information "Detected architecture: $arch"
 
     if ($arch -ne "x86_64-pc-windows") {
-        Write-ErrorAndExit "ERROR: Timbal installation currently only supports the 'x86_64-pc-windows' (amd64) architecture. Detected: $arch"
+        throw "ERROR: Timbal installation currently only supports the 'x86_64-pc-windows' (amd64) architecture. Detected: $arch"
     }
 
     $manifestUrl = "https://github.com/timbal-ai/timbal/releases/latest/download/manifest.json"
@@ -203,7 +197,7 @@ function Get-Executable($DestinationPath) {
     try {
         Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestPath -UseBasicParsing -ErrorAction Stop
     } catch {
-        Write-ErrorAndExit "Failed to download manifest.json from $manifestUrl. Error $($_.Exception.Message)"
+        throw "Failed to download manifest.json from $manifestUrl. Error $($_.Exception.Message)"
     }
 
     try {
@@ -211,11 +205,11 @@ function Get-Executable($DestinationPath) {
         $url = $manifest.binaries.windows.x86_64.url
         if (-not $url) {
             Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
-            Write-ErrorAndExit "No download URL found in manifest for windows and x86_64"
+            throw "No download URL found in manifest for windows and x86_64"
         }
     } catch {
         Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
-        Write-ErrorAndExit "Failed to parse manifest.json. Error $($_.Exception.Message)"
+        throw "Failed to parse manifest.json. Error $($_.Exception.Message)"
     } finally {
         Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
     }
@@ -239,7 +233,7 @@ function Get-Executable($DestinationPath) {
         if (-not (Test-Path -Path $DestinationPath) -or (Get-Item $DestinationPath).Length -eq 0) {
              # Clean up potentially corrupt/empty file before throwing
              if (Test-Path -Path $DestinationPath) { Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue }
-             Write-ErrorAndExit "Downloaded file is missing or empty. Check if the release asset exists at $url"
+             throw "Downloaded file is missing or empty. Check if the release asset exists at $url"
         }
 
         # No return value needed
@@ -249,7 +243,7 @@ function Get-Executable($DestinationPath) {
             Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue
         }
         # Rethrow a more specific error including the intended destination
-        Write-ErrorAndExit "FATAL: Failed to download Timbal CLI from '$url' to '$DestinationPath'. Check URL, network, and permissions. Error: $($_.Exception.Message)"
+        throw "FATAL: Failed to download Timbal CLI from '$url' to '$DestinationPath'. Check URL, network, and permissions. Error: $($_.Exception.Message)"
     }
 }
 
@@ -273,7 +267,7 @@ function Install-Binary($install_args) {
         try {
             New-Item -Path $InstallDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
         } catch {
-            Write-ErrorAndExit "Failed to create installation directory '$InstallDir'. Error: $($_.Exception.Message)"
+            throw "Failed to create installation directory '$InstallDir'. Error: $($_.Exception.Message)"
         }
     } else {
         Write-Information "Installation directory already exists: '$InstallDir'"
