@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import inspect
 import re
+import sys
 from collections.abc import AsyncGenerator
 from functools import cached_property
 from pathlib import Path
@@ -131,10 +132,20 @@ class Agent(Runnable):
                     for fn_i in range(1, len(path_parts)):
                         module_path = agent_path / "/".join(path_parts[:-fn_i])
                         try:
-                            module_spec = importlib.util.spec_from_file_location(module_path.stem, module_path.as_posix())
+                            # Use absolute path as module identifier
+                            module_path_str = str(module_path.resolve())
+                            # Check if module is already loaded in sys.modules by absolute path
+                            if module_path_str in sys.modules:
+                                module = sys.modules[module_path_str]
+                                logger.info(f"Using already loaded module '{module_path}' for system prompt callable '{text}'")
+                                break
+                            # Load the module if not already loaded
+                            module_spec = importlib.util.spec_from_file_location(module_path_str, module_path.as_posix())
                             if not module_spec or not module_spec.loader:
                                 raise ValueError(f"Failed to load module {module_path}")
                             module = importlib.util.module_from_spec(module_spec)
+                            # Register in sys.modules BEFORE executing to prevent re-entry
+                            sys.modules[module_path_str] = module
                             module_spec.loader.exec_module(module)
                             logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
                             break
