@@ -43,6 +43,17 @@
 set -e
 
 
+# Parse command line arguments
+AUTO_YES=false
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes)
+            AUTO_YES=true
+            ;;
+    esac
+done
+
+
 # Function to report errors and exit
 error_exit() {
     echo "Error: $1" >&2
@@ -186,18 +197,23 @@ setup_timbal() {
     # Check if the file already exists
     if [ -e "$CLI_EXECUTABLE_PATH" ]; then
         echo "A file already exists at $CLI_EXECUTABLE_PATH"
-        # Ask if user wants to overwrite. Default to No.
-        read -p "Overwrite? (y/N): " choice
-        case "$choice" in
-            y|Y ) 
-                echo "Overwriting existing file..." 
-                rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH"
-                ;;
-            * ) 
-                echo "Skipping installation because file exists." 
-                return
-                ;;
-        esac
+        if [ "$AUTO_YES" = true ]; then
+            echo "Auto-accepting overwrite (--yes flag provided)"
+            rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH"
+        else
+            # Ask if user wants to overwrite. Default to No.
+            read -p "Overwrite? (y/N): " choice
+            case "$choice" in
+                y|Y ) 
+                    echo "Overwriting existing file..." 
+                    rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH"
+                    ;;
+                * ) 
+                    echo "Skipping installation because file exists." 
+                    return
+                    ;;
+            esac
+        fi
     fi
 
     download_file "$DOWNLOAD_URL" "$CLI_EXECUTABLE_PATH"
@@ -271,13 +287,17 @@ main() {
 
     if command_exists timbal; then
         echo "A timbal command already exists on your system at the following location: $(which timbal)"
-        echo "The installations may interfere with one another."
-        echo "Do you want to continue with this installation anyway?"
-        read -p "Continue? (y/N): " choice
-        case "$choice" in 
-            y|Y ) echo "Continuing with installation...";;
-            * ) echo "Exiting installation."; exit 1;;
-        esac
+        if [ "$AUTO_YES" = true ]; then
+            echo "Overwriting..."
+        else
+            echo "The installations may interfere with one another."
+            echo "Do you want to continue with this installation anyway?"
+            read -p "Continue? (y/N): " choice
+            case "$choice" in 
+                y|Y ) echo "Continuing with installation...";;
+                * ) echo "Exiting installation."; exit 1;;
+            esac
+        fi
     fi
 
     check_uv
