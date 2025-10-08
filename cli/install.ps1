@@ -40,6 +40,12 @@ param (
 $InformationPreference = 'Continue'
 
 
+function Write-ErrorAndExit($message) {
+    Write-Error $message
+    Exit 1
+}
+
+
 function Initialize-Environment() {
     If (($PSVersionTable.PSVersion.Major) -lt 5) {
         throw @"
