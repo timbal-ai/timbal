@@ -65,16 +65,17 @@ This guide shows how to create a Slack bot using Timbal that can:
         </Note>
       </Step>
       
-      <Step title="Enable Home Tab (for Direct Messages)">
-        1. Go to **App Home** in your Slack app settings
-        2. Under **Show Tabs**, enable **Home Tab**
-        3. This allows users to send direct messages to your bot
-      </Step>
-      
       <Step title="Install App to Workspace">
         1. In **OAuth & Permissions**, click **Install to Workspace**
         2. Copy the **Bot User OAuth Token** (starts with `xoxb-`)
         3. Set as environment variable: `SLACK_BOT_TOKEN`
+      </Step>
+
+      <Step title="Enable Home Tab (for Direct Messages)">
+        1. Go to **App Home** in your Slack app settings
+        2. Under **Show Tabs**, enable **Home Tab**
+        3. Check **Allow users to send Slash commands and messages from the messages tab**
+        4. This enables users to send direct messages to your bot
       </Step>
       
       <Step title="Get Bot User ID">
