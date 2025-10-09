@@ -1,5 +1,6 @@
 import ast
 import asyncio
+from contextlib import asynccontextmanager
 import contextvars
 import inspect
 import os
@@ -672,6 +673,12 @@ class Runnable(ABC, BaseModel):
             if output_event.type in timbal_log_events:
                 logger.info("output_event", **output_event.model_dump())
             yield output_event
+
+
+    @asynccontextmanager
+    async def session(self) -> AsyncGenerator[Event, None]:
+        yield
+        
 
 
 RunnableLike = Runnable | dict[str, Any] | Callable[..., Any]
