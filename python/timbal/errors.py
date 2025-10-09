@@ -13,6 +13,9 @@ class EvalError(TimbalError):
 class PlatformError(TimbalError):
     """Error raised when a platform API call fails."""
 
+class InterruptError(TimbalError):
+    """Error raised when an interrupt is requested."""
+
 class EarlyExit(TimbalError):
     """Error raised when an early exit is requested."""
 

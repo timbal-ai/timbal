@@ -224,12 +224,12 @@ class TestAgentExecution:
         """Test that multiple tools can be called concurrently."""
         def slow_tool_1(delay: float) -> str:
             import time
-            time.sleep(delay)
+            time.sleep(1)
             return "tool1_result"
         
-        def slow_tool_2(delay: float) -> str:
+        def slow_tool_2() -> str:
             import time
-            time.sleep(delay)
+            time.sleep(1)
             return "tool2_result"
         
         agent = Agent(
@@ -239,15 +239,22 @@ class TestAgentExecution:
         )
         
         # Prompt that might trigger both tools
-        prompt = Message.validate({"role": "user", "content": "Call both slow_tool_1 and slow_tool_2 with delay 0.1"})
+        prompt = Message.validate({"role": "user", "content": "Call both slow_tool_1 and slow_tool_2. Just 1 time."})
         
-        with Timer() as timer:
-            result = agent(prompt=prompt)
-            await result.collect()
-        
-        # If tools ran concurrently, should be much faster than sequential
-        # This is a loose test since it depends on LLM behavior
-        assert timer.elapsed < 10  # Reasonable upper bound
+        slow_tool_1_started = False
+        slow_tool_2_started = False
+        async for event in agent(prompt=prompt):
+            if event.type == "START" and event.path == "concurrent_agent.slow_tool_1":
+                slow_tool_1_started = True
+            if event.type == "START" and event.path == "concurrent_agent.slow_tool_2":
+                slow_tool_2_started = True
+            if event.type == "OUTPUT" and event.path == "concurrent_agent.slow_tool_1":
+                if not slow_tool_2_started:
+                    pytest.fail("slow_tool_1 started before slow_tool_2")
+            if event.type == "OUTPUT" and event.path == "concurrent_agent.slow_tool_2":
+                if not slow_tool_1_started:
+                    pytest.fail("slow_tool_2 started before slow_tool_1")
+
     
     @pytest.mark.asyncio 
     async def test_agent_event_streaming(self):

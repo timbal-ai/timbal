@@ -6,7 +6,7 @@ from timbal.state.dependency_analyzer import RunContextDependencyAnalyzer
 
 
 class TestRunContextDependencyAnalyzer:
-    """Test the AST analyzer that detects RunContext.step_trace() usage."""
+    """Test the AST analyzer that detects RunContext.step_span() usage."""
 
     def test_empty_code(self):
         """Test analyzer with empty code."""
@@ -16,7 +16,7 @@ class TestRunContextDependencyAnalyzer:
         assert analyzer.dependencies == []
 
     def test_no_dependencies(self):
-        """Test code with no step_trace calls."""
+        """Test code with no step_span calls."""
         code = dedent("""
             def handler():
                 x = 1 + 2
@@ -27,14 +27,14 @@ class TestRunContextDependencyAnalyzer:
         analyzer.visit(tree)
         assert analyzer.dependencies == []
 
-    def test_simple_step_trace_call(self):
-        """Test detection of ctx.step_trace('step_name')."""
+    def test_simple_step_span_call(self):
+        """Test detection of ctx.step_span('step_name')."""
         code = dedent("""
             from timbal.state import get_run_context
 
             def handler():
                 ctx = get_run_context()
-                result = ctx.step_trace("preprocess")
+                result = ctx.step_span("preprocess")
                 return result
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -42,13 +42,13 @@ class TestRunContextDependencyAnalyzer:
         analyzer.visit(tree)
         assert analyzer.dependencies == ["preprocess"]
 
-    def test_direct_get_run_context_step_trace(self):
-        """Test detection of get_run_context().step_trace('step_name')."""
+    def test_direct_get_run_context_step_span(self):
+        """Test detection of get_run_context().step_span('step_name')."""
         code = dedent("""
             from timbal.state import get_run_context
 
             def handler():
-                result = get_run_context().step_trace("validation")
+                result = get_run_context().step_span("validation")
                 return result
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -56,16 +56,16 @@ class TestRunContextDependencyAnalyzer:
         analyzer.visit(tree)
         assert analyzer.dependencies == ["validation"]
 
-    def test_multiple_step_trace_calls(self):
-        """Test detection of multiple step_trace calls."""
+    def test_multiple_step_span_calls(self):
+        """Test detection of multiple step_span calls."""
         code = dedent("""
             from timbal.state import get_run_context
 
             def handler():
                 ctx = get_run_context()
-                data = ctx.step_trace("fetch_data")
-                processed = ctx.step_trace("process_data")
-                validated = ctx.step_trace("validate_data")
+                data = ctx.step_span("fetch_data")
+                processed = ctx.step_span("process_data")
+                validated = ctx.step_span("validate_data")
                 return validated
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -73,17 +73,17 @@ class TestRunContextDependencyAnalyzer:
         analyzer.visit(tree)
         assert set(analyzer.dependencies) == {"fetch_data", "process_data", "validate_data"}
 
-    def test_mixed_step_trace_patterns(self):
-        """Test different patterns of step_trace calls."""
+    def test_mixed_step_span_patterns(self):
+        """Test different patterns of step_span calls."""
         code = dedent("""
             from timbal.state import get_run_context
 
             def handler():
                 ctx = get_run_context()
                 # Direct variable call
-                result1 = ctx.step_trace("step1")
+                result1 = ctx.step_span("step1")
                 # Direct get_run_context call
-                result2 = get_run_context().step_trace("step2")
+                result2 = get_run_context().step_span("step2")
                 return result1, result2
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -99,7 +99,7 @@ class TestRunContextDependencyAnalyzer:
             def handler():
                 ctx = get_run_context()
                 ctx2 = ctx  # Copy variable
-                result = ctx2.step_trace("copied_context")
+                result = ctx2.step_span("copied_context")
                 return result
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -114,10 +114,10 @@ class TestRunContextDependencyAnalyzer:
             from timbal.state import get_run_context as grc
 
             def handler1():
-                return get_run_context().step_trace("import1")
+                return get_run_context().step_span("import1")
 
             def handler2():
-                return grc().step_trace("import2")
+                return grc().step_span("import2")
         """)
         analyzer = RunContextDependencyAnalyzer()
         tree = ast.parse(code)
@@ -125,17 +125,17 @@ class TestRunContextDependencyAnalyzer:
         assert set(analyzer.dependencies) == {"import1", "import2"}
 
     def test_nested_scopes(self):
-        """Test step_trace detection in nested scopes."""
+        """Test step_span detection in nested scopes."""
         code = dedent("""
             from timbal.state import get_run_context
 
             def outer():
                 ctx = get_run_context()
-                result1 = ctx.step_trace("outer_step")
+                result1 = ctx.step_span("outer_step")
 
                 def inner():
                     ctx2 = get_run_context()
-                    result2 = ctx2.step_trace("inner_step")
+                    result2 = ctx2.step_span("inner_step")
                     return result2
 
                 return result1, inner()
@@ -146,12 +146,12 @@ class TestRunContextDependencyAnalyzer:
         assert set(analyzer.dependencies) == {"outer_step", "inner_step"}
 
     def test_lambda_functions(self):
-        """Test step_trace detection in lambda functions."""
+        """Test step_span detection in lambda functions."""
         code = dedent("""
             from timbal.state import get_run_context
 
             def handler():
-                processor = lambda: get_run_context().step_trace("lambda_step")
+                processor = lambda: get_run_context().step_span("lambda_step")
                 return processor()
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -160,13 +160,13 @@ class TestRunContextDependencyAnalyzer:
         assert analyzer.dependencies == ["lambda_step"]
 
     def test_async_functions(self):
-        """Test step_trace detection in async functions."""
+        """Test step_span detection in async functions."""
         code = dedent("""
             from timbal.state import get_run_context
 
             async def async_handler():
                 ctx = get_run_context()
-                result = ctx.step_trace("async_step")
+                result = ctx.step_span("async_step")
                 return result
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -175,7 +175,7 @@ class TestRunContextDependencyAnalyzer:
         assert analyzer.dependencies == ["async_step"]
 
     def test_non_string_arguments_ignored(self):
-        """Test that non-string arguments to step_trace are ignored."""
+        """Test that non-string arguments to step_span are ignored."""
         code = dedent("""
             from timbal.state import get_run_context
 
@@ -183,9 +183,9 @@ class TestRunContextDependencyAnalyzer:
                 ctx = get_run_context()
                 step_name = "dynamic_step"
                 # This should be ignored since it's not a string literal
-                result1 = ctx.step_trace(step_name)
+                result1 = ctx.step_span(step_name)
                 # This should be detected
-                result2 = ctx.step_trace("literal_step")
+                result2 = ctx.step_span("literal_step")
                 return result1, result2
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -197,13 +197,13 @@ class TestRunContextDependencyAnalyzer:
         """Test that false positives are avoided."""
         code = dedent("""
             class SomeOtherClass:
-                def step_trace(self, name):
+                def step_span(self, name):
                     return f"fake_{name}"
 
             def handler():
                 obj = SomeOtherClass()
                 # This should NOT be detected
-                result = obj.step_trace("not_a_dependency")
+                result = obj.step_span("not_a_dependency")
                 return result
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -219,7 +219,7 @@ class TestRunContextDependencyAnalyzer:
 
             def handler():
                 ctx = get_run_context()
-                result = ctx.step_trace("relative_import")
+                result = ctx.step_span("relative_import")
                 return result
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -228,13 +228,13 @@ class TestRunContextDependencyAnalyzer:
         assert analyzer.dependencies == ["relative_import"]
 
     def test_module_attribute_access(self):
-        """Test step_trace access through module attributes."""
+        """Test step_span access through module attributes."""
         code = dedent("""
             import timbal.state as state
 
             def handler():
                 ctx = state.get_run_context()
-                result = ctx.step_trace("module_attr")
+                result = ctx.step_span("module_attr")
                 return result
         """)
         analyzer = RunContextDependencyAnalyzer()
@@ -246,15 +246,15 @@ class TestRunContextDependencyAnalyzer:
 class TestRunnableInspectCallable:
     """Test the Runnable._inspect_callable method for dependency detection."""
 
-    def test_inspect_callable_with_step_trace(self):
-        """Test that _inspect_callable correctly identifies step_trace dependencies."""
-        # Create a temporary file with a function that uses step_trace
+    def test_inspect_callable_with_step_span(self):
+        """Test that _inspect_callable correctly identifies step_span dependencies."""
+        # Create a temporary file with a function that uses step_span
         code = dedent("""
             from timbal.state import get_run_context
 
             def test_handler():
                 ctx = get_run_context()
-                result = ctx.step_trace("dependency1")
+                result = ctx.step_span("dependency1")
                 return result
         """)
 
@@ -292,9 +292,9 @@ class TestRunnableInspectCallable:
 
             def multi_dep_handler():
                 ctx = get_run_context()
-                data = ctx.step_trace("fetch")
-                processed = ctx.step_trace("process")
-                validated = get_run_context().step_trace("validate")
+                data = ctx.step_span("fetch")
+                processed = ctx.step_span("process")
+                validated = get_run_context().step_span("validate")
                 return validated
         """)
 
@@ -320,7 +320,7 @@ class TestRunnableInspectCallable:
 
             async def async_handler():
                 ctx = get_run_context()
-                result = ctx.step_trace("async_dep")
+                result = ctx.step_span("async_dep")
                 return result
         """)
 
@@ -341,7 +341,7 @@ class TestRunnableInspectCallable:
             assert result["is_coroutine"] is True
 
     def test_inspect_callable_no_dependencies(self):
-        """Test callable with no step_trace dependencies."""
+        """Test callable with no step_span dependencies."""
         code = dedent("""
             def simple_handler():
                 return "no dependencies here"
@@ -368,7 +368,7 @@ class TestRunnableInspectCallable:
         code = dedent("""
             from timbal.state import get_run_context
 
-            lambda_handler = lambda: get_run_context().step_trace("lambda_dep")
+            lambda_handler = lambda: get_run_context().step_span("lambda_dep")
         """)
 
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
@@ -448,15 +448,15 @@ class TestRunnableInspectCallable:
 class TestAdvancedCallableScenarios:
     """Test complex callable scenarios: methods, decorators, callable classes."""
 
-    def test_instance_method_with_step_trace(self):
-        """Test detection of step_trace in instance methods."""
+    def test_instance_method_with_step_span(self):
+        """Test detection of step_span in instance methods."""
         code = dedent("""
             from timbal.state import get_run_context
 
             class Handler:
                 def process(self):
                     ctx = get_run_context()
-                    result = ctx.step_trace("method_step")
+                    result = ctx.step_span("method_step")
                     return result
         """)
 
@@ -476,8 +476,8 @@ class TestAdvancedCallableScenarios:
 
             assert result["dependencies"] == ["method_step"]
 
-    def test_static_method_with_step_trace(self):
-        """Test detection of step_trace in static methods."""
+    def test_static_method_with_step_span(self):
+        """Test detection of step_span in static methods."""
         code = dedent("""
             from timbal.state import get_run_context
 
@@ -485,7 +485,7 @@ class TestAdvancedCallableScenarios:
                 @staticmethod
                 def process():
                     ctx = get_run_context()
-                    result = ctx.step_trace("static_step")
+                    result = ctx.step_span("static_step")
                     return result
         """)
 
@@ -504,8 +504,8 @@ class TestAdvancedCallableScenarios:
 
             assert result["dependencies"] == ["static_step"]
 
-    def test_class_method_with_step_trace(self):
-        """Test detection of step_trace in class methods."""
+    def test_class_method_with_step_span(self):
+        """Test detection of step_span in class methods."""
         code = dedent("""
             from timbal.state import get_run_context
 
@@ -513,7 +513,7 @@ class TestAdvancedCallableScenarios:
                 @classmethod
                 def process(cls):
                     ctx = get_run_context()
-                    result = ctx.step_trace("class_step")
+                    result = ctx.step_span("class_step")
                     return result
         """)
 
@@ -532,15 +532,15 @@ class TestAdvancedCallableScenarios:
 
             assert result["dependencies"] == ["class_step"]
 
-    def test_callable_class_with_step_trace(self):
-        """Test detection of step_trace in callable classes (__call__ method)."""
+    def test_callable_class_with_step_span(self):
+        """Test detection of step_span in callable classes (__call__ method)."""
         code = dedent("""
             from timbal.state import get_run_context
 
             class CallableHandler:
                 def __call__(self):
                     ctx = get_run_context()
-                    result = ctx.step_trace("callable_class_step")
+                    result = ctx.step_span("callable_class_step")
                     return result
         """)
 
@@ -560,8 +560,8 @@ class TestAdvancedCallableScenarios:
 
             assert result["dependencies"] == ["callable_class_step"]
 
-    def test_decorated_function_with_step_trace(self):
-        """Test detection of step_trace in decorated functions."""
+    def test_decorated_function_with_step_span(self):
+        """Test detection of step_span in decorated functions."""
         code = dedent("""
             from timbal.state import get_run_context
 
@@ -573,7 +573,7 @@ class TestAdvancedCallableScenarios:
             @my_decorator
             def decorated_handler():
                 ctx = get_run_context()
-                result = ctx.step_trace("decorated_step")
+                result = ctx.step_span("decorated_step")
                 return result
         """)
 
@@ -595,7 +595,7 @@ class TestAdvancedCallableScenarios:
             # The test documents this limitation.
             assert isinstance(result["dependencies"], list)
 
-    def test_multiple_decorators_with_step_trace(self):
+    def test_multiple_decorators_with_step_span(self):
         """Test detection with multiple decorators."""
         code = dedent("""
             from timbal.state import get_run_context
@@ -617,7 +617,7 @@ class TestAdvancedCallableScenarios:
             @decorator2
             def multi_decorated_handler():
                 ctx = get_run_context()
-                result = ctx.step_trace("multi_decorated_step")
+                result = ctx.step_span("multi_decorated_step")
                 return result
         """)
 
@@ -637,7 +637,7 @@ class TestAdvancedCallableScenarios:
             # With @wraps, the original function name and source should be preserved
             assert result["dependencies"] == ["multi_decorated_step"]
 
-    def test_nested_class_method_with_step_trace(self):
+    def test_nested_class_method_with_step_span(self):
         """Test detection in nested class methods."""
         code = dedent("""
             from timbal.state import get_run_context
@@ -646,7 +646,7 @@ class TestAdvancedCallableScenarios:
                 class InnerHandler:
                     def process(self):
                         ctx = get_run_context()
-                        result = ctx.step_trace("nested_class_step")
+                        result = ctx.step_span("nested_class_step")
                         return result
         """)
 
@@ -666,7 +666,7 @@ class TestAdvancedCallableScenarios:
 
             assert result["dependencies"] == ["nested_class_step"]
 
-    def test_property_getter_with_step_trace(self):
+    def test_property_getter_with_step_span(self):
         """Test detection in property getters."""
         code = dedent("""
             from timbal.state import get_run_context
@@ -675,7 +675,7 @@ class TestAdvancedCallableScenarios:
                 @property
                 def computed_value(self):
                     ctx = get_run_context()
-                    result = ctx.step_trace("property_step")
+                    result = ctx.step_span("property_step")
                     return result
         """)
 
@@ -697,7 +697,7 @@ class TestAdvancedCallableScenarios:
 
             assert result["dependencies"] == ["property_step"]
 
-    def test_async_method_with_step_trace(self):
+    def test_async_method_with_step_span(self):
         """Test detection in async methods."""
         code = dedent("""
             from timbal.state import get_run_context
@@ -705,7 +705,7 @@ class TestAdvancedCallableScenarios:
             class AsyncHandler:
                 async def process(self):
                     ctx = get_run_context()
-                    result = ctx.step_trace("async_method_step")
+                    result = ctx.step_span("async_method_step")
                     return result
         """)
 
@@ -726,7 +726,7 @@ class TestAdvancedCallableScenarios:
             assert result["dependencies"] == ["async_method_step"]
             assert result["is_coroutine"] is True
 
-    def test_generator_method_with_step_trace(self):
+    def test_generator_method_with_step_span(self):
         """Test detection in generator methods."""
         code = dedent("""
             from timbal.state import get_run_context
@@ -734,7 +734,7 @@ class TestAdvancedCallableScenarios:
             class GeneratorHandler:
                 def process(self):
                     ctx = get_run_context()
-                    data = ctx.step_trace("generator_step")
+                    data = ctx.step_span("generator_step")
                     yield data
         """)
 
@@ -755,7 +755,7 @@ class TestAdvancedCallableScenarios:
             assert result["dependencies"] == ["generator_step"]
             assert result["is_gen"] is True
 
-    def test_async_generator_method_with_step_trace(self):
+    def test_async_generator_method_with_step_span(self):
         """Test detection in async generator methods."""
         code = dedent("""
             from timbal.state import get_run_context
@@ -763,7 +763,7 @@ class TestAdvancedCallableScenarios:
             class AsyncGeneratorHandler:
                 async def process(self):
                     ctx = get_run_context()
-                    data = ctx.step_trace("async_generator_step")
+                    data = ctx.step_span("async_generator_step")
                     yield data
         """)
 
@@ -788,7 +788,7 @@ class TestAdvancedCallableScenarios:
             assert result["dependencies"] == ["async_generator_step"]
             assert result["is_async_gen"] is True
 
-    def test_metaclass_method_with_step_trace(self):
+    def test_metaclass_method_with_step_span(self):
         """Test detection in metaclass methods."""
         code = dedent("""
             from timbal.state import get_run_context
@@ -796,7 +796,7 @@ class TestAdvancedCallableScenarios:
             class MetaHandler(type):
                 def process(cls):
                     ctx = get_run_context()
-                    result = ctx.step_trace("metaclass_step")
+                    result = ctx.step_span("metaclass_step")
                     return result
 
             class Handler(metaclass=MetaHandler):
@@ -818,20 +818,20 @@ class TestAdvancedCallableScenarios:
 
             assert result["dependencies"] == ["metaclass_step"]
 
-    def test_duplicate_step_trace_dependencies(self):
-        """Test handling of duplicate step_trace calls with same step name."""
+    def test_duplicate_step_span_dependencies(self):
+        """Test handling of duplicate step_span calls with same step name."""
         code = dedent("""
             from timbal.state import get_run_context
 
             def handler_with_duplicates():
                 ctx = get_run_context()
                 # Same step called multiple times
-                result1 = ctx.step_trace("shared_step")
-                result2 = ctx.step_trace("shared_step")
+                result1 = ctx.step_span("shared_step")
+                result2 = ctx.step_span("shared_step")
                 # Different step
-                result3 = ctx.step_trace("unique_step")
+                result3 = ctx.step_span("unique_step")
                 # Same step again
-                result4 = get_run_context().step_trace("shared_step")
+                result4 = get_run_context().step_span("shared_step")
                 return result1, result2, result3, result4
         """)
 

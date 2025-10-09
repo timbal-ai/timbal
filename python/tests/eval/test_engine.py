@@ -121,7 +121,7 @@ class TestEvalSteps:
         success, errors, steps = await eval_steps(turn, agent)
         
         assert success is False
-        assert "No tracing data available" in errors[0]
+        assert "No trace data available" in errors[0]
         assert steps == []
 
     @pytest.mark.asyncio

@@ -9,7 +9,7 @@ import yaml
 from ..core.agent import Agent
 from ..errors import EvalError
 from ..state import RunContext, get_run_context, set_run_context
-from ..state.tracing import Tracing
+from ..state.tracing.span import Span
 from ..state.tracing.trace import Trace
 from ..types.content import TextContent
 from ..types.message import Message
@@ -32,13 +32,13 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
             return True, [], []
             
         run_context = get_run_context()
-        if not run_context or not run_context._tracing:
-            return False, ["No tracing data available"], []
+        if not run_context or not run_context._trace:
+            return False, ["No trace data available"], []
             
-        # Extract tool calls from tracing data
+        # Extract tool calls from trace data
         actual_steps = []
-        for call_id, trace in run_context._tracing.items():
-            path = trace.path
+        for call_id, span in run_context._trace.items():
+            path = span.path
             # Skip the root agent call (call_id=None or no path separators)
             if call_id is None or not path or "." not in path:
                 continue
@@ -52,7 +52,7 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
                 if tool_name == "llm":
                     continue
                 
-                tool_input = trace.input or {}
+                tool_input = span.input or {}
                 actual_steps.append({
                     "tool": tool_name,
                     "input": tool_input
@@ -276,7 +276,7 @@ async def run_turn(
     if conversation_history:
         fake_parent_id = "fake-parent-conversation-123"
         run_context.parent_id = fake_parent_id
-        parent_tracing = Tracing()
+        parent_trace = Trace()
         
         msg_dicts = [await dump(msg) for msg in conversation_history]
         
@@ -285,7 +285,7 @@ async def run_turn(
         output_message = msg_dicts[-1]
         input_messages = msg_dicts[:-1]  # Remove the last assistant message from input
         
-        trace = Trace(
+        span = Span(
             path=agent._llm._path,
             call_id="fake_call_conversation",
             parent_call_id=None,
@@ -295,12 +295,12 @@ async def run_turn(
             output=output_message or {},
             usage={}
         )
-        parent_tracing["fake_call_conversation"] = trace
+        parent_trace["fake_call_conversation"] = span
         
-        # Store the fake parent tracing in the provider
+        # Store the fake parent trace in the provider
         # We need to store it with the fake_parent_id as the key so it can be retrieved later
         fake_parent_context = RunContext(id=fake_parent_id)
-        fake_parent_context._tracing = parent_tracing
+        fake_parent_context._trace = parent_trace
         await run_context._tracing_provider.put(fake_parent_context)
         
     set_run_context(run_context)

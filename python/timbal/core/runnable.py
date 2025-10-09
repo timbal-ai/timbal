@@ -26,7 +26,7 @@ from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
 from ..collectors.impl.timbal import TimbalCollector
-from ..errors import EarlyExit
+from ..errors import EarlyExit, InterruptError
 from ..state import (
     get_or_create_run_context,
     get_parent_call_id,
@@ -36,7 +36,7 @@ from ..state import (
 )
 from ..state.context import RunContext
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
-from ..state.tracing.trace import Trace
+from ..state.tracing.span import Span
 from ..types.events import (
     BaseEvent,
     ChunkEvent,
@@ -48,10 +48,6 @@ from ..types.run_status import RunStatus
 from ..utils import dump, sync_to_async_gen
 
 logger = structlog.get_logger("timbal.core.runnable")
-
-# By default, we only print START and OUTPUT events
-timbal_log_events = os.getenv("TIMBAL_LOG_EVENTS", "START,OUTPUT").split(",")
-timbal_log_events = set(event.strip() for event in timbal_log_events)
 
 
 # TODO Add timeout
@@ -115,7 +111,7 @@ class Runnable(ABC, BaseModel):
     _is_async_gen: bool = PrivateAttr()
     """Whether the Runnable handler is an async generator."""
     _dependencies: list[str] = PrivateAttr(default_factory=list)
-    """List of sibling node names that the handler depends on via step_trace() calls."""
+    """List of sibling node names that the handler depends on via step_span() calls."""
     _default_fixed_params: dict[str, Any] = PrivateAttr(default_factory=dict)
     """Dictionary of static default parameters."""
     _default_runtime_params: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
@@ -128,6 +124,8 @@ class Runnable(ABC, BaseModel):
     """Whether the post_hook is a coroutine."""
     _post_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
     # ? Can we store all post_hook related stuff together?
+    _log_events: set[str] = PrivateAttr()
+    """Which timbal events to log."""
 
 
     @classmethod
@@ -252,6 +250,8 @@ class Runnable(ABC, BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize the Runnable after Pydantic model creation."""
+        log_events = os.getenv("TIMBAL_LOG_EVENTS", "START,OUTPUT").split(",")
+        self._log_events = set(event.strip() for event in log_events)
         self._prepare_default_params(self.default_params)
         # Allow users to override the type in metadata if desired. Else, use the class name.
         if "type" not in self.metadata:
@@ -501,12 +501,12 @@ class Runnable(ABC, BaseModel):
 
         # Generate new context or reset it if appropriate
         run_context = get_or_create_run_context()
-        if not _parent_call_id and run_context._tracing:
+        if not _parent_call_id and run_context._trace:
             run_context = RunContext(parent_id=run_context.id)
             set_run_context(run_context)
 
-        assert _call_id not in run_context._tracing, f"Call ID {_call_id} already exists in tracing."
-        trace = Trace(
+        assert _call_id not in run_context._trace, f"Call ID {_call_id} already exists in trace."
+        span = Span(
             path=self._path,
             call_id=_call_id,
             parent_call_id=_parent_call_id,
@@ -514,31 +514,32 @@ class Runnable(ABC, BaseModel):
             metadata={**self.metadata}, # Shallow copy
             runnable=self,
         )
-        run_context._tracing[_call_id] = trace
+        run_context._trace[_call_id] = span
 
         # Execute the 'when' condition inside the appropriate runnable context
         if hasattr(self, "when") and self.when:
             should_run = await self._execute_runtime_callable(self.when["callable"], self.when["is_coroutine"])
             if not should_run:
-                # Remove the trace entry. As if this was never run
-                run_context._tracing.pop(_call_id)
+                # Remove the span entry. As if this was never run
+                run_context._trace.pop(_call_id)
                 # Clean exit. The async for loop will complete normally but won't iterate over anything
                 return
 
-        # We store a preliminary version of the input and output in the trace, in case resolution fails
+        # We store a preliminary version of the input and output in the span, in case resolution fails
         input, output, error = kwargs, None, None
-        trace.input = input
-        trace._input_dump = None # ? await dump(input)
-        trace._output_dump = None
+        span.input = input
+        span._input_dump = None # ? await dump(input)
+        span._output_dump = None
+        collector = None
         try:
             start_event = StartEvent(
                 run_id=run_context.id,
                 parent_run_id=run_context.parent_id,
-                path=trace.path,
-                call_id=trace.call_id,
-                parent_call_id=trace.parent_call_id,
+                path=span.path,
+                call_id=span.call_id,
+                parent_call_id=span.parent_call_id,
             )
-            if start_event.type in timbal_log_events:
+            if start_event.type in self._log_events:
                 logger.info("start_event", **start_event.model_dump())
             yield start_event
 
@@ -547,8 +548,8 @@ class Runnable(ABC, BaseModel):
             # Resolve default params (executing any callable values)
             resolved_default_params = await self._resolve_default_params()
             input = {**resolved_default_params, **input}
-            trace.input = input
-            trace._input_dump = await dump(input)
+            span.input = input
+            span._input_dump = await dump(input)
 
             if self.pre_hook is not None:
                 await self._execute_runtime_callable(self.pre_hook, self._pre_hook_is_coroutine)
@@ -586,12 +587,12 @@ class Runnable(ABC, BaseModel):
                             chunk_event = ChunkEvent(
                                 run_id=run_context.id,
                                 parent_run_id=run_context.parent_id,
-                                path=trace.path,
-                                call_id=trace.call_id,
-                                parent_call_id=trace.parent_call_id,
+                                path=span.path,
+                                call_id=span.call_id,
+                                parent_call_id=span.parent_call_id,
                                 chunk=event,
                             )
-                            if chunk_event.type in timbal_log_events:
+                            if chunk_event.type in self._log_events:
                                 logger.info("chunk_event", **chunk_event.model_dump())
                             return chunk_event
                         return event
@@ -606,32 +607,51 @@ class Runnable(ABC, BaseModel):
                     # Keep the final result
                     output = collector.result()
 
-            # If the output is an OutputEvent, we extract the output
-            # to avoid nesting an output event inside another output event
-            if isinstance(output, OutputEvent):
-                output = output.output
-            trace.output = output
-            trace._output_dump = await dump(output)
-            trace.status = RunStatus(
+            span.status = RunStatus(
                 code="success",
                 reason=None, # TODO
                 message=None # TODO
             )
+            # If the output is an OutputEvent, we extract the output
+            # to avoid nesting an output event inside another output event
+            if isinstance(output, OutputEvent):
+                if output.status.code == "cancelled":
+                    span.status = output.status
+                output = output.output
+            span.output = output
             
             # Restore the call context to this runnable before executing post_hook
-            # This ensures post_hook modifies the correct trace, not any nested ones
+            # This ensures post_hook modifies the correct span, not any nested ones
             set_call_id(_call_id)
             if self._is_orchestrator:
                 set_parent_call_id(_call_id)
             if self.post_hook is not None:
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+
+            # Post hook might modify the output, so we dump afterwards 
+            span._output_dump = await dump(output)
             
         except EarlyExit as early_exit:
-            trace.status = RunStatus(
+            span.status = RunStatus(
                 code="cancelled",
                 reason="early_exit",
                 message=str(early_exit)
             )
+            span.output = None
+            span._output_dump = None
+
+        except (asyncio.CancelledError, InterruptError) as e:
+            logger.warning("Interrupted", run_id=run_context.id, call_id=span.call_id)
+            # Create a message with collected chunks or cancellation info
+            if collector is not None:
+                span.output = collector.result()
+                span._output_dump = await dump(span.output)
+            span.status = RunStatus(
+                code="cancelled",
+                reason="interrupted",
+                message=str(e)
+            )
+            yield InterruptError(_call_id)
 
         except Exception as err:
             error = {
@@ -639,8 +659,8 @@ class Runnable(ABC, BaseModel):
                 "message": str(err),
                 "traceback": traceback.format_exc(),
             }
-            trace.error = error # No need to model dump the error. It's already a json compatible dict
-            trace.status = RunStatus(
+            span.error = error # No need to model dump the error. It's already a json compatible dict
+            span.status = RunStatus(
                 code="error",
                 reason=None, # TODO
                 message=None # TODO
@@ -648,29 +668,29 @@ class Runnable(ABC, BaseModel):
         
         finally:
             t1 = int(time.time() * 1000)
-            trace.t1 = t1
+            span.t1 = t1
             output_event = OutputEvent(
                 run_id=run_context.id,
                 parent_run_id=run_context.parent_id,
-                path=trace.path,
-                call_id=trace.call_id,
-                parent_call_id=trace.parent_call_id,
-                input=trace.input,
-                status=trace.status,
-                output=trace.output,
-                error=trace.error,
-                t0=trace.t0,
-                t1=trace.t1,
-                usage=trace.usage,
-                metadata=trace.metadata,
+                path=span.path,
+                call_id=span.call_id,
+                parent_call_id=span.parent_call_id,
+                input=span.input,
+                status=span.status,
+                output=span.output,
+                error=span.error,
+                t0=span.t0,
+                t1=span.t1,
+                usage=span.usage,
+                metadata=span.metadata,
             )
-            output_event._input_dump = trace._input_dump
-            output_event._output_dump = trace._output_dump
+            output_event._input_dump = span._input_dump
+            output_event._output_dump = span._output_dump
             if _parent_call_id is None:
-                await run_context._save_tracing()
+                await run_context._save_trace()
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
                 set_parent_call_id(None)
-            if output_event.type in timbal_log_events:
+            if output_event.type in self._log_events:
                 logger.info("output_event", **output_event.model_dump())
             yield output_event
 

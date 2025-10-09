@@ -1,0 +1,59 @@
+---
+title: "Text-to-Speech"
+description: "AI agents can convert text to speech using OpenAI's TTS capabilities"
+---
+
+Agents can generate audio from text using text-to-speech tools. Add the TTS tool to your agent's tools list:
+
+```python
+import os
+from openai import AsyncOpenAI
+from pydantic import Field
+from timbal import Agent
+from timbal.state import get_run_context
+from timbal.types.file import File
+
+async def tts(
+    text: str = Field(
+        ...,
+        description="The text to convert to speech.",
+    ),
+) -> File:
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    
+    kwargs = {
+        "input": text,
+        'model': 'tts-1',
+        'voice': 'alloy'
+    }
+    
+    response = await client.audio.speech.create(**kwargs)
+    
+    return File.validate(
+        response.content,
+        {"extension": ".mp3"}
+    )
+
+async def post_hook():
+    """Post hook to extract and return the audio file."""
+    trace = get_run_context().current_span()
+    trace.output = await tts(text=trace.output.content[0].text)
+    trace.output.to_disk("audio.mp3")
+
+agent = Agent(
+    name="VoiceAgent",
+    model="openai/gpt-4.1-mini",
+    post_hook=post_hook
+)
+
+# Agent will generate audio files
+await agent(
+    prompt="What is the capital of France?"
+).collect()
+```
+
+## Key Features
+
+- **Multiple Voices**: Choose from various voice options
+- **Audio Formats**: Support for MP3, WAV, and other formats
+- **File Output**: Returns audio files for download or playback

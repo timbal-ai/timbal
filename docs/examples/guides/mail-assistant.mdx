@@ -1,0 +1,336 @@
+---
+title: "Mail Assistant"
+description: "AI-powered Gmail integration that triages emails and autonomously drafts intelligent responses"
+---
+
+This guide shows how to:
+- Connect to the Gmail API to retrieve incoming messages
+- Use agents to generate draft replies
+
+## Setup Requirements
+
+<AccordionGroup>
+  <Accordion title="Installing Packages">
+    To get started, install the following Google API client libraries to interact with Gmail:
+    ```python 
+    google-api-core 
+    google-api-python-client 
+    google-auth 
+    google-auth-httplib2 
+    google-auth-oauthlib   
+    ```
+    
+
+  </Accordion>  
+  <Accordion title="Enabling Gmail API to your account">
+    <Steps>
+      <Step title="Create a Google Cloud Project">
+        Go to the [Google Cloud Console](https://console.cloud.google.com/) and create a new project or select an existing one.
+      </Step>
+      <Step title="Enable Gmail API">
+        1. Navigate to **APIs & Services** > **Library**
+        2. Search for "Gmail API"
+        3. Click on **Gmail API** and then **Enable**
+      </Step>
+      <Step title="Create OAuth 2.0 Credentials">
+        1. Go to **APIs & Services** > **Credentials**
+        2. Click **Create Credentials** > **OAuth client ID**
+        3. Choose **Desktop app** as the application type
+        4. Download the credentials JSON file
+      </Step>
+      <Step title="Configure OAuth Scopes">
+        The following scopes are required:
+        ```json
+        SCOPES = [
+          "https://www.googleapis.com/auth/gmail.readonly",
+          "https://www.googleapis.com/auth/gmail.compose",
+          "https://www.googleapis.com/auth/gmail.modify"
+        ]
+        ```
+      </Step>
+      <Step title="Generate Access Token">
+        Generate a `token.json` file with your access credentials. 
+        Example:
+        ```python
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from google.auth.transport.requests import Request
+        import os.path
+
+        SCOPES = [
+            'https://www.googleapis.com/auth/gmail.readonly',
+            'https://www.googleapis.com/auth/gmail.compose',
+            'https://www.googleapis.com/auth/gmail.modify'
+        ]
+
+        def main():
+            if os.path.exists('token.json'):
+                creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+            
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                else:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        'credentials.json', SCOPES) # Your credentials JSON file name
+                    creds = flow.run_local_server(port=0)
+                
+                with open('token.json', 'w') as token:
+                    token.write(creds.to_json())
+            
+
+        if __name__ == '__main__':
+            main()
+        ```
+        This will open a browser window for Google sign-in and generate the token access to Gmail.
+      </Step>
+    </Steps>
+  </Accordion>
+</AccordionGroup>
+
+## Implementation
+This section walks through the essential components needed to implement Gmail integration with Timbal. 
+For the complete example, visit our [GitHub repository](https://github.com/timbal-ai/timbal/tree/main/examples/gmail).
+
+### Gmail Initialization
+
+Establish a connection to the Gmail API using your OAuth credentials:
+
+```python
+def initialize_gmail(self):
+    """Initialize Gmail API connection"""
+    try:
+        creds = None
+        token_file = 'token.json'
+        
+        if os.path.exists(token_file):
+            creds = Credentials.from_authorized_user_file(token_file, self.scopes)
+        
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                print("Refreshing expired credentials...")
+                creds.refresh(Request())
+            else:
+                print("No valid credentials found.")
+                return False
+        
+        self.gmail_service = build('gmail', 'v1', credentials=creds)
+
+        # Test connection and get initial history ID
+        profile = self.gmail_service.users().getProfile(userId='me').execute()
+        print(f"Connected to Gmail: {profile['emailAddress']}")
+        
+        # Get initial history ID from profile
+        self.last_history_id = profile.get('historyId')
+        if self.last_history_id:
+            print(f"Starting from history ID: {self.last_history_id}")
+        else:
+            print("No history ID found, will monitor from now")
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error initializing Gmail API: {e}")
+        return False
+```
+
+
+### Email monitoring
+Monitor the Gmail inbox for new messages using polling:
+
+```python
+async def check_for_new_messages(self):
+    """Check for new messages since last check"""
+    try:           
+        # Check for new messages since last history ID
+        history = self.gmail_service.users().history().list(
+            userId='me',
+            startHistoryId=self.last_history_id,
+            historyTypes=['messageAdded']
+        ).execute()
+        
+        new_messages = []
+        for history_record in history.get('history', []):
+            for message_added in history_record.get('messagesAdded', []):
+                message_id = message_added['message']['id']
+                message_details = self.get_message_details(message_id)
+                if message_details:
+                    # Filter out draft messages
+                    if not self.is_draft_message(message_details):
+                        new_messages.append(message_details)
+                    else:
+                        print(f"📝 Skipping draft message: {message_details.get('subject', 'No Subject')}")
+        
+        if new_messages:
+            print(f"\n🔔 Found {len(new_messages)} new message(s) at {datetime.now().strftime('%H:%M:%S')}")
+            for message in new_messages:
+                await self.generate_draft(message)
+        
+        # Update history ID
+        if history.get('history'):
+            self.last_history_id = history['history'][-1]['id']
+        
+    except HttpError as error:
+        print(f"Error checking for new messages: {error}")
+
+
+async def start_monitoring(self):
+    """Start monitoring Gmail for new messages using polling"""   
+      while True:
+          await self.check_for_new_messages()
+          time.sleep(10)  # Check new emails every 10 seconds
+```
+
+### Create a Timbal Agent for intelligent email responses
+Create an Agent to generate emails responses:
+```python
+agent = Agent(
+    name="email_response_generator", 
+    model="openai/gpt-4o-mini",
+    system_prompt="You are an assistant that helps draft professional email responses.",
+    post_hook=self.save_draft,
+)  
+```
+
+
+### Call a Timbal Agent to generate the draft
+Process incoming emails by creating the prompt and invoking the Agent to generate a response:
+
+```python
+def _create_email_prompt(self, email):
+    # Extract email information
+    subject = email.get('subject', 'No Subject')
+    sender = email.get('from', 'Unknown Sender')
+    body = email.get('body', '')
+    snippet = email.get('snippet', '')
+    content = body if body else snippet
+    
+    prompt = f"""
+You are an AI assistant that helps draft professional email responses. 
+
+Please write a helpful and appropriate response to this email:
+
+**Received Email:**
+From: {sender}
+Subject: {subject}
+Content: {content}
+
+**Instructions:**
+- Write a professional response
+- Do not assume anything that is not explicitly stated in the email
+- Address any questions or requests appropriately
+- Keep the tone friendly but business-appropriate
+- If you need more information, ask clarifying questions
+- End with a professional closing
+- Keep the response concise but complete
+
+**Your Response:**
+"""
+    return prompt.strip()
+
+
+async def generate_draft(self, message):
+    prompt = self._create_email_prompt(message)
+    
+    # Generate and create draft
+    try:
+        response_text = await self.agent(prompt=prompt, input_email=message).collect()
+        if response_text:
+            print("Generated Response:")
+            print("-" * 40)
+            print(response_text)
+            print("-" * 40)
+            
+            print("Draft created successfully!")
+            print("="*60)
+        else:
+            print("Failed to generate response")
+    except Exception as e:
+        print(f"Error generating/creating draft: {e}")
+    
+    print("="*60)
+```
+
+### Save the draft to the emails thread
+Define the post-hook function that automatically saves the AI-generated response as a draft reply in the original email thread:
+
+```python
+def save_draft(self):
+    """Create a draft response to the original message"""
+    trace = get_run_context().current_span()
+    original_message = trace.input['input_email']
+    response_text = trace.output.content[0].text
+
+    try:
+        # Extract sender email from the original message
+        from_header = original_message.get('from', '')
+        if '<' in from_header and '>' in from_header:
+            # Extract email from "Name <email@domain.com>" format
+            sender_email = from_header.split('<')[1].split('>')[0].strip()
+        else:
+            # Assume the entire from header is the email
+            sender_email = from_header.strip()
+        
+        # Create response subject
+        original_subject = original_message.get('subject', '')
+        if not original_subject.startswith('Re:'):
+            response_subject = f"Re: {original_subject}"
+        else:
+            response_subject = original_subject
+        
+        # Create draft message
+        draft_message = self._create_message(sender_email, response_subject, response_text)
+        
+        # Create the draft with thread ID to link it to the original conversation
+        draft_body = {
+            'message': {
+                'raw': draft_message
+            }
+        }
+        
+        # Include thread ID if available to link the draft to the original conversation
+        if original_message.get('thread_id'):
+            draft_body['message']['threadId'] = original_message['thread_id']
+        
+        draft = self.gmail_service.users().drafts().create(
+            userId='me',
+            body=draft_body
+        ).execute()
+        
+        print(f"Draft ID: {draft['id']}")
+        print(f"To: {sender_email}")
+        print(f"Subject: {response_subject}")
+        return draft
+        
+    except Exception as e:
+        print(f"Error creating draft: {e}")
+        return None
+```
+
+## Script Key Features
+- **Real-time Processing**: Constantly polls new emails
+- **Intelligent Responses**: Uses AI to generate contextually appropriate draft replies
+- **History Tracking**: Maintains state to avoid processing duplicate emails or generated drafts
+
+## Next Steps
+
+This example demonstrates a simple implementation to showcase Timbal's capabilities for Gmail automation. 
+For a more sophisticated solution, consider configuring Gmail to send notifications to a Pub/Sub topic when new messages arrive.
+
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Authentication Issues">
+    - **Missing scopes**: Verify all required Gmail API scopes are included
+    - **OAuth setup**: Check that OAuth client ID is properly configured and the credentials json file downloaded.
+  </Accordion>
+
+  <Accordion title="API Connection Problems">
+    - **Rate limits**: Gmail API has daily quotas. Check your usage.
+  </Accordion>
+
+  <Accordion title="Code Issues">
+    - **Import errors**: Ensure all required packages are installed
+    - **File errors**: Check `token.json` and `credentials.json` files exist.
+  </Accordion>
+</AccordionGroup>

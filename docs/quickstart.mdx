@@ -1,0 +1,145 @@
+---
+title: "Quickstart"
+description: "Build your first AI Agent with Timbal in a few lines of code"
+---
+
+In this quickstart guide we're going to see how to build an AI agent with Timbal. We'll start from scratch and gradually enhance it with advanced features. Let's dive in!
+
+Before moving forward, ensure you've completed the [installation steps](/installation).
+
+## Create a Timbal Project
+
+Run the following Timbal CLI command to create a new project:
+
+```bash
+timbal init my-project --agent
+```
+
+This creates a simple project structure with all the necessary files and dependencies to get started building an agent. If you want to build a workflow, you can use the `--workflow` flag instead. You can check all the options by running any `timbal` command with the `--help` flag.
+
+### Project Structure
+
+After running the command, your project will look like this:
+
+<img
+  src="/images/project-structure.png"
+  alt="Project structure"
+  style={{width: '300px'}}
+  noZoom
+  className="rounded-lg"
+/>
+| File | Purpose |
+|------|---------|
+| **.venv** | Python virtual environment directory (automatically created) |
+| **.dockerignore** | Docker configuration for containerized deployment |
+| **agent.py** | Main application file where you define your AI agents and workflows.<br/>If you create a workflow, you'll have a `workflow.py` file instead |
+| **pyproject.toml** | Python project configuration and dependency management |
+| **timbal.yaml** | Timbal deployment configuration and settings |
+| **uv.lock** | Dependency lock file for reproducible builds |
+
+Timbal automatically sets up a Python virtual environment using `uv`. You can manage your project dependencies using `uv` commands just like in any other Python project. For example:
+
+```bash
+uv add package-name
+```
+
+This makes it easy to add new packages and manage your project's dependencies.
+
+<Tip>
+You have your project structure set up. Next, you only need to edit the `agent.py` file to customize your agent's behavior and capabilities.
+</Tip>
+
+## Build a simple Agent
+
+Let's create a simple agent with the `Agent` class:
+
+```python agent.py icon="python"
+from timbal import Agent
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-5-mini"
+)
+```
+
+<Info>
+You'll need to set the appropriate environment variables for your chosen model (e.g., `OPENAI_API_KEY`). Store these in a `.env` file and never commit them to version control.
+</Info>
+
+We can add the following boilerplate to our script to interact with the agent in the terminal:
+
+```python
+async def main():
+    while True:
+        prompt = input("User: ")
+        if prompt == "q":
+            break
+        agent_output_event = await agent(prompt=prompt).collect()
+        print(f"Agent: {agent_output_event.output}") # noqa: T201
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+You can learn more about the Agent class and all the available options in the [Agents](/agents) section.
+
+<Tip>
+You've just created your first Timbal agent. Next, you can add any type of tools to it to make it more powerful.
+</Tip>
+
+## Adding Tools
+
+Agents become powerful with tools.
+In Timbal, you can use both **baked-in tools** (pre-built and ready to use) and **custom tools** (functions you write yourself).
+
+### Baked-in Tools
+
+Timbal includes several ready-to-use tools. For example, the `WebSearch` tool allows your agent to search the internet for real-time information:
+
+```python agent.py icon="python"
+from timbal import Agent
+from timbal.tools import WebSearch
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-5-mini",
+    tools=[WebSearch()]
+)
+```
+
+### Custom Tools
+
+Creating custom tools is straightforward—just write a function. Here's a simple example that returns the current date and time:
+
+```python agent.py icon="python"
+from datetime import datetime
+
+from timbal import Agent
+from timbal.tools import WebSearch
+
+def get_datetime() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-5-mini",
+    tools=[WebSearch(), get_datetime]
+)
+```
+
+You can combine any number of tools to create powerful, specialized agents. 
+Mix and match baked-in and custom tools to fit your specific use case.
+You can even use agents and workflows as tools!
+
+<Tip>
+**Congratulations!** You've built a fully functional AI agent with tools in just a few lines of code.
+
+Ready to explore more? Check out our [examples](/examples), or browse the latest code samples on <a href="https://github.com/timbal-ai/timbal" target="_blank" rel="noopener noreferrer">GitHub</a>.
+</Tip>
+
+## Moving to Production
+
+Ready to take your agent to production? Timbal provides enterprise-grade deployment options designed for real-world applications.
+
+Whether you need fully managed hosting or complete infrastructure control, we've got you covered. Check out our comprehensive [deployment guide](/deployment) to explore your options and choose the best approach for your needs.

@@ -1,8 +1,8 @@
 # Timbal
 
-> 🚀 **Agents and Workflows**: APIs nearly stable - version 1.0.0 coming soon!
+> 🚀 Version 1.0 is now live! Start with the [quickstart guide](https://docs.timbal.ai/quickstart) or explore our [examples](https://docs.timbal.ai/examples).
 
-Timbal is an open-source python framework for building reliable AI applications, battle-tested in production with transparent architecture that eliminates complexity while delivering concurrent execution, robust typing, and interface stability in an ever-changing ecosystem.
+Timbal is an open-source python framework for building reliable AI applications, battle-tested in production with simple, transparent architecture that eliminates complexity while delivering blazing fast performance, robust typing, and API stability in an ever-changing ecosystem.
 
 ## Overview
 
@@ -58,7 +58,7 @@ Agents are autonomous execution units that orchestrate LLM interactions with too
 from datetime import datetime
 
 from timbal import Agent
-from timbal.handlers.docx import create_docx
+from timbal.tools import WebSearch
 
 def get_datetime() -> str:
     return datetime.now().isoformat()
@@ -66,11 +66,11 @@ def get_datetime() -> str:
 agent = Agent(
     name="demo_agent",
     model="openai/gpt-5-mini",
-    tools=[get_datetime, create_docx]
+    tools=[get_datetime, WebSearch()]
 )
 
 await agent(prompt="What time is it?").collect()
-await agent(prompt="Cool, write that down on a word file for me").collect()
+await agent(prompt="What's the weather like in Barcelona?").collect()
 ```
 
 The framework performs automatic introspection of function signatures and docstrings for tool schema generation. Architecture features:
@@ -96,37 +96,20 @@ The framework performs automatic introspection of function signatures and docstr
 Workflows provide explicit step-by-step execution with automatic dependency management. Define your pipeline as a series of steps that execute concurrently while respecting dependencies:
 
 ```python
+import httpx
 from timbal import Workflow
-from timbal.state import get_run_context()
+from timbal.state import get_run_context
+from timbal.tools import Write
 
-def fetch_url(url: str) -> str:
-    # ...
-    pass
+async def fetch_content(url: str) -> str:
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        res = await client.get(url)
+        res.raise_for_status()
+        return res.text
 
-def summarize_text(text: str, max_length: int) -> str:
-    # ...
-    pass
-
-def extract_keywords(text: str) -> list[str]:
-    # ...
-    pass
-
-def save_to_file(path: str, content: dict) -> None:
-    # ...
-    pass
-
-workflow = (Workflow(name="content_pipeline")
-    .step(fetch_url)
-    .step(summarize_text, max_length=200, text=lambda: get_run_context().get_data("fetch_url.output"))
-    .step(extract_keywords, text=lambda: get_run_context().get_data("fetch_url.output"))
-    .step(
-        save_to_file, 
-        path="./results.json", 
-        content=lambda: {
-            "summary": get_run_context().get_data("summarize_text.output"),
-            "keywords": get_run_context().get_data("extract_keywords.output")
-        }
-    )
+workflow = (Workflow(name="demo_workflow")
+    .step(fetch_content)
+    .step(Write(), path="./output.html", content=get_run_context().step_span("fetch_content").output) 
 )
 
 await workflow(url="https://timbal.ai").collect()
@@ -136,15 +119,14 @@ await workflow(url="https://timbal.ai").collect()
 
 The workflow automatically infers execution order from data dependencies:
 
-1. **`fetch_url`** runs first (no dependencies, takes `url` from workflow input)
-2. **`summarize_text` and `extract_keywords`** execute in parallel once `fetch_url` completes
-3. **`save_to_file`** waits for both parallel steps to finish, then combines their outputs
+1. **`fetch_content`** runs first (no dependencies, takes url from workflow input)
+2. **`Write`** executes once `fetch_content` completes, using its output to save the HTML content
 
-Execution pattern: `fetch_url` → (`summarize_text` || `extract_keywords`) → `save_to_file`
+Execution pattern: `fetch_content` → `Write`
 
 **Key Features:**
 
-- **Automatic Dependency Linking**: Lambda functions using `get_run_context().get_data()` create automatic step dependencies
+- **Automatic Dependency Linking**: Steps using `get_run_context().step_span()` create automatic step dependencies
 - **Workflow Input Propagation**: Unspecified step parameters become workflow-level inputs  
 - **Concurrent Execution**: Independent steps run in parallel for optimal performance
 - **DAG Validation**: Prevents circular dependencies with built-in cycle detection

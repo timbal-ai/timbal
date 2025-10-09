@@ -1,0 +1,525 @@
+---
+title: "Sales Agent"
+description: "WhatsApp dealership agent that qualifies leads and books appointments automatically"
+---
+
+This guide shows how to create a WhatsApp assistant with Timbal that can:
+- Respond to messages in real time via webhooks
+- Persist conversations using Timbal Knowledge Bases or JSONL
+- Handle text, audio, images, and documents
+
+## Setup Requirements
+
+<AccordionGroup>
+  <Accordion title="Meta WhatsApp App and Webhook">
+    <Steps>
+      <Step title="Create or open your WhatsApp App">
+        Go to the Meta console and open your app's WhatsApp section: [Meta WhatsApp App Dashboard](https://developers.facebook.com/apps/).
+      </Step>
+      <Step title="Set Callback URL and Verify Token">
+        1. Set the **Callback URL** to your endpoint, e.g., `https://yourdomain.com/`  
+        2. Set a **Verify Token** (keep it secret)  
+        3. In your app code, use the same token (see `WHATSAPP_VERIFY_TOKEN` in the example below)  
+        4. Click **Verify and Save**
+      </Step>
+      <Step title="Subscribe to fields">
+        In the WhatsApp product settings, subscribe to message-related events (e.g., messages, statuses).
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="Environment Variables">
+    Create a `.env` file and set:
+    ```bash .env
+    # Timbal platform (if using KB persistence)
+    ORG_ID=your_org_id
+    KB_ID=your_kb_id
+    
+    # WhatsApp API
+    WHATSAPP_ACCESS_TOKEN=your_long_lived_token
+    WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
+    
+    # Storage mode for this template: JSONL | timbal
+    WHATSAPP_STORAGE_MODE=timbal
+    
+    # Webhook verification
+    WHATSAPP_VERIFY_TOKEN=your_verify_token
+    
+    # Server
+    HOST=0.0.0.0
+    PORT=4343
+    
+    # Optional: enable ngrok tunnel
+    ENABLE_NGROK=true
+    ```
+    <Note>
+      The included `whatsapp_tools.send_whatsapp_message` currently references `WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_PHONE_NUMBER_ID`. Ensure these are set. If you see mismatched names in your local template (e.g., `WHATSAPP_TOKEN`, `PHONE_NUMBER_ID`), set both pairs to be safe.
+    </Note>
+  </Accordion>
+</AccordionGroup>
+
+## Minimal Webhook App (FastAPI)
+
+Use a simple FastAPI app to receive the webhook and pass the full payload to the agent. The agent will process everything in `pre_hook` and send responses in `post_hook`.
+
+```python app.py
+from fastapi import FastAPI, Request, Response
+from agent import agent
+import os
+import uvicorn
+from dotenv import load_dotenv
+
+load_dotenv()
+
+app = FastAPI()
+
+VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
+
+@app.get("/")
+async def verify(request: Request):
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    if token == VERIFY_TOKEN and challenge:
+        return Response(content=challenge, media_type="text/plain")
+    return Response(content="Verification failed", status_code=403)
+
+@app.post("/")
+async def webhook(request: Request):
+    _webhook = await request.json()
+    await agent(_webhook=_webhook).collect()
+    return {"status": "ok"}
+
+def _maybe_start_ngrok(port: int) -> None:
+    enable = os.getenv("ENABLE_NGORK", "false")
+    if enable != "true":
+        return
+    try:
+        from pyngrok import ngrok
+        public_url = ngrok.connect(port, "http")
+        print(f"ngrok public url: {public_url}")
+    except Exception as e:
+        print(f"Failed to start ngrok: {e}")
+
+if __name__ == "__main__":
+    host = os.getenv("HOST", "0.0.0.0")
+    try:
+        port = int(os.getenv("PORT", "4343"))
+    except Exception:
+        port = 4343
+    _maybe_start_ngrok(port)
+    uvicorn.run("app:app", host=host, port=port, log_level="info")
+```
+
+Expose locally (optional):
+```bash
+ngrok http 4343
+```
+Then set the ngrok HTTPS URL as the Callback URL in the Meta console.
+
+## Creating the Agent
+
+```python agent.py
+import os
+import json
+from timbal import Agent
+from timbal.state import get_run_context
+from whatsapp_tools import send_whatsapp_message
+
+def _value(payload: dict) -> dict | None:
+    try:
+        return payload["entry"][0]["changes"][0]["value"]
+    except Exception:
+        return None
+
+def _prompt_from_message(msg: dict) -> str:
+    t = msg.get("type")
+    if t == "text":
+        return (msg.get("text") or {}).get("body", "").strip()
+    if t == "image":
+        mid = (msg.get("image") or {}).get("id")
+        cap = (msg.get("image") or {}).get("caption", "")
+        return f"[image:{mid}] {cap}".strip()
+    if t == "audio":
+        mid = (msg.get("audio") or {}).get("id")
+        return f"[audio:{mid}]"
+    if t == "document":
+        fn = (msg.get("document") or {}).get("filename", "document")
+        return f"[document:{fn}]"
+    return f"[{t or 'unknown'}]"
+
+def _append_jsonl(path: str, rec: dict) -> None:
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+def _recent_history(path: str, user_phone: str, limit: int = 10) -> list[str]:
+    out = []
+    try:
+        if not os.path.exists(path):
+            return []
+        with open(path, "r", encoding="utf-8") as f:
+            rows = [json.loads(l) for l in f if l.strip()]
+            for r in reversed(rows):
+                if r.get("user_phone") == user_phone:
+                    try:
+                        payload = json.loads(r.get("message") or "{}")
+                        out.append(f"{r.get('direction')}: {payload.get('content','')}")
+                    except Exception:
+                        continue
+                    if len(out) >= limit:
+                        break
+        return list(reversed(out))
+    except Exception:
+        return []
+
+def pre_hook():
+    """Build professional prompt from WhatsApp metadata, message, and optional history."""
+    trace = get_run_context().current_span()
+    payload = trace.input.get("_webhook")
+    if not payload:
+        bail("No payload found in webhook")
+
+    value = payload["entry"][0]["changes"][0]["value"]
+    if not value:
+        bail("No value found in webhook")
+
+    messages = value.get("messages", [])
+    if not messages:
+        bail("No messages found in webhook")
+
+    contacts = value.get("contacts", [])
+    profile = contacts[0].get("profile", {})
+    name = profile.get("name", "")
+    msg = messages[0]
+    from_number = msg.get("from")
+    message_id = msg.get("id")
+    phone_number_id = value.get("metadata").get("phone_number_id")
+    prompt = _prompt_from_message(msg)
+    msg_type = msg.get("type")
+
+    rec = {
+        "id": msg.get("id"),
+        "user_phone": from_number,
+        "direction": "inbound",
+        "message_type": msg_type,
+        "message": json.dumps({"type": msg_type, "content": prompt}, ensure_ascii=False),
+        "timestamp": msg.get("timestamp"),
+        "conversation_id": f"{phone_number_id}_{from_number}",
+        "user_name": name,
+    }
+    _append_jsonl("whatsapp_messages.jsonl", rec)
+
+    trace.input["prompt"] = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
+    trace.input["whatsapp_from_number"] = from_number
+    trace.input["name"] = name
+```
+
+The `pre_hook` runs before invoking the agent. It extracts metadata from the webhook, builds a prompt from the incoming message, persists the inbound event, and sets values in `trace.input` for the agent to use during inference.
+
+```python agent.py
+def post_hook():
+    """Send the agent response via WhatsApp and persist outbound to JSONL."""
+    trace = get_run_context().current_span()
+    from_number = trace.input.get("whatsapp_from_number")
+    if not from_number:
+        return
+    try:
+        response_text = (trace.output.content[0].text or "").strip()
+    except Exception:
+        return
+    if not response_text:
+        return
+    try:
+        send_whatsapp_message(to=from_number, message=response_text)
+    except Exception:
+        pass
+    _append_jsonl("whatsapp_messages.jsonl", {
+        "id": f"outbound_{from_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        "user_phone": from_number,
+        "direction": "outbound",
+        "message_type": "agent",
+        "message": json.dumps({"type": "text", "content": response_text}, ensure_ascii=False),
+        "timestamp": datetime.now().isoformat(),
+        "conversation_id": "",
+        "user_name": trace.input.get("name", ""),
+    })
+```
+
+The `post_hook` runs after obtaining the agent's response. It sends the text via WhatsApp and persists the outbound event to JSONL.
+
+```python agent.py
+agent = Agent(
+    name="WhatsAppAgent",
+    description="A minimal WhatsApp agent for Timbal",
+    model="openai/gpt-4.1-mini",
+    pre_hook=pre_hook,
+    post_hook=post_hook,
+)
+```
+
+### Optional: system prompt example
+
+<Accordion title="Show example system_prompt">
+```text
+title: "WHATSAPP AGENT from {{YOUR_BRAND}}",
+description: "You are a WhatsApp agent from {{YOUR_BRAND}}. Your goal is to help users find the perfect vehicle and manage all their automotive needs.",
+
+## WhatsApp message format
+You are responding to messages in WhatsApp. Use WhatsApp's text formatting syntax when appropriate:
+
+Text format:
+- *text* = bold (for important information)
+- _text_ = italic (for clarifications or soft emphasis)
+- ~text~ = strikethrough (for corrections or obsolete information)
+- `text` = monospace (for code, commands or technical text)
+- Use triple backticks for code blocks (for longer fragments)
+- > text = quote (for references or highlighted information)
+- Important: Never use [View here](url) or ![Image](url). Send the direct link instead; WhatsApp does not render these markdown forms.
+
+Important rules:
+- Symbols must be attached to the text (no spaces)
+- Every opening symbol must have its closing symbol
+- You can combine formats: *_text_* for bold+italic
+- Use sparingly; only when it adds value
+- For lists use bullets (•), numbers (1.), or hyphens (-)
+```
+</Accordion>
+
+### Optional: Timbal KB persistence and history
+
+If you prefer using Timbal Knowledge Bases instead of JSONL, you can import and query records with the platform helpers. These are async functions; adapt their usage to your environment accordingly.
+
+```python
+from timbal.platform.kbs.tables import import_records, query
+
+ORG_ID = int(os.getenv("ORG_ID"))
+KB_ID = int(os.getenv("KB_ID"))
+
+async def save_record_to_kb(record: dict) -> None:
+    await import_records(ORG_ID, KB_ID, "whatsapp_messages", [record])
+
+async def fetch_recent_history_from_kb(user_phone: str, limit: int = 10) -> list[str]:
+    rows = await query(ORG_ID, KB_ID, sql=f"""
+        SELECT direction, message
+        FROM whatsapp_messages
+        WHERE user_phone = '{user_phone}'
+        ORDER BY timestamp DESC
+        LIMIT {limit}
+    """)
+    lines: list[str] = []
+    for r in reversed(rows or []):
+        try:
+            payload = json.loads(r.get("message") or "{}")
+            lines.append(f"{r.get('direction')}: {payload.get('content','')}")
+        except Exception:
+            continue
+    return lines
+```
+
+## Media Handling Notes
+
+- **Images**: The webhook includes an image `id`. Use the Graph API to fetch the media URL or content using your `WHATSAPP_ACCESS_TOKEN`. Provide the URL or a `File` object to the agent if needed.
+- **Audio**: The webhook includes an audio `id`. You can fetch and transcribe audio, then pass the transcript as the prompt.
+- **Documents**: You receive basic metadata (e.g., filename). Decide whether to fetch and analyze content or treat as a reference.
+
+Keep the `pre_hook` minimal: extract the message type, create a concise prompt, and persist the event.
+
+## Complete implementation reference
+
+For a full, end-to-end reference (webhook app, helpers, and utilities), see the official WhatsApp examples in the Timbal repository:
+
+- [timbal/examples/whatsapp](https://github.com/timbal-ai/timbal/tree/e978458d75b6f6632d624977d9b07cf4e2f4b4fd/examples/whatsapp)
+
+## Possible Improvements
+
+<AccordionGroup>
+  <Accordion title="Delay response to batch context (debounce)">
+    Each WhatsApp webhook creates a separate agent instance. Persist every inbound message immediately (JSONL or KB), then wait a short debounce window. After that window, if storage shows a newer message for the same user, bail this run so the most recent instance answers with full context. No in-memory buffer is required.
+
+    - **Why it helps**: avoids replying to partial context when the user is still typing or sending media.
+    - **Trade-offs**: adds small latency; choose a short window (e.g., 800–1500 ms).
+    - **Example approach (JSONL)**:
+    ```python
+    import os, json, time
+
+    DEBOUNCE_MS = int(os.getenv("WHATSAPP_DEBOUNCE_MS", "1200"))
+
+    def _message_ts(msg: dict) -> int:
+        try:
+            return int(msg.get("timestamp") or 0)
+        except Exception:
+            return 0
+
+    def _newer_exists_in_jsonl(path: str, user_phone: str, after_ts: int) -> bool:
+        try:
+            if not os.path.exists(path):
+                return False
+            with open(path, "r", encoding="utf-8") as f:
+                rows = [json.loads(l) for l in f if l.strip()]
+            for rec in reversed(rows):
+                if rec.get("user_phone") != user_phone:
+                    continue
+                if rec.get("direction") != "inbound":
+                    continue
+                try:
+                    ts = int(rec.get("timestamp") or 0)
+                except Exception:
+                    continue
+                if ts > after_ts:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def pre_hook():
+        trace = get_run_context().current_span()
+        payload = trace.input.get("_webhook") or {}
+        value = (payload.get("entry") or [{}])[0].get("changes", [{}])[0].get("value", {})
+        msg = (value.get("messages") or [None])[0] or {}
+        from_number = msg.get("from", "")
+        current_ts = _message_ts(msg)
+
+        # 1) Persist inbound immediately (example: JSONL)
+        _append_jsonl("whatsapp_messages.jsonl", {
+            "id": msg.get("id"),
+            "user_phone": from_number,
+            "direction": "inbound",
+            "message_type": msg.get("type"),
+            "message": json.dumps({"type": msg.get("type"), "content": _prompt_from_message(msg)}, ensure_ascii=False),
+            "timestamp": str(current_ts),
+            "conversation_id": (value.get("metadata") or {}).get("phone_number_id", ""),
+            "user_name": (value.get("contacts") or [{}])[0].get("profile", {}).get("name", ""),
+        })
+
+        # 2. Wait a small window, then check for a newer message
+        asyncio.sleep(DEBOUNCE_MS / 1000.0) 
+        if _newer_exists_in_jsonl("whatsapp_messages.jsonl", from_number, current_ts):
+            bail("Newer message detected; aborting this run")
+
+        # 3. Proceed with prompt building from recent history
+        trace.input["prompt"] = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
+    ```
+  </Accordion>
+
+  <Accordion title="Mark inbound message as read">
+    Use the WhatsApp Cloud API to mark messages as read. This improves UX and clears unread indicators for the user.
+    ```python
+    import os, requests
+
+    def mark_as_read(message_id: str) -> None:
+        token = os.getenv("WHATSAPP_ACCESS_TOKEN")
+        phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+        try:
+            requests.post(
+                f"https://graph.facebook.com/v21.0/{phone_id}/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "messaging_product": "whatsapp",
+                    "status": "read",
+                    "message_id": message_id,
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass
+    ```
+    Call `mark_as_read(message_id)` right after parsing the webhook.
+  </Accordion>
+
+  <Accordion title="Progress updates (typing indicator and ack)">
+    You can mark the message as read and briefly show a typing indicator while the agent thinks or uses tools. Optionally send a short acknowledgement, then follow up with the final answer.
+
+    ```python
+    import os, httpx
+
+    def send_typing_and_read(message_id: str) -> dict:
+        token = os.getenv("WHATSAPP_ACCESS_TOKEN")
+        phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+        if not token or not phone_id:
+            return {}
+
+        url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        with httpx.Client() as client:
+            # Mark as read
+            client.post(
+                url,
+                headers=headers,
+                json={
+                    "messaging_product": "whatsapp",
+                    "status": "read",
+                    "message_id": message_id,
+                },
+                timeout=10,
+            )
+            # Show typing indicator briefly
+            resp = client.post(
+                url,
+                headers=headers,
+                json={
+                    "messaging_product": "whatsapp",
+                    "typing_indicator": {"type": "typing_on"},
+                },
+                timeout=10,
+            )
+            return resp.json()
+    ```
+
+    - Call this right after parsing the webhook and before long operations.
+    - Keep interim notifications minimal to avoid noise.
+  </Accordion>
+
+  <Accordion title="Persist and reuse media in the KB">
+    Persist metadata for images, audio, videos, and documents so the agent can reuse them as context later (e.g., to re-attach an image or analyze it again).
+
+    Suggested fields to store: `id`, `user_phone`, `direction`, `message_type`, `media_id`, `media_url` (or object store key), `mime_type`, `caption`, `timestamp`.
+
+    ```python
+    async def save_media_example(record: dict) -> None:
+        # Merge this idea with your existing save flow
+        await save_record_to_kb({
+            **record,
+            "message_type": "image",  # or "video", "audio", "document"
+            # e.g. values fetched via Graph API media URL endpoint
+            "media_id": record.get("media_id"),
+            "media_url": record.get("media_url"),
+            "mime_type": record.get("mime_type"),
+            "caption": record.get("caption", ""),
+        })
+    ```
+
+    Later, query recent media by `user_phone` or `conversation_id` and inject URLs or file handles into the agent context as needed.
+  </Accordion>
+</AccordionGroup>
+
+## Running
+
+```bash
+python app.py
+```
+Expose with ngrok, then verify the webhook in the Meta console. New messages should invoke your agent and send responses via WhatsApp.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Webhook verification fails">
+    - **Verify token**: Ensure the value in Meta matches `VERIFY_TOKEN` in your app
+    - **Public URL**: Your callback must be publicly reachable (use ngrok)
+    - **HTTPS**: Required in production
+  </Accordion>
+  <Accordion title="Messages not sent">
+    - **Tokens**: Confirm `WHATSAPP_ACCESS_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` are set
+    - **Phone ID**: Ensure your app uses the correct phone number ID
+    - **Permissions**: Check token permissions in Access Token Debugger
+  </Accordion>
+  <Accordion title="No context/history">
+    - Check `ORG_ID` and `KB_ID` if using Timbal KB
+    - If using JSONL, verify the JSONL file path and write permissions
+  </Accordion>
+</AccordionGroup>

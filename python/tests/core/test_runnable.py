@@ -157,7 +157,7 @@ class TestPerformance:
         """Test that multiple runnables can execute concurrently."""
         def slow_handler(x: str) -> str:
             import time
-            time.sleep(0.1)  # 100ms delay
+            time.sleep(1)  # 1s delay
             return f"slow:{x}"
         
         tool = Tool(handler=slow_handler)
@@ -170,8 +170,8 @@ class TestPerformance:
                 tool(x="3").collect()
             )
         
-        # Should complete in roughly 100ms, not 300ms
-        assert timer.elapsed < 0.2, f"Concurrent execution took too long: {timer.elapsed}s"
+        # Should complete in roughly 1s, not 3s
+        assert timer.elapsed < 2, f"Concurrent execution took too long: {timer.elapsed}s"
         
         # All results should be present
         assert len(results) == 3

@@ -21,6 +21,7 @@ version.zig
 !python/tests/types/files/examples/test.jsonl
 
 *.dump
+*.wav
 
 # Safe testing during development
 sandbox/

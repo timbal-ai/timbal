@@ -20,6 +20,8 @@ from ..types.message import Message
 from ..utils import resolve_default
 from .runnable import Runnable
 
+OPENAI_API = os.getenv("TIMBAL_OPENAI_API", "responses")
+
 # Model type with provider prefixes
 Model = Literal[
     # OpenAI models
@@ -46,6 +48,7 @@ Model = Literal[
     "anthropic/claude-opus-4-1",
     "anthropic/claude-opus-4-0",
     "anthropic/claude-sonnet-4-0",
+    "anthropic/claude-sonnet-4-5",
     "anthropic/claude-3-7-sonnet-latest",
     "anthropic/claude-3-5-haiku-latest",
     # TogetherAI models
@@ -60,23 +63,23 @@ Model = Literal[
     "togetherai/deepseek-ai/DeepSeek-V3.1",
     "togetherai/deepseek-ai/DeepSeek-R1",
     # Gemini models
-    "gemini/gemini-2.5-pro",
-    "gemini/gemini-2.5-flash",
-    "gemini/gemini-2.5-flash-lite",
-    "gemini/gemini-2.5-flash-preview-native-audio-dialog",
-    "gemini/gemini-2.5-flash-exp-native-audio-thinking-dialog",
-    "gemini/gemini-2.5-flash-image-preview",
-    "gemini/gemini-2.5-flash-preview-tts",
-    "gemini/gemini-2.5-pro-preview-tts",
-    "gemini/gemini-2.0-flash-preview-image-generation",
-    "gemini/gemini-2.0-flash",
-    "gemini/gemini-2.0-flash-lite",
+    "google/gemini-2.5-pro",
+    "google/gemini-2.5-flash",
+    "google/gemini-2.5-flash-lite",
+    "google/gemini-2.5-flash-preview-native-audio-dialog",
+    "google/gemini-2.5-flash-exp-native-audio-thinking-dialog",
+    "google/gemini-2.5-flash-image-preview",
+    "google/gemini-2.5-flash-preview-tts",
+    "google/gemini-2.5-pro-preview-tts",
+    "google/gemini-2.0-flash-preview-image-generation",
+    "google/gemini-2.0-flash",
+    "google/gemini-2.0-flash-lite",
 ]
 
 
 # TODO Add more parameters
 async def _llm_router(
-    model: Model = Field(
+    model: Model | str = Field(
         ...,
         description="Provider/Name of the LLM model to use.",
     ),
@@ -88,7 +91,7 @@ async def _llm_router(
         default_factory=list,
         description="Chat history containing user and LLM messages.",
     ),
-    tools: list[Runnable] = Field(
+    tools: list[Runnable] | None = Field(
         default_factory=list,
         description="List of tools/functions the LLM can call.",
     ),
@@ -116,6 +119,7 @@ async def _llm_router(
     messages = resolve_default("messages", messages)
     tools = resolve_default("tools", tools)
     max_tokens = resolve_default("max_tokens", max_tokens)
+    thinking = resolve_default("thinking", thinking)
 
     if "/" not in model:
         raise ValueError("Model must be in format 'provider/model_name'")
@@ -136,7 +140,7 @@ async def _llm_router(
             raise APIKeyNotFoundError("ANTHROPIC_API_KEY not found.")
         client = AsyncAnthropic(api_key=api_key)
 
-    elif provider == "gemini":
+    elif provider == "google":
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise APIKeyNotFoundError("GEMINI_API_KEY not found.")
@@ -189,7 +193,7 @@ async def _llm_router(
         async for res_chunk in res:
             yield res_chunk
 
-    elif provider == "openai" and os.getenv("TIMBAL_ENABLE_OPENAI_RESPONSES_API", "false") == "true":
+    elif provider == "openai" and OPENAI_API == "responses":
         responses_kwargs = {
             "model": model_name,
             "stream": True,

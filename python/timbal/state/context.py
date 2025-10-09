@@ -6,8 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from uuid_extensions import uuid7
 
 from .config import PlatformConfig
-from .tracing import Tracing
 from .tracing.providers import InMemoryTracingProvider, PlatformTracingProvider, TracingProvider
+from .tracing.span import Span
 from .tracing.trace import Trace
 
 logger = structlog.get_logger("timbal.state.context")
@@ -45,7 +45,7 @@ class RunContext(BaseModel):
         validation_alias="timbal_platform_config", # Legacy
     )
 
-    _tracing: Tracing = PrivateAttr()
+    _trace: Trace = PrivateAttr()
     _tracing_provider: type[TracingProvider] = PrivateAttr()
 
 
@@ -82,10 +82,10 @@ class RunContext(BaseModel):
                         "auth": auth,
                         "subject": subject
                     })
-        # ? Crazy idea. Merge RunContext and Tracing classes
-        self._tracing = Tracing()
-        # TODO Enable custom tracingproviders
+        self._trace = Trace()
+        # TODO Enable custom tracing providers
         if self.platform_config:
+            # TODO This logs should only appear once (at first execution)
             if not self.platform_config.subject:
                 logger.warning(
                     "Platform configuration found but no subject. "
@@ -107,8 +107,8 @@ class RunContext(BaseModel):
         self._tracing_provider = InMemoryTracingProvider
 
 
-    async def _get_parent_tracing(self) -> Tracing | None:
-        """Load the tracing data for the parent run.
+    async def _get_parent_trace(self) -> Trace | None:
+        """Load the trace data for the parent run.
         
         INTERNAL METHOD: This method is intended for internal framework use.
         Use with caution as it involves async I/O operations and direct
@@ -122,47 +122,47 @@ class RunContext(BaseModel):
         return None
 
 
-    async def _save_tracing(self) -> None:
-        """Save the tracing data for the run.
+    async def _save_trace(self) -> None:
+        """Save the trace data for the run.
         
         INTERNAL METHOD: This method is intended for internal framework use.
-        It persists the current run's tracing data using the configured
+        It persists the current run's trace data using the configured
         tracing provider. Manual calls to this method may interfere with
         the framework's automatic tracing lifecycle.
         """
         await self._tracing_provider.put(self)
 
 
-    def current_trace(self) -> Trace:
-        """Get the trace for the current call."""
+    def current_span(self) -> Span:
+        """Get the span for the current call."""
         from . import get_call_id
         call_id = get_call_id()
-        trace = self._tracing.get(call_id)
-        if not trace:
-            raise RuntimeError(f"Could not resolve current trace for call ID {call_id}")
-        return trace
+        span = self._trace.get(call_id)
+        if not span:
+            raise RuntimeError(f"Could not resolve current span for call ID {call_id}")
+        return span
 
     
-    def parent_trace(self) -> Trace:
-        """Get the trace for the parent call."""
-        trace = self.current_trace()
-        parent_call_id = trace.parent_call_id
-        parent_trace = self._tracing.get(parent_call_id)
-        if not parent_trace:
-            raise RuntimeError(f"Could not resolve parent trace for call ID {parent_call_id}")
-        return parent_trace
+    def parent_span(self) -> Span:
+        """Get the span for the parent call."""
+        span = self.current_span()
+        parent_call_id = span.parent_call_id
+        parent_span = self._trace.get(parent_call_id)
+        if not parent_span:
+            raise RuntimeError(f"Could not resolve parent span for call ID {parent_call_id}")
+        return parent_span
 
     
-    def step_trace(self, name: str) -> Trace:
-        """Get the trace for a neighbor step by name."""
-        trace = self.current_trace()
-        parent_call_id = trace.parent_call_id
-        for trace in self._tracing.values():
-            if (trace.parent_call_id == parent_call_id and 
-                # trace.call_id != current_trace.call_id and  # Don't match self
-                trace.path.endswith("." + name)):
-                return trace
-        raise RuntimeError(f"Could not resolve step trace for call ID {parent_call_id} and step name {name}")
+    def step_span(self, name: str) -> Span:
+        """Get the span for a neighbor step by name."""
+        span = self.current_span()
+        parent_call_id = span.parent_call_id
+        for span in self._trace.values():
+            if (span.parent_call_id == parent_call_id and 
+                # span.call_id != span.call_id and  # Don't match self
+                span.path.endswith("." + name)):
+                return span
+        raise RuntimeError(f"Could not resolve step span for call ID {parent_call_id} and step name {name}")
     
 
     def update_usage(self, key: str, value: int) -> None:
@@ -180,8 +180,8 @@ class RunContext(BaseModel):
         call_id = get_call_id()
         # Update usage for all parents in the call stack
         while call_id:
-            assert call_id in self._tracing, f"RunContext.update_usage: Call ID {call_id} not found in tracing."
-            trace = self._tracing[call_id]
-            current_value = trace.usage.get(key, 0)
-            trace.usage[key] = current_value + value
-            call_id = trace.parent_call_id
+            assert call_id in self._trace, f"RunContext.update_usage: Call ID {call_id} not found in trace."
+            span = self._trace[call_id]
+            current_value = span.usage.get(key, 0)
+            span.usage[key] = current_value + value
+            call_id = span.parent_call_id

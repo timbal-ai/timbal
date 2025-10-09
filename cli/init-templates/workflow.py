@@ -36,8 +36,8 @@ def prettify_result(filtered_row: dict) -> str:
 
 workflow = (Workflow(name="demo_workflow")
     .step(fetch_data)
-    .step(filter_data, csv_data=lambda: get_run_context().step_trace("fetch_data").output)
-    .step(prettify_result, filtered_row=lambda: get_run_context().step_trace("filter_data").output)
+    .step(filter_data, csv_data=lambda: get_run_context().step_span("fetch_data").output)
+    .step(prettify_result, filtered_row=lambda: get_run_context().step_span("filter_data").output)
 )
 
 

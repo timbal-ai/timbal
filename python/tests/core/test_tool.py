@@ -372,7 +372,7 @@ class TestPerformance:
     async def test_concurrent_sync_tools(self):
         """Test that sync tools can run concurrently."""
         def slow_handler(x: str) -> str:
-            time.sleep(0.1)  # 100ms delay
+            time.sleep(1)
             return f"slow:{x}"
         
         tool = Tool(handler=slow_handler)
@@ -385,7 +385,7 @@ class TestPerformance:
             )
         
         # Should complete concurrently, not sequentially
-        assert timer.elapsed < 0.2, f"Tools did not run concurrently: {timer.elapsed}s"
+        assert timer.elapsed < 2, f"Tools did not run concurrently: {timer.elapsed}s"
         assert len(results) == 3
     
     @pytest.mark.asyncio

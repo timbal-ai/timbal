@@ -11,7 +11,7 @@ except ImportError:
 
 from pydantic import BaseModel, SkipValidation, computed_field, model_validator
 
-from ..utils import create_model_from_argspec
+from ..utils import create_model_from_handler
 from .runnable import Runnable
 
 
@@ -110,12 +110,8 @@ class Tool(Runnable):
     @cached_property
     def params_model(self) -> BaseModel:
         """See base class."""
-        handler_argspec = inspect.getfullargspec(self.handler)
         params_model_name = self.name.title().replace("_", "") + "Params"
-        params_model = create_model_from_argspec(
-            name=params_model_name,
-            argspec=handler_argspec,
-        )
+        params_model = create_model_from_handler(name=params_model_name, handler=self.handler)
         return params_model
 
 

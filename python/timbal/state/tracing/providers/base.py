@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
-from .. import Tracing
+from ..trace import Trace
 
 if TYPE_CHECKING:
     from ...context import RunContext
@@ -12,23 +12,23 @@ class TracingProvider(ABC):
     
     @classmethod
     @abstractmethod
-    async def get(cls, run_context: "RunContext") -> Tracing | None:
-        """Retrieve the parent run's tracing data.
+    async def get(cls, run_context: "RunContext") -> Trace | None:
+        """Retrieve the parent run's trace data.
         
         Args:
-            run_context: The run context to retrieve tracing data for
+            run_context: The run context to retrieve trace data for
 
         Returns:
-            Tracing data or None if not found
+            Trace data or None if not found
         """
         pass
 
     @classmethod
     @abstractmethod
     async def put(cls, run_context: "RunContext") -> None:
-        """Store the tracing data for a run.
+        """Store the trace data for a run.
         
         Args:
-            run_context: The run context to store tracing data for
+            run_context: The run context to store trace data for
         """
         pass

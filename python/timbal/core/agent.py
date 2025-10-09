@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import inspect
 import re
+import sys
 from collections.abc import AsyncGenerator
 from functools import cached_property
 from pathlib import Path
@@ -23,6 +24,7 @@ from pydantic import (
     computed_field,
 )
 
+from ..errors import InterruptError, bail
 from ..state import get_run_context
 from ..types.content import ToolUseContent
 from ..types.events import OutputEvent
@@ -68,7 +70,7 @@ class Agent(Runnable):
     - Integration with multiple LLM providers via _llm_router
     """
 
-    model: Model
+    model: Model | str
     """The LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-3-sonnet')."""
     system_prompt: str | None = None
     """System prompt to provide context for the agent."""
@@ -130,10 +132,20 @@ class Agent(Runnable):
                     for fn_i in range(1, len(path_parts)):
                         module_path = agent_path / "/".join(path_parts[:-fn_i])
                         try:
-                            module_spec = importlib.util.spec_from_file_location(module_path.stem, module_path.as_posix())
+                            # Use absolute path as module identifier
+                            module_path_str = str(module_path.resolve())
+                            # Check if module is already loaded in sys.modules by absolute path
+                            if module_path_str in sys.modules:
+                                module = sys.modules[module_path_str]
+                                logger.info(f"Using already loaded module '{module_path}' for system prompt callable '{text}'")
+                                break
+                            # Load the module if not already loaded
+                            module_spec = importlib.util.spec_from_file_location(module_path_str, module_path.as_posix())
                             if not module_spec or not module_spec.loader:
                                 raise ValueError(f"Failed to load module {module_path}")
                             module = importlib.util.module_from_spec(module_spec)
+                            # Register in sys.modules BEFORE executing to prevent re-entry
+                            sys.modules[module_path_str] = module
                             module_spec.loader.exec_module(module)
                             logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
                             break
@@ -285,72 +297,90 @@ class Agent(Runnable):
         run_context = get_run_context()
         if run_context.parent_id:
             # Try to get tracing data from parent execution
-            parent_tracing = await run_context._get_parent_tracing()
-            if parent_tracing is None:
-                logger.error("Parent tracing not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
+            parent_trace = await run_context._get_parent_trace()
+            if parent_trace is None:
+                logger.error("Parent trace not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
             else:
                 # Extract conversation history from parent's LLM calls
                 # TODO: Handle multiple call_ids for this subagent
-                llm_tracing = parent_tracing.get_path(self._llm._path)
-                assert len(llm_tracing) >= 1, f"Agent trace does not have any records for path {self._llm._path}"
+                llm_spans = parent_trace.get_path(self._llm._path)
+                assert len(llm_spans) >= 1, f"Agent trace does not have any records for path {self._llm._path}"
                 # Get the most recent LLM interaction
-                llm_input_messages = llm_tracing[-1].input.get("messages", []) # TODO Put an assertion in here
-                llm_output_message = llm_tracing[-1].output
+                llm_input_messages = llm_spans[-1].input.get("messages", []) # TODO Put an assertion in here
+                llm_output_message = llm_spans[-1].output
                 # Reconstruct conversation: input messages + LLM response
                 memory = [
                     *[Message.validate(m) for m in llm_input_messages], 
                     Message.validate(llm_output_message)
                 ]
+                for content in memory[-1].content:
+                    if content.type != "tool_use":
+                        continue
+                    tool_result_path = f"{self._path}.{content.name}"
+                    tool_result_spans = parent_trace.get_path(tool_result_path)
+                    assert len(tool_result_spans) >= 1, f"Agent trace does not have any records for path {tool_result_path}"
+                    for tool_result_span in tool_result_spans:
+                        if tool_result_span.metadata.get("tool_call_id") == content.id:
+                            tool_result_content = tool_result_span.output.content if isinstance(tool_result_span.output, Message) else tool_result_span.output
+                            if tool_result_span.status["code"] == "cancelled" and tool_result_span.status["reason"] == "interrupted":
+                                tool_result_content = "</interrupted>"
+                            tool_result_message = Message.validate({
+                                "role": "tool",
+                                "content": [{
+                                    "type": "tool_result",
+                                    "id": content.id,
+                                    "content": tool_result_content,
+                                }]
+                            })
+                            memory.append(tool_result_message)
         return memory
-
-    
-    async def _enqueue_tool_events(self, tool_call: ToolUseContent, queue: asyncio.Queue) -> None:
-        """Execute a single tool call and enqueue its events.
-        
-        This method runs a tool call asynchronously and puts all generated
-        events into a shared queue for multiplexed processing. Used by
-        _multiplex_tools to handle concurrent tool execution.
-        
-        Args:
-            tool_call: The tool call content with name and input parameters
-            queue: Async queue to put events into
-        """
-        tool = self._tools_by_name[tool_call.name]
-        # Execute tool and enqueue all events
-        async for event in tool(**tool_call.input):
-            await queue.put((tool_call, event))
-        # Signal completion with a sentinel value (None)
-        await queue.put((tool_call, None))
 
 
     async def _multiplex_tools(self, tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
-        """Execute multiple tool calls concurrently and multiplex their events.
-        
-        This method enables concurrent execution of multiple tool calls requested
-        by the LLM, significantly improving performance when tools can run in parallel.
-        Events from all tools are multiplexed and yielded as they become available.
-        
-        Args:
-            tool_calls: List of tool calls to execute concurrently
-            
-        Yields:
-            Tuples of (tool_call, event) as events are generated by tools
-        """
+        """Execute multiple tool calls concurrently and multiplex their events."""
         queue = asyncio.Queue()
-        # Start all tool executions concurrently
-        tasks = [asyncio.create_task(self._enqueue_tool_events(tc, queue)) for tc in tool_calls]
-        # Process events as they arrive from any tool
-        remaining = len(tasks)
-        while remaining > 0:
-            tool_call, event = await queue.get()
-            if event is None:
-                # Sentinel value indicates a tool completed
-                remaining -= 1
-            else:
-                # Yield event along with which tool call generated it
-                yield tool_call, event
-        # Ensure all tasks complete cleanly
-        await asyncio.gather(*tasks)
+        tasks = []
+        
+        async def consume_tool(tool_call: ToolUseContent):
+            """Consume events from a single tool and put them in the queue."""
+            tool = self._tools_by_name[tool_call.name]
+            try:
+                async for event in tool(**tool_call.input):
+                    # We need to link the tool call id to the span so that we can later match when resolving memory
+                    if event.type == "START":
+                        tool_call_id = event.call_id 
+                        tool_call_span = get_run_context()._trace[tool_call_id]
+                        tool_call_span.metadata["tool_call_id"] = tool_call.id
+                    await queue.put((tool_call, event))
+            finally:
+                await queue.put((tool_call, None))  # Sentinel
+        
+        try:
+            # Start all tool tasks
+            for tc in tool_calls:
+                task = asyncio.create_task(consume_tool(tc))
+                tasks.append(task)
+            
+            # Consume events as they arrive
+            remaining = len(tool_calls)
+            while remaining > 0:
+                tool_call, event = await queue.get()
+                if event is None:
+                    remaining -= 1
+                else:
+                    yield tool_call, event
+        except (asyncio.CancelledError, GeneratorExit, InterruptError):
+            # Cancellation or generator closed - clean up gracefully
+            raise
+        finally:
+            # Cancel all pending tasks
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            
+            # Wait for all cancellations to complete, suppressing errors
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
@@ -396,9 +426,13 @@ class Agent(Runnable):
                     # If the LLM call fails, we want to propagate the error upwards
                     if event.error is not None:
                         raise RuntimeError(event.error)
+                    # If the LLM was interrupted, propagate the interruption
+                    if event.status.code == "cancelled" and event.status.reason == "interrupted":
+                        raise InterruptError(event.call_id)
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
                     # Add LLM response to conversation for next iteration
                     messages = messages + [event.output]
+                    
                 yield event
             
             tool_calls = [
@@ -412,6 +446,9 @@ class Agent(Runnable):
             async for tool_call, event in self._multiplex_tools(tool_calls):
                 # Only process events from immediate children (not nested subagents)
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
+                    # Propagate bail
+                    if event.status.code == "cancelled" and event.status.reason == "early_exit":
+                        bail(event.status.message)
                     message = Message.validate({
                         "role": "tool",
                         "content": [{

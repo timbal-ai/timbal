@@ -1,79 +1,66 @@
+from collections import UserDict
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from .span import Span
 
 
-class Trace(BaseModel):
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        extra="allow",
-    )
+class Trace(UserDict):
+    
+    def __init__(self, data: dict[str, Any] | list[dict[str, Any]] | None = None):
+        self._root_call_id = None
 
-    path: str = Field(
-        ...,
-        description="The path of the runnable.",
-    )
-    call_id: str = Field(
-        ...,
-        description="The call id of the runnable.",
-    )
-    parent_call_id: str | None = Field(
-        None,
-        description="The parent call id of the runnable.",
-    )
-    t0: int = Field(
-        ...,
-        description="The start time of the runnable.",
-    )
-    t1: int | None = Field(
-        None, 
-        description="The end time of the runnable. Will be None if the runnable has not yet completed.",
-    )
-    input: Any = Field(
-        None,
-        description="The input of the runnable. Will be None if the runnable has not yet started or if there was an error gathering the input.",
-    )
-    status: Any | None = Field( # Any to prevent circular import
-        None,
-        description="The status of the runnable.",
-    )
-    output: Any = Field(
-        None,
-        description="The output of the runnable. Will be None if the runnable has not yet completed or if there was an error.",
-    )
-    error: Any = Field(
-        None,
-        description="The error of the runnable. Will be None if the runnable has not yet completed or if there was no error.",
-    )
-    usage: dict[str, int] = Field(
-        default_factory=dict,
-        description="The usage of the runnable.",
-    )
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Flexible metadata storage for run-specific metrics and data.",
-    )
-    runnable: Any = Field(
-        None,
-        description=(
-            "A reference to the runnable being executed. "
-            "Can be used to access runnable properties, background tasks, and other runtime attributes. "
-            "Will be None when initializing traces from serialized data."
-        ),
-        exclude=True,
-    )
+        if data is None:
+            super().__init__({})
+        elif isinstance(data, list):
+            super().__init__({})
+            for record in data:
+                if "call_id" not in record:
+                    raise ValueError("Missing call_id in trace record")
+                self.__setitem__(record["call_id"], record)
+        elif isinstance(data, dict):
+            super().__init__({})
+            for call_id, record in data.items():
+                if "call_id" not in record:
+                    raise ValueError("Missing call_id in trace record")
+                self.__setitem__(call_id, record)
+        else:
+            raise ValueError(f"Invalid trace data type: {type(data)}")
+    
+    def __setitem__(self, key: str, value: Span | dict[str, Any]) -> None:
+        if not isinstance(key, str):
+            raise ValueError(f"Invalid trace key type: {type(key)}")
+        if not isinstance(value, Span | dict):
+            raise ValueError(f"Invalid trace value type: {type(value)}")
+        
+        if isinstance(value, dict):
+            if "parent_call_id" not in value:
+                raise ValueError("Missing parent_call_id in trace value")
+            value = Span(**value)
+        
+        if value.parent_call_id is None:
+            if self._root_call_id is not None:
+                raise ValueError("Cannot set multiple root calls in trace data")
+            self._root_call_id = key
 
-    _input_dump: Any = PrivateAttr()
-    """The dumped/serialized version of input for internal use."""
-    _output_dump: Any = PrivateAttr()
-    """The dumped/serialized version of output for internal use."""
+        super().__setitem__(key, value)
 
-    def model_dump(self, **kwargs) -> dict[str, Any]:
-        """Override model_dump to use dumped versions of input and output during serialization."""
-        data = super().model_dump(**kwargs) # Pydantic ignores private attributes by default
-        # Use dumped versions if available, otherwise fall back to originals
-        if hasattr(self, "_input_dump"):
-            data["input"] = self._input_dump
-        if hasattr(self, "_output_dump"):
-            data["output"] = self._output_dump
-        return data
+    def model_dump(self) -> list[dict[str, Any]]:
+        """Returns a list of trace record references ready for serialization."""
+        return [span.model_dump() for span in self.data.values()]
+
+    def as_records(self) -> list[Span]:
+        """Returns a list of trace record references."""
+        return list(self.data.values())
+
+    def get_path(self, path: str) -> list[Span]:
+        """Returns a list of trace record references for the given path."""
+        return [span for span in self.data.values() if span.path == path]
+
+    def get_level(self, path: str) -> list[Span]:
+        """Returns a list of trace record references for the given path level."""
+        level = path.count(".") + 1
+        return [
+            span
+            for span in self.data.values()
+            if span.path.count(".") == level and span.path.startswith(path)
+        ]

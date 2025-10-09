@@ -162,9 +162,9 @@ class GmailMonitor:
     # Post hook
     def save_draft(self):
         """Create a draft response to the original message"""
-        trace = get_run_context().current_trace()
-        original_message = trace.input['input_email']
-        response_text = trace.output.content[0].text
+        span = get_run_context().current_span()
+        original_message = span.input['input_email']
+        response_text = span.output.content[0].text
 
         try:
             # Extract sender email from the original message

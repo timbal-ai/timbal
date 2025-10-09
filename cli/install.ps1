@@ -110,35 +110,34 @@ function Test-DockerInstallation() {
         Write-Information "Docker command found successfully."
     } catch [System.Management.Automation.CommandNotFoundException] {
         # Specific catch for command not found
-        $errorMessage = @"
-Docker command not found in PATH. Timbal requires Docker for container management.
+        $warningMessage = @"
+Warning: Docker command not found in PATH.
+Docker is required for 'timbal build' and 'timbal push' commands.
 
 Please follow the instructions in: https://docs.docker.com/desktop/setup/install/windows-install/
 "@
-        Write-Error $errorMessage
-        Exit 1
+        Write-Warning $warningMessage
+        return
     } catch {
         # Catch any other unexpected errors during the check
-        Write-Error "An unexpected error occurred while checking for 'docker': $($_.Exception.Message)"
-        Exit 1
+        Write-Warning "An unexpected error occurred while checking for 'docker': $($_.Exception.Message)"
+        return
     }
 
-    # Check if docker command is usable by running hello-world
-    Write-Information "Checking Docker connectivity by running 'hello-world' container..."
+    # Test Docker connectivity
+    Write-Information "Testing Docker connectivity by running 'hello-world' container..."
     # Attempt to run hello-world, suppress output, and check exit status
     # *> $null redirects both stdout (1) and stderr (2) streams to null
     docker run --rm hello-world *> $null
     if ($LASTEXITCODE -ne 0) {
-        # Use Write-Warning for non-critical issues
-        $errorMessage = @"
-Docker engine appears to be not running, or the current user lacks permissions.
+        $warningMessage = @"
+Warning: Docker engine appears to be not running, or the current user lacks permissions.
 Failed to run the 'hello-world' container (Exit Code: $LASTEXITCODE).
 You might need to start Docker Desktop or configure user permissions.
 For Windows, ensure Docker Desktop is running. For Linux/WSL, you might need to add your user to the 'docker' group.
 See relevant documentation: https://docs.docker.com/desktop/setup/install/windows-install/
 "@
-        Write-Error $errorMessage
-        Exit 1
+        Write-Warning $warningMessage
     } else {
         Write-Information "Docker connection successful ('hello-world' container ran successfully)."
     }
@@ -183,14 +182,14 @@ function Get-Arch() {
 
 function Get-Executable($DestinationPath) {
     if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
-        Write-ErrorAndExit "Get-Executable requires a non-empty -DestinationPath parameter."
+        throw "Get-Executable requires a non-empty -DestinationPath parameter."
     }
 
     $arch = Get-Arch
     Write-Information "Detected architecture: $arch"
 
     if ($arch -ne "x86_64-pc-windows") {
-        Write-ErrorAndExit "ERROR: Timbal installation currently only supports the 'x86_64-pc-windows' (amd64) architecture. Detected: $arch"
+        throw "ERROR: Timbal installation currently only supports the 'x86_64-pc-windows' (amd64) architecture. Detected: $arch"
     }
 
     $manifestUrl = "https://github.com/timbal-ai/timbal/releases/latest/download/manifest.json"
@@ -198,7 +197,7 @@ function Get-Executable($DestinationPath) {
     try {
         Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestPath -UseBasicParsing -ErrorAction Stop
     } catch {
-        Write-ErrorAndExit "Failed to download manifest.json from $manifestUrl. Error $($_.Exception.Message)"
+        throw "Failed to download manifest.json from $manifestUrl. Error $($_.Exception.Message)"
     }
 
     try {
@@ -206,11 +205,11 @@ function Get-Executable($DestinationPath) {
         $url = $manifest.binaries.windows.x86_64.url
         if (-not $url) {
             Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
-            Write-ErrorAndExit "No download URL found in manifest for windows and x86_64"
+            throw "No download URL found in manifest for windows and x86_64"
         }
     } catch {
         Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
-        Write-ErrorAndExit "Failed to parse manifest.json. Error $($_.Exception.Message)"
+        throw "Failed to parse manifest.json. Error $($_.Exception.Message)"
     } finally {
         Remove-Item $manifestPath -Force -ErrorAction SilentlyContinue
     }
@@ -234,7 +233,7 @@ function Get-Executable($DestinationPath) {
         if (-not (Test-Path -Path $DestinationPath) -or (Get-Item $DestinationPath).Length -eq 0) {
              # Clean up potentially corrupt/empty file before throwing
              if (Test-Path -Path $DestinationPath) { Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue }
-             Write-ErrorAndExit "Downloaded file is missing or empty. Check if the release asset exists at $url"
+             throw "Downloaded file is missing or empty. Check if the release asset exists at $url"
         }
 
         # No return value needed
@@ -244,7 +243,7 @@ function Get-Executable($DestinationPath) {
             Remove-Item -Path $DestinationPath -Force -ErrorAction SilentlyContinue
         }
         # Rethrow a more specific error including the intended destination
-        Write-ErrorAndExit "FATAL: Failed to download Timbal CLI from '$url' to '$DestinationPath'. Check URL, network, and permissions. Error: $($_.Exception.Message)"
+        throw "FATAL: Failed to download Timbal CLI from '$url' to '$DestinationPath'. Check URL, network, and permissions. Error: $($_.Exception.Message)"
     }
 }
 
@@ -268,7 +267,7 @@ function Install-Binary($install_args) {
         try {
             New-Item -Path $InstallDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
         } catch {
-            Write-ErrorAndExit "Failed to create installation directory '$InstallDir'. Error: $($_.Exception.Message)"
+            throw "Failed to create installation directory '$InstallDir'. Error: $($_.Exception.Message)"
         }
     } else {
         Write-Information "Installation directory already exists: '$InstallDir'"
@@ -288,6 +287,8 @@ function Install-Binary($install_args) {
     } else {
         Write-Information "'$InstallDir' is already in your user PATH."
     }
+
+    Write-Information "Successfully installed timbal. Setup 'TIMBAL_API_KEY' env variable to configure Timbal Platform access."
 }
 
 

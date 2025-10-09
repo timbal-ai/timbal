@@ -180,30 +180,7 @@ class FileContent(BaseContent):
         if current_position != 0:
             self.file.seek(0)
 
-        if (
-            (mime and mime.startswith("text/")) or 
-            # Files like .jsonl don't have a mime type.
-            (self.file.__source_extension__ in [".json", ".jsonl"])
-        ):
-            # Attempt to decode the binary content into a string guessing the encoding.
-            raw_bytes = self.file.read()
-            content = None
-            for encoding in AVAILABLE_ENCODINGS:
-                try:
-                    content = raw_bytes.decode(encoding)
-                    break
-                except UnicodeDecodeError:
-                    continue
-            if content is None:
-                raise ValueError(f"Could not decode file {self.file} with any of: {AVAILABLE_ENCODINGS}")
-            openai_responses_input = {
-                "type": "input_text",
-                "text": content,
-            }
-            self._cached_openai_responses_input = openai_responses_input
-            return openai_responses_input
-
-        elif self.file.__source_extension__ == ".xlsx":
+        if self.file.__source_extension__ == ".xlsx":
             df = pd.read_excel(io.BytesIO(self.file.read()))
             openai_responses_input = {
                 "type": "input_text",
@@ -259,8 +236,25 @@ class FileContent(BaseContent):
                     "format": "wav" if "wav" in mime else "mp3",
                 },
             }
+        
+        # Attempt to decode the binary content into a string guessing the encoding.
+        raw_bytes = self.file.read()
+        content = None
+        for encoding in AVAILABLE_ENCODINGS:
+            try:
+                content = raw_bytes.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if content is None:
+            raise ValueError(f"Could not decode file {self.file} with any of: {AVAILABLE_ENCODINGS}")
+        openai_responses_input = {
+            "type": "input_text",
+            "text": content,
+        }
+        self._cached_openai_responses_input = openai_responses_input
+        return openai_responses_input
 
-        raise ValueError(f"Unsupported file {self.file}.")
 
     @override
     def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any] | list[dict[str, Any]]:
@@ -275,30 +269,7 @@ class FileContent(BaseContent):
         if current_position != 0:
             self.file.seek(0)
 
-        if (
-            (mime and mime.startswith("text/")) or 
-            # Files like .jsonl don't have a mime type.
-            (self.file.__source_extension__ in [".json", ".jsonl"])
-        ):
-            # Attempt to decode the binary content into a string guessing the encoding.
-            raw_bytes = self.file.read()
-            content = None
-            for encoding in AVAILABLE_ENCODINGS:
-                try:
-                    content = raw_bytes.decode(encoding)
-                    break
-                except UnicodeDecodeError:
-                    continue
-            if content is None:
-                raise ValueError(f"Could not decode file {self.file} with any of: {AVAILABLE_ENCODINGS}")
-            openai_input = {
-                "type": "text",
-                "text": content,
-            }
-            self._cached_openai_chat_completions_input = openai_input
-            return openai_input
-
-        elif self.file.__source_extension__ == ".xlsx":
+        if self.file.__source_extension__ == ".xlsx":
             df = pd.read_excel(io.BytesIO(self.file.read()))
             openai_input = {
                 "type": "text",
@@ -429,7 +400,23 @@ class FileContent(BaseContent):
                 },
             }
 
-        raise ValueError(f"Unsupported file {self.file}.")
+        # Attempt to decode the binary content into a string guessing the encoding.
+        raw_bytes = self.file.read()
+        content = None
+        for encoding in AVAILABLE_ENCODINGS:
+            try:
+                content = raw_bytes.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if content is None:
+            raise ValueError(f"Could not decode file {self.file} with any of: {AVAILABLE_ENCODINGS}")
+        openai_input = {
+            "type": "text",
+            "text": content,
+        }
+        self._cached_openai_chat_completions_input = openai_input
+        return openai_input
 
 
     @override
@@ -445,30 +432,7 @@ class FileContent(BaseContent):
         if current_position != 0:
             self.file.seek(0)
 
-        if (
-            (mime and mime.startswith("text/")) or 
-            # Files like .jsonl don't have a mime type.
-            (self.file.__source_extension__ in [".json", ".jsonl"])
-        ):
-            # Attempt to decode the binary content into a string guessing the encoding.
-            raw_bytes = self.file.read()
-            content = None
-            for encoding in AVAILABLE_ENCODINGS:
-                try:
-                    content = raw_bytes.decode(encoding)
-                    break
-                except UnicodeDecodeError:
-                    continue
-            if content is None:
-                raise ValueError(f"Could not decode file {self.file} with any of: {AVAILABLE_ENCODINGS}")
-            anthropic_input = {
-                "type": "text",
-                "text": content,
-            }
-            self._cached_anthropic_input = anthropic_input
-            return anthropic_input
-
-        elif self.file.__source_extension__ == ".xlsx":
+        if self.file.__source_extension__ == ".xlsx":
             df = pd.read_excel(io.BytesIO(self.file.read()))
             anthropic_input = {
                 "type": "text",
@@ -608,4 +572,20 @@ class FileContent(BaseContent):
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
 
-        raise ValueError(f"Unsupported file {self.file}.")
+        # Attempt to decode the binary content into a string guessing the encoding.
+        raw_bytes = self.file.read()
+        content = None
+        for encoding in AVAILABLE_ENCODINGS:
+            try:
+                content = raw_bytes.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if content is None:
+            raise ValueError(f"Could not decode file {self.file} with any of: {AVAILABLE_ENCODINGS}")
+        anthropic_input = {
+            "type": "text",
+            "text": content,
+        }
+        self._cached_anthropic_input = anthropic_input
+        return anthropic_input

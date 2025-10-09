@@ -43,6 +43,17 @@
 set -e
 
 
+# Parse command line arguments
+AUTO_YES=false
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes)
+            AUTO_YES=true
+            ;;
+    esac
+done
+
+
 # Function to report errors and exit
 error_exit() {
     echo "Error: $1" >&2
@@ -107,26 +118,25 @@ If the command doesn't work, please refer to the documentation:
 
 check_docker() {
     if ! command_exists docker; then
-        error_exit "Docker is not installed.
-
-If you're on macOS, follow the instructions here:
-    https://docs.docker.com/desktop/setup/install/mac-install/
-
-If you're on Linux, follow the instructions here:
-    https://docs.docker.com/engine/install/
-
-Please install Docker before proceeding."
+        echo "Warning: Docker is not installed."
+        echo "Docker is required for 'timbal build' and 'timbal push' commands."
+        echo ""
+        echo "If you're on macOS, follow the instructions here:"
+        echo "    https://docs.docker.com/desktop/setup/install/mac-install/"
+        echo ""
+        echo "If you're on Linux, follow the instructions here:"
+        echo "    https://docs.docker.com/engine/install/"
+        return
     fi
 
-    # Attempt to run hello-world, but don't fail script if it errors out
-    # Capture output to avoid cluttering install log, check exit status
-    echo "Checking Docker connectivity..."
-    if ! docker run --rm hello-world >/dev/null 2>&1; then
+    # Test Docker connectivity
+    echo "Testing Docker connectivity..."
+    if docker run --rm hello-world >/dev/null 2>&1; then
+        echo "Docker connection successful."
+    else
         echo "Warning: Docker engine appears to be not running, or the current user lacks permissions."
         echo "You might need to start Docker or configure user permissions (e.g., add user to 'docker' group)."
         echo "See: https://docs.docker.com/engine/install/linux-postinstall/"
-    else
-        echo "Docker connection successful."
     fi
 }
 
@@ -187,18 +197,23 @@ setup_timbal() {
     # Check if the file already exists
     if [ -e "$CLI_EXECUTABLE_PATH" ]; then
         echo "A file already exists at $CLI_EXECUTABLE_PATH"
-        # Ask if user wants to overwrite. Default to No.
-        read -p "Overwrite? (y/N): " choice
-        case "$choice" in
-            y|Y ) 
-                echo "Overwriting existing file..." 
-                rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH"
-                ;;
-            * ) 
-                echo "Skipping installation because file exists." 
-                return
-                ;;
-        esac
+        if [ "$AUTO_YES" = true ]; then
+            echo "Auto-accepting overwrite (--yes flag provided)"
+            rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH"
+        else
+            # Ask if user wants to overwrite. Default to No.
+            read -p "Overwrite? (y/N): " choice
+            case "$choice" in
+                y|Y ) 
+                    echo "Overwriting existing file..." 
+                    rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH"
+                    ;;
+                * ) 
+                    echo "Skipping installation because file exists." 
+                    return
+                    ;;
+            esac
+        fi
     fi
 
     download_file "$DOWNLOAD_URL" "$CLI_EXECUTABLE_PATH"
@@ -272,23 +287,26 @@ main() {
 
     if command_exists timbal; then
         echo "A timbal command already exists on your system at the following location: $(which timbal)"
-        echo "The installations may interfere with one another."
-        echo "Do you want to continue with this installation anyway?"
-        read -p "Continue? (y/N): " choice
-        case "$choice" in 
-            y|Y ) echo "Continuing with installation...";;
-            * ) echo "Exiting installation."; exit 1;;
-        esac
+        if [ "$AUTO_YES" = true ]; then
+            echo "Overwriting..."
+        else
+            echo "The installations may interfere with one another."
+            echo "Do you want to continue with this installation anyway?"
+            read -p "Continue? (y/N): " choice
+            case "$choice" in 
+                y|Y ) echo "Continuing with installation...";;
+                * ) echo "Exiting installation."; exit 1;;
+            esac
+        fi
     fi
 
     check_uv
-    # TODO Make this step optional. This will only be required if you want to use timbal build or timbal push.
     check_docker
 
     setup_timbal
 
     if command_exists timbal; then
-        echo "Successfully installed timbal. Setup 'TIMBAL_API_TOKEN' env variable to configure Timbal Platform access."
+        echo "Successfully installed timbal. Setup 'TIMBAL_API_KEY' env variable to configure Timbal Platform access."
     else
         echo 'Error: timbal not installed.'
         exit 1

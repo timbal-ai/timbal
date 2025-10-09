@@ -2,7 +2,7 @@ import ast
 
 
 class RunContextDependencyAnalyzer(ast.NodeVisitor):
-    """Static analyzer to detect RunContext.step_trace() access in code."""
+    """Static analyzer to detect RunContext.step_span() access in code."""
 
     def __init__(self):
         self.scope_stack = [{}]  # Stack of symbol tables for nested scopes
@@ -105,7 +105,7 @@ class RunContextDependencyAnalyzer(ast.NodeVisitor):
     def visit_Call(self, node):
         """Analyze function/method calls for step dependencies."""
         # Only look for step() method calls
-        if isinstance(node.func, ast.Attribute) and node.func.attr == 'step_trace':
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "step_span":
             is_valid_step = False
             # Pattern 1: variable.step() where variable is RunContext
             if isinstance(node.func.value, ast.Name):

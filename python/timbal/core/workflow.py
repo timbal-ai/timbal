@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr, computed_field, create_
 
 from timbal.types.events.start import StartEvent
 
+from ..errors import InterruptError
 from ..types.events.output import OutputEvent
 from .runnable import Runnable, RunnableLike
 from .tool import Tool
@@ -60,7 +61,7 @@ class Workflow(Runnable):
         """See base class."""
         self._path = f"{parent_path}.{self.name}"
         # Update paths for internal LLM and all tools
-        for step in self._steps:
+        for step in self._steps.values():
             step.nest(self._path)
     
 
@@ -260,12 +261,28 @@ class Workflow(Runnable):
             asyncio.create_task(self._enqueue_step_events(step, queue, completions, **kwargs)) 
             for step in self._steps.values()
         ]
-        remaining = len(tasks)
-        while remaining > 0:
-            event = await queue.get()
-            if isinstance(event, Exception):
-                raise event
-            elif event is None:
-                remaining -= 1
-            else:
-                yield event
+        
+        try:
+            remaining = len(tasks)
+            while remaining > 0:
+                event = await queue.get()
+                if isinstance(event, InterruptError):
+                    # Propagate interrupt error - will be handled by finally block
+                    raise event
+                if isinstance(event, Exception):
+                    raise event
+                elif event is None:
+                    remaining -= 1
+                else:
+                    yield event
+        except (asyncio.CancelledError, InterruptError):
+            # Cancellation or interrupt - clean up gracefully
+            raise
+        finally:
+            # Cancel all pending step tasks
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            # Wait for all cancellations to complete, suppressing errors
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
