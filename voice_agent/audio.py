@@ -35,7 +35,9 @@ class VoiceAgent(Agent):
 
     _agent_call_task = PrivateAttr(default=None)
     _run_id: str = PrivateAttr(default=None)
-    _transcription_event_id: str = PrivateAttr(default=None)
+
+    _speech_started_item_id: str | None = PrivateAttr(default=None)
+    _speech_transcript: str = PrivateAttr(default="")
 
 
     def __init__(
@@ -140,12 +142,16 @@ class VoiceAgent(Agent):
 
         if event_type == "conversation.item.input_audio_transcription.completed":
             logger.info("transcription_completed", full_event=event)
-            if not self._transcription_event_id or self._transcription_event_id != event["event_id"]:
-                self._transcription_event_id = event["event_id"]
-                self._agent_call_task = asyncio.create_task(self._run_agent_and_tts(prompt=event["transcript"]))
+            self._speech_transcript += f"{event['transcript']} "
+            transcript = self._speech_transcript
+            if self._speech_started_item_id != event["item_id"]:
+                return
+            self._speech_transcript = ""
+            self._agent_call_task = asyncio.create_task(self._run_agent_and_tts(prompt=transcript.strip()))
 
         elif event_type == "input_audio_buffer.speech_started":
             logger.info("speech_started")
+            self._speech_started_item_id = event["item_id"]
             if not self._agent_call_task:
                 return
 
@@ -156,7 +162,7 @@ class VoiceAgent(Agent):
                 self._agent_call_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await self._agent_call_task
-                self._agent_call_task = None
+            self._agent_call_task = None
 
             # Send clear 
             await self._twilio_ws.send_json({
