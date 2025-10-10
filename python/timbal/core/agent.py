@@ -304,7 +304,9 @@ class Agent(Runnable):
                 # Extract conversation history from parent's LLM calls
                 # TODO: Handle multiple call_ids for this subagent
                 llm_spans = parent_trace.get_path(self._llm._path)
-                assert len(llm_spans) >= 1, f"Agent trace does not have any records for path {self._llm._path}"
+                # In a subagent, this can be empty if the parent agent didn't call the LLM
+                if not len(llm_spans):
+                    return memory
                 # Get the most recent LLM interaction
                 llm_input_messages = llm_spans[-1].input.get("messages", []) # TODO Put an assertion in here
                 llm_output_message = llm_spans[-1].output
