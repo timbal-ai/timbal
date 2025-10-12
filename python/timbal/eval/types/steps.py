@@ -63,12 +63,18 @@ class Steps(BaseModel):
         validators = []
         for validator_name, validator_arg in v.items():
             if validator_name == "contains":
-                # Handle both formats: ["tool_name"] and [{"name": "tool_name"}]
+                # Handle multiple formats:
+                # 1. ["tool_name"] - list of strings
+                # 2. [{"name": "tool_name"}] - list of dicts with just name
+                # 3. [{"name": "tool_name", "input": {...}}] - list of dicts with name and input
                 normalized_arg = []
                 for item in validator_arg:
                     if isinstance(item, str):
                         normalized_arg.append({"name": item})
                     elif isinstance(item, dict):
+                        # Ensure the dict has a "name" field
+                        if "name" not in item:
+                            raise ValueError(f"Invalid contains step item: {item}. Must have 'name' field.")
                         normalized_arg.append(item)
                     else:
                         raise ValueError(f"Invalid contains step item: {item}")
@@ -84,6 +90,9 @@ class Steps(BaseModel):
                     if isinstance(item, str):
                         normalized_arg.append({"name": item})
                     elif isinstance(item, dict):
+                        # Ensure the dict has a "name" field
+                        if "name" not in item:
+                            raise ValueError(f"Invalid not_contains step item: {item}. Must have 'name' field.")
                         normalized_arg.append(item)
                     else:
                         raise ValueError(f"Invalid not_contains step item: {item}")
@@ -139,14 +148,16 @@ class Steps(BaseModel):
                 key = getattr(v, "name", str(type(v)))
                 value = getattr(v, "ref", str(v))
                 
-                # For contains_steps and not_contains_steps, show the expected tools
+                # For contains_steps and not_contains_steps, show the expected tools with full structure
                 if key == "contains_steps":
-                    # Extract tool names from the validator reference
+                    # Extract full structure from the validator reference
                     if isinstance(value, list):
-                        d["contains"] = [item.get("name", item) if isinstance(item, dict) else item for item in value]
+                        # Keep the full structure including input if present
+                        d["contains"] = value
                 elif key == "not_contains_steps":
                     if isinstance(value, list):
-                        d["not_contains"] = [item.get("name", item) if isinstance(item, dict) else item for item in value]
+                        # Keep the full structure including input if present
+                        d["not_contains"] = value
                 else:
                     # Group multiple validators of the same type
                     if key in validators_dict:

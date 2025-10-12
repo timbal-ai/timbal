@@ -1,0 +1,33 @@
+tests:
+  - name: steps_validation_test
+    description: Test steps validation with name and input parameters using available tools
+    turns:
+      - input:
+          text: "What's the current time and add 5 + 3"
+        output:
+          text: "I'll get the current time and calculate 5 + 3 for you."
+        steps:
+          validators:
+            contains:
+              - name: get_current_time
+              - name: add_numbers
+                input:
+                  a: 5
+                  b: 3
+
+  - name: steps_validation_with_multiple_tools
+    description: Test steps validation with multiple different tools
+    turns:
+      - input:
+          text: "Greet John and calculate 10 * 2"
+        output:
+          text: "I'll greet John and calculate that for you."
+        steps:
+          validators:
+            contains:
+              - name: greet_person
+                input:
+                  name: John
+              - name: calculate_expression
+                input:
+                  expression: 10 * 2
