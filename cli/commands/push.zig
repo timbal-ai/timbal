@@ -332,7 +332,7 @@ const AuthRes = struct {
 
 fn authenticate(
     allocator: std.mem.Allocator,
-    timbal_api_token: []const u8,
+    timbal_api_key: []const u8,
     image_digest_info: ImageDigestInfo,
     probe_res: ProbeRes,
     app_parts: AppParts,
@@ -350,7 +350,7 @@ fn authenticate(
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    const auth_header = try std.fmt.allocPrint(allocator, "Bearer {s}", .{timbal_api_token});
+    const auth_header = try std.fmt.allocPrint(allocator, "Bearer {s}", .{timbal_api_key});
     defer allocator.free(auth_header);
 
     var res_buffer = std.ArrayList(u8).init(allocator);
@@ -535,18 +535,25 @@ fn pushImage(
 }
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    // Ensure TIMBAL_API_TOKEN is set.
-    const timbal_api_token = std.process.getEnvVarOwned(allocator, "TIMBAL_API_TOKEN") catch |err| {
-        if (err == error.EnvironmentVariableNotFound) {
-            const stderr = std.io.getStdErr().writer();
-            try stderr.writeAll("Error: TIMBAL_API_TOKEN is not set\n");
-            try stderr.writeAll("Please set the TIMBAL_API_TOKEN environment variable before running this command.\n");
-            std.process.exit(1);
+    // Ensure TIMBAL_API_KEY or TIMBAL_API_TOKEN is set.
+    const timbal_api_key = std.process.getEnvVarOwned(allocator, "TIMBAL_API_KEY") catch |key_err| blk: {
+        if (key_err == error.EnvironmentVariableNotFound) {
+            // Try fallback to TIMBAL_API_TOKEN
+            break :blk std.process.getEnvVarOwned(allocator, "TIMBAL_API_TOKEN") catch |token_err| {
+                if (token_err == error.EnvironmentVariableNotFound) {
+                    const stderr = std.io.getStdErr().writer();
+                    try stderr.writeAll("Error: TIMBAL_API_KEY or TIMBAL_API_TOKEN is not set\n");
+                    try stderr.writeAll("Please set the TIMBAL_API_KEY or TIMBAL_API_TOKEN environment variable before running this command.\n");
+                    std.process.exit(1);
+                } else {
+                    return token_err;
+                }
+            };
         } else {
-            return err;
+            return key_err;
         }
     };
-    defer allocator.free(timbal_api_token);
+    defer allocator.free(timbal_api_key);
 
     const parsed_args = try parseArgs(args);
 
@@ -566,7 +573,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Retrieve login user and pwd for the container registry.
     var auth_res = try authenticate(
         allocator,
-        timbal_api_token,
+        timbal_api_key,
         image_digest_info,
         probe_res,
         parsed_args.app_parts,
