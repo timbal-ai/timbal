@@ -116,42 +116,73 @@ class Agent(Runnable):
                 assert len(path_parts) >= 2, f"Invalid path format for system prompt: {path}. Review the SYSTEM_PROMPT_FN_PATTERN regex."
                 module, fn_i = None, None
                 if path_parts[0] == "":
+                    # File-relative import: look in caller's globals first
                     frame = inspect.currentframe()
-                    caller_file = None
+                    caller_globals = None
                     while frame:
                         frame = frame.f_back
                         if frame is None:
                             break
-                        frame_file = frame.f_globals.get("__file__", "")
                         frame_self = frame.f_locals.get("self")
                         if not isinstance(frame_self, Agent):
-                            caller_file = Path(frame_file)
+                            caller_globals = frame.f_globals
                             break
-                    assert caller_file is not None, "Could not determine caller file for Agent constructor."
-                    agent_path = Path(caller_file).expanduser().resolve()
-                    for fn_i in range(1, len(path_parts)):
-                        module_path = agent_path / "/".join(path_parts[:-fn_i])
-                        try:
-                            # Use absolute path as module identifier
-                            module_path_str = str(module_path.resolve())
-                            # Check if module is already loaded in sys.modules by absolute path
-                            if module_path_str in sys.modules:
-                                module = sys.modules[module_path_str]
-                                logger.info(f"Using already loaded module '{module_path}' for system prompt callable '{text}'")
+                    assert caller_globals is not None, "Could not determine caller globals for Agent constructor."
+                    
+                    # Try to resolve from caller's globals directly (handles same-file definitions)
+                    fn = caller_globals
+                    try:
+                        for attr_name in path_parts[1:]:
+                            fn = fn[attr_name] if isinstance(fn, dict) else getattr(fn, attr_name)
+                        logger.info(f"Resolved callable '{text}' from caller's globals")
+                    except (KeyError, AttributeError):
+                        # If not in globals, try loading the module
+                        caller_file = Path(caller_globals.get("__file__", "")).expanduser().resolve()
+                        agent_path = caller_file
+                        for fn_i in range(1, len(path_parts)):
+                            module_path = agent_path / "/".join(path_parts[:-fn_i])
+                            try:
+                                # Use absolute path as module identifier
+                                module_path_str = str(module_path.resolve())
+                                # Check if module is already loaded in sys.modules by absolute path
+                                if module_path_str in sys.modules:
+                                    module = sys.modules[module_path_str]
+                                    logger.info(f"Using already loaded module '{module_path}' for system prompt callable '{text}'")
+                                    break
+                                # Load the module if not already loaded
+                                module_spec = importlib.util.spec_from_file_location(module_path_str, module_path.as_posix())
+                                if not module_spec or not module_spec.loader:
+                                    raise ValueError(f"Failed to load module {module_path}")
+                                module = importlib.util.module_from_spec(module_spec)
+                                # Register in sys.modules BEFORE executing to prevent re-entry
+                                sys.modules[module_path_str] = module
+                                module_spec.loader.exec_module(module)
+                                logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
                                 break
-                            # Load the module if not already loaded
-                            module_spec = importlib.util.spec_from_file_location(module_path_str, module_path.as_posix())
-                            if not module_spec or not module_spec.loader:
-                                raise ValueError(f"Failed to load module {module_path}")
-                            module = importlib.util.module_from_spec(module_spec)
-                            # Register in sys.modules BEFORE executing to prevent re-entry
-                            sys.modules[module_path_str] = module
-                            module_spec.loader.exec_module(module)
-                            logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
-                            break
-                        except Exception:
-                            pass
+                            except Exception:
+                                pass
+                        else:
+                            for fn_i in range(1, len(path_parts)):
+                                module_path = ".".join(path_parts[:-fn_i])
+                                try:
+                                    module = importlib.import_module(module_path)
+                                    logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
+                                    break
+                                except Exception:
+                                    pass
+                        fn = module
+                        for j in path_parts[-fn_i:]:
+                            fn = getattr(fn, j)
+                    
+                    inspect_result = self._inspect_callable(fn)
+                    self._system_prompt_callables[text] = {
+                        "start": match.start(),
+                        "end": match.end(),
+                        "callable": fn,
+                        "is_coroutine": inspect_result["is_coroutine"],
+                    }
                 else:
+                    # Package import (e.g., {os::getcwd})
                     for fn_i in range(1, len(path_parts)):
                         module_path = ".".join(path_parts[:-fn_i])
                         try:
@@ -160,16 +191,16 @@ class Agent(Runnable):
                             break
                         except Exception:
                             pass
-                fn = module
-                for j in path_parts[-fn_i:]:
-                    fn = getattr(fn, j)
-                inspect_result = self._inspect_callable(fn)
-                self._system_prompt_callables[text] = {
-                    "start": match.start(),
-                    "end": match.end(),
-                    "callable": fn,
-                    "is_coroutine": inspect_result["is_coroutine"],
-                }
+                    fn = module
+                    for j in path_parts[-fn_i:]:
+                        fn = getattr(fn, j)
+                    inspect_result = self._inspect_callable(fn)
+                    self._system_prompt_callables[text] = {
+                        "start": match.start(),
+                        "end": match.end(),
+                        "callable": fn,
+                        "is_coroutine": inspect_result["is_coroutine"],
+                    }
         
         model_provider, model_name = self.model.split("/")
         if model_provider == "anthropic":
