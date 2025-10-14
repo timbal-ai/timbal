@@ -116,7 +116,7 @@ class Message:
         if isinstance(value, Message):
             return value
         if isinstance(value, dict):
-            role = value.get("role", None)
+            role = value.get("role", "user")
             content = value.get("content", None)
             if not isinstance(content, list):
                 content = [content]
