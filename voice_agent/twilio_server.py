@@ -2,15 +2,16 @@ import asyncio
 import base64
 import json
 import os
-from typing import AsyncGenerator
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response
-from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
-from starlette.websockets import WebSocketState
-from audio import VoiceAgent
+from collections.abc import AsyncGenerator
 from contextlib import suppress
 
+from audio_bg import VoiceAgent
 from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
+from timbal.core.agent import logger
+from twilio.twiml.voice_response import Connect, Stream, VoiceResponse
+
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -18,8 +19,6 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 
 app = FastAPI()
 
-
-import os
 
 os.environ["TIMBAL_ORG_ID"] = "1"
 # os.environ["TIMBAL_APP_ID"] = "125"
@@ -36,7 +35,7 @@ async def incoming_call():
     connect = Connect()
     
     # Create a bidirectional audio stream to our WebSocket endpoint
-    stream = Stream(url=f'wss://5ae7191fddc1.ngrok-free.app/media-stream')
+    stream = Stream(url='wss://ta-stratospherical-supersentimentally.ngrok-free.dev/media-stream')
     connect.append(stream)
     response.append(connect)
     
@@ -60,12 +59,11 @@ async def twilio_audio_stream(websocket: WebSocket) -> AsyncGenerator[bytes, Non
 
 
 
-async def send_audio_to_twilio(websocket: WebSocket, audio_stream: AsyncGenerator[bytes, None], sid_getter: callable, voice_agent_instance: VoiceAgent):
+async def send_audio_to_twilio(websocket: WebSocket, audio_stream: AsyncGenerator[bytes, None], sid_getter: callable):
     try:
         async for audio_chunk in audio_stream:
-            print(f"Sending {len(audio_chunk)} bytes to Twilio")
             sid = sid_getter()
-            encoded_audio = base64.b64encode(audio_chunk).decode('ascii')
+            encoded_audio = base64.b64encode(audio_chunk).decode('utf-8')
             await websocket.send_json({
                 "event": "media",
                 "streamSid": sid,
@@ -119,16 +117,21 @@ async def media_stream(websocket: WebSocket):
         stream_sid = data['start']['streamSid']
         call_sid = data['start']['callSid']
         print(f"📞 Call started - Stream: {stream_sid}, Call: {call_sid}")
+
+        # Agent info
+        system_prompt = open("system_prompt.txt", encoding="utf-8").read()
         
         # Create a new VoiceAgent instance for this call
         voice_agent_instance = VoiceAgent(
             name="twilio_voice_agent",
             model="openai/gpt-4o-mini",
-            language="es",
+            system_prompt=system_prompt,
+            language="en",
             audio_format="g711_ulaw",
             vad_prefix_padding_ms=250,
             vad_silence_duration_ms=250,
-            elevenlabs_voice_type="H6bZE3vdUcn6ksY6zH1x"
+            elevenlabs_voice_type="H6bZE3vdUcn6ksY6zH1x",
+            elevenlabs_output_format="ulaw_8000"
         )
 
         voice_agent_instance._twilio_ws = websocket
@@ -140,7 +143,7 @@ async def media_stream(websocket: WebSocket):
         # Start the voice agent session and keep it running for the entire call
         async with voice_agent_instance.session(input_stream=input_stream) as agent_output:
             # Create a task to send agent audio to Twilio
-            await send_audio_to_twilio(websocket, agent_output, sid_getter, voice_agent_instance)
+            await send_audio_to_twilio(websocket, agent_output, sid_getter)
         print(f"✅ Call ended - Stream: {stream_sid}")
                 
     except WebSocketDisconnect:
@@ -150,7 +153,8 @@ async def media_stream(websocket: WebSocket):
         import traceback
         traceback.print_exc()
     finally:
-        if websocket.client_state != WebSocketState.DISCONNECTED:
+        # Close websocket gracefully if still open
+        with suppress(Exception):
             await websocket.close()
 
 
