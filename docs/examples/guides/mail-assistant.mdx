@@ -11,15 +11,20 @@ This guide shows how to:
 
 <AccordionGroup>
   <Accordion title="Installing Packages">
-    To get started, install the following Google API client libraries to interact with Gmail:
+    Install the required Google API client libraries:
+    
+    **Required for both methods:**
     ```python 
     google-api-core 
     google-api-python-client 
     google-auth 
     google-auth-httplib2 
-    google-auth-oauthlib   
     ```
     
+    **Additional for OAuth only:**
+    ```python
+    google-auth-oauthlib
+    ```
 
   </Accordion>  
   <Accordion title="Enabling Gmail API to your account">
@@ -32,29 +37,38 @@ This guide shows how to:
         2. Search for "Gmail API"
         3. Click on **Gmail API** and then **Enable**
       </Step>
-      <Step title="Create OAuth 2.0 Credentials">
+      <Step title="Choose Authentication Method">
+        There are two ways to authenticate with Gmail API. Choose the one that fits your use case:
+        
+        ## Method 1: OAuth 2.0 (Personal/Desktop Apps)
+        
+        **Use this if:**
+        - You're building a personal application
+        - You want users to authenticate with their own Google account
+        - You're using a personal Gmail account (not Google Workspace)
+        
+        ### Setup Steps:
+        
+        **1. Create OAuth 2.0 Credentials**
         1. Go to **APIs & Services** > **Credentials**
         2. Click **Create Credentials** > **OAuth client ID**
         3. Choose **Desktop app** as the application type
-        4. Download the credentials JSON file
-      </Step>
-      <Step title="Configure OAuth Scopes">
+        4. Download the credentials JSON file and save it as `credentials.json`
+        
+        **2. Configure OAuth Scopes**
         The following scopes are required:
-        ```json
+        ```python
         SCOPES = [
           "https://www.googleapis.com/auth/gmail.readonly",
           "https://www.googleapis.com/auth/gmail.compose",
           "https://www.googleapis.com/auth/gmail.modify"
         ]
         ```
-      </Step>
-      <Step title="Generate Access Token">
-        Generate a `token.json` file with your access credentials. 
-        Example:
+        
+        **3. Generate Access Token**
+        Run this script once to generate `token.json`:
         ```python
         from google_auth_oauthlib.flow import InstalledAppFlow
-        from google.auth.transport.requests import Request
-        import os.path
 
         SCOPES = [
             'https://www.googleapis.com/auth/gmail.readonly',
@@ -62,26 +76,139 @@ This guide shows how to:
             'https://www.googleapis.com/auth/gmail.modify'
         ]
 
-        def main():
-            if os.path.exists('token.json'):
-                creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-            
-            if not creds or not creds.valid:
-                if creds and creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
-                else:
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        'credentials.json', SCOPES) # Your credentials JSON file name
-                    creds = flow.run_local_server(port=0)
-                
-                with open('token.json', 'w') as token:
-                    token.write(creds.to_json())
-            
-
-        if __name__ == '__main__':
-            main()
+        flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+        creds = flow.run_local_server(port=0)
+        
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+        
+        print("token.json generated successfully!")
         ```
-        This will open a browser window for Google sign-in and generate the token access to Gmail.
+        This will open a browser window for Google sign-in.
+        
+        **4. Initialize in Code**
+        ```python
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        from googleapiclient.discovery import build
+        import os
+
+        SCOPES = [
+            'https://www.googleapis.com/auth/gmail.readonly',
+            'https://www.googleapis.com/auth/gmail.compose',
+            'https://www.googleapis.com/auth/gmail.modify'
+        ]
+
+        def initialize_gmail():
+            """Initialize Gmail API connection with OAuth"""
+            try:
+                creds = None
+                if os.path.exists('token.json'):
+                    creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+                
+                if not creds or not creds.valid:
+                    if creds and creds.expired and creds.refresh_token:
+                        creds.refresh(Request())
+                    else:
+                        print("No valid credentials found.")
+                        return None
+                
+                gmail_service = build('gmail', 'v1', credentials=creds)
+
+                # Test connection and get profile
+                profile = gmail_service.users().getProfile(userId='me').execute()
+                print(f"Connected to Gmail: {profile['emailAddress']}")
+                
+                return gmail_service
+                
+            except Exception as e:
+                print(f"Error initializing Gmail API: {e}")
+                return None
+        ```
+        
+        ---
+        
+        ## Method 2: Service Account (Google Workspace)
+        
+        **Use this if:**
+        - You have a Google Workspace account
+        - You need to access Gmail on behalf of multiple users
+        - You're building a server-side application
+        
+        <Warning>
+        **Requirements:**
+        - Google Workspace account (not personal Gmail)
+        - Google Workspace Admin access for domain-wide delegation
+        </Warning>
+        
+        ### Setup Steps:
+        
+        **1. Create a Service Account**
+        1. Go to **IAM & Admin** > **Service Accounts**
+        2. Click **CREATE SERVICE ACCOUNT**
+        3. Enter name: `gmail-service-account`
+        4. Add description: `Service account for Gmail API access`
+        5. Click **CREATE AND CONTINUE**, then **DONE**
+        6. Note the service account email: `gmail-service-account@your-project-id.iam.gserviceaccount.com`
+        
+        **2. Create and Download Service Account Key**
+        1. Click on your service account
+        2. Go to **KEYS** tab
+        3. Click **ADD KEY** > **Create new key**
+        4. Select **JSON** and click **CREATE**
+        5. Save the downloaded file as `credentials.json`
+        6. **Keep this file secure!**
+        
+        **3. Configure Domain-Wide Delegation**
+        
+        <Warning>
+        Requires Google Workspace Admin privileges
+        </Warning>
+        
+        1. Open `credentials.json` and copy the `client_id` value (e.g., `103635629912027933995`)
+        2. Go to [Google Workspace Admin Console](https://admin.google.com/)
+        3. Navigate to **Security** > **Access and data control** > **API Controls**
+        4. Click **Manage Domain Wide Delegation** > **Add new**
+        5. Paste the **Client ID** and add scopes:
+        ```
+        https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.compose,https://www.googleapis.com/auth/gmail.modify
+        ```
+        6. Click **Authorize**
+        
+        **4. Initialize Service Account in Code**
+        ```python
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
+        SCOPES = [
+            'https://www.googleapis.com/auth/gmail.readonly',
+            'https://www.googleapis.com/auth/gmail.compose',
+            'https://www.googleapis.com/auth/gmail.modify'
+        ]
+
+        CREDENTIALS_FILE = 'credentials.json'
+        DELEGATED_USER = 'your-email@yourdomain.com'
+
+        def initialize_gmail():
+            """Initialize Gmail API connection with service account"""
+            try:
+                credentials = service_account.Credentials.from_service_account_file(
+                    CREDENTIALS_FILE, scopes=SCOPES)
+
+                delegated_credentials = credentials.with_subject(DELEGATED_USER)
+
+                gmail_service = build('gmail', 'v1', credentials=delegated_credentials)
+
+                # Test connection and get profile
+                profile = gmail_service.users().getProfile(userId='me').execute()
+                print(f"Connected to Gmail: {profile['emailAddress']}")
+                
+                return gmail_service
+                
+            except Exception as e:
+                print(f"Error initializing Gmail API: {e}")
+                return None
+        ```
       </Step>
     </Steps>
   </Accordion>
@@ -93,7 +220,7 @@ For the complete example, visit our [GitHub repository](https://github.com/timba
 
 ### Gmail Initialization
 
-Establish a connection to the Gmail API using your OAuth credentials:
+Establish a connection to the Gmail API using your credentials (this example uses OAuth):
 
 ```python
 def initialize_gmail(self):
@@ -322,15 +449,17 @@ For a more sophisticated solution, consider configuring Gmail to send notificati
 <AccordionGroup>
   <Accordion title="Authentication Issues">
     - **Missing scopes**: Verify all required Gmail API scopes are included
-    - **OAuth setup**: Check that OAuth client ID is properly configured and the credentials json file downloaded.
+    - **OAuth issues**: Check that `credentials.json` and `token.json` files exist and are valid
+    - **Service Account issues**: Verify domain-wide delegation is configured and `DELEGATED_USER` has correct email
   </Accordion>
 
   <Accordion title="API Connection Problems">
     - **Rate limits**: Gmail API has daily quotas. Check your usage.
+    - **Permission denied**: For Service Accounts, ensure domain-wide delegation is authorized with correct Client ID
   </Accordion>
 
   <Accordion title="Code Issues">
     - **Import errors**: Ensure all required packages are installed
-    - **File errors**: Check `token.json` and `credentials.json` files exist.
+    - **File errors**: Check that your credentials file exists and is properly formatted
   </Accordion>
 </AccordionGroup>
