@@ -166,6 +166,7 @@
           {
             "group": "Runs",
             "pages": [
+              "api-reference/runs/list",
               "api-reference/runs/upsert"
             ]
           },
