@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """
-Gmail API Credentials Setup Script
+Gmail API Credentials Setup Script (OAuth Method Only)
 
 This script sets up OAuth2 credentials for the Gmail API.
 You'll need to create a Google Cloud Project and enable the Gmail API first.
+
+Note: This script is only for OAuth authentication. Service Account
+authentication doesn't require this setup script.
 """
 
 import os
-import json
+from dotenv import load_dotenv
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+
+load_dotenv()
 
 TOKEN_FILE = os.getenv("TOKEN_FILE")
 CREDENTIALS_FILE = os.getenv("CREDENTIALS_FILE")
@@ -31,18 +36,18 @@ def setup_credentials():
     token_file = TOKEN_FILE
     credentials_file = CREDENTIALS_FILE
     
-    # Check if credentials file exists
     if not os.path.exists(credentials_file):
         print(f"{credentials_file} not found!")
         return None
     
-    # Check if token file exists (user has already authenticated)
+    # If user has already authenticated, load the credentials
     if os.path.exists(token_file):
         creds = Credentials.from_authorized_user_file(token_file, SCOPES)
     
     # If there are no valid credentials, let the user log in
     if not creds or not creds.valid:
-        os.remove(token_file)
+        if os.path.exists(token_file):
+            os.remove(token_file)
         if creds and creds.expired and creds.refresh_token:
             print("Refreshing expired credentials...")
             creds.refresh(Request())
@@ -62,27 +67,26 @@ def test_connection(creds):
     """Test the Gmail API connection"""
     try:
         service = build('gmail', 'v1', credentials=creds)
-        # Get user profile to test connection
         profile = service.users().getProfile(userId='me').execute()
-        print(f"Successfully connected to Gmail")
-        print(f"Email: {profile.get('emailAddress')}")
-        return service
+        print(f"✓ Connected to: {profile.get('emailAddress')}")
+        return True
     except Exception as e:
-        print(f"Failed to connect to Gmail API: {e}")
-        return None
+        print(f"✗ Connection failed: {e}")
+        return False
+
 
 if __name__ == "__main__":
-    print("Gmail API Credentials Setup")
-    print("=" * 40)
+    print("=" * 50)
+    print("Gmail OAuth Setup")
+    print("=" * 50)
     
     credentials = setup_credentials()
 
     if credentials:
-        service = test_connection(credentials)
-
-        if service:
-            print("\n Setup complete!")
+        print("\nTesting connection...")
+        if test_connection(credentials):
+            print("\n✓ Setup complete! You can now run gmail.py")
         else:
-            print("\nSetup failed. Please check your credentials and try again.")
+            print("\n✗ Setup failed")
     else:
-        print("\nPlease complete the credential setup first.")
+        print("\n✗ Failed to create credentials")

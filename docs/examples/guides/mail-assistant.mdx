@@ -13,16 +13,9 @@ This guide shows how to:
   <Accordion title="Installing Packages">
     Install the required Google API client libraries:
     
-    **Required for both methods:**
     ```python 
     google-api-core 
-    google-api-python-client 
-    google-auth 
-    google-auth-httplib2 
-    ```
-    
-    **Additional for OAuth only:**
-    ```python
+    google-api-python-client
     google-auth-oauthlib
     ```
 
@@ -220,11 +213,13 @@ For the complete example, visit our [GitHub repository](https://github.com/timba
 
 ### Gmail Initialization
 
-Establish a connection to the Gmail API using your credentials (this example uses OAuth):
+Establish a connection to the Gmail API using your credentials. Choose the method that matches your setup:
 
+<Tabs>
+  <Tab title="OAuth 2.0">
 ```python
 def initialize_gmail(self):
-    """Initialize Gmail API connection"""
+    """Initialize Gmail API connection with OAuth"""
     try:
         creds = None
         token_file = 'token.json'
@@ -259,6 +254,41 @@ def initialize_gmail(self):
         print(f"Error initializing Gmail API: {e}")
         return False
 ```
+  </Tab>
+  <Tab title="Service Account">
+```python
+def initialize_gmail(self):
+    """Initialize Gmail API connection with Service Account"""
+    try:
+        CREDENTIALS_FILE = 'credentials.json'
+        DELEGATED_USER = 'your-email@yourdomain.com'
+        
+        credentials = service_account.Credentials.from_service_account_file(
+            CREDENTIALS_FILE, scopes=self.scopes)
+
+        delegated_credentials = credentials.with_subject(DELEGATED_USER)
+
+        self.gmail_service = build('gmail', 'v1', credentials=delegated_credentials)
+
+        # Test connection and get initial history ID
+        profile = self.gmail_service.users().getProfile(userId='me').execute()
+        print(f"Connected to Gmail: {profile['emailAddress']}")
+        
+        # Get initial history ID from profile
+        self.last_history_id = profile.get('historyId')
+        if self.last_history_id:
+            print(f"Starting from history ID: {self.last_history_id}")
+        else:
+            print("No history ID found, will monitor from now")
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error initializing Gmail API: {e}")
+        return False
+```
+  </Tab>
+</Tabs>
 
 
 ### Email monitoring

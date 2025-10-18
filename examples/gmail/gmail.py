@@ -2,7 +2,8 @@
 The script polls Gmail for new messages and generates drafts for them.
 
 Prerequisites:
-- Have 'credentials.json' and 'token.json' files ready
+- For OAuth: Have 'credentials.json' and 'token.json' files ready
+- For Service Account: Have 'credentials.json' and set DELEGATED_USER environment variable
 """
 
 import asyncio
@@ -11,18 +12,73 @@ import time
 import base64
 from datetime import datetime
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from timbal import Agent
 
+# Only needed for OAuth method
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+
+# Only needed for Service Account method
+from google.oauth2 import service_account
+
+from timbal import Agent
 from timbal.state import get_run_context
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Authentication configuration
+AUTH_METHOD = os.getenv("AUTH_METHOD", "oauth")  # "oauth" or "service_account"
 TOKEN_FILE = os.getenv("TOKEN_FILE")
+CREDENTIALS_FILE = os.getenv("CREDENTIALS_FILE", "credentials.json")
+DELEGATED_USER = os.getenv("DELEGATED_USER")  # Required for service account
+
+SCOPES = [
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.compose'
+]
+
+
+def get_oauth_credentials():
+    """Get credentials using OAuth authentication"""
+    print("Using OAuth authentication...")
+    if not TOKEN_FILE or not os.path.exists(TOKEN_FILE):
+        raise Exception("No valid credentials found. Please run setup_credentials.py first.")
+    
+    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            print("Refreshing expired credentials...")
+            creds.refresh(Request())
+        else:
+            raise Exception("Credentials invalid. Please run setup_credentials.py.")
+    
+    return creds
+
+
+def get_service_account_credentials():
+    """Get credentials using Service Account with domain-wide delegation"""
+    print("Using Service Account authentication...")
+    if not DELEGATED_USER:
+        raise Exception("DELEGATED_USER environment variable is required for service account authentication")
+    
+    credentials = service_account.Credentials.from_service_account_file(
+        CREDENTIALS_FILE, scopes=SCOPES)
+    
+    delegated_creds = credentials.with_subject(DELEGATED_USER)
+    print(f"Delegating to user: {DELEGATED_USER}")
+    
+    return delegated_creds
+
+
+def get_gmail_credentials():
+    """Get Gmail credentials based on AUTH_METHOD"""
+    if AUTH_METHOD == "service_account":
+        return get_service_account_credentials()
+    else:
+        return get_oauth_credentials()
 
 
 class GmailMonitor:
@@ -31,12 +87,6 @@ class GmailMonitor:
     def __init__(self):
         self.gmail_service = None
         self.last_history_id = None
-        # OAuth2 scopes
-        self.scopes = [
-            'https://www.googleapis.com/auth/gmail.readonly',
-            'https://www.googleapis.com/auth/gmail.modify',
-            'https://www.googleapis.com/auth/gmail.compose'
-        ]
 
         try:
             self.agent = Agent(
@@ -52,19 +102,10 @@ class GmailMonitor:
     def initialize_gmail(self):
         """Initialize Gmail API connection"""
         try:
-            creds = None
+            # Get credentials based on configured auth method
+            creds = get_gmail_credentials()
             
-            if os.path.exists(TOKEN_FILE):
-                creds = Credentials.from_authorized_user_file(TOKEN_FILE, self.scopes)
-            
-            if not creds or not creds.valid:
-                if creds and creds.expired and creds.refresh_token:
-                    print("Refreshing expired credentials...")
-                    creds.refresh(Request())
-                else:
-                    print("No valid credentials found.")
-                    return False
-            
+            # Build Gmail service
             self.gmail_service = build('gmail', 'v1', credentials=creds)
 
             # Test connection and get initial history ID
@@ -318,7 +359,7 @@ Content: {content}
         try:
             while True:
                 await self.check_for_new_messages()
-                time.sleep(10)  # Check every 10 seconds
+                await asyncio.sleep(10)  # Check every 10 seconds
                 
         except KeyboardInterrupt:
             print("Monitor stopped successfully")
