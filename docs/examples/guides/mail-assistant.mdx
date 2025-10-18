@@ -16,6 +16,7 @@ This guide shows how to:
     ```python 
     google-api-core 
     google-api-python-client
+    google-auth
     google-auth-oauthlib
     ```
 
@@ -53,8 +54,7 @@ This guide shows how to:
         ```python
         SCOPES = [
           "https://www.googleapis.com/auth/gmail.readonly",
-          "https://www.googleapis.com/auth/gmail.compose",
-          "https://www.googleapis.com/auth/gmail.modify"
+          "https://www.googleapis.com/auth/gmail.compose"
         ]
         ```
         
@@ -65,8 +65,7 @@ This guide shows how to:
 
         SCOPES = [
             'https://www.googleapis.com/auth/gmail.readonly',
-            'https://www.googleapis.com/auth/gmail.compose',
-            'https://www.googleapis.com/auth/gmail.modify'
+            'https://www.googleapis.com/auth/gmail.compose'
         ]
 
         flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
@@ -88,8 +87,7 @@ This guide shows how to:
 
         SCOPES = [
             'https://www.googleapis.com/auth/gmail.readonly',
-            'https://www.googleapis.com/auth/gmail.compose',
-            'https://www.googleapis.com/auth/gmail.modify'
+            'https://www.googleapis.com/auth/gmail.compose'
         ]
 
         def initialize_gmail():
@@ -164,7 +162,7 @@ This guide shows how to:
         4. Click **Manage Domain Wide Delegation** > **Add new**
         5. Paste the **Client ID** and add scopes:
         ```
-        https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.compose,https://www.googleapis.com/auth/gmail.modify
+        https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.compose
         ```
         6. Click **Authorize**
         
@@ -175,8 +173,7 @@ This guide shows how to:
 
         SCOPES = [
             'https://www.googleapis.com/auth/gmail.readonly',
-            'https://www.googleapis.com/auth/gmail.compose',
-            'https://www.googleapis.com/auth/gmail.modify'
+            'https://www.googleapis.com/auth/gmail.compose'
         ]
 
         CREDENTIALS_FILE = 'credentials.json'
@@ -332,9 +329,9 @@ async def check_for_new_messages(self):
 
 async def start_monitoring(self):
     """Start monitoring Gmail for new messages using polling"""   
-      while True:
-          await self.check_for_new_messages()
-          time.sleep(10)  # Check new emails every 10 seconds
+    while True:
+        await self.check_for_new_messages()
+        await asyncio.sleep(10)  # Check new emails every 10 seconds
 ```
 
 ### Create a Timbal Agent for intelligent email responses

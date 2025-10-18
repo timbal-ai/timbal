@@ -7,24 +7,22 @@ Prerequisites:
 """
 
 import asyncio
-import os
-import time
 import base64
+import os
 from datetime import datetime
 
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from dotenv import load_dotenv
 
 # Only needed for OAuth method
 from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 
 # Only needed for Service Account method
 from google.oauth2 import service_account
-
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from timbal import Agent
 from timbal.state import get_run_context
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -367,7 +365,7 @@ Content: {content}
 
     async def run(self):
         print("Monitoring Gmail for new messages...")
-        print(f"Using polling (checks every 10 seconds)")
+        print("Using polling (checks every 10 seconds)")
         print("=" * 45)
         
         # Initialize Gmail API
