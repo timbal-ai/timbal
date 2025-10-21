@@ -49,6 +49,7 @@ Model = Literal[
     "anthropic/claude-opus-4-0",
     "anthropic/claude-sonnet-4-0",
     "anthropic/claude-sonnet-4-5",
+    "anthropic/claude-haiku-4-5",
     "anthropic/claude-3-7-sonnet-latest",
     "anthropic/claude-3-5-haiku-latest",
     # TogetherAI models
@@ -107,6 +108,14 @@ async def _llm_router(
             "For Anthropic models, this should be a dictionary with 'budget_tokens' key."
         ),
     ),
+    base_url: str | None = Field(
+        None,
+        description="Base URL for the LLM provider.",
+    ),
+    api_key: str | None = Field(
+        None,
+        description="API key for the LLM provider.",
+    ),
 ) -> Message: # type: ignore
     """
     Internal LLM router function.
@@ -120,6 +129,8 @@ async def _llm_router(
     tools = resolve_default("tools", tools)
     max_tokens = resolve_default("max_tokens", max_tokens)
     thinking = resolve_default("thinking", thinking)
+    base_url = resolve_default("base_url", base_url)
+    api_key = resolve_default("api_key", api_key)
 
     if "/" not in model:
         raise ValueError("Model must be in format 'provider/model_name'")
@@ -127,36 +138,46 @@ async def _llm_router(
     provider, model_name = model.split("/", 1)
     
     if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise APIKeyNotFoundError("OPENAI_API_KEY not found.")
-        client = AsyncOpenAI(api_key=api_key)
+        if base_url is not None:
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        else:
+            client = AsyncOpenAI(api_key=api_key)
 
     elif provider == "anthropic":
         if not max_tokens:
             raise ValueError("'max_tokens' is required for claude models.")
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise APIKeyNotFoundError("ANTHROPIC_API_KEY not found.")
-        client = AsyncAnthropic(api_key=api_key)
+        if base_url is not None:
+            client = AsyncAnthropic(api_key=api_key, base_url=base_url)
+        else:
+            client = AsyncAnthropic(api_key=api_key)
 
     elif provider == "google":
-        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise APIKeyNotFoundError("GEMINI_API_KEY not found.")
-        client = AsyncOpenAI(
-            api_key=os.getenv("GEMINI_API_KEY"),
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-        )
+        if base_url is not None:
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        else:
+            client = AsyncOpenAI(api_key=api_key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
 
     elif provider == "togetherai":
-        api_key = os.getenv("TOGETHER_API_KEY")
+        if not api_key:
+            api_key = os.getenv("TOGETHER_API_KEY")
         if not api_key:
             raise APIKeyNotFoundError("TOGETHER_API_KEY not found.")
-        client = AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://api.together.xyz/v1",
-        )
+        if base_url is not None:
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        else:
+            client = AsyncOpenAI(api_key=api_key, base_url="https://api.together.xyz/v1")
 
     else:
         raise ValueError(f"Unsupported provider: {provider}")
