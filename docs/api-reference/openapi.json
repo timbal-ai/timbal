@@ -106,28 +106,30 @@
           {
             "name": "from",
             "in": "query",
-            "description": "Filter runs by start time",
+            "description": "Filter runs by start time (epoch timestamp in milliseconds)",
             "required": false,
             "schema": {
               "type": [
-                "string",
+                "integer",
                 "null"
               ],
-              "format": "date-time"
-            }
+              "format": "int64"
+            },
+            "example": 1729540800000
           },
           {
             "name": "to",
             "in": "query",
-            "description": "Filter runs by end time",
+            "description": "Filter runs by end time (epoch timestamp in milliseconds)",
             "required": false,
             "schema": {
               "type": [
-                "string",
+                "integer",
                 "null"
               ],
-              "format": "date-time"
-            }
+              "format": "int64"
+            },
+            "example": 1729627200000
           },
           {
             "name": "metadata",
