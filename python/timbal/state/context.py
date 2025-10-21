@@ -73,7 +73,7 @@ class RunContext(BaseModel):
                     )
 
         # We validate this afterwards. We might want to send a platform config from the platform, and rely on the subject to be set locally with the env
-        if not self.platform_config.subject:
+        if self.platform_config and not self.platform_config.subject:
             org_id = os.getenv("TIMBAL_ORG_ID")
             app_id = os.getenv("TIMBAL_APP_ID")
             project_id = os.getenv("TIMBAL_PROJECT_ID")
