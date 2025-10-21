@@ -46,8 +46,10 @@ class PlatformSubject(BaseModel):
 
     org_id: str
     """Organization identifier."""
-    app_id: str
-    """Application identifier."""
+    project_id: str | None = None
+    """Project identifier. Either project or app must be specified."""
+    app_id: str | None = None
+    """Application identifier. Either project or app must be specified."""
     version_id: str | None = None
     """Application version identifier."""
 
@@ -78,6 +80,8 @@ class PlatformConfig(BaseModel):
             values["subject"] = values.pop("app_config")
         elif "app" in values:
             values["subject"] = values.pop("app")
+        elif "project" in values:
+            values["subject"] = values.pop("project")
         elif "scope" in values:
             values["subject"] = values.pop("scope")
 

@@ -5,7 +5,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from uuid_extensions import uuid7
 
-from .config import PlatformConfig
+from .config import PlatformConfig, PlatformSubject
 from .tracing.providers import InMemoryTracingProvider, PlatformTracingProvider, TracingProvider
 from .tracing.span import Span
 from .tracing.trace import Trace
@@ -67,21 +67,30 @@ class RunContext(BaseModel):
                         "type": "bearer",
                         "token": token
                     }
-                    subject = None
-                    org_id = os.getenv("TIMBAL_ORG_ID")
-                    app_id = os.getenv("TIMBAL_APP_ID")
-                    if org_id and app_id:
-                        version_id = os.getenv("TIMBAL_VERSION_ID")
-                        subject = {
-                            "org_id": org_id,
-                            "app_id": app_id,
-                            "version_id": version_id
-                        }
-                    self.platform_config = PlatformConfig.model_validate({
-                        "host": host,
-                        "auth": auth,
-                        "subject": subject
-                    })
+                    self.platform_config = PlatformConfig(
+                        host=host,
+                        auth=auth,
+                    )
+
+        # We validate this afterwards. We might want to send a platform config from the platform, and rely on the subject to be set locally with the env
+        if not self.platform_config.subject:
+            org_id = os.getenv("TIMBAL_ORG_ID")
+            app_id = os.getenv("TIMBAL_APP_ID")
+            project_id = os.getenv("TIMBAL_PROJECT_ID")
+            if org_id:
+                if app_id:
+                    version_id = os.getenv("TIMBAL_VERSION_ID")
+                    self.platform_config.subject = PlatformSubject(
+                        org_id=org_id,
+                        app_id=app_id,
+                        version_id=version_id,
+                    )
+                elif project_id:
+                    self.platform_config.subject = PlatformSubject(
+                        org_id=org_id,
+                        project_id=project_id,
+                    )
+
         self._trace = Trace()
         # TODO Enable custom tracing providers
         if self.platform_config:

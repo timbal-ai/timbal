@@ -22,9 +22,15 @@ class PlatformTracingProvider(TracingProvider):
         """See base class."""
         from ....platform.utils import _request
         subject = run_context.platform_config.subject
+        if subject.app_id:
+            subject_path = f"apps/{subject.app_id}"
+        elif subject.project_id:
+            subject_path = f"projects/{subject.project_id}"
+        else:
+            raise ValueError("Cannot use platform tracing provider without an app or project subject")
         res = await _request(
             method="GET",
-            path=f"orgs/{subject.org_id}/apps/{subject.app_id}/runs/{run_context.parent_id}",
+            path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.parent_id}",
         )
         res_json = res.json()
         trace = res_json.get("trace")
@@ -39,13 +45,19 @@ class PlatformTracingProvider(TracingProvider):
         from ....platform.utils import _request
         subject = run_context.platform_config.subject
         payload = {
-            "version_id": subject.version_id,
             "parent_id": run_context.parent_id,
             "trace": run_context._trace.model_dump()
         }
+        if subject.app_id:
+            subject_path = f"apps/{subject.app_id}"
+            payload["version_id"] = subject.version_id
+        elif subject.project_id:
+            subject_path = f"projects/{subject.project_id}"
+        else:
+            raise ValueError("Cannot use platform tracing provider without an app or project subject")
         res = await _request(
             method="PATCH",
-            path=f"orgs/{subject.org_id}/apps/{subject.app_id}/runs/{run_context.id}",
+            path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
             json=payload,
         )
         res_json = res.json()
