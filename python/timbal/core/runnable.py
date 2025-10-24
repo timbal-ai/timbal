@@ -43,10 +43,17 @@ from ..types.events import (
     OutputEvent,
     StartEvent,
 )
+from ..types.events.delta import CustomItem, DeltaEvent, DeltaItem, TextItem
 from ..types.run_status import RunStatus
 from ..utils import dump, sync_to_async_gen
 
 logger = structlog.get_logger("timbal.core.runnable")
+
+TIMBAL_DELTA_EVENTS = os.getenv("TIMBAL_DELTA_EVENTS", "false").lower() in ["true", "1", "t", "yes", "y", "enabled", "on"]
+if TIMBAL_DELTA_EVENTS:
+    logger.warning("TIMBAL_DELTA_EVENTS is enabled. This is an experimental feature and may not work properly with all providers.")
+else:
+    logger.warning("ChunkEvents will be deprecated in a future release. Enable TIMBAL_DELTA_EVENTS=true to use the new structured DeltaEvents system.")
 
 
 # TODO Add timeout
@@ -547,7 +554,7 @@ class Runnable(ABC, BaseModel):
                 parent_call_id=span.parent_call_id,
             )
             if start_event.type in self._log_events:
-                logger.info("start_event", **start_event.model_dump())
+                logger.info(start_event.type, **start_event.model_dump())
             yield start_event
 
             # We store the unvalidated input, as sent by the user. 
@@ -588,10 +595,30 @@ class Runnable(ABC, BaseModel):
                 collector_type = get_collector_registry().get_collector_type(first_chunk)
                 if collector_type:
                     collector = collector_type(async_gen=async_gen, start=handler_start)
-                    def emit_event(event):
-                        # If it's already a BaseEvent, it means we have already emitted it.
-                        if not isinstance(event, BaseEvent):
-                            chunk_event = ChunkEvent(
+
+                    def process_event(event):
+                        # If it's already a BaseEvent, it means we have already processed and logged it
+                        if isinstance(event, BaseEvent):
+                            return event
+                        if TIMBAL_DELTA_EVENTS:
+                            # Wrap non-delta events in a CustomItem
+                            if not isinstance(event, DeltaItem):
+                                event = CustomItem(data=event)
+                            event = DeltaEvent(
+                                run_id=run_context.id,
+                                parent_run_id=run_context.parent_id,
+                                path=span.path,
+                                call_id=span.call_id,
+                                parent_call_id=span.parent_call_id,
+                                item=event,
+                            )
+                        else:
+                            if isinstance(event, TextItem):
+                                event = event.delta
+                            elif isinstance(event, DeltaItem):
+                                # Filter out all LLM emitted delta events that are not text
+                                return None
+                            event = ChunkEvent(
                                 run_id=run_context.id,
                                 parent_run_id=run_context.parent_id,
                                 path=span.path,
@@ -599,18 +626,21 @@ class Runnable(ABC, BaseModel):
                                 parent_call_id=span.parent_call_id,
                                 chunk=event,
                             )
-                            if chunk_event.type in self._log_events:
-                                logger.info("chunk_event", **chunk_event.model_dump())
-                            return chunk_event
+                        if event.type in self._log_events:
+                            logger.info(event.type, **event.model_dump())
                         return event
+
                     # We need to manually process the first chunk, since we removed it from the generator
                     first_event = collector.process(first_chunk)
                     if first_event is not None:
-                        yield emit_event(first_event)
+                        first_event = process_event(first_event)
+                        if first_event is not None:
+                            yield first_event
                     # Process remaining events
                     async for event in collector:
+                        event = process_event(event)
                         if event is not None:
-                            yield emit_event(event)
+                            yield event
                     # Keep the final result
                     output = collector.result()
 
@@ -698,7 +728,7 @@ class Runnable(ABC, BaseModel):
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
                 set_parent_call_id(None)
             if output_event.type in self._log_events:
-                logger.info("output_event", **output_event.model_dump())
+                logger.info(output_event.type, **output_event.model_dump())
             yield output_event
 
 

@@ -386,7 +386,7 @@ class Agent(Runnable):
                     Message.validate(llm_output_message)
                 ]
                 for content in memory[-1].content:
-                    if content.type != "tool_use":
+                    if content.type != "tool_use" or content.is_server_tool_use:
                         continue
                     tool_result_path = f"{self._path}.{content.name}"
                     tool_result_spans = parent_trace.get_path(tool_result_path)
@@ -513,7 +513,7 @@ class Agent(Runnable):
             
             tool_calls = [
                 content for content in messages[-1].content
-                if isinstance(content, ToolUseContent)
+                if isinstance(content, ToolUseContent) and not content.is_server_tool_use
             ]
             
             if not tool_calls:

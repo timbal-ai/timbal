@@ -40,6 +40,7 @@ from ...state import get_run_context
 from ...types.content.text import TextContent
 from ...types.content.thinking import ThinkingContent
 from ...types.content.tool_use import ToolUseContent
+from ...types.events.delta import TextItem
 from ...types.message import Message
 from .. import register_collector
 from ..base import BaseCollector
@@ -141,8 +142,10 @@ class ChatCompletionCollector(BaseCollector):
                 "name": tool_call.function.name,
                 "input": tool_call.function.arguments
             }
+            # TODO Return ToolItem
             self._tool_calls.append(self._current_tool_call)
         else:
+            # TODO Return ToolInputItem
             self._current_tool_call["input"] += tool_call.function.arguments
     
     def _handle_text_content(self, event: ChatCompletionEvent) -> str:
@@ -152,7 +155,7 @@ class ChatCompletionCollector(BaseCollector):
         if hasattr(event, "citations"):
             self.citations = event.citations
         self._content += text_chunk
-        return text_chunk
+        return TextItem(delta=text_chunk)
     
     @override
     def result(self) -> Message:
@@ -286,12 +289,12 @@ class ResponseCollector(BaseCollector):
             "citations": [],
             "text": event.part.text,
         }
-        return event.part.text
+        return TextItem(delta=event.part.text)
 
     def _handle_text_delta(self, event: ResponseTextDeltaEvent) -> None:
         """Handle text delta events from OpenAI."""
         self.content[event.item_id]["text"] += event.delta
-        return event.delta
+        return TextItem(delta=event.delta)
 
     def _handle_output_text_annotation_added(self, event: ResponseOutputTextAnnotationAddedEvent) -> None:
         """Handle output text annotation added events from OpenAI."""
@@ -299,15 +302,18 @@ class ResponseCollector(BaseCollector):
     
     def _handle_function_call_arguments_delta(self, event: ResponseFunctionCallArgumentsDeltaEvent) -> None:
         """Handle function call arguments delta events from OpenAI."""
+        # TODO Return ToolInputItem
         self.content[event.item_id]["input"] += event.delta
 
     def _handle_output_item_done(self, event: ResponseOutputItemDoneEvent) -> None:
         """Handle output item done events from OpenAI."""
         if isinstance(event.item, ResponseFunctionWebSearch):
+            # TODO Return ToolResultItem
             get_run_context().update_usage(f"{self.model}:web_search_requests", 1)
     
     def _handle_reasoning_summary_part_added(self, event: ResponseReasoningSummaryPartAddedEvent) -> None:
         """Handle reasoning summary part added events from OpenAI."""
+        # TODO Return ThinkingItem
         self.content[event.item_id] = {
             "type": "thinking",
             "thinking": event.part.text, # Usually empty string from the beginning
@@ -315,6 +321,7 @@ class ResponseCollector(BaseCollector):
 
     def _handle_reasoning_summary_text_delta(self, event: ResponseReasoningSummaryTextDeltaEvent) -> None:
         """Handle reasoning summary text delta events from OpenAI."""
+        # TODO Return ThinkingItem
         self.content[event.item_id]["thinking"] += event.delta
     
     def _handle_completed(self, event: ResponseCompletedEvent) -> None:
