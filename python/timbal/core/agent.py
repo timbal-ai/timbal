@@ -33,6 +33,7 @@ from ..types.message import Message
 from .llm_router import Model, _llm_router
 from .runnable import Runnable, RunnableLike
 from .tool import Tool
+from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.agent")
 
@@ -124,8 +125,6 @@ class Agent(Runnable):
 
     _llm: Tool = PrivateAttr()
     """Internal LLM tool instance for making model calls."""
-    _tools_by_name: dict[str, Tool] = PrivateAttr()
-    """Dictionary mapping tool names to Tool instances for fast lookup."""
     _system_prompt_callables: dict[str, Any] = PrivateAttr(default_factory=dict)
     """Dictionary mapping template patterns to their callable functions and metadata."""
 
@@ -270,25 +269,27 @@ class Agent(Runnable):
             self.tools.append(output_model_tool)
 
         # Normalize tools: convert functions/dicts to Tool instances
-        # tools and _tools_by_name will hold references to the same Tool instances
+        # ToolSet instances are kept as-is and resolved later in _resolve_tools()
         normalized_tools = []
-        tools_by_name = {}
         for tool in self.tools:
+            # Keep ToolSet instances as-is, they'll be resolved later
+            if isinstance(tool, ToolSet):
+                normalized_tools.append(tool)
+                continue
+            
             if not isinstance(tool, Runnable):
                 if isinstance(tool, dict):
                     tool = Tool(**tool)
                 else:
                     tool = Tool(handler=tool)
             
-            if tool.name in tools_by_name:
+            if any(t.name == tool.name for t in normalized_tools):
                 raise ValueError(f"Tool {tool.name} already exists. You can only add a tool once.")
             
             tool.nest(self._path)
             normalized_tools.append(tool)
-            tools_by_name[tool.name] = tool
         
         self.tools = normalized_tools
-        self._tools_by_name = tools_by_name 
 
         # Agents are always orchestrators with async generator handlers
         self._is_orchestrator = True
@@ -408,14 +409,30 @@ class Agent(Runnable):
         return memory
 
 
-    async def _multiplex_tools(self, tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
+    async def _resolve_tools(self, i: int) -> list[Tool]:
+        """Resolve the tools to be provided to the LLM."""
+        tools = []
+        if i < self.max_iter:
+            for t in self.tools:
+                if isinstance(t, ToolSet):
+                    resolved_toolset = await t.resolve()
+                    for tool in resolved_toolset:
+                        tool.nest(self._path)
+                    tools.extend(resolved_toolset)
+                else:
+                    tools.append(t)
+        return tools
+
+
+    async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events."""
         queue = asyncio.Queue()
         tasks = []
         
         async def consume_tool(tool_call: ToolUseContent):
             """Consume events from a single tool and put them in the queue."""
-            tool = self._tools_by_name[tool_call.name]
+            tool = next((t for t in tools if t.name == tool_call.name), None)
+            assert tool is not None, f"Tool {tool_call.name} not found"
             try:
                 async for event in tool(**tool_call.input):
                     # We need to link the tool call id to the span so that we can later match when resolving memory
@@ -489,13 +506,14 @@ class Agent(Runnable):
 
         i = 0
         while True:
-            # Call LLM with current conversation
+            # ? We could resolve the system prompt at each iteration
+            tools = await self._resolve_tools(i)
+            print(messages)
             async for event in self._llm(
                 model=self.model,
                 messages=messages,
                 system_prompt=system_prompt,
-                # Only provide tools if we haven't hit max iterations
-                tools=self.tools if i < self.max_iter else [],
+                tools=tools,
                 **kwargs, 
             ):
                 if isinstance(event, OutputEvent):
@@ -519,7 +537,7 @@ class Agent(Runnable):
             if not tool_calls:
                 break           
 
-            async for tool_call, event in self._multiplex_tools(tool_calls):
+            async for tool_call, event in self._multiplex_tools(tools, tool_calls):
                 # Only process events from immediate children (not nested subagents)
                 if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
                     # Propagate bail
