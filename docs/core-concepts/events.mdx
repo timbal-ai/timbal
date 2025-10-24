@@ -38,7 +38,7 @@ Events are the communication mechanism that Runnables use to stream information 
 
 Events are designed to be lightweight. For comprehensive execution data, see [Traces](./tracing.mdx).
 
-Every execution produces at least a **Start** event (when it begins) and an **Output** event (when it finishes). LLMs and streaming operations also produce **Chunk** events for intermediate results.
+Every execution produces at least a **Start** event (when it begins) and an **Output** event (when it finishes). LLMs and streaming operations also produce **Chunk** or **Delta** events for intermediate results.
 
 The following examples show what these events look like for an LLM interaction:
 
@@ -78,6 +78,138 @@ chunk_event = ChunkEvent(
     chunk="Hello"
 )
 ```
+
+<Warning>
+**Deprecation Notice:** ChunkEvents are simple and untyped, and will be deprecated in a future release in favor of [Delta Events](#delta-events). Delta Events provide structured, typed streaming with semantic information about different content types (text, tool calls, thinking) and better observability. **We recommend migrating to Delta Events for new projects.**
+</Warning>
+
+### Delta Events
+
+For advanced use cases requiring fine-grained control over streaming content, Timbal provides **Delta Events**. Unlike simple ChunkEvents, DeltaEvents provide typed, structured information about different types of streaming content.
+
+<Note>
+Delta events are opt-in via the environment variable:
+
+```bash
+export TIMBAL_DELTA_EVENTS=true
+```
+</Note>
+
+#### Delta Event Structure
+
+```python
+from timbal.types.events import DeltaEvent
+from timbal.types.events.delta import TextItem, ToolItem, ToolInputItem
+
+# Text streaming
+text_delta = DeltaEvent(
+    run_id="068c4458382e79bb80006dc019ac3039",
+    path="agent.llm",
+    call_id="068c4458383678be800031537a8df42e",
+    item=TextItem(delta="Hello")  # Typed as text
+)
+
+# Tool call start
+tool_delta = DeltaEvent(
+    run_id="068c4458382e79bb80006dc019ac3039",
+    path="agent.llm",
+    call_id="068c4458383678be800031537a8df42e",
+    item=ToolItem(id="call_123", name="search", input="")
+)
+```
+
+#### Delta Item Types
+
+DeltaEvents contain one of several typed items:
+
+**TextItem** - Streaming text output:
+```python
+TextItem(delta="Hello world")
+```
+
+**ToolItem** - Start of a tool call:
+```python
+ToolItem(
+    id="call_abc123",
+    name="search_web",
+    input="",  # Initially empty
+    is_server_tool_use=False
+)
+```
+
+**ToolInputItem** - Streaming tool parameters:
+```python
+ToolInputItem(
+    id="call_abc123",
+    delta='{"query'  # Partial JSON
+)
+```
+LLMs stream tool input parameters incrementally. Multiple `ToolInputItem` events will be emitted for a single tool call. You need to accumulate these deltas and parse the complete JSON afterwards.
+
+**ToolResultItem** - Tool execution result:
+```python
+ToolResultItem(
+    id="call_abc123",
+    result={"temperature": 72}
+)
+```
+This event is only emitted for **is_server_tool_use tools** (e.g., web search tools run by OpenAI/Anthropic). For local tools that Timbal executes, you'll see the normal runnable event sequence (StartEvent, OutputEvent, etc.) instead.
+
+**ThinkingItem** - LLM reasoning process:
+```python
+ThinkingItem(delta="Let me analyze...")
+```
+
+**CustomItem** - Arbitrary custom content:
+```python
+CustomItem(
+    data={"type": "image_progress", "percent": 45}
+)
+```
+Use `CustomItem` for streaming content that doesn't fit standard types (e.g., multimodal content, provider-specific features, experimental data). This allows custom collectors and tools to emit arbitrary typed data while participating in the delta event system.
+
+#### Using Delta Events
+
+```python
+from timbal.types.events import DeltaEvent
+from timbal.types.events.delta import TextItem, ToolItem, ThinkingItem, CustomItem
+
+async for event in agent(input="Hello"):
+    if isinstance(event, DeltaEvent):
+        # Type-safe handling of different content types
+        if isinstance(event.item, TextItem):
+            print(event.item.delta, end="", flush=True)
+        elif isinstance(event.item, ToolItem):
+            print(f"\n[Calling {event.item.name}]")
+        elif isinstance(event.item, ThinkingItem):
+            print(f"\n[Thinking: {event.item.delta}]")
+        elif isinstance(event.item, CustomItem):
+            print(f"\n[Custom: {event.item.data}]")
+```
+
+#### Benefits of Delta Events
+
+- **Type Safety**: Each delta item has specific fields and types
+- **Semantic Information**: Know exactly what type of content is streaming
+- **Better Observability**: Track tool calls, thinking, and text separately
+- **UI Flexibility**: Render different content types with appropriate components
+- **Structured Logging**: Monitor different content types independently
+
+#### Backward Compatibility
+
+<Warning>
+**Delta Events are opt-in.** 
+
+When `TIMBAL_DELTA_EVENTS` is disabled (default):
+- Text content is emitted as `ChunkEvent` for backward compatibility
+- Other delta types (tool calls, thinking) are filtered out
+- Existing code continues to work unchanged
+
+When enabled:
+- All content is emitted as structured `DeltaEvent` instances
+- No `ChunkEvent` instances for LLM text output
+- Full observability into all streaming content types
+</Warning>
 
 ### Output Event
 

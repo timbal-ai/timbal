@@ -8,10 +8,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .. import __version__
-from ..core.runnable import Runnable
-from ..utils import ImportSpec
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Timbal probe script.")
     parser.add_argument(
@@ -29,6 +25,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.version:
+        from .. import __version__
         print(f"timbal.server.probe {__version__}", file=sys.stderr) # noqa: T201
         sys.exit(0)
 
@@ -52,13 +49,16 @@ if __name__ == "__main__":
         print("Invalid import spec format. Use 'path/to/file.py::object_name' or 'path/to/file.py'", file=sys.stderr) # noqa: T201
         sys.exit(1)
     import_path, import_target = import_parts
-    import_spec = ImportSpec(
-        path=Path(import_path).expanduser().resolve(), 
-        target=import_target,
-    )
 
     redirect = io.StringIO()
     with contextlib.redirect_stdout(redirect):
+        from .. import __version__
+        from ..core.runnable import Runnable
+        from ..utils import ImportSpec
+        import_spec = ImportSpec(
+            path=Path(import_path).expanduser().resolve(), 
+            target=import_target,
+        )
         runnable = import_spec.load()
 
     if not isinstance(runnable, Runnable):

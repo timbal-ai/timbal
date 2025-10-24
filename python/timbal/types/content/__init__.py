@@ -4,8 +4,10 @@ import structlog
 
 from ..file import File
 from .base import BaseContent
+from .custom import CustomContent
 from .file import FileContent
 from .text import TextContent
+from .thinking import ThinkingContent
 from .tool_result import ToolResultContent
 from .tool_use import ToolUseContent
 
@@ -22,8 +24,12 @@ def content_factory(value: Any) -> BaseContent:
         return FileContent(file=value)
     elif isinstance(value, dict):
         content_type = value.get("type", None)
-        if content_type == "text":
+        if content_type == "custom":
+            return CustomContent(value=value.get("value"))
+        elif content_type == "text":
             return TextContent(text=value.get("text"))
+        elif content_type == "thinking":
+            return ThinkingContent(thinking=value.get("thinking"))
         elif content_type == "file":
             return FileContent(file=File.validate(value.get("file")))
         elif content_type == "tool_use":
