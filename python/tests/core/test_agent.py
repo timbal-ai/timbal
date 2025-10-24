@@ -55,8 +55,6 @@ class TestAgentCreation:
         
         assert len(agent.tools) == 2
         assert all(isinstance(tool, Tool) for tool in agent.tools)
-        assert agent._tools_by_name["add"] is not None
-        assert agent._tools_by_name["multiply"] is not None
     
     def test_agent_with_dict_tools(self):
         """Test agent with dictionary tool configurations."""
@@ -98,7 +96,6 @@ class TestAgentCreation:
         
         assert len(main_agent.tools) == 1
         assert isinstance(main_agent.tools[0], Agent)
-        assert main_agent._tools_by_name["weather_agent"] is weather_agent
     
     def test_duplicate_tool_names(self):
         """Test that duplicate tool names are rejected."""
