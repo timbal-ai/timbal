@@ -22,6 +22,7 @@ class ToolUseContent(BaseContent):
     id: str
     name: str
     input: dict[str, Any]
+    is_server_tool_use: bool = False
 
     @field_validator("input", mode="before")
     def validate_input(cls, v: Any):
@@ -49,6 +50,9 @@ class ToolUseContent(BaseContent):
     @override
     def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any]:
         """See base class."""
+        # TODO Review is_server_tool_use
+        if self.is_server_tool_use:
+            raise NotImplementedError("is_server_tool_use is not supported for OpenAI responses yet")
         return {
             "call_id": self.id,
             "type": "function_call",
@@ -59,6 +63,8 @@ class ToolUseContent(BaseContent):
     @override
     def to_openai_chat_completions_input(self, **kwargs: Any) -> dict[str, Any]:
         """See base class."""
+        if self.is_server_tool_use:
+            raise ValueError("is_server_tool_use is not supported for OpenAI chat completions")
         return {
             "id": self.id,
             "type": "function",
@@ -72,7 +78,7 @@ class ToolUseContent(BaseContent):
     def to_anthropic_input(self, **kwargs: Any) -> dict[str, Any]:
         """See base class."""
         return {
-            "type": "tool_use",
+            "type": "tool_use" if not self.is_server_tool_use else "server_tool_use",
             "id": self.id,
             "name": self.name,
             "input": self.input,

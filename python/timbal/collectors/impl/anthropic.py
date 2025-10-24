@@ -33,9 +33,11 @@ from anthropic.types import (
 )
 
 from ...state import get_run_context
+from ...types.content.custom import CustomContent
 from ...types.content.text import TextContent
 from ...types.content.thinking import ThinkingContent
 from ...types.content.tool_use import ToolUseContent
+from ...types.events.delta import *
 from ...types.message import Message
 from .. import register_collector
 from ..base import BaseCollector
@@ -105,6 +107,12 @@ class AnthropicCollector(BaseCollector):
                 "name": event.content_block.name,
                 "input": "" # claude sends an empty object here {}
             })
+            return ToolItem(
+                id=event.content_block.id,
+                name=event.content_block.name,
+                input="", # claude sends an empty object here {}
+                is_server_tool_use=event.content_block.type == "server_tool_use",
+            )
         elif isinstance(event.content_block, ThinkingBlock):
             self.content.append({
                 "type": "thinking",
@@ -116,11 +124,19 @@ class AnthropicCollector(BaseCollector):
                 "thinking": event.content_block.data,
             })
         elif isinstance(event.content_block, WebSearchToolResultBlock):
+            if isinstance(event.content_block.content, list):
+                content = [item.model_dump() for item in event.content_block.content]
+            else:
+                content = event.content_block.content.model_dump()
             self.content.append({
-                "type": "server_tool_result",
-                "id": event.content_block.tool_use_id,
-                "content": event.content_block.content, # ? Parse this
+                "type": "web_search_tool_result",
+                "tool_use_id": event.content_block.tool_use_id,
+                "content": content,
             })
+            return ToolResultItem(
+                id=event.content_block.tool_use_id,
+                result=content,
+            )
         elif isinstance(event.content_block, TextBlock):
             self.content.append({
                 "type": "text",
@@ -133,13 +149,21 @@ class AnthropicCollector(BaseCollector):
     def _handle_content_block_delta(self, event: RawContentBlockDeltaEvent) -> str | None:
         """Handle content block delta events."""
         if isinstance(event.delta, InputJSONDelta):
-            self.content[-1]["input"] += event.delta.partial_json
+            tool_delta = event.delta.partial_json
+            self.content[-1]["input"] += tool_delta
+            return ToolInputItem(
+                id=self.content[-1]["id"],
+                delta=tool_delta,
+            )
         elif isinstance(event.delta, TextDelta):
-            text_chunk = event.delta.text
-            self.content[-1]["text"] += text_chunk
-            return text_chunk
+            text_delta = event.delta.text
+            self.content[-1]["text"] += text_delta
+            # return text_delta
+            return TextItem(delta=text_delta)
         elif isinstance(event.delta, ThinkingDelta):
-            self.content[-1]["thinking"] += event.delta.thinking
+            thinking_delta = event.delta.thinking
+            self.content[-1]["thinking"] += thinking_delta
+            return ThinkingItem(delta=thinking_delta)
         elif isinstance(event.delta, CitationsDelta):
             if isinstance(event.delta.citation, CitationsWebSearchResultLocation):
                 self.content[-1]["citations"].append(event.delta.citation) # ? Parse this
@@ -184,9 +208,14 @@ class AnthropicCollector(BaseCollector):
                     input=content_block["input"]
                 ))
             elif content_block["type"] == "server_tool_use":
-                continue
-            elif content_block["type"] == "server_tool_result":
-                continue
+                content.append(ToolUseContent(
+                    id=content_block["id"],
+                    name=content_block["name"],
+                    input=content_block["input"],
+                    is_server_tool_use=True
+                ))
+            elif content_block["type"] == "web_search_tool_result":
+                content.append(CustomContent(value=content_block))
             elif content_block["type"] == "thinking":
                 content.append(ThinkingContent(thinking=content_block["thinking"]))
             elif content_block["type"] == "text":
