@@ -202,7 +202,7 @@ class Agent(Runnable):
                         "is_coroutine": inspect_result["is_coroutine"],
                     }
         
-        model_provider, model_name = self.model.split("/")
+        model_provider, model_name = self.model.split("/", 1)
         if model_provider == "anthropic":
             if not self.model_params.get("max_tokens"):
                 raise ValueError("'max_tokens' is required for claude models.")
