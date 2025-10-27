@@ -43,7 +43,7 @@ from ..types.events import (
     OutputEvent,
     StartEvent,
 )
-from ..types.events.delta import CustomItem, DeltaEvent, DeltaItem, TextItem
+from ..types.events.delta import Custom, DeltaEvent, DeltaItem, TextDelta
 from ..types.run_status import RunStatus
 from ..utils import dump, sync_to_async_gen
 
@@ -603,7 +603,8 @@ class Runnable(ABC, BaseModel):
                         if TIMBAL_DELTA_EVENTS:
                             # Wrap non-delta events in a CustomItem
                             if not isinstance(event, DeltaItem):
-                                event = CustomItem(data=event)
+                                # We use the runnable call id to aggregate events from the same call
+                                event = Custom(id=span.call_id, data=event)
                             event = DeltaEvent(
                                 run_id=run_context.id,
                                 parent_run_id=run_context.parent_id,
@@ -613,8 +614,8 @@ class Runnable(ABC, BaseModel):
                                 item=event,
                             )
                         else:
-                            if isinstance(event, TextItem):
-                                event = event.delta
+                            if isinstance(event, TextDelta):
+                                event = event.text_delta
                             elif isinstance(event, DeltaItem):
                                 # Filter out all LLM emitted delta events that are not text
                                 return None

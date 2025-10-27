@@ -508,7 +508,6 @@ class Agent(Runnable):
         while True:
             # ? We could resolve the system prompt at each iteration
             tools = await self._resolve_tools(i)
-            print(messages)
             async for event in self._llm(
                 model=self.model,
                 messages=messages,

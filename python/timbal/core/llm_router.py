@@ -236,7 +236,7 @@ async def _llm_router(
             responses_kwargs["max_output_tokens"] = max_tokens
 
         if thinking:
-            # {"effort": "", "summary": ""}
+            # {"effort": enum["minimal", "low", "medium", "high"], "summary": enum["auto", "concise", "detailed"]}
             responses_kwargs["reasoning"] = thinking
 
         res = await client.responses.create(**responses_kwargs)
