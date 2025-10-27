@@ -3,7 +3,7 @@ title: "Context & State Management"
 description: "The shared memory that connects everything together across the entire lifetime of a run"
 ---
 
-The RunContext is the central storage and state management system for your runs. Beyond storing traces, it enables data sharing between components, input/output manipulation, and hierarchical data access across parent-child relationships.
+The RunContext is the central storage and state management system for your runs. Beyond storing spans, it enables data sharing between components, input/output manipulation, and hierarchical data access across parent-child relationships.
 
 ## Accessing the RunContext
 
@@ -13,7 +13,7 @@ The RunContext is accessible from any callable within a Runnable's execution usi
 - **Default parameter callables**: Functions used to compute default values at runtime (as shown in [Runnables](./runnables#parameter-handling-and-basic-execution)).
 - **Lifecycle hooks**: Functions that run before or after the main handler.
 
-The `RunContext.current_span()` method returns the trace object for the currently executing Runnable, containing all execution data - input parameters, output, timing, metadata, and any custom data you store on it. You get direct access to the live trace object being built during execution.
+The `RunContext.current_span()` method returns the span object for the currently executing Runnable, containing all execution data - input parameters, output, timing, metadata, and any custom data you store on it. You get direct access to the live span object being built during execution.
 
 Here's a simple example showing context access from a main handler:
 
@@ -24,16 +24,16 @@ import httpx
 from timbal.state import get_run_context
 
 async def api_call(endpoint: str) -> dict:
-    trace = get_run_context().current_span()
+    span = get_run_context().current_span()
     # Store request metadata for observability
-    trace.endpoint = endpoint
-    trace.request_start = datetime.now()
+    span.endpoint = endpoint
+    span.request_start = datetime.now()
     # Perform actual HTTP request
     async with httpx.AsyncClient() as client:
         response = await client.get(endpoint)
     # Store response metadata for debugging/monitoring
-    trace.response_status = response.status_code
-    trace.request_duration = datetime.now() - trace.request_start
+    span.response_status = response.status_code
+    span.request_duration = datetime.now() - span.request_start
     return response.json()
 
 api_tool = Tool(
@@ -43,7 +43,7 @@ api_tool = Tool(
 ```
 
 <Note>
-Beyond `current_span()`, the RunContext provides methods like `.parent_span()` and `.step_span()` to access parent or neighbor traces. We'll explore these methods in future sections when working with multi-step workflows and nested executions.
+Beyond `current_span()`, the RunContext provides methods like `.parent_span()` and `.step_span()` to access parent or neighbor spans. We'll explore these methods in future sections when working with multi-step workflows and nested executions.
 </Note>
 
 ## Lifecycle Hooks
@@ -67,13 +67,13 @@ from datetime import datetime
 from timbal.state import get_run_context
 
 def pre_hook():
-    trace = get_run_context().current_span()
+    span = get_run_context().current_span()
     # Modify input parameters that will be passed to the handler
-    trace.input["name"] = trace.input["name"].capitalize()
+    span.input["name"] = span.input["name"].capitalize()
     # Add a new parameter
-    trace.input["location"] = "Barcelona"
+    span.input["location"] = "Barcelona"
     # Store custom data for later use
-    trace.greet_time = datetime.now()
+    span.greet_time = datetime.now()
 
 def greet(name: str, location: str) -> str:
     return f"Hello {name} from {location}!"
@@ -99,12 +99,12 @@ A `post_hook` runs after your handler and can access both input and output:
 
 ```python highlight={13}
 def post_hook():
-    trace = get_run_context().current_span()
+    span = get_run_context().current_span()
     # Retrieve custom data stored in pre_hook
-    greet_time = trace.greet_time
+    greet_time = span.greet_time
     print(f"Greeting at {greet_time}")
     # Modify the output before it's returned
-    trace.output = "Greeting overridden!"
+    span.output = "Greeting overridden!"
 
 greet_tool = Tool(
     name="greet",

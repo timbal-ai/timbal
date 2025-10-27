@@ -36,9 +36,9 @@ async def tts(
 
 async def post_hook():
     """Post hook to extract and return the audio file."""
-    trace = get_run_context().current_span()
-    trace.output = await tts(text=trace.output.content[0].text)
-    trace.output.to_disk("audio.mp3")
+    span = get_run_context().current_span()
+    span.output = await tts(text=span.output.content[0].text)
+    span.output.to_disk("audio.mp3")
 
 agent = Agent(
     name="VoiceAgent",

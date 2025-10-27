@@ -15,14 +15,14 @@ client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 
 async def pre_hook():
     """Process incoming Slack webhook events before agent execution."""
-    trace = get_run_context().current_span()
+    span = get_run_context().current_span()
 
     # Only process Slack webhook events
     # Note: "_webhook" must match the parameter name used when calling agent(_webhook=body)
-    if "_webhook" not in trace.input:
+    if "_webhook" not in span.input:
         return
 
-    slack_event = trace.input["_webhook"]["event"]
+    slack_event = span.input["_webhook"]["event"]
 
     # Prevent infinite loops by ignoring bot's own messages
     if slack_event.get("user") == SLACK_BOT_USER_ID:
@@ -34,21 +34,21 @@ async def pre_hook():
         raise bail()
 
     # Store context for response
-    trace.slack_channel = slack_event["channel"]
-    trace.slack_thread_ts = slack_event.get("thread_ts")
-    trace.input["prompt"] = text
+    span.slack_channel = slack_event["channel"]
+    span.slack_thread_ts = slack_event.get("thread_ts")
+    span.input["prompt"] = text
 
 def post_hook():
     """Send agent response back to Slack."""
-    trace = get_run_context().current_span()
+    span = get_run_context().current_span()
     
-    if "_webhook" not in trace.input:
+    if "_webhook" not in span.input:
         return
 
     # Get response and send to Slack
-    reply = trace.output.content[0].text
-    slack_channel = trace.slack_channel
-    slack_thread_ts = trace.slack_thread_ts
+    reply = span.output.content[0].text
+    slack_channel = span.slack_channel
+    slack_thread_ts = span.slack_thread_ts
     
     if reply.strip():
         client.chat_postMessage(

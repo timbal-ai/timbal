@@ -43,10 +43,12 @@ from timbal.core import Tool, Agent
 from timbal.state import get_run_context
 
 def get_user_language():
-    return get_run_context().get_data(".input.language")
+    span = get_run_context().current_span()
+    return span.input["language"]
 
 def set_user_language(l):
-  context = get_run_context().set_data("user_lang", "catalan")
+    span = get_run_context().current_span()
+    span.input["language"] = "catalan"
 
 agent = Agent(
     name="multilang_agent",
