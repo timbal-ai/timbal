@@ -24,12 +24,12 @@ def get_origin_specific_prompt():
     return prompts.get(client_chain, """You are a helpful assistant. Adapt your response style based on the context.""")
 
 def pre_hook():
-    trace = get_run_context().current_span()
+    span = get_run_context().current_span()
     # Detect client chain from the prompt content
-    if "whatsapp" in trace.input["prompt"]:
-        trace.client_chain = "whatsapp"
-    elif "slack" in trace.input["prompt"]:
-        trace.client_chain = "slack"
+    if "whatsapp" in span.input["prompt"]:
+        span.client_chain = "whatsapp"
+    elif "slack" in span.input["prompt"]:
+        span.client_chain = "slack"
 
 # Create origin-aware agent
 agent = Agent(

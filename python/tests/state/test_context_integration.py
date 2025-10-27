@@ -19,9 +19,9 @@ class TestRunContextTraceAccess:
     async def test_current_span_basic_access(self):
         """Test basic current_span() access within agent execution."""
         def get_current_span_info() -> str:
-            """Get information about the current trace."""
-            trace = get_run_context().current_span()
-            return f"Call ID: {trace.call_id}, Path: {trace.path}"
+            """Get information about the current span."""
+            span = get_run_context().current_span()
+            return f"Call ID: {span.call_id}, Path: {span.path}"
 
         agent = Agent(
             name="trace_test_agent",
@@ -43,9 +43,9 @@ class TestRunContextTraceAccess:
     async def test_current_span_input_access(self):
         """Test accessing current trace input data."""
         def get_trace_input() -> str:
-            """Get the input from the current trace."""
-            trace = get_run_context().current_span()
-            return f"Input type: {type(trace.input)}, Content: {str(trace.input)[:100]}"
+            """Get the input from the current span."""
+            span = get_run_context().current_span()
+            return f"Input type: {type(span.input)}, Content: {str(span.input)[:100]}"
 
         agent = Agent(
             name="input_trace_agent",
@@ -65,11 +65,11 @@ class TestRunContextTraceAccess:
     async def test_parent_span_nested_execution(self):
         """Test parent_span() access in nested agent execution."""
         def get_parent_info() -> str:
-            """Get information about the parent trace."""
+            """Get information about the parent span."""
             try:
-                trace = get_run_context().current_span()
+                span = get_run_context().current_span()
                 parent = get_run_context().parent_span()
-                return f"Current: {trace.path}, Parent: {parent.path}"
+                return f"Current: {span.path}, Parent: {parent.path}"
             except RuntimeError as e:
                 return f"Error: {str(e)}"
 
@@ -112,9 +112,9 @@ class TestRunContextTraceAccess:
             return "Step one completed"
 
         def step_two() -> str:
-            """Second step that accesses step one's trace."""
+            """Second step that accesses step one's span."""
             try:
-                # Try to access the step_one trace
+                # Try to access the step_one span
                 step_span = get_run_context().step_span("step_one")
                 return f"Found sibling trace: {step_span.path}, Output: {step_span.output}"
             except RuntimeError as e:
@@ -150,16 +150,16 @@ class TestRunContextTraceAccess:
 
         async def pre_hook():
             """Pre-hook that modifies input based on trace data."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Simulate audio file in input
-            if isinstance(trace.input, dict) and "prompt" in trace.input:
+            if isinstance(span.input, dict) and "prompt" in span.input:
                 # In real scenario, this would be a File object
-                if isinstance(trace.input["prompt"], str) and trace.input["prompt"].startswith("audio:"):
+                if isinstance(span.input["prompt"], str) and span.input["prompt"].startswith("audio:"):
                     # Mock audio processing
-                    audio_content = trace.input["prompt"].replace("audio:", "")
+                    audio_content = span.input["prompt"].replace("audio:", "")
                     transcribed = await mock_stt(File(content=audio_content, path="mock.wav"))
-                    trace.input["prompt"] = transcribed
+                    span.input["prompt"] = transcribed
 
         agent = Agent(
             name="pre_hook_agent",
@@ -189,13 +189,13 @@ class TestRunContextTraceAccess:
             ctx.update_usage("custom_metric", 5)
 
             # Get current trace to check usage
-            trace = ctx.current_span()
-            return f"Usage tracked: {trace.usage}"
+            span = ctx.current_span()
+            return f"Usage tracked: {span.usage}"
 
         def check_usage() -> str:
             """Tool that checks current usage."""
-            trace = get_run_context().current_span()
-            return f"Current usage: {trace.usage}"
+            span = get_run_context().current_span()
+            return f"Current usage: {span.usage}"
 
         agent = Agent(
             name="usage_agent",
@@ -250,15 +250,15 @@ class TestRunContextTraceAccess:
         call_count = 0
 
         def increment_counter() -> str:
-            """Increment a counter and store in trace."""
+            """Increment a counter and store in span."""
             nonlocal call_count
             call_count += 1
 
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
             # Store data in trace (this would persist in real scenarios)
-            if not hasattr(trace, 'metadata'):
-                trace.metadata = {}
-            trace.metadata['call_count'] = call_count
+            if not hasattr(span, 'metadata'):
+                span.metadata = {}
+            span.metadata['call_count'] = call_count
 
             return f"Counter: {call_count}"
 
@@ -291,20 +291,20 @@ class TestRunContextTraceAccess:
 
         async def complex_pre_hook():
             """Complex pre-hook that performs multiple operations."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Modify input based on various conditions
-            if isinstance(trace.input, str):
+            if isinstance(span.input, str):
                 # Simple string input
-                trace.input = f"[PRE-PROCESSED] {trace.input}"
-            elif isinstance(trace.input, dict):
+                span.input = f"[PRE-PROCESSED] {span.input}"
+            elif isinstance(span.input, dict):
                 # Dict input - modify specific keys
-                if "prompt" in trace.input:
-                    trace.input["prompt"] = f"Enhanced: {trace.input['prompt']}"
-                if "data" in trace.input:
-                    trace.input["data"] = trace.input["data"].lower()
+                if "prompt" in span.input:
+                    span.input["prompt"] = f"Enhanced: {span.input['prompt']}"
+                if "data" in span.input:
+                    span.input["data"] = span.input["data"].lower()
                 # Add metadata
-                trace.input["processed_at"] = datetime.now().isoformat()
+                span.input["processed_at"] = datetime.now().isoformat()
 
         agent = Agent(
             name="complex_pre_hook_agent",
@@ -338,8 +338,8 @@ class TestRunContextWorkflowIntegration:
         def workflow_step() -> str:
             """A workflow step that accesses trace information."""
             try:
-                trace = get_run_context().current_span()
-                return f"Workflow step trace: {trace.path}"
+                span = get_run_context().current_span()
+                return f"Workflow step trace: {span.path}"
             except Exception as e:
                 return f"Workflow trace error: {str(e)}"
 
@@ -369,9 +369,9 @@ class TestRunContextEdgeCases:
 
         async def concurrent_tool(tool_id: str) -> str:
             """Tool that might be called concurrently."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
             await asyncio.sleep(0.1)  # Simulate async work
-            return f"Tool {tool_id}: {trace.call_id}"
+            return f"Tool {tool_id}: {span.call_id}"
 
         def create_concurrent_tool(tool_id):
             async def tool():
@@ -449,9 +449,9 @@ class TestRunContextEdgeCases:
             nonlocal iteration_count
             iteration_count += 1
 
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
             # Create some data that would accumulate if not managed properly
-            trace.metadata = {"iteration": iteration_count, "data": "x" * 100}
+            span.metadata = {"iteration": iteration_count, "data": "x" * 100}
 
             return f"Iteration {iteration_count} completed"
 
@@ -481,19 +481,19 @@ class TestTraceLifecycle:
         """Test that traces are properly created and initialized."""
         def inspect_trace_creation() -> str:
             """Inspect the trace at creation time."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Verify initial state
-            assert trace.call_id is not None
-            assert trace.path is not None
-            assert trace.t0 is not None
-            assert trace.t1 is None  # Should be None during execution
-            assert trace.output is None  # Should be None during execution
-            assert trace.error is None
-            assert isinstance(trace.usage, dict)
-            assert isinstance(trace.metadata, dict)
+            assert span.call_id is not None
+            assert span.path is not None
+            assert span.t0 is not None
+            assert span.t1 is None  # Should be None during execution
+            assert span.output is None  # Should be None during execution
+            assert span.error is None
+            assert isinstance(span.usage, dict)
+            assert isinstance(span.metadata, dict)
 
-            return f"Trace created: {trace.call_id}, Path: {trace.path}"
+            return f"Trace created: {span.call_id}, Path: {span.path}"
 
         agent = Agent(
             name="trace_creation_agent",
@@ -514,14 +514,14 @@ class TestTraceLifecycle:
         """Test that trace input is properly captured."""
         def check_trace_input() -> str:
             """Check that the trace captures the correct input."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # The input should contain the message we sent
-            assert trace.input is not None
-            input_str = str(trace.input)
+            assert span.input is not None
+            input_str = str(span.input)
             assert "check_trace_input" in input_str or "test input capture" in input_str
 
-            return f"Input captured: {type(trace.input).__name__}"
+            return f"Input captured: {type(span.input).__name__}"
 
         agent = Agent(
             name="input_capture_agent",
@@ -543,22 +543,22 @@ class TestTraceLifecycle:
 
         def capture_execution_stage(stage: str) -> str:
             """Capture the current execution stage and trace state."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             stage_info = {
                 "stage": stage,
-                "has_input": trace.input is not None,
-                "has_output": trace.output is not None,
-                "has_t1": trace.t1 is not None,
-                "usage_items": len(trace.usage),
-                "metadata_items": len(trace.metadata)
+                "has_input": span.input is not None,
+                "has_output": span.output is not None,
+                "has_t1": span.t1 is not None,
+                "usage_items": len(span.usage),
+                "metadata_items": len(span.metadata)
             }
 
             execution_stages.append(stage_info)
 
             # Add some usage and metadata
             get_run_context().update_usage("test_calls", 1)
-            trace.metadata[f"stage_{stage}"] = True
+            span.metadata[f"stage_{stage}"] = True
 
             return f"Stage {stage} captured"
 
@@ -592,13 +592,13 @@ class TestTraceLifecycle:
 
         def slow_operation() -> str:
             """Simulate a slow operation to test timing."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Verify we're still executing (t1 should be None)
-            assert trace.t1 is None
+            assert span.t1 is None
 
             # Record start time for comparison
-            start_time = trace.t0
+            start_time = span.t0
             assert start_time is not None
 
             # Simulate work
@@ -637,11 +637,11 @@ class TestTraceLifecycle:
         """Test trace state when errors occur."""
         def failing_tool() -> str:
             """Tool that always fails."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Verify trace state before error
-            assert trace.error is None
-            assert trace.t1 is None
+            assert span.error is None
+            assert span.t1 is None
 
             # Add some usage before failing
             get_run_context().update_usage("failed_calls", 1)
@@ -672,21 +672,21 @@ class TestTraceLifecycle:
 
         def store_call_id() -> str:
             """Store the current call ID for later retrieval."""
-            trace = get_run_context().current_span()
-            stored_call_ids.append(trace.call_id)
-            return f"Stored call ID: {trace.call_id}"
+            span = get_run_context().current_span()
+            stored_call_ids.append(span.call_id)
+            return f"Stored call ID: {span.call_id}"
 
         def check_stored_ids() -> str:
             """Check that we can access previously stored call IDs."""
-            current_span = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # We should have access to the stored IDs
             assert len(stored_call_ids) > 0
 
             # Current call should be different from previous calls
-            assert current_span.call_id not in stored_call_ids
+            assert span.call_id not in stored_call_ids
 
-            return f"Current: {current_span.call_id}, Stored: {stored_call_ids}"
+            return f"Current: {span.call_id}, Stored: {stored_call_ids}"
 
         agent = Agent(
             name="persistence_agent",
@@ -778,18 +778,18 @@ class TestPostHookIntegration:
 
         async def post_hook():
             """Post-hook that modifies the output."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Verify we have output at this stage
-            assert trace.output is not None
+            assert span.output is not None
 
             # Modify the output (add formatting)
-            if isinstance(trace.output, int):
-                trace.output = f"Result: {trace.output}"
-            elif hasattr(trace.output, 'content'):
+            if isinstance(span.output, int):
+                span.output = f"Result: {span.output}"
+            elif hasattr(span.output, 'content'):
                 # For message objects, modify the content
-                original_content = str(trace.output.content)
-                trace.output.content = f"[POST-PROCESSED] {original_content}"
+                original_content = str(span.output.content)
+                span.output.content = f"[POST-PROCESSED] {original_content}"
 
         agent = Agent(
             name="post_hook_agent",
@@ -815,17 +815,17 @@ class TestPostHookIntegration:
 
         async def analytics_post_hook():
             """Post-hook that adds analytics metadata."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Add analytics metadata
-            print(trace.metadata)
-            trace.metadata.update({
+            print(span.metadata)
+            span.metadata.update({
                 "processed_at": datetime.now().isoformat(),
-                "output_length": len(str(trace.output)) if trace.output else 0,
+                "output_length": len(str(span.output)) if span.output else 0,
                 "processing_stage": "completed",
                 "enhanced": True
             })
-            print(trace.metadata)
+            print(span.metadata)
 
             # Update usage metrics
             get_run_context().update_usage("post_hook_calls", 1)
@@ -856,17 +856,17 @@ class TestPostHookIntegration:
 
         async def error_sensitive_post_hook():
             """Post-hook that behaves differently based on errors."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
-            if trace.error:
+            if span.error:
                 # Handle error case
-                trace.metadata["error_handled"] = True
-                trace.metadata["recovery_attempted"] = True
+                span.metadata["error_handled"] = True
+                span.metadata["recovery_attempted"] = True
             else:
                 # Handle success case
-                trace.metadata["success_processed"] = True
-                if trace.output:
-                    trace.metadata["output_type"] = type(trace.output).__name__
+                span.metadata["success_processed"] = True
+                if span.output:
+                    span.metadata["output_type"] = type(span.output).__name__
 
         agent = Agent(
             name="error_handling_agent",
@@ -895,25 +895,25 @@ class TestPostHookIntegration:
 
         async def monitoring_post_hook():
             """Post-hook that logs execution details."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Create execution log entry
             log_entry = {
-                "call_id": trace.call_id,
-                "path": trace.path,
-                "execution_time": trace.t1 - trace.t0 if trace.t1 else None,
-                "had_error": trace.error is not None,
-                "input_type": type(trace.input).__name__ if trace.input else None,
-                "output_type": type(trace.output).__name__ if trace.output else None,
-                "usage": dict(trace.usage),
-                "metadata_keys": list(trace.metadata.keys())
+                "call_id": span.call_id,
+                "path": span.path,
+                "execution_time": span.t1 - span.t0 if span.t1 else None,
+                "had_error": span.error is not None,
+                "input_type": type(span.input).__name__ if span.input else None,
+                "output_type": type(span.output).__name__ if span.output else None,
+                "usage": dict(span.usage),
+                "metadata_keys": list(span.metadata.keys())
             }
 
             execution_log.append(log_entry)
 
             # Add monitoring metadata
-            trace.metadata["monitored"] = True
-            trace.metadata["log_entry_id"] = len(execution_log) - 1
+            span.metadata["monitored"] = True
+            span.metadata["log_entry_id"] = len(execution_log) - 1
 
         agent = Agent(
             name="monitoring_agent",
@@ -951,28 +951,28 @@ class TestPostHookIntegration:
 
         async def setup_pre_hook():
             """Pre-hook that sets up processing context."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Set up context based on input
             processing_context["current_context"] = {
                 "prefix": "[PRE] ",
                 "suffix": " [/PRE]",
-                "trace_id": trace.call_id,
+                "trace_id": span.call_id,
                 "setup_time": datetime.now().isoformat()
             }
 
             # Store context in trace metadata
-            trace.metadata["pre_hook_context"] = processing_context["current_context"]
+            span.metadata["pre_hook_context"] = processing_context["current_context"]
 
         async def cleanup_post_hook():
             """Post-hook that cleans up and finalizes processing."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Get the context that was set up
             context = processing_context.get("current_context", {})
 
             # Add completion metadata
-            trace.metadata.update({
+            span.metadata.update({
                 "pre_hook_setup_time": context.get("setup_time"),
                 "post_hook_completion_time": datetime.now().isoformat(),
                 "processing_completed": True
@@ -1011,22 +1011,22 @@ class TestPostHookIntegration:
 
         async def async_post_hook():
             """Post-hook that performs async operations."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Simulate async operations
             await asyncio.sleep(0.1)  # Simulate network call
 
             # Store async result
             async_result = {
-                "call_id": trace.call_id,
+                "call_id": span.call_id,
                 "async_processed": True,
                 "processing_delay": 100  # ms
             }
             async_results.append(async_result)
 
             # Update trace with async operation results
-            trace.metadata["async_post_processing"] = True
-            trace.metadata["async_operations_count"] = 1
+            span.metadata["async_post_processing"] = True
+            span.metadata["async_operations_count"] = 1
 
         agent = Agent(
             name="async_post_hook_agent",
@@ -1073,11 +1073,11 @@ class TestComplexNestedExecution:
             """Sync non-generator tool"""
             context = get_run_context()
             context.update_usage("sync_tool:calls", 1)
-            trace = context.current_span()
+            span = context.current_span()
             execution_log.append({
                 "stage": "first_clue",
-                "path": trace.path,
-                "call_id": trace.call_id,
+                "path": span.path,
+                "call_id": span.call_id,
                 "input": x,
                 "tool_type": "sync"
             })
@@ -1087,11 +1087,11 @@ class TestComplexNestedExecution:
             """Async coroutine tool"""
             context = get_run_context()
             context.update_usage("async_tool:calls", 1)
-            trace = context.current_span()
+            span = context.current_span()
             execution_log.append({
                 "stage": "second_clue",
-                "path": trace.path,
-                "call_id": trace.call_id,
+                "path": span.path,
+                "call_id": span.call_id,
                 "input": x,
                 "tool_type": "async"
             })
@@ -1103,11 +1103,11 @@ class TestComplexNestedExecution:
             """Sync generator tool"""
             context = get_run_context()
             context.update_usage("sync_gen_tool:calls", 1)
-            trace = context.current_span()
+            span = context.current_span()
             execution_log.append({
                 "stage": "third_clue",
-                "path": trace.path,
-                "call_id": trace.call_id,
+                "path": span.path,
+                "call_id": span.call_id,
                 "input": x,
                 "tool_type": "sync_gen"
             })
@@ -1118,11 +1118,11 @@ class TestComplexNestedExecution:
             """Async generator tool"""
             context = get_run_context()
             context.update_usage("async_gen_tool:calls", 1)
-            trace = context.current_span()
+            span = context.current_span()
             execution_log.append({
                 "stage": "fourth_clue",
-                "path": trace.path,
-                "call_id": trace.call_id,
+                "path": span.path,
+                "call_id": span.call_id,
                 "input": x,
                 "tool_type": "async_gen"
             })
@@ -1133,26 +1133,26 @@ class TestComplexNestedExecution:
         # Pre-hook for secret agent that modifies input and adds context
         async def secret_agent_pre_hook():
             """Pre-hook that enriches the secret agent's execution context"""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Store original input before modification
-            original_input = str(trace.input)
-            hook_modifications[f"secret_agent_pre_{trace.call_id}"] = {
+            original_input = str(span.input)
+            hook_modifications[f"secret_agent_pre_{span.call_id}"] = {
                 "original_input": original_input,
                 "stage": "pre_hook"
             }
 
             # Enhance the input with additional context
-            if hasattr(trace.input, 'content'):
-                if isinstance(trace.input.content, str):
-                    enhanced_content = f"ENHANCED: {trace.input.content} [Use ALL available tools for complete analysis]"
-                    trace.input.content = enhanced_content
-                elif isinstance(trace.input.content, dict) and "prompt" in trace.input.content:
-                    enhanced_prompt = f"PRIORITY: {trace.input.content['prompt']} - Execute all tools in parallel for comprehensive results"
-                    trace.input.content["prompt"] = enhanced_prompt
+            if hasattr(span.input, 'content'):
+                if isinstance(span.input.content, str):
+                    enhanced_content = f"ENHANCED: {span.input.content} [Use ALL available tools for complete analysis]"
+                    span.input.content = enhanced_content
+                elif isinstance(span.input.content, dict) and "prompt" in span.input.content:
+                    enhanced_prompt = f"PRIORITY: {span.input.content['prompt']} - Execute all tools in parallel for comprehensive results"
+                    span.input.content["prompt"] = enhanced_prompt
 
             # Add metadata for tracking
-            trace.metadata.update({
+            span.metadata.update({
                 "pre_hook_enhanced": True,
                 "enhancement_time": datetime.now().isoformat(),
                 "expected_tools": ["first_clue", "second_clue", "third_clue", "fourth_clue"]
@@ -1161,56 +1161,56 @@ class TestComplexNestedExecution:
         # Post-hook for secret agent that processes results
         async def secret_agent_post_hook():
             """Post-hook that analyzes and enhances the secret agent's output"""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Capture the original output before modification
-            original_output = str(trace.output) if trace.output else "None"
-            hook_modifications[f"secret_agent_post_{trace.call_id}"] = {
+            original_output = str(span.output) if span.output else "None"
+            hook_modifications[f"secret_agent_post_{span.call_id}"] = {
                 "original_output": original_output,
                 "stage": "post_hook"
             }
 
             # Enhance the output with analysis
-            if trace.output and hasattr(trace.output, 'content'):
-                analysis = f"\n\n[ANALYSIS] Tools executed: {len(execution_log)} | Usage tracked: {dict(trace.usage)}"
-                if isinstance(trace.output.content, list):
-                    for item in trace.output.content:
+            if span.output and hasattr(span.output, 'content'):
+                analysis = f"\n\n[ANALYSIS] Tools executed: {len(execution_log)} | Usage tracked: {dict(span.usage)}"
+                if isinstance(span.output.content, list):
+                    for item in span.output.content:
                         if hasattr(item, 'text'):
                             item.text += analysis
-                elif hasattr(trace.output.content, 'text'):
-                    trace.output.content.text += analysis
+                elif hasattr(span.output.content, 'text'):
+                    span.output.content.text += analysis
 
             # Add comprehensive metadata
-            trace.metadata.update({
+            span.metadata.update({
                 "post_hook_processed": True,
                 "processing_time": datetime.now().isoformat(),
-                "tools_called": [log["stage"] for log in execution_log if log["path"].startswith(trace.path)],
-                "total_usage": dict(trace.usage)
+                "tools_called": [log["stage"] for log in execution_log if log["path"].startswith(span.path)],
+                "total_usage": dict(span.usage)
             })
 
         # Pre-hook for superagent that sets up orchestration context
         async def superagent_pre_hook():
             """Pre-hook that prepares the superagent for complex orchestration"""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
-            hook_modifications[f"superagent_pre_{trace.call_id}"] = {
-                "original_input": str(trace.input),
+            hook_modifications[f"superagent_pre_{span.call_id}"] = {
+                "original_input": str(span.input),
                 "stage": "orchestrator_pre_hook"
             }
 
             # Add orchestration instructions
-            if hasattr(trace.input, 'content'):
-                if isinstance(trace.input.content, dict):
-                    if "system_prompt" in trace.input.content:
+            if hasattr(span.input, 'content'):
+                if isinstance(span.input.content, dict):
+                    if "system_prompt" in span.input.content:
                         enhanced_system = (
-                            f"{trace.input.content.get('system_prompt', '')} "
+                            f"{span.input.content.get('system_prompt', '')} "
                             f"CRITICAL: You must delegate to the secret_agent for BOTH numbers. "
                             f"Ensure the secret_agent uses ALL four available tools for each number. "
                             f"Combine and synthesize all results into a comprehensive final answer."
                         )
-                        trace.input.content["system_prompt"] = enhanced_system
+                        span.input.content["system_prompt"] = enhanced_system
 
-            trace.metadata.update({
+            span.metadata.update({
                 "orchestrator_pre_hook": True,
                 "orchestration_setup": datetime.now().isoformat(),
                 "delegation_strategy": "parallel_comprehensive"
@@ -1219,36 +1219,36 @@ class TestComplexNestedExecution:
         # Post-hook for superagent that provides final synthesis
         async def superagent_post_hook():
             """Post-hook that provides final analysis and summary"""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Collect usage from all nested traces
             run_context = get_run_context()
             total_usage = {}
             all_traces = []
 
-            for call_id, trace_obj in run_context._trace.items():
+            for call_id, span_obj in run_context._trace.items():
                 all_traces.append({
                     "call_id": call_id,
-                    "path": trace_obj.path,
-                    "usage": dict(trace_obj.usage),
-                    "metadata": dict(trace_obj.metadata)
+                    "path": span_obj.path,
+                    "usage": dict(span_obj.usage),
+                    "metadata": dict(span_obj.metadata)
                 })
                 # Aggregate usage
-                for key, value in trace_obj.usage.items():
+                for key, value in span_obj.usage.items():
                     total_usage[key] = total_usage.get(key, 0) + value
 
             usage_summary["final_aggregated_usage"] = total_usage
             usage_summary["all_traces"] = all_traces
 
-            hook_modifications[f"superagent_post_{trace.call_id}"] = {
-                "original_output": str(trace.output) if trace.output else "None",
+            hook_modifications[f"superagent_post_{span.call_id}"] = {
+                "original_output": str(span.output) if span.output else "None",
                 "stage": "orchestrator_post_hook",
                 "total_nested_traces": len(all_traces),
                 "aggregated_usage": total_usage
             }
 
             # Add comprehensive final metadata
-            trace.metadata.update({
+            span.metadata.update({
                 "orchestrator_post_hook": True,
                 "final_analysis": datetime.now().isoformat(),
                 "total_nested_executions": len(all_traces),
@@ -1385,36 +1385,36 @@ class TestTraceDumpedVersions:
 
         def process_input(data: str) -> str:
             """Process the input data."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Capture what the tool sees
-            modified_inputs.append(str(trace.input))
+            modified_inputs.append(str(span.input))
 
             return f"Processed: {data}"
 
         async def input_modifying_pre_hook():
             """Pre-hook that modifies the input."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Capture original input before modification
-            original_inputs.append(str(trace.input))
+            original_inputs.append(str(span.input))
 
             # Capture the dumped version if it exists
-            if hasattr(trace, '_input_dump'):
-                dumped_inputs.append(str(trace._input_dump))
+            if hasattr(span, '_input_dump'):
+                dumped_inputs.append(str(span._input_dump))
 
             # Modify the input
-            if hasattr(trace.input, 'content'):
+            if hasattr(span.input, 'content'):
                 # For Message objects
-                original_content = trace.input.content
-                trace.input.content = f"[MODIFIED] {original_content}"
-            elif isinstance(trace.input, dict):
+                original_content = span.input.content
+                span.input.content = f"[MODIFIED] {original_content}"
+            elif isinstance(span.input, dict):
                 # For dict inputs
-                trace.input["modified"] = True
-                trace.input["original_preserved"] = False
+                span.input["modified"] = True
+                span.input["original_preserved"] = False
             else:
                 # For other types, wrap in a modified structure
-                trace.input = {"modified_input": str(trace.input), "was_modified": True}
+                span.input = {"modified_input": str(span.input), "was_modified": True}
 
         agent = Agent(
             name="input_modification_agent",
@@ -1448,8 +1448,8 @@ class TestTraceDumpedVersions:
         """Test that when post_hook modifies output, the dumped version contains the modified output."""
         async def output_modifying_post_hook():
             """Post-hook that modifies the output."""
-            trace = get_run_context().current_span()
-            trace.output.content[0] = f"[POST-MODIFIED] {trace.output.content[0]}"
+            span = get_run_context().current_span()
+            span.output.content[0] = f"[POST-MODIFIED] {span.output.content[0]}"
 
         agent = Agent(
             name="output_modification_agent",
@@ -1478,18 +1478,18 @@ class TestTraceDumpedVersions:
 
         async def stt_pre_hook():
             """Pre-hook that simulates STT conversion of audio to text."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Simulate the scenario where input contains audio data
-            if hasattr(trace.input, 'content') and isinstance(trace.input.content, dict):
-                if "prompt" in trace.input.content and str(trace.input.content["prompt"]).startswith("audio:"):
+            if hasattr(span.input, 'content') and isinstance(span.input.content, dict):
+                if "prompt" in span.input.content and str(span.input.content["prompt"]).startswith("audio:"):
                     # Simulate STT conversion
-                    audio_content = trace.input.content["prompt"]
+                    audio_content = span.input.content["prompt"]
                     transcribed_text = audio_content.replace("audio:", "transcribed:")
 
                     # Modify the input to contain transcribed text
-                    trace.input.content["prompt"] = transcribed_text
-                    trace.input.content["stt_processed"] = True
+                    span.input.content["prompt"] = transcribed_text
+                    span.input.content["stt_processed"] = True
 
         agent = Agent(
             name="stt_agent",
@@ -1522,28 +1522,28 @@ class TestTraceDumpedVersions:
 
     @pytest.mark.asyncio
     async def test_model_dump_behavior(self):
-        """Test that trace.model_dump() uses dumped versions when available."""
+        """Test that span.model_dump() uses dumped versions when available."""
         def test_tool() -> str:
             """Test tool to verify dump behavior."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Get the model dump
-            trace_dump = trace.model_dump()
+            span_dump = span.model_dump()
 
             # Verify the dump uses dumped versions if available
-            if hasattr(trace, '_input_dump'):
-                # The model_dump should use _input_dump, not trace.input
-                assert trace_dump["input"] == trace._input_dump
+            if hasattr(span, '_input_dump'):
+                # The model_dump should use _input_dump, not span.input
+                assert span_dump["input"] == span._input_dump
 
             return "Tool executed"
 
         async def modifying_pre_hook():
             """Pre-hook that modifies input."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
 
             # Modify the input after it's been dumped
-            if hasattr(trace.input, 'content'):
-                trace.input.content = f"MODIFIED: {trace.input.content}"
+            if hasattr(span.input, 'content'):
+                span.input.content = f"MODIFIED: {span.input.content}"
 
         agent = Agent(
             name="dump_behavior_agent",
@@ -1567,27 +1567,27 @@ class TestTraceDumpedVersions:
 
         def inner_tool(data: str) -> str:
             """Inner tool that processes data."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
             modification_log.append({
                 "stage": "inner_tool",
-                "input": str(trace.input),
-                "has_input_dump": hasattr(trace, '_input_dump'),
-                "input_dump": str(getattr(trace, '_input_dump', None))
+                "input": str(span.input),
+                "has_input_dump": hasattr(span, '_input_dump'),
+                "input_dump": str(getattr(span, '_input_dump', None))
             })
             return f"Inner processed: {data}"
 
         async def inner_pre_hook():
             """Pre-hook that makes inner modifications."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
             modification_log.append({
                 "stage": "inner_pre_hook_before",
-                "input": str(trace.input),
-                "has_input_dump": hasattr(trace, '_input_dump')
+                "input": str(span.input),
+                "has_input_dump": hasattr(span, '_input_dump')
             })
 
             # Modify input
-            if hasattr(trace.input, 'content'):
-                trace.input.content = f"[INNER-PRE] {trace.input.content}"
+            if hasattr(span.input, 'content'):
+                span.input.content = f"[INNER-PRE] {span.input.content}"
 
         async def outer_tool_wrapper() -> str:
             """Outer tool that calls an inner agent."""
@@ -1615,16 +1615,16 @@ class TestTraceDumpedVersions:
 
         async def outer_pre_hook():
             """Outer pre-hook that makes initial modifications."""
-            trace = get_run_context().current_span()
+            span = get_run_context().current_span()
             modification_log.append({
                 "stage": "outer_pre_hook",
-                "input": str(trace.input),
-                "has_input_dump": hasattr(trace, '_input_dump')
+                "input": str(span.input),
+                "has_input_dump": hasattr(span, '_input_dump')
             })
 
             # Modify input at outer level
-            if hasattr(trace.input, 'content'):
-                trace.input.content = f"[OUTER-PRE] {trace.input.content}"
+            if hasattr(span.input, 'content'):
+                span.input.content = f"[OUTER-PRE] {span.input.content}"
 
         outer_agent = Agent(
             name="outer_modification_agent",

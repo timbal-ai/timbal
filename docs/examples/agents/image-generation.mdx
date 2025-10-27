@@ -40,11 +40,11 @@ async def gen_images(
 
 def post_hook():
     """Simple post hook to save files to disk."""
-    trace = get_run_context().current_span()
+    span = get_run_context().current_span()
     
-    if hasattr(trace.output, '__iter__') and trace.output:
+    if hasattr(span.output, '__iter__') and span.output:
         saved_files = []
-        for i, file_obj in enumerate(trace.output):
+        for i, file_obj in enumerate(span.output):
             if hasattr(file_obj, 'to_disk'):
                 # Save to specific directory
                 output_dir = Path("generated_images")
@@ -54,7 +54,7 @@ def post_hook():
                 saved_files.append(str(file_path))
         
         if saved_files:
-            trace.output = saved_files
+            span.output = saved_files
 
 # Create tool with post hook
 gen_images_with_save = Tool(

@@ -176,8 +176,8 @@ def _recent_history(path: str, user_phone: str, limit: int = 10) -> list[str]:
 
 def pre_hook():
     """Build professional prompt from WhatsApp metadata, message, and optional history."""
-    trace = get_run_context().current_span()
-    payload = trace.input.get("_webhook")
+    span = get_run_context().current_span()
+    payload = span.input.get("_webhook")
     if not payload:
         bail("No payload found in webhook")
 
@@ -211,22 +211,22 @@ def pre_hook():
     }
     _append_jsonl("whatsapp_messages.jsonl", rec)
 
-    trace.input["prompt"] = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
-    trace.input["whatsapp_from_number"] = from_number
-    trace.input["name"] = name
+    span.input["prompt"] = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
+    span.input["whatsapp_from_number"] = from_number
+    span.input["name"] = name
 ```
 
-The `pre_hook` runs before invoking the agent. It extracts metadata from the webhook, builds a prompt from the incoming message, persists the inbound event, and sets values in `trace.input` for the agent to use during inference.
+The `pre_hook` runs before invoking the agent. It extracts metadata from the webhook, builds a prompt from the incoming message, persists the inbound event, and sets values in `span.input` for the agent to use during inference.
 
 ```python agent.py
 def post_hook():
     """Send the agent response via WhatsApp and persist outbound to JSONL."""
-    trace = get_run_context().current_span()
-    from_number = trace.input.get("whatsapp_from_number")
+    span = get_run_context().current_span()
+    from_number = span.input.get("whatsapp_from_number")
     if not from_number:
         return
     try:
-        response_text = (trace.output.content[0].text or "").strip()
+        response_text = (span.output.content[0].text or "").strip()
     except Exception:
         return
     if not response_text:
@@ -243,7 +243,7 @@ def post_hook():
         "message": json.dumps({"type": "text", "content": response_text}, ensure_ascii=False),
         "timestamp": datetime.now().isoformat(),
         "conversation_id": "",
-        "user_name": trace.input.get("name", ""),
+        "user_name": span.input.get("name", ""),
     })
 ```
 
@@ -374,8 +374,8 @@ For a full, end-to-end reference (webhook app, helpers, and utilities), see the 
             return False
 
     def pre_hook():
-        trace = get_run_context().current_span()
-        payload = trace.input.get("_webhook") or {}
+        span = get_run_context().current_span()
+        payload = span.input.get("_webhook") or {}
         value = (payload.get("entry") or [{}])[0].get("changes", [{}])[0].get("value", {})
         msg = (value.get("messages") or [None])[0] or {}
         from_number = msg.get("from", "")
@@ -399,7 +399,7 @@ For a full, end-to-end reference (webhook app, helpers, and utilities), see the 
             bail("Newer message detected; aborting this run")
 
         # 3. Proceed with prompt building from recent history
-        trace.input["prompt"] = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
+        span.input["prompt"] = _recent_history("whatsapp_messages.jsonl", user_phone=from_number, limit=10)
     ```
   </Accordion>
 
