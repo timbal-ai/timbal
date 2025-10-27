@@ -22,6 +22,7 @@ from pydantic import (
     PrivateAttr,
     SkipValidation,
     computed_field,
+    model_validator,
 )
 
 from ..errors import InterruptError, bail
@@ -39,19 +40,57 @@ logger = structlog.get_logger("timbal.core.agent")
 SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)*\}")
 
 
-# TODO Add more params here
 class AgentParams(BaseModel):
     """Parameter model for Agent execution.
     
     Defines the input parameters that agents accept when called.
-    Supports flexible system prompt composition through templates.
+    Use either 'prompt' or 'messages', not both:
+    - 'prompt': Single message input. The framework will automatically resolve 
+      and include memory from previous runs.
+    - 'messages': Explicit list of messages. No automatic memory resolution occurs;
+      you have full control over the message history.
     """
     model_config = ConfigDict(extra="allow")
 
-    prompt: Message = Field(
-        ...,
-        description="Input message to send to the agent.",
+    prompt: Message | None = Field(
+        None,
+        description="Single input message. Framework automatically resolves memory from previous runs.",
     )
+    messages: list[Message] | None = Field(
+        None,
+        description="Explicit list of messages. No automatic memory resolution; full manual control.",
+    )
+
+    @model_validator(mode="after")
+    def validate_prompt_or_messages(self) -> "AgentParams":
+        """Ensure exactly one of prompt or messages is set."""
+        if self.prompt is not None and self.messages is not None:
+            logger.warning("Calling agent with both 'prompt' and 'messages'. Using 'messages'.")
+        if self.prompt is None and self.messages is None:
+            raise ValueError("Must specify either 'prompt' or 'messages'.")
+        return self
+
+    @classmethod
+    def model_json_schema(cls, **kwargs: Any) -> dict[str, Any]:
+        """Override model_json_schema to return a custom schema so that agents can be used as tools more easily."""
+        return {
+            "type": "object",
+            "properties": {"prompt": {
+                "type": "object",
+                "title": "TimbalMessage",
+                "properties": {
+                    "role": {
+                        "type": "string",
+                        "enum": ["user"],
+                    },
+                    "content": {
+                        "type": "array",
+                        "items": {},
+                    }
+                },
+            }},
+            "required": ["prompt"],
+        }
 
 
 class Agent(Runnable):
@@ -440,9 +479,13 @@ class Agent(Runnable):
         system_prompt = kwargs.pop("system_prompt", None)
         if not system_prompt:
             system_prompt = await self._resolve_system_prompt()
-        # Initialize conversation with memory + user prompt
-        messages = await self._resolve_memory()
-        messages.append(kwargs.pop("prompt"))
+            
+        # We allow the user to pass a 'hardcoded' list of messages
+        # Or simply a prompt and we attempt to resolve memory
+        messages = kwargs.pop("messages", [])
+        if not messages:
+            messages = await self._resolve_memory()
+            messages.append(kwargs.pop("prompt"))
 
         i = 0
         while True:

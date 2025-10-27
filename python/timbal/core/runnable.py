@@ -357,11 +357,19 @@ class Runnable(ABC, BaseModel):
             selected_params.difference_update(self.schema_exclude_params)
 
         # Filter properties to only include selected params
-        properties = {
-            k: v 
-            for k, v in self.params_model_schema["properties"].items()
-            if k in selected_params
-        }
+        properties = {}
+        for k, v in self.params_model_schema["properties"].items():
+            if k not in selected_params:
+                continue
+            # Simplify the structure of messages for LLM tool calling
+            if v.get("title") == "TimbalMessage":
+                properties[k] = {
+                    "type": "string",
+                    "description": "The input message to the agent.",
+                }
+            else:
+                properties[k] = v
+
         return {
             **self.params_model_schema,
             "properties": properties,
