@@ -20,8 +20,6 @@ from anthropic.types import (
     RawMessageDeltaEvent,
     RawMessageStartEvent,
     RawMessageStopEvent,
-    RedactedThinkingBlock,
-    #
     ServerToolUseBlock,
     SignatureDelta,
     TextBlock,
@@ -37,7 +35,15 @@ from ...types.content.custom import CustomContent
 from ...types.content.text import TextContent
 from ...types.content.thinking import ThinkingContent
 from ...types.content.tool_use import ToolUseContent
-from ...types.events.delta import *
+from ...types.events.delta import (
+    ContentBlockStop as TimbalContentBlockStop,
+    Text as TimbalText,
+    TextDelta as TimbalTextDelta, 
+    Thinking as TimbalThinking,
+    ThinkingDelta as TimbalThinkingDelta,
+    ToolUse as TimbalToolUse,
+    ToolUseDelta as TimbalToolUseDelta,
+)
 from ...types.message import Message
 from .. import register_collector
 from ..base import BaseCollector
@@ -64,7 +70,7 @@ class AnthropicCollector(BaseCollector):
         self._start = start
         self._first_token: float | None = None
         self._output_tokens: int = 0
-        #
+        self.content_blocks: set[str] = set()
         self.content: list[dict[str, Any]] = []
     
     @classmethod
@@ -84,7 +90,7 @@ class AnthropicCollector(BaseCollector):
         elif isinstance(event, RawContentBlockDeltaEvent):
             return self._handle_content_block_delta(event)
         elif isinstance(event, RawContentBlockStopEvent):
-            return None
+            return self._handle_content_block_stop(event)
         elif isinstance(event, RawMessageDeltaEvent):
             return self._handle_message_delta(event)
         elif isinstance(event, RawMessageStopEvent):
@@ -94,6 +100,7 @@ class AnthropicCollector(BaseCollector):
     
     def _handle_message_start(self, event: RawMessageStartEvent) -> None:
         """Handle message start events with usage information."""
+        self.id = event.message.id
         self.anthropic_model = event.message.model
         self.content = event.message.content
     
@@ -107,8 +114,10 @@ class AnthropicCollector(BaseCollector):
                 "name": event.content_block.name,
                 "input": "" # claude sends an empty object here {}
             })
-            return ToolItem(
-                id=event.content_block.id,
+            content_block_id = f"{self.id}-{event.index}"
+            self.content_blocks.add(content_block_id)
+            return TimbalToolUse(
+                id=content_block_id,
                 name=event.content_block.name,
                 input="", # claude sends an empty object here {}
                 is_server_tool_use=event.content_block.type == "server_tool_use",
@@ -118,11 +127,12 @@ class AnthropicCollector(BaseCollector):
                 "type": "thinking",
                 "thinking": event.content_block.thinking,
             })
-        elif isinstance(event.content_block, RedactedThinkingBlock):
-            self.content.append({
-                "type": "thinking",
-                "thinking": event.content_block.data,
-            })
+            content_block_id = f"{self.id}-{event.index}"
+            self.content_blocks.add(content_block_id)
+            return TimbalThinking(
+                id=content_block_id,
+                thinking=event.content_block.thinking,
+            )
         elif isinstance(event.content_block, WebSearchToolResultBlock):
             if isinstance(event.content_block.content, list):
                 content = [item.model_dump() for item in event.content_block.content]
@@ -133,16 +143,23 @@ class AnthropicCollector(BaseCollector):
                 "tool_use_id": event.content_block.tool_use_id,
                 "content": content,
             })
-            return ToolResultItem(
-                id=event.content_block.tool_use_id,
-                result=content,
-            )
+            # ? We'll receive a ContentBlockStop event for this anyways
+            # return TimbalToolResult(
+            #     id=event.content_block.tool_use_id,
+            #     result=content,
+            # )
         elif isinstance(event.content_block, TextBlock):
             self.content.append({
                 "type": "text",
                 "citations": [],
                 "text": ""
             })
+            content_block_id = f"{self.id}-{event.index}"
+            self.content_blocks.add(content_block_id)
+            return TimbalText(
+                id=content_block_id,
+                text=event.content_block.text,
+            )
         else:
             logger.warning("Unhandled content block start event", raw_content_block_start_event=event)
     
@@ -151,19 +168,30 @@ class AnthropicCollector(BaseCollector):
         if isinstance(event.delta, InputJSONDelta):
             tool_delta = event.delta.partial_json
             self.content[-1]["input"] += tool_delta
-            return ToolInputItem(
-                id=self.content[-1]["id"],
-                delta=tool_delta,
+            content_block_id = f"{self.id}-{event.index}"
+            assert content_block_id in self.content_blocks, "Content block delta event without content block start event"
+            return TimbalToolUseDelta(
+                id=content_block_id,
+                input_delta=tool_delta,
             )
         elif isinstance(event.delta, TextDelta):
             text_delta = event.delta.text
             self.content[-1]["text"] += text_delta
-            # return text_delta
-            return TextItem(delta=text_delta)
+            content_block_id = f"{self.id}-{event.index}"
+            assert content_block_id in self.content_blocks, "Content block delta event without content block start event"
+            return TimbalTextDelta(
+                id=content_block_id,
+                text_delta=text_delta,
+            )
         elif isinstance(event.delta, ThinkingDelta):
             thinking_delta = event.delta.thinking
             self.content[-1]["thinking"] += thinking_delta
-            return ThinkingItem(delta=thinking_delta)
+            content_block_id = f"{self.id}-{event.index}"
+            assert content_block_id in self.content_blocks, "Content block delta event without content block start event"
+            return TimbalThinkingDelta(
+                id=content_block_id,
+                thinking_delta=thinking_delta,
+            )
         elif isinstance(event.delta, CitationsDelta):
             if isinstance(event.delta.citation, CitationsWebSearchResultLocation):
                 self.content[-1]["citations"].append(event.delta.citation) # ? Parse this
@@ -173,6 +201,14 @@ class AnthropicCollector(BaseCollector):
             return None
         else:
             logger.warning("Unhandled content block delta event", raw_content_block_delta_event=event)
+
+    def _handle_content_block_stop(self, event: RawContentBlockStopEvent) -> None:
+        """Handle content block stop events."""
+        content_block_id = f"{self.id}-{event.index}"
+        if content_block_id in self.content_blocks:
+            return TimbalContentBlockStop(id=content_block_id)
+        else:
+            return None
     
     def _handle_message_delta(self, event: RawMessageDeltaEvent) -> None:
         """Handle message delta events with output usage information."""
