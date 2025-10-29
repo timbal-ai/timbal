@@ -26,7 +26,7 @@ def model(request):
 
 
 @pytest.fixture(params=[
-    Path(__file__).parent / "fixtures" / "test.png",
+    Path(__file__).parent.parent / "fixtures" / "test.png",
     "https://content.timbal.ai/tests/test.png",
 ])
 def png(request):
@@ -45,7 +45,7 @@ async def test_png(model, png) -> None:
 
 
 @pytest.fixture(params=[
-    Path(__file__).parent / "fixtures" / "test.pdf",
+    Path(__file__).parent.parent / "fixtures" / "test.pdf",
     "https://content.timbal.ai/tests/test.pdf",
 ])
 def pdf(request):
@@ -64,7 +64,7 @@ async def test_pdf(model, pdf) -> None:
 
 
 @pytest.fixture(params=[
-    Path(__file__).parent / "fixtures" / "test.md",
+    Path(__file__).parent.parent / "fixtures" / "test.md",
     "https://content.timbal.ai/tests/test.md",
 ])
 def md(request):
@@ -82,7 +82,7 @@ async def test_md(model, md) -> None:
 
 
 @pytest.fixture(params=[
-    Path(__file__).parent / "fixtures" / "test.csv",
+    Path(__file__).parent.parent / "fixtures" / "test.csv",
     "https://content.timbal.ai/tests/test.csv",
 ])
 def csv(request):
@@ -99,7 +99,7 @@ async def test_csv(model, csv) -> None:
 
 
 @pytest.fixture(params=[
-    Path(__file__).parent / "fixtures" / "test.tsv",
+    Path(__file__).parent.parent / "fixtures" / "test.tsv",
     "https://content.timbal.ai/tests/test.tsv",
 ])
 def tsv(request):
@@ -116,7 +116,7 @@ async def test_tsv(model, tsv) -> None:
 
 
 @pytest.fixture(params=[
-    Path(__file__).parent / "fixtures" / "test.jsonl",
+    Path(__file__).parent.parent / "fixtures" / "test.jsonl",
     "https://content.timbal.ai/tests/test.jsonl",
 ])
 def jsonl(request):
@@ -134,7 +134,7 @@ async def test_jsonl(model, jsonl) -> None:
 
 
 @pytest.fixture(params=[
-    Path(__file__).parent / "fixtures" / "test.json",
+    Path(__file__).parent.parent / "fixtures" / "test.json",
     "https://content.timbal.ai/tests/test.json",
 ])
 def json(request):
@@ -152,7 +152,7 @@ async def test_json(model, json) -> None:
 
 
 @pytest.fixture(params=[
-    Path(__file__).parent / "fixtures" / "test.xlsx",
+    Path(__file__).parent.parent / "fixtures" / "test.xlsx",
     "https://content.timbal.ai/tests/test.xlsx",
 ])
 def xlsx(request):
@@ -170,7 +170,7 @@ async def test_xlsx(model, xlsx) -> None:
 
 
 @pytest.fixture(params=[
-    Path(__file__).parent / "fixtures" / "test.docx",
+    Path(__file__).parent.parent / "fixtures" / "test.docx",
     "https://content.timbal.ai/tests/test.docx",
 ])
 def docx(request):
