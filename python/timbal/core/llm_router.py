@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
-from pydantic import Field
+from pydantic import Field, SecretStr
 
 from ..errors import APIKeyNotFoundError
 from ..types.message import Message
@@ -108,11 +108,11 @@ async def _llm_router(
             "For Anthropic models, this should be a dictionary with 'budget_tokens' key."
         ),
     ),
-    base_url: str | None = Field(
+    base_url: str | SecretStr | None = Field(
         None,
         description="Base URL for the LLM provider.",
     ),
-    api_key: str | None = Field(
+    api_key: str | SecretStr | None = Field(
         None,
         description="API key for the LLM provider.",
     ),
@@ -131,6 +131,12 @@ async def _llm_router(
     thinking = resolve_default("thinking", thinking)
     base_url = resolve_default("base_url", base_url)
     api_key = resolve_default("api_key", api_key)
+
+    # Convert SecretStr to str if needed
+    if isinstance(base_url, SecretStr):
+        base_url = base_url.get_secret_value()
+    if isinstance(api_key, SecretStr):
+        api_key = api_key.get_secret_value()
 
     if "/" not in model:
         raise ValueError("Model must be in format 'provider/model_name'")
