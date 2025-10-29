@@ -542,12 +542,19 @@ class Agent(Runnable):
                     # Propagate bail
                     if event.status.code == "cancelled" and event.status.reason == "early_exit":
                         bail(event.status.message)
+                    content = None
+                    if event.error is not None:
+                        content = event.error
+                    elif isinstance(event.output, Message):
+                        content = event.output.content
+                    else:
+                        content = event.output
                     message = Message.validate({
                         "role": "tool",
                         "content": [{
                             "type": "tool_result",
                             "id": tool_call.id,
-                            "content": event.output.content if isinstance(event.output, Message) else event.output,
+                            "content": content,
                         }]
                     })
                     messages.append(message)
