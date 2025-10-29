@@ -12,6 +12,7 @@ from pathlib import Path
 import structlog
 
 from timbal import Tool
+from timbal.state import get_run_context
 
 logger = structlog.get_logger("timbal.tools.write")
 
@@ -22,7 +23,13 @@ class Write(Tool):
     def __init__(self, **kwargs):
 
         async def _write(path: str, content: str, dry_run: bool = False):
-            path = Path(os.path.expandvars(os.path.expanduser(path))).resolve()
+            # Resolve path with base_path security if run_context exists
+            run_context = get_run_context()
+            if run_context:
+                path = run_context.resolve_cwd(path)
+            else:
+                # No run context - just expand and resolve normally
+                path = Path(os.path.expandvars(os.path.expanduser(path))).resolve()
 
             if path.is_dir():
                 raise ValueError(f"Path is a directory, not a file: {path}")

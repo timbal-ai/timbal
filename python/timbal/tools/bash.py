@@ -44,11 +44,13 @@ Warning:
 """
 import asyncio
 import re
+from pathlib import Path
 from typing import Any
 
 import structlog
 
 from ..core.tool import Tool
+from ..state import get_run_context
 
 logger = structlog.get_logger("timbal.tools.bash")
 
@@ -108,10 +110,18 @@ class Bash(Tool):
                     if not part_allowed:
                         raise ValueError(f"Command '{command}' does not match any allowed patterns: {allowed_patterns}")
 
+            # Resolve working directory
+            run_context = get_run_context()
+            if run_context:
+                cwd = run_context.resolve_cwd()
+            else:
+                cwd = Path.cwd()
+
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=str(cwd),
             )
 
             stdout, stderr = await process.communicate()

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -27,7 +28,7 @@ class RunContext(BaseModel):
     """
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
-        extra="ignore",
+        extra="allow",
     )
 
     id: str = Field(
@@ -45,6 +46,7 @@ class RunContext(BaseModel):
         validation_alias="timbal_platform_config", # Legacy
     )
 
+    _base_path: Path | None = PrivateAttr(default=None)
     _trace: Trace = PrivateAttr()
     _tracing_provider: type[TracingProvider] = PrivateAttr()
 
@@ -194,3 +196,58 @@ class RunContext(BaseModel):
             current_value = span.usage.get(key, 0)
             span.usage[key] = current_value + value
             call_id = span.parent_call_id
+
+
+    def resolve_cwd(self, path: str | None = None) -> Path:
+        """Get the current working directory or resolve a path relative to it.
+        
+        This method handles:
+        - Returning the base_path (CWD) when no path is provided
+        - Environment variable expansion (e.g., $HOME)
+        - User home directory expansion (e.g., ~)
+        - Relative path resolution (relative to base_path/CWD if set)
+        - Security validation (ensures path is within base_path/CWD if set)
+        
+        Args:
+            path: Optional file path to resolve (can be relative or absolute).
+                  If None, returns the current working directory (base_path).
+            
+        Returns:
+            Resolved absolute Path object
+            
+        Raises:
+            ValueError: If base_path is set and the resolved path is outside it
+        """
+        # If no path provided, return the CWD (base_path or current directory)
+        if path is None:
+            if self._base_path is not None:
+                return self._base_path.resolve()
+            else:
+                return Path.cwd()
+        
+        # Expand environment variables and user home directory
+        expanded_path = Path(os.path.expandvars(os.path.expanduser(path)))
+        
+        # Only enforce base_path restrictions if explicitly set
+        if self._base_path is not None:
+            base_path = self._base_path.resolve()
+            
+            # If path is relative, resolve it relative to base_path
+            if not expanded_path.is_absolute():
+                resolved_path = (base_path / expanded_path).resolve()
+            else:
+                resolved_path = expanded_path.resolve()
+            
+            # Security check: ensure resolved path is within base_path
+            try:
+                resolved_path.relative_to(base_path)
+            except ValueError:
+                raise ValueError(
+                    f"Access denied: path '{path}' resolves to '{resolved_path}' "
+                    f"which is outside the allowed base path '{base_path}'"
+                )
+            
+            return resolved_path
+        else:
+            # No base_path restriction - just resolve the path normally
+            return expanded_path.resolve()
