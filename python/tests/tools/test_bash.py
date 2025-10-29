@@ -68,6 +68,42 @@ class TestBashCommandExecution:
         assert isinstance(output.output['stdout'], str)
     
     @pytest.mark.asyncio
+    async def test_ls_command_with_and_without_args(self):
+        """Test that 'ls *' pattern accepts both 'ls' alone and 'ls' with args."""
+        bash_tool = Bash("ls *")
+        
+        # Should accept "ls" alone
+        result1 = bash_tool(command="ls")
+        output1 = await result1.collect()
+        assert output1.error is None
+        assert isinstance(output1.output['stdout'], str)
+        
+        # Should accept "ls" with arguments
+        result2 = bash_tool(command="ls -la")
+        output2 = await result2.collect()
+        assert output2.error is None
+        assert isinstance(output2.output['stdout'], str)
+    
+    @pytest.mark.asyncio
+    async def test_command_word_boundary_validation(self):
+        """Test that word boundaries prevent matching similar command names."""
+        bash_tool = Bash("ls *")
+        
+        # Should NOT accept "lsblk" (different command)
+        result1 = bash_tool(command="lsblk")
+        output1 = await result1.collect()
+        assert output1.error is not None
+        assert output1.error["type"] == "ValueError"
+        assert "does not match any allowed patterns" in output1.error["message"]
+        
+        # Should NOT accept "ls-lshdfa" (not a real ls command)
+        result2 = bash_tool(command="ls-lshdfa projects")
+        output2 = await result2.collect()
+        assert output2.error is not None
+        assert output2.error["type"] == "ValueError"
+        assert "does not match any allowed patterns" in output2.error["message"]
+    
+    @pytest.mark.asyncio
     async def test_command_pwd(self):
         """Test executing pwd command."""
         bash_tool = Bash("pwd")

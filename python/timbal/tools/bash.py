@@ -79,12 +79,33 @@ class Bash(Tool):
                 compiled_patterns.append(re.compile(r"^.*$"))
                 continue
 
-            regex_pattern = regex_pattern.split()
-            regex_pattern = [
-                part.replace("*", r"""(?:(['"]).*?\1|[\w\/\\\-\.\,\*]+)(?:\s+(?:(['"]).*?\2|[\w\/\\\-\.\,\*]+))*""")
-                for part in regex_pattern
-            ]
-            regex_pattern = r"\s+".join(regex_pattern)
+            parts = regex_pattern.split()
+            
+            # Build regex by processing each part
+            regex_parts = []
+            for i, part in enumerate(parts):
+                if "*" in part:
+                    # Wildcard: replace with argument pattern
+                    arg_pattern = r"""(?:(['"]).*?\1|[\w\/\\\-\.\,\*]+)(?:\s+(?:(['"]).*?\2|[\w\/\\\-\.\,\*]+))*"""
+                    # If this is not the first part, require space before it, but make the whole thing optional
+                    if i > 0:
+                        regex_parts.append(r"(?:\s+" + arg_pattern + r")?")
+                    else:
+                        # First part with wildcard - just make it optional
+                        regex_parts.append(r"(?:" + arg_pattern + r")?")
+                else:
+                    # Literal part: escape and add word boundary if it's alphanumeric
+                    escaped = re.escape(part)
+                    # Add word boundary after if the part ends with alphanumeric
+                    if part[-1].isalnum():
+                        escaped = escaped + r"\b"
+                    
+                    if i > 0:
+                        regex_parts.append(r"\s+" + escaped)
+                    else:
+                        regex_parts.append(escaped)
+            
+            regex_pattern = "".join(regex_parts)
             regex_pattern = f"^{regex_pattern}$"
             compiled_patterns.append(re.compile(regex_pattern))
 
