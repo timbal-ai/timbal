@@ -29,7 +29,10 @@ def content_factory(value: Any) -> BaseContent:
         elif content_type == "text":
             return TextContent(text=value.get("text"))
         elif content_type == "thinking":
-            return ThinkingContent(thinking=value.get("thinking"))
+            return ThinkingContent(
+                thinking=value.get("thinking"),
+                signature=value.get("signature"),
+            )
         elif content_type == "file":
             return FileContent(file=File.validate(value.get("file")))
         elif content_type == "tool_use":
@@ -37,6 +40,7 @@ def content_factory(value: Any) -> BaseContent:
                 id=value.get("id"), 
                 name=value.get("name"), 
                 input=value.get("input"),
+                is_server_tool_use=value.get("is_server_tool_use", False),
             )
         elif content_type == "tool_result":
             tool_result_content = value.get("content")

@@ -198,6 +198,7 @@ class AnthropicCollector(BaseCollector):
             else:
                 logger.warning("Unhandled citation delta event", citation_delta_event=event.delta.citation)
         elif isinstance(event.delta, SignatureDelta):
+            self.content[-1]["signature"] = event.delta.signature
             return None
         else:
             logger.warning("Unhandled content block delta event", raw_content_block_delta_event=event)
@@ -253,7 +254,10 @@ class AnthropicCollector(BaseCollector):
             elif content_block["type"] == "web_search_tool_result":
                 content.append(CustomContent(value=content_block))
             elif content_block["type"] == "thinking":
-                content.append(ThinkingContent(thinking=content_block["thinking"]))
+                content.append(ThinkingContent(
+                    thinking=content_block["thinking"],
+                    signature=content_block.get("signature")
+                ))
             elif content_block["type"] == "text":
                 text = content_block["text"]
                 # TODO Make an effort to deduplicate these
