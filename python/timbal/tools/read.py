@@ -4,6 +4,7 @@ Read tool for file access with path expansion support.
 Returns a File object with content formatted for LLM consumption.
 Supports ~ (home directory) and environment variables in paths.
 """
+import hashlib
 import os
 from itertools import islice
 from pathlib import Path
@@ -44,6 +45,16 @@ class Read(Tool):
             else:
                 # No run context - just expand and resolve normally
                 path = Path(os.path.expandvars(os.path.expanduser(path))).resolve()
+
+            if not path.exists():
+                raise FileNotFoundError(f"File does not exist: {path}")
+            if path.is_dir():
+                raise ValueError(f"Path is a directory, not a file: {path}")
+
+            # Update file state tracking with new hash
+            if run_context and hasattr(run_context, "_fs_state"):
+                new_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+                run_context._fs_state[str(path)] = new_hash
 
             file = File.validate(path)
 

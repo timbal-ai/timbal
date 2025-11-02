@@ -2,17 +2,17 @@
 Write tool for file creation and editing with path expansion support.
 
 Creates new files or modifies existing ones with diff output.
-Supports dry-run mode to preview changes without writing files.
 Supports ~ (home directory) and environment variables in paths.
 """
 import difflib
+import hashlib
 import os
 from pathlib import Path
 
 import structlog
 
-from timbal import Tool
-from timbal.state import get_run_context
+from ..core.tool import Tool
+from ..state import get_run_context
 
 logger = structlog.get_logger("timbal.tools.write")
 
@@ -22,7 +22,20 @@ class Write(Tool):
     # TODO Add parameter to limit permissions to a specific path
     def __init__(self, **kwargs):
 
-        async def _write(path: str, content: str, dry_run: bool = False):
+        async def _write(path: str, content: str) -> str:
+            """
+            Write content to a file, creating it if it doesn't exist or overwriting if it does.
+            
+            Creates parent directories automatically if they don't exist.
+            Returns a unified diff showing the changes made.
+            
+            Args:
+                path: Path to the file to write (supports ~ and environment variables)
+                content: The complete content to write to the file
+                
+            Returns:
+                Unified diff showing the changes made (empty for new files)
+            """
             # Resolve path with base_path security if run_context exists
             run_context = get_run_context()
             if run_context:
@@ -31,44 +44,43 @@ class Write(Tool):
                 # No run context - just expand and resolve normally
                 path = Path(os.path.expandvars(os.path.expanduser(path))).resolve()
 
-            if path.is_dir():
+            if path.exists() and path.is_dir():
                 raise ValueError(f"Path is a directory, not a file: {path}")
 
+            # Read original content if file exists for diff generation
             original_content = ""
-            file_exists = path.exists()
-            if file_exists:
-                original_content = path.read_text(encoding="utf-8")
+            if path.exists():
+                original_bytes = path.read_bytes()
+                original_content = original_bytes.decode("utf-8")
 
-            # Check if content is the same
-            if original_content == content:
-                return "Content already matches - no changes needed"
-
-            # Generate diff (always)
-            diff = "\n".join(difflib.unified_diff(
-                original_content.splitlines(),
-                content.splitlines(),
-                fromfile=str(path) + (" (existing)" if file_exists else " (new file)"),
-                tofile=str(path) + " (modified)",
-                lineterm=""
+            # Generate clean, IDE-style diff with minimal context
+            diff_lines = list(difflib.unified_diff(
+                original_content.splitlines(keepends=False),
+                content.splitlines(keepends=False),
+                fromfile=f"a/{path.name}",
+                tofile=f"b/{path.name}",
+                lineterm="",
+                n=3  # 3 lines of context (standard)
             ))
-
-            if dry_run:
-                # Return diff without writing
-                action = "modify" if file_exists else "create"
-                return f"Preview - would {action} {path}:\n\n{diff}"
 
             # Create parent directories if they don't exist
             path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Write the actual file
             path.write_text(content, encoding="utf-8")
-            action = "modified" if file_exists else "created"
-            return f"File {action}: {path}\n\nChanges:\n{diff}"
+
+            # Update file state tracking with new hash
+            if run_context and hasattr(run_context, "_fs_state"):
+                new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                run_context._fs_state[str(path)] = new_hash
+
+            return "\n".join(diff_lines)
 
 
         super().__init__(
             name="write",
-            description="Create a new file or edit an existing one at the specified path",
+            description=(
+                "Write content to a file, creating it if it doesn't exist or overwriting if it does. "
+                "Automatically creates parent directories. Returns a diff showing changes."
+            ),
             handler=_write,
             **kwargs
         )
