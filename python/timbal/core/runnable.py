@@ -636,7 +636,7 @@ class Runnable(ABC, BaseModel):
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
 
             # Post hook might modify the output, so we dump afterwards 
-            span._output_dump = await dump(output)
+            span._output_dump = await dump(span.output)
             
         except EarlyExit as early_exit:
             span.status = RunStatus(
