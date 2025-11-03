@@ -8,17 +8,35 @@ evolve to match provider changes.
 
 Do not rely on this module's interface in external code.
 """
+import asyncio
 import os
 from typing import Any, Literal
 
+import structlog
 from anthropic import AsyncAnthropic
+from anthropic import (
+    # APIError as AnthropicAPIError,
+    RateLimitError as AnthropicRateLimitError,
+    APIStatusError as AnthropicAPIStatusError,
+    APITimeoutError as AnthropicAPITimeoutError,
+    APIConnectionError as AnthropicAPIConnectionError,
+)
 from openai import AsyncOpenAI
+from openai import (
+    # APIError as OpenAIAPIError,
+    RateLimitError as OpenAIRateLimitError,
+    APIStatusError as OpenAIAPIStatusError,
+    APITimeoutError as OpenAIAPITimeoutError,
+    APIConnectionError as OpenAIAPIConnectionError,
+)
 from pydantic import Field, SecretStr
 
 from ..errors import APIKeyNotFoundError
 from ..types.message import Message
 from ..utils import resolve_default
 from .runnable import Runnable
+
+logger = structlog.get_logger("timbal.core.llm_router")
 
 OPENAI_API = os.getenv("TIMBAL_OPENAI_API", "responses")
 
@@ -78,6 +96,121 @@ Model = Literal[
 ]
 
 
+async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, context: str):
+    """Helper to retry an async generator function on transient failures.
+    
+    Retryable errors (using SDK exception types):
+    - Empty streams (StopAsyncIteration)
+    - Rate limiting (RateLimitError from OpenAI/Anthropic SDKs)
+    - Timeouts (APITimeoutError from OpenAI/Anthropic SDKs)
+    - Connection errors (APIConnectionError from OpenAI/Anthropic SDKs)
+    - Server errors (APIStatusError with 500, 502, 503, 504 status codes)
+    - Overloaded/capacity errors (APIError with "overload" or "capacity" in message)
+    
+    Non-retryable errors (fail immediately):
+    - Authentication errors (401, 403)
+    - Invalid requests (400, 404)
+    - Other 4xx client errors
+    
+    Args:
+        async_gen_func: Async callable that returns an async generator
+        max_retries: Maximum number of retry attempts
+        retry_delay: Base delay for exponential backoff
+        context: Description for logging (e.g., "Anthropic API")
+    
+    Yields:
+        Items from the async generator
+        
+    Raises:
+        Exception: Original exception if not retryable or max retries exceeded
+    """
+    last_error = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            async_gen = async_gen_func()
+            # Try to get the first item to detect empty streams
+            first_item = await async_gen.__anext__()
+            # Success - yield first item and then all remaining items
+            yield first_item
+            async for item in async_gen:
+                yield item
+            return  # Successfully completed
+            
+        except StopAsyncIteration as e:
+            # Empty stream detected
+            last_error = e
+            error_type = "empty_stream"
+            error_msg = "Empty stream"
+            
+        except Exception as e:
+            # Check if it's a retryable error
+            last_error = e
+            error_type = type(e).__name__
+            error_msg = str(e)
+            
+            # Determine if error is retryable based on SDK exception types
+            is_retryable = False
+            
+            # OpenAI SDK exceptions
+            if isinstance(e, (OpenAIRateLimitError, AnthropicRateLimitError)):
+                is_retryable = True
+                error_type = "rate_limit"
+                
+            elif isinstance(e, (OpenAIAPITimeoutError, AnthropicAPITimeoutError)):
+                is_retryable = True
+                error_type = "timeout"
+                
+            elif isinstance(e, (OpenAIAPIConnectionError, AnthropicAPIConnectionError)):
+                is_retryable = True
+                error_type = "connection_error"
+                
+            elif isinstance(e, (OpenAIAPIStatusError, AnthropicAPIStatusError)):
+                # Check status code for retryable HTTP errors
+                status_code = getattr(e, 'status_code', None)
+                if status_code in [500, 502, 503, 504]:
+                    is_retryable = True
+                    if status_code == 503:
+                        error_type = "service_unavailable"
+                    else:
+                        error_type = f"server_error_{status_code}"
+                # Don't retry on 4xx errors (client errors like 400, 401, 403, 404)
+                
+            # If not retryable, re-raise immediately
+            if not is_retryable:
+                logger.error(
+                    "Non-retryable error from LLM provider",
+                    context=context,
+                    error_type=error_type,
+                    error=error_msg
+                )
+                raise
+        
+        # Retry logic for retryable errors
+        if attempt < max_retries:
+            delay = retry_delay * (2 ** attempt)
+            logger.warning(
+                "Retryable error from LLM provider, retrying...",
+                context=context,
+                error_type=error_type,
+                error=error_msg,
+                attempt=attempt + 1,
+                max_retries=max_retries,
+                delay=delay
+            )
+            await asyncio.sleep(delay)
+        else:
+            # Max retries exceeded
+            logger.error(
+                "Max retries exceeded for LLM provider",
+                context=context,
+                error_type=error_type,
+                max_retries=max_retries
+            )
+            # Re-raise the last error
+            raise last_error
+
+
 # TODO Add more parameters
 async def _llm_router(
     model: Model | str = Field(
@@ -115,6 +248,14 @@ async def _llm_router(
     api_key: str | SecretStr | None = Field(
         None,
         description="API key for the LLM provider.",
+    ),
+    max_retries: int = Field(
+        0,
+        description="Maximum number of retries for empty streams or transient failures.",
+    ),
+    retry_delay: float = Field(
+        1.0,
+        description="Base delay in seconds between retries (uses exponential backoff).",
     ),
 ) -> Message: # type: ignore
     """
@@ -215,9 +356,12 @@ async def _llm_router(
             # budget_tokens must be >= 1024
             anthropic_kwargs["thinking"] = thinking
 
-        res = await client.messages.create(**anthropic_kwargs)
-
-        async for res_chunk in res:
+        async def _create_stream():
+            res = await client.messages.create(**anthropic_kwargs)
+            async for chunk in res:
+                yield chunk
+        
+        async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, "Anthropic"):
             yield res_chunk
 
     elif provider == "openai" and OPENAI_API == "responses":
@@ -245,9 +389,12 @@ async def _llm_router(
             # {"effort": enum["minimal", "low", "medium", "high"], "summary": enum["auto", "concise", "detailed"]}
             responses_kwargs["reasoning"] = thinking
 
-        res = await client.responses.create(**responses_kwargs)
-
-        async for res_chunk in res:
+        async def _create_stream():
+            res = await client.responses.create(**responses_kwargs)
+            async for chunk in res:
+                yield chunk
+        
+        async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, "OpenAI Responses"):
             yield res_chunk
 
     # Try with OpenAI Chat Completions compatible providers
@@ -275,7 +422,10 @@ async def _llm_router(
         if max_tokens:
             chat_completions_kwargs["max_completion_tokens"] = max_tokens
 
-        res = await client.chat.completions.create(**chat_completions_kwargs)
-
-        async for res_chunk in res:
+        async def _create_stream():
+            res = await client.chat.completions.create(**chat_completions_kwargs)
+            async for chunk in res:
+                yield chunk
+        
+        async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, f"{provider} Chat Completions"):
             yield res_chunk
