@@ -74,7 +74,7 @@ class WebSearch(Tool):
     
 
     @override
-    @computed_field
+    @computed_field(repr=False)
     @cached_property
     def openai_chat_completions_schema(self) -> dict[str, Any]:
         """See base class."""
