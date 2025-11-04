@@ -39,6 +39,7 @@ dependencies = [
     "pymupdf==1.26.0",
     "python-docx>=1.1.2",
     "python-dotenv>=1.0.1",
+    "pyyaml>=6.0.2",
     "requests>=2.32.3",
     "structlog>=25.1.0",
     "typing-extensions>=4.14.1",
