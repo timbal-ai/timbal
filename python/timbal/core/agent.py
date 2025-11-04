@@ -34,6 +34,7 @@ from .llm_router import Model, _llm_router
 from .runnable import Runnable, RunnableLike
 from .tool import Tool
 from .tool_set import ToolSet
+from ..tools import ReadSkill, SKILLS_PROMPT, load_skills
 
 logger = structlog.get_logger("timbal.core.agent")
 
@@ -122,6 +123,8 @@ class Agent(Runnable):
     """Model parameters to pass to the agent."""
     output_model: type[BaseModel] | None = None
     """BaseModel to generate a structured output."""
+    skills: str | Path | None = None
+    """Path to the skills directory."""
 
     _llm: Tool = PrivateAttr()
     """Internal LLM tool instance for making model calls."""
@@ -145,6 +148,10 @@ class Agent(Runnable):
         """
         super().model_post_init(__context)
         self._path = self.name
+
+        if self.skills:
+            self.skills = Path(self.skills).resolve()
+            self.system_prompt = self.system_prompt + SKILLS_PROMPT if self.system_prompt else SKILLS_PROMPT
 
         if self.system_prompt:
             for match in SYSTEM_PROMPT_FN_PATTERN.finditer(self.system_prompt):
@@ -267,6 +274,9 @@ class Agent(Runnable):
             )
             output_model_tool.params_model = self.output_model
             self.tools.append(output_model_tool)
+
+        if self.skills:
+            self.tools.append(ReadSkill(skills_path=self.skills))
 
         # Normalize tools: convert functions/dicts to Tool instances
         # ToolSet instances are kept as-is and resolved later in _resolve_tools()
