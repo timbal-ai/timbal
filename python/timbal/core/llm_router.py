@@ -285,16 +285,18 @@ async def _llm_router(
     provider, model_name = model.split("/", 1)
     
     if provider == "openai":
+        default_headers = {"x-provider": "openai",}
         if not api_key:
             api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise APIKeyNotFoundError("OPENAI_API_KEY not found.")
         if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
         else:
-            client = AsyncOpenAI(api_key=api_key)
+            client = AsyncOpenAI(api_key=api_key, default_headers=default_headers)
 
     elif provider == "anthropic":
+        default_headers = {"x-provider": "anthropic",}
         if not max_tokens:
             raise ValueError("'max_tokens' is required for claude models.")
         if not api_key:
@@ -302,29 +304,31 @@ async def _llm_router(
         if not api_key:
             raise APIKeyNotFoundError("ANTHROPIC_API_KEY not found.")
         if base_url is not None:
-            client = AsyncAnthropic(api_key=api_key, base_url=base_url)
+            client = AsyncAnthropic(api_key=api_key, base_url=base_url, default_headers=default_headers)
         else:
-            client = AsyncAnthropic(api_key=api_key)
+            client = AsyncAnthropic(api_key=api_key, default_headers=default_headers)
 
     elif provider == "google":
+        default_headers = {"x-provider": "google",}
         if not api_key:
             api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise APIKeyNotFoundError("GEMINI_API_KEY not found.")
         if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
         else:
-            client = AsyncOpenAI(api_key=api_key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
+            client = AsyncOpenAI(api_key=api_key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/", default_headers=default_headers)
 
     elif provider == "togetherai":
+        default_headers = {"x-provider": "togetherai",}
         if not api_key:
             api_key = os.getenv("TOGETHER_API_KEY")
         if not api_key:
             raise APIKeyNotFoundError("TOGETHER_API_KEY not found.")
         if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
         else:
-            client = AsyncOpenAI(api_key=api_key, base_url="https://api.together.xyz/v1")
+            client = AsyncOpenAI(api_key=api_key, base_url="https://api.together.xyz/v1/", default_headers=default_headers)
 
     else:
         raise ValueError(f"Unsupported provider: {provider}")
