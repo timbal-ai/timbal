@@ -15,7 +15,6 @@ from .runnable import Runnable
 from .tool import Tool
 from .tool_set import ToolSet
 
-
 """
 
 
@@ -36,6 +35,7 @@ class Skill(ToolSet):
     """Skill is a tool set that can be used to provide context to the agent."""
     path: str | Path
     tools: list[Tool] = []
+    is_in_context: bool = False
 
     @model_validator(mode="after")
     def validate_skill_structure(self) -> "Skill":
@@ -103,11 +103,6 @@ class Skill(ToolSet):
     @override
     async def resolve(self) -> list[Tool]:
         """See base class."""
-        # tools = [ReadSkill(self.skills_path)] # TODO Modify read skill to add is in context or something
-
-        # # TODO Other stuff
-        # if self.is_in_context:
-        #     tools.extend([])
-
-        # return tools
+        if self.is_in_context:
+            return self.tools
         return []

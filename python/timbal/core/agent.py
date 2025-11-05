@@ -27,7 +27,6 @@ from pydantic import (
 
 from ..errors import InterruptError, bail
 from ..state import get_run_context
-from ..tools import ReadSkill, SKILLS_PROMPT, load_skills
 from ..types.content import ToolUseContent
 from ..types.events import OutputEvent
 from ..types.message import Message
@@ -36,6 +35,7 @@ from .runnable import Runnable, RunnableLike
 from .skill import Skill
 from .tool import Tool
 from .tool_set import ToolSet
+from ..tools import ReadSkill
 
 logger = structlog.get_logger("timbal.core.agent")
 
@@ -269,8 +269,22 @@ class Agent(Runnable):
                 logger.warning(f"Skills directory {self.skills_path} does not exist or is not a directory. Skipping...")
                 self.skills_path = None
             else:
+                skills_metadata = []
                 for skill_path in self.skills_path.iterdir():
-                    normalized_tools.append(Skill(path=skill_path))
+                    skill = Skill(path=skill_path)
+                    normalized_tools.append(skill)
+                    skills_metadata.append(f"- **{skill.name}**: {skill.description}")
+                # Add skills metadata to system prompt
+                self.system_prompt += f"""
+<skills>
+Skills provide additional knowledge of a specific topic. The following skills are available:
+{'\n'.join(skills_metadata)}
+In skills documentation, you will encounter references to additional files.
+If the file is relevant for the user query, USE the `read_skill` tool to get its content.
+</skills>"""
+                # Add read_skill tool
+                self.tools.append(ReadSkill(skills_path=self.skills_path))
+
 
         # Add structured output tool if output_model is provided
         if self.output_model:

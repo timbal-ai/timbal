@@ -20,6 +20,11 @@ class ReadSkill(Tool):
             skill_name: The name of the skill from the YAML frontmatter (e.g., 'timbal')
             reference: The name of the file in the skill directory to read (e.g., 'slack-integration.md')
             """
+            # Track read skill
+            agent_span = get_run_context().parent_span()
+            for tool in agent_span.runnable.tools:
+                if hasattr(tool, "name") and tool.name == skill_name:
+                    tool.is_in_context = True
 
             # Reference file
             if reference:
