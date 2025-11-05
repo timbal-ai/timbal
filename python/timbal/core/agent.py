@@ -265,6 +265,10 @@ class Agent(Runnable):
         )
         self._llm.nest(self._path)
 
+        normalized_tools = []
+        # Add skills tool if skills are provided
+        if self.skills:
+            normalized_tools.append(ReadSkill(skills_path=self.skills))
         # Add structured output tool if output_model is provided
         if self.output_model:
             output_model_tool = Tool(
@@ -273,16 +277,11 @@ class Agent(Runnable):
                 handler=lambda x: x
             )
             output_model_tool.params_model = self.output_model
-            self.tools.append(output_model_tool)
+            normalized_tools.append(output_model_tool)
 
-        if self.skills:
-            self.tools.append(ReadSkill(skills_path=self.skills))
-
-        # Normalize tools: convert functions/dicts to Tool instances
-        # ToolSet instances are kept as-is and resolved later in _resolve_tools()
-        normalized_tools = []
+        # Normalize the rest of the tools
         for tool in self.tools:
-            # Keep ToolSet instances as-is, they'll be resolved later
+            # ToolSet instances are kept as-is and resolved later in _resolve_tools()
             if isinstance(tool, ToolSet):
                 normalized_tools.append(tool)
                 continue
@@ -293,7 +292,7 @@ class Agent(Runnable):
                 else:
                     tool = Tool(handler=tool)
             
-            if any(t.name == tool.name for t in normalized_tools):
+            if any(t.name == tool.name if isinstance(t, Tool) else False for t in normalized_tools):
                 raise ValueError(f"Tool {tool.name} already exists. You can only add a tool once.")
             
             tool.nest(self._path)
@@ -421,16 +420,26 @@ class Agent(Runnable):
 
     async def _resolve_tools(self, i: int) -> list[Tool]:
         """Resolve the tools to be provided to the LLM."""
+        if i >= self.max_iter:
+            return []
         tools = []
-        if i < self.max_iter:
-            for t in self.tools:
-                if isinstance(t, ToolSet):
-                    resolved_toolset = await t.resolve()
-                    for tool in resolved_toolset:
+        tools_names = set()
+        for t in self.tools:
+            if isinstance(t, ToolSet):
+                resolved_toolset = await t.resolve()
+                for tool in resolved_toolset:
+                    if tool.name in tools_names:
+                        logger.warning(f"Tool with name '{tool.name}' already exists. You can only add a tool once.")
+                    else:
                         tool.nest(self._path)
-                    tools.extend(resolved_toolset)
+                        tools.append(tool)
+                        tools_names.add(tool.name)
+            else:
+                if t.name in tools_names:
+                    logger.warning(f"Tool with name '{t.name}' already exists. You can only add a tool once.")
                 else:
                     tools.append(t)
+                    tools_names.add(t.name)
         return tools
 
 
