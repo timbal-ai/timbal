@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from .tool import Tool
 
@@ -18,6 +18,7 @@ class ToolSet(ABC, BaseModel):
     - **Conditional availability**: Tools that may or may not be available based
       on iteration count or other execution context
     """
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     @abstractmethod
     async def resolve(self) -> list[Tool]:

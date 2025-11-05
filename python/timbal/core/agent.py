@@ -27,14 +27,15 @@ from pydantic import (
 
 from ..errors import InterruptError, bail
 from ..state import get_run_context
+from ..tools import ReadSkill, SKILLS_PROMPT, load_skills
 from ..types.content import ToolUseContent
 from ..types.events import OutputEvent
 from ..types.message import Message
 from .llm_router import Model, _llm_router
 from .runnable import Runnable, RunnableLike
+from .skill import Skill
 from .tool import Tool
 from .tool_set import ToolSet
-from ..tools import ReadSkill, SKILLS_PROMPT, load_skills
 
 logger = structlog.get_logger("timbal.core.agent")
 
@@ -117,14 +118,14 @@ class Agent(Runnable):
     """System prompt to provide context for the agent."""
     tools: list[SkipValidation[RunnableLike]] = []
     """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
+    skills_path: str | Path | None = None
+    """Path to the skills directory."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
     model_params: dict[str, Any] = {}
     """Model parameters to pass to the agent."""
     output_model: type[BaseModel] | None = None
     """BaseModel to generate a structured output."""
-    skills: str | Path | None = None
-    """Path to the skills directory."""
 
     _llm: Tool = PrivateAttr()
     """Internal LLM tool instance for making model calls."""
@@ -148,10 +149,6 @@ class Agent(Runnable):
         """
         super().model_post_init(__context)
         self._path = self.name
-
-        if self.skills:
-            self.skills = Path(self.skills).resolve()
-            self.system_prompt = self.system_prompt + SKILLS_PROMPT if self.system_prompt else SKILLS_PROMPT
 
         if self.system_prompt:
             for match in SYSTEM_PROMPT_FN_PATTERN.finditer(self.system_prompt):
@@ -266,9 +263,15 @@ class Agent(Runnable):
         self._llm.nest(self._path)
 
         normalized_tools = []
-        # Add skills tool if skills are provided
-        if self.skills:
-            normalized_tools.append(ReadSkill(skills_path=self.skills))
+        if self.skills_path is not None:
+            self.skills_path = Path(self.skills_path).expanduser().resolve()
+            if not self.skills_path.exists() or not self.skills_path.is_dir():
+                logger.warning(f"Skills directory {self.skills_path} does not exist or is not a directory. Skipping...")
+                self.skills_path = None
+            else:
+                for skill_path in self.skills_path.iterdir():
+                    normalized_tools.append(Skill(path=skill_path))
+
         # Add structured output tool if output_model is provided
         if self.output_model:
             output_model_tool = Tool(
@@ -283,21 +286,21 @@ class Agent(Runnable):
         for tool in self.tools:
             # ToolSet instances are kept as-is and resolved later in _resolve_tools()
             if isinstance(tool, ToolSet):
+                if isinstance(tool, Skill):
+                    if any(t.name == tool.name for t in normalized_tools if hasattr(t, "name")):
+                        raise ValueError(f"Skill '{tool.name}' already exists. You can only add a skill once.")
                 normalized_tools.append(tool)
                 continue
-            
             if not isinstance(tool, Runnable):
                 if isinstance(tool, dict):
                     tool = Tool(**tool)
                 else:
                     tool = Tool(handler=tool)
-            
-            if any(t.name == tool.name if isinstance(t, Tool) else False for t in normalized_tools):
+            if any(t.name == tool.name for t in normalized_tools if hasattr(t, "name")):
                 raise ValueError(f"Tool {tool.name} already exists. You can only add a tool once.")
-            
             tool.nest(self._path)
             normalized_tools.append(tool)
-        
+
         self.tools = normalized_tools
 
         # Agents are always orchestrators with async generator handlers
@@ -373,48 +376,49 @@ class Agent(Runnable):
             List of Messages representing the conversation history,
             or empty list if no parent context exists
         """
-        memory = []
         run_context = get_run_context()
-        if run_context.parent_id:
-            # Try to get tracing data from parent execution
-            parent_trace = await run_context._get_parent_trace()
-            if parent_trace is None:
-                logger.error("Parent trace not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
-            else:
-                # Extract conversation history from parent's LLM calls
-                # TODO: Handle multiple call_ids for this subagent
-                llm_spans = parent_trace.get_path(self._llm._path)
-                # In a subagent, this can be empty if the parent agent didn't call the LLM
-                if not len(llm_spans):
-                    return memory
-                # Get the most recent LLM interaction
-                llm_input_messages = llm_spans[-1].input.get("messages", []) # TODO Put an assertion in here
-                llm_output_message = llm_spans[-1].output
-                # Reconstruct conversation: input messages + LLM response
-                memory = [
-                    *[Message.validate(m) for m in llm_input_messages], 
-                    Message.validate(llm_output_message)
-                ]
-                for content in memory[-1].content:
-                    if content.type != "tool_use" or content.is_server_tool_use:
-                        continue
-                    tool_result_path = f"{self._path}.{content.name}"
-                    tool_result_spans = parent_trace.get_path(tool_result_path)
-                    assert len(tool_result_spans) >= 1, f"Agent trace does not have any records for path {tool_result_path}"
-                    for tool_result_span in tool_result_spans:
-                        if tool_result_span.metadata.get("tool_call_id") == content.id:
-                            tool_result_content = tool_result_span.output.content if isinstance(tool_result_span.output, Message) else tool_result_span.output
-                            if tool_result_span.status["code"] == "cancelled" and tool_result_span.status["reason"] == "interrupted":
-                                tool_result_content = "</interrupted>"
-                            tool_result_message = Message.validate({
-                                "role": "tool",
-                                "content": [{
-                                    "type": "tool_result",
-                                    "id": content.id,
-                                    "content": tool_result_content,
-                                }]
-                            })
-                            memory.append(tool_result_message)
+        if not run_context.parent_id:
+            return []
+        # Try to get tracing data from parent execution
+        parent_trace = await run_context._get_parent_trace()
+        if parent_trace is None:
+            logger.error("Parent trace not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
+            return []
+        # TODO Extract memory from memory key, not LLM calls
+        # Extract conversation history from parent's LLM calls
+        # TODO: Handle multiple call_ids for this subagent (we could access steps spans)
+        llm_spans = parent_trace.get_path(self._llm._path)
+        # In a subagent, this can be empty if the parent agent didn't call the LLM
+        if not len(llm_spans):
+            return []
+        # Get the most recent LLM interaction
+        llm_input_messages = llm_spans[-1].input.get("messages", []) # TODO Put an assertion in here
+        llm_output_message = llm_spans[-1].output
+        # Reconstruct conversation: input messages + LLM response
+        memory = [
+            *[Message.validate(m) for m in llm_input_messages], 
+            Message.validate(llm_output_message)
+        ]
+        for content in memory[-1].content:
+            if content.type != "tool_use" or content.is_server_tool_use:
+                continue
+            tool_result_path = f"{self._path}.{content.name}"
+            tool_result_spans = parent_trace.get_path(tool_result_path)
+            assert len(tool_result_spans) >= 1, f"Agent trace does not have any records for path {tool_result_path}"
+            for tool_result_span in tool_result_spans:
+                if tool_result_span.metadata.get("tool_call_id") == content.id:
+                    tool_result_content = tool_result_span.output.content if isinstance(tool_result_span.output, Message) else tool_result_span.output
+                    if tool_result_span.status["code"] == "cancelled" and tool_result_span.status["reason"] == "interrupted":
+                        tool_result_content = "</interrupted>"
+                    tool_result_message = Message.validate({
+                        "role": "tool",
+                        "content": [{
+                            "type": "tool_result",
+                            "id": content.id,
+                            "content": tool_result_content,
+                        }]
+                    })
+                    memory.append(tool_result_message)
         return memory
 
 
@@ -522,6 +526,11 @@ class Agent(Runnable):
         if not messages:
             messages = await self._resolve_memory()
             messages.append(kwargs.pop("prompt"))
+        
+        # TODO memory_snapshot | memory_checkpoint
+        # from timbal.utils import dump
+        # span = get_run_context().current_span()
+        # span.memory = await dump(messages)
 
         i = 0
         while True:
