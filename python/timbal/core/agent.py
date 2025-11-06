@@ -24,12 +24,14 @@ from pydantic import (
     computed_field,
     model_validator,
 )
+from uuid_extensions import uuid7
 
 from ..errors import InterruptError, bail
 from ..state import get_run_context
-from ..types.content import ToolUseContent
-from ..types.events import OutputEvent
+from ..types.content import TextContent, ToolUseContent
+from ..types.events import BaseEvent, OutputEvent
 from ..types.message import Message
+from ..utils import dump
 from .llm_router import Model, _llm_router
 from .runnable import Runnable, RunnableLike
 from .skill import ReadSkill, Skill
@@ -112,7 +114,7 @@ class Agent(Runnable):
     """
 
     model: Model | str
-    """The LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-3-sonnet')."""
+    """The LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5')."""
     system_prompt: str | None = None
     """System prompt to provide context for the agent."""
     tools: list[SkipValidation[RunnableLike]] = []
@@ -354,15 +356,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
 
     async def _resolve_system_prompt(self) -> str | None:
-        """Resolve system prompt by executing embedded template functions.
-        
-        Parses the system prompt for function calls in the format {namespace::function}
-        and executes them in parallel, substituting the results back into the prompt.
-        
-        Returns:
-            The resolved system prompt with function calls replaced by their results,
-            or None if no system prompt is configured.
-        """
+        """Resolve system prompt by executing embedded template functions."""
         if not self.system_prompt:
             return None
         if not self._system_prompt_callables:
@@ -383,16 +377,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
 
     async def _resolve_memory(self) -> list[Message]:
-        """Resolve conversation memory from parent agent context.
-        
-        When agents are nested (e.g., subagents called by parent agents),
-        this method retrieves the conversation history from the parent's
-        tracing data to maintain context across agent calls.
-        
-        Returns:
-            List of Messages representing the conversation history,
-            or empty list if no parent context exists
-        """
+        """Resolve conversation memory from previous agent trace."""
         run_context = get_run_context()
         if not run_context.parent_id:
             return []
@@ -403,50 +388,59 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             logger.error("Parent trace not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
             return []
 
-        # TODO Extract memory from memory key, not LLM calls
         self_spans = parent_trace.get_path(self._path)
         if not len(self_spans):
             return []
         if len(self_spans) > 1:
+            # TODO Handle multiple call_ids for this agent (we could access step spans)
             raise NotImplementedError("Multiple spans for the same agent are not supported yet.")
         previous_span = self_spans[0]
         if hasattr(previous_span, "in_context_skills"):
             current_span.in_context_skills = previous_span.in_context_skills
 
-        # Extract conversation history from parent's LLM calls
-        # TODO: Handle multiple call_ids for this subagent (we could access steps spans)
-        llm_spans = parent_trace.get_path(self._llm._path)
-        # In a subagent, this can be empty if the parent agent didn't call the LLM
-        if not len(llm_spans):
-            return []
-        # Get the most recent LLM interaction
-        llm_input_messages = llm_spans[-1].input.get("messages", []) # TODO Put an assertion in here
-        llm_output_message = llm_spans[-1].output
-        # Reconstruct conversation: input messages + LLM response
-        memory = [
-            *[Message.validate(m) for m in llm_input_messages], 
-            Message.validate(llm_output_message)
-        ]
+        # >= 1.1.0 memory is stored in the agent span. This enables us to modify the memory directly without passing it to the LLM.
+        if hasattr(previous_span, "memory"):
+            memory = [Message.validate(m) for m in previous_span.memory]
+        else:
+            # < 1.1.0 Extract conversation history from parent's LLM calls
+            # TODO Handle multiple call_ids for this agent (we could access step spans)
+            llm_spans = parent_trace.get_path(self._llm._path)
+            # In a subagent, this can be empty if the parent agent didn't call the LLM
+            if not len(llm_spans):
+                return []
+            # Get the most recent LLM interaction
+            llm_input_messages = llm_spans[-1].input.get("messages", [])
+            llm_output_message = llm_spans[-1].output
+            # Reconstruct conversation: input messages + LLM response
+            memory = [
+                *[Message.validate(m) for m in llm_input_messages], 
+                Message.validate(llm_output_message)
+            ]
+        
+        # Make sure interrupted tool calls have a corresponding tool result
+        # We assume all previous messages but the last one have matching tool uses and tool results
         for content in memory[-1].content:
             if content.type != "tool_use" or content.is_server_tool_use:
                 continue
             tool_result_path = f"{self._path}.{content.name}"
             tool_result_spans = parent_trace.get_path(tool_result_path)
-            assert len(tool_result_spans) >= 1, f"Agent trace does not have any records for path {tool_result_path}"
+            tool_result_content = None
             for tool_result_span in tool_result_spans:
                 if tool_result_span.metadata.get("tool_call_id") == content.id:
                     tool_result_content = tool_result_span.output.content if isinstance(tool_result_span.output, Message) else tool_result_span.output
                     if tool_result_span.status["code"] == "cancelled" and tool_result_span.status["reason"] == "interrupted":
-                        tool_result_content = "</interrupted>"
-                    tool_result_message = Message.validate({
-                        "role": "tool",
-                        "content": [{
-                            "type": "tool_result",
-                            "id": content.id,
-                            "content": tool_result_content,
-                        }]
-                    })
-                    memory.append(tool_result_message)
+                        tool_result_content = "INTERRUPTED: Tool call was cancelled or interrupted by the user / system."
+            # If there's no matching tool result, we create an empty one indicating there was an error
+            if tool_result_content is None:
+                tool_result_content = "ERROR: There was an unexpected error executing the tool."
+            memory.append(Message.validate({
+                "role": "tool",
+                "content": [{
+                    "type": "tool_result",
+                    "id": content.id,
+                    "content": tool_result_content,
+                }]
+            }))
         return memory
 
 
@@ -456,6 +450,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return []
         tools = []
         tools_names = set()
+        commands = {}
         for t in self.tools:
             if isinstance(t, ToolSet):
                 resolved_toolset = await t.resolve()
@@ -466,13 +461,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         tool.nest(self._path)
                         tools.append(tool)
                         tools_names.add(tool.name)
+                        if tool.command:
+                            commands[tool.command] = tool
             else:
                 if t.name in tools_names:
                     logger.warning(f"Tool with name '{t.name}' already exists. You can only add a tool once.")
                 else:
                     tools.append(t)
                     tools_names.add(t.name)
-        return tools
+                    if t.command:
+                        commands[t.command] = t
+        return tools, commands
 
 
     async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
@@ -529,7 +528,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         This is the core agent logic that implements the autonomous execution pattern:
         1. Load conversation memory from parent context (if nested)
         2. Add the user prompt to the conversation
-        3. Loop until no more tool calls or max_iter reached:
+        3. Check for slash commands (e.g., /command args):
+           a. If command found, execute the corresponding tool directly
+           b. Add tool use and result to memory, then return early
+        4. Loop until no more tool calls or max_iter reached:
            a. Call LLM with current conversation and available tools
            b. Add LLM response to conversation
            c. If LLM made tool calls, execute them concurrently
@@ -537,12 +539,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         
         Args:
             **kwargs: Execution parameters including:
-                - prompt: The input Message to process
+                - prompt: The input Message to process (or messages list)
+                - messages: Optional explicit list of messages (bypasses memory resolution)
+                - system_prompt: Optional system prompt override
                 - Other parameters passed through to LLM
                 
         Yields:
             Events from LLM calls and tool executions
         """
+        current_span = get_run_context().current_span()
         # ? Do we want to allow the user to pass parameterized system prompts
         system_prompt = kwargs.pop("system_prompt", None)
         if not system_prompt:
@@ -554,16 +559,75 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if not messages:
             messages = await self._resolve_memory()
             messages.append(kwargs.pop("prompt"))
-        
-        # TODO memory_snapshot | memory_checkpoint
-        # from timbal.utils import dump
-        # span = get_run_context().current_span()
-        # span.memory = await dump(messages)
+        # Span memory will also be modified with messages array modification (it's the same object)
+        current_span.memory = await dump(messages) # ? Can we optimize the dumping the llm already does next
+
+        async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
+            """Helper to process tool output events and create tool results."""
+            if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
+                return
+            if event.status.code == "cancelled" and event.status.reason == "early_exit":
+                bail(event.status.message)
+            content = None
+            if event.error is not None:
+                content = event.error
+            elif isinstance(event.output, Message):
+                content = event.output.content
+            else:
+                content = event.output
+            tool_result = Message.validate({
+                "role": "tool",
+                "content": [{
+                    "type": "tool_result",
+                    "id": tool_call_id,
+                    "content": content,
+                }]
+            })
+            if append_to_messages:
+                messages.append(tool_result)
+            tool_result_dump = await dump(tool_result)
+            current_span.memory.append(tool_result_dump)
 
         i = 0
         while True:
             # ? We could resolve the system prompt at each iteration
-            tools = await self._resolve_tools(i)
+            tools, commands = await self._resolve_tools(i)
+            if commands:
+                # Commands will only be user messages with a single text content
+                if len(messages[-1].content) == 1:
+                    content = messages[-1].content[0]
+                    if isinstance(content, TextContent) and content.text.startswith("/"):
+                        import shlex
+                        args = shlex.split(content.text)
+                        command = args[0].strip("/")
+                        args = args[1:]
+                        # If no command is found, we'll simply let the message pass through the LLM
+                        if command in commands:
+                            tool = commands[command]
+                            tool_input = {}
+                            for i, field_name in enumerate(tool.params_model.model_fields.keys()):
+                                # Params model preserves the ordering of the fields as they appear in the signature
+                                # We grab as many arguments as we can. If there are too few arguments, we'll let the tool params model validator give a better error
+                                if i >= len(args):
+                                    break
+                                tool_input[field_name] = args[i]
+                            # Craft a fake tool_use so we can keep this interaction in the agent memory
+                            tool_use_id = uuid7(as_type="str").replace("-", "")
+                            current_span.memory.append({
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "tool_use",
+                                    "id": tool_use_id,
+                                    "name": tool.name,
+                                    "input": tool_input
+                                }]
+                            })
+                            # Run the tool
+                            async for event in tool(**tool_input):
+                                await _process_tool_event(event, tool_use_id, append_to_messages=False)
+                                yield event
+                            return
+
             async for event in self._llm(
                 model=self.model,
                 messages=messages,
@@ -581,7 +645,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
                     # Add LLM response to conversation for next iteration
                     messages = messages + [event.output]
-                    
+                    # This breaks the reference to the original messages object. We need to manually append the output to the span memory.
+                    current_span.memory.append(event._output_dump)
                 yield event
             
             tool_calls = [
@@ -593,26 +658,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 break           
 
             async for tool_call, event in self._multiplex_tools(tools, tool_calls):
-                # Only process events from immediate children (not nested subagents)
-                if isinstance(event, OutputEvent) and event.path.count(".") == self._path.count(".") + 1:
-                    # Propagate bail
-                    if event.status.code == "cancelled" and event.status.reason == "early_exit":
-                        bail(event.status.message)
-                    content = None
-                    if event.error is not None:
-                        content = event.error
-                    elif isinstance(event.output, Message):
-                        content = event.output.content
-                    else:
-                        content = event.output
-                    message = Message.validate({
-                        "role": "tool",
-                        "content": [{
-                            "type": "tool_result",
-                            "id": tool_call.id,
-                            "content": content,
-                        }]
-                    })
-                    messages.append(message)
+                await _process_tool_event(event, tool_call.id, append_to_messages=True)
                 yield event
             i += 1

@@ -106,6 +106,18 @@ class Runnable(ABC, BaseModel):
     Use get_run_context() to access execution state and output data.
     """
 
+    command: str | None = None
+    """Optional command string that triggers automatic invocation of this runnable.
+    
+    When specified, this runnable will be automatically invoked when the command is received,
+    bypassing LLM decision-making. This is particularly useful for Agents where you want
+    direct command-based routing (e.g., '/help', '/search') without requiring the LLM to
+    decide which tool to call.
+    
+    Note: This feature is primarily designed for Agent orchestrators and may not be
+    applicable to all Runnable types.
+    """
+
     _path: str = PrivateAttr()
     """The full path of the Runnable in the run context."""
     _is_orchestrator: bool = PrivateAttr()
