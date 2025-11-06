@@ -1,0 +1,131 @@
+---
+title: "Skills"
+description: "Extend Agent capabilities through dynamic discovery of knowledge and tools"
+---
+
+## What are Skills?
+
+Skills provide **domain-specific knowledge and tools** that agents can selectively activate based on user requests. 
+Each skill is a module with its own documentation and tools that become accessible only when the skill is activated.
+This is an extension of [Anthropic's Agent Skills](https://claude.com/blog/skills)
+
+
+## How Skills Work
+
+### Structure
+
+Each skill is a directory containing:
+
+- `SKILL.md` (required): Knowledge provided by the Skill
+- `tools/` (optional): Folder for python files defining instances of skill-specific tools
+- Supporting Files (optional): Additional documentation (must be referenced in `SKILL.md`)
+
+Example structure:
+
+```
+skills/
+└── payment_processing/
+    ├── SKILL.md
+    ├── fraud_detection.md
+    ├── ...
+    └── tools/
+        ├── process_refund.py
+        └── check_status.py
+└── ...
+```
+
+### Loading Behavior
+
+1. **Discovery**: The agent receives a list of available skills with their names and descriptions
+2. **Activation**: When relevant to a user query, the agent loads the `SKILL.md` file and its associated tools
+3. **Persistence**: Once loaded, skills remain available throughout the conversation
+
+This lazy-loading approach keeps the agent's context efficient while ensuring specialized knowledge is available when needed.
+
+
+## Using Skills
+
+### Step 1: Enable Skills in Your Agent
+
+Create a skills directory and configure your agent to use it:
+
+```python highlight=6
+from timbal import Agent
+
+agent = Agent(
+    name="my_agent",
+    model="anthropic/claude-3-5-sonnet",
+    skills_path="./skills"
+)
+```
+The agent can now discover skills from this directory.
+
+### Step 2: Create the SKILL.md File
+Every skill requires a `SKILL.md` file with YAML frontmatter defining its name and description:
+
+```markdown skills/payment_processing/SKILL.md
+---
+name: payment_processing
+description: Complete payment processing including payments, refunds, and fraud detection
+---
+
+## Overview
+There are different operations for e-commerce orders.
+
+### Payment Policy
+- Payments must be made within 30 days of order placement
+- See `fraud_detection.md` for security guidelines
+
+### Usage Guidelines
+Always verify the order exists before processing payments or refunds.
+
+### Escalation Process
+If you cannot resolve an issue, escalate to the customer support team.
+```
+
+<Note> 
+**Important**:  
+The `name` and `description` fields are **required** in the YAML frontmatter. The agent uses these fields to decide when to activate the skill  
+The `name` field must match the skill's directory name
+</Note>
+
+
+### Step 3: Add Tools (Optional)
+
+Skills can provide specialized tools that only become available when the skill is used.
+
+```python skills/payment_processing/tools/process_refund.py
+from timbal import Tool
+
+async def process_refund(order_id: str, amount: float, reason: str) -> str:
+    """Process a customer refund."""
+    # Your refund logic here
+    return f"Refund of ${amount} processed for order {order_id}"
+
+# Create the tool instance
+process_refund_tool = Tool(
+    name="process_refund",
+    description="Process a refund for a customer order",
+    handler=process_refund
+)
+```
+
+
+### Step 4: Add Supporting Documentation (Optional)
+
+For complex skills, include additional reference files and link to them in `SKILL.md`.
+In the previous example, the `fraud_detection.md` file will only be read when the agent determines it is needed.
+
+## Best Practices
+- Each skill should have a single, well-defined purpose.
+- Write clear descriptions. Agents use it to decide when to activate a Skill.
+- Use descriptive names for the skill.
+
+
+
+## Key Takeaways
+
+- **Skills are modular packages** that combine knowledge and tools for specific domains
+- **Dynamic loading** keeps agents efficient by loading only relevant capabilities
+- **SKILL.md YAML frontmatter** defines the skill's identity and purpose
+- **Tools and supporting documentation** are loaded on demand when the skill is activated

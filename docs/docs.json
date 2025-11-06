@@ -41,6 +41,7 @@
               "agents/index",
               "agents/memory",
               "agents/tools",
+              "agents/skills",
               "agents/structured-output",
               "agents/voice",
               "agents/dynamic",
