@@ -43,11 +43,23 @@ from ...types.content.thinking import ThinkingContent
 from ...types.content.tool_use import ToolUseContent
 from ...types.events.delta import (
     ContentBlockStop as TimbalContentBlockStop,
+)
+from ...types.events.delta import (
     Text as TimbalText,
+)
+from ...types.events.delta import (
     TextDelta as TimbalTextDelta,
+)
+from ...types.events.delta import (
     Thinking as TimbalThinking,
+)
+from ...types.events.delta import (
     ThinkingDelta as TimbalThinkingDelta,
+)
+from ...types.events.delta import (
     ToolUse as TimbalToolUse,
+)
+from ...types.events.delta import (
     ToolUseDelta as TimbalToolUseDelta,
 )
 from ...types.message import Message

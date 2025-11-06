@@ -32,10 +32,9 @@ from ..types.events import OutputEvent
 from ..types.message import Message
 from .llm_router import Model, _llm_router
 from .runnable import Runnable, RunnableLike
-from .skill import Skill
+from .skill import ReadSkill, Skill
 from .tool import Tool
 from .tool_set import ToolSet
-from ..tools import ReadSkill
 
 logger = structlog.get_logger("timbal.core.agent")
 
@@ -262,29 +261,14 @@ class Agent(Runnable):
         )
         self._llm.nest(self._path)
 
-        normalized_tools = []
+        # Load skills directory if provided
         if self.skills_path is not None:
             self.skills_path = Path(self.skills_path).expanduser().resolve()
             if not self.skills_path.exists() or not self.skills_path.is_dir():
-                logger.warning(f"Skills directory {self.skills_path} does not exist or is not a directory. Skipping...")
-                self.skills_path = None
-            else:
-                skills_metadata = []
-                for skill_path in self.skills_path.iterdir():
-                    skill = Skill(path=skill_path)
-                    normalized_tools.append(skill)
-                    skills_metadata.append(f"- **{skill.name}**: {skill.description}")
-                # Add skills metadata to system prompt
-                self.system_prompt += f"""
-<skills>
-Skills provide additional knowledge of a specific topic. The following skills are available:
-{'\n'.join(skills_metadata)}
-In skills documentation, you will encounter references to additional files.
-If the file is relevant for the user query, USE the `read_skill` tool to get its content.
-</skills>"""
-                # Add read_skill tool
-                self.tools.append(ReadSkill(skills_path=self.skills_path))
-
+                raise ValueError(f"Skills directory {self.skills_path} does not exist or is not a directory. Skipping...")
+            for skill_path in self.skills_path.iterdir():
+                skill = Skill(path=skill_path)
+                self.tools.append(skill)
 
         # Add structured output tool if output_model is provided
         if self.output_model:
@@ -294,28 +278,47 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 handler=lambda x: x
             )
             output_model_tool.params_model = self.output_model
-            normalized_tools.append(output_model_tool)
+            self.tools.append(output_model_tool)
 
-        # Normalize the rest of the tools
-        for tool in self.tools:
+        # Normalize the rest of the tools and prevent duplicate names
+        names = set()
+        skills_metadata = []
+        for i, tool in enumerate(self.tools):
             # ToolSet instances are kept as-is and resolved later in _resolve_tools()
+            # _resolve_tools() nests the tools with the orchestrator path - no need to do anything here
             if isinstance(tool, ToolSet):
                 if isinstance(tool, Skill):
-                    if any(t.name == tool.name for t in normalized_tools if hasattr(t, "name")):
+                    if tool.name in names:
                         raise ValueError(f"Skill '{tool.name}' already exists. You can only add a skill once.")
-                normalized_tools.append(tool)
+                    names.add(tool.name)
+                    skills_metadata.append(f"- **{tool.name}**: {tool.description}")
                 continue
+            # Otherwise make sure they are runnable instances
             if not isinstance(tool, Runnable):
                 if isinstance(tool, dict):
                     tool = Tool(**tool)
                 else:
                     tool = Tool(handler=tool)
-            if any(t.name == tool.name for t in normalized_tools if hasattr(t, "name")):
+            if tool.name in names:
                 raise ValueError(f"Tool {tool.name} already exists. You can only add a tool once.")
+            names.add(tool.name)
             tool.nest(self._path)
-            normalized_tools.append(tool)
+            self.tools[i] = tool
 
-        self.tools = normalized_tools
+        # If there are skills, we need to add the read_skill tool and indicate the agent about the skills in the system prompt
+        if skills_metadata:
+            read_skill_tool = ReadSkill()
+            read_skill_tool.nest(self._path)
+            self.tools.append(read_skill_tool)
+            if not isinstance(self.system_prompt, str):
+                self.system_prompt = ""
+            self.system_prompt += f"""
+<skills>
+Skills provide additional knowledge of a specific topic. The following skills are available:
+{'\n'.join(skills_metadata)}
+In skills documentation, you will encounter references to additional files.
+If the file is relevant for the user query, USE the `read_skill` tool to get its content.
+</skills>"""
 
         # Agents are always orchestrators with async generator handlers
         self._is_orchestrator = True
@@ -393,12 +396,23 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         run_context = get_run_context()
         if not run_context.parent_id:
             return []
+        current_span = run_context.current_span()
         # Try to get tracing data from parent execution
         parent_trace = await run_context._get_parent_trace()
         if parent_trace is None:
             logger.error("Parent trace not found. Continuing without memory...", parent_id=run_context.parent_id, run_id=run_context.id)
             return []
+
         # TODO Extract memory from memory key, not LLM calls
+        self_spans = parent_trace.get_path(self._path)
+        if not len(self_spans):
+            return []
+        if len(self_spans) > 1:
+            raise NotImplementedError("Multiple spans for the same agent are not supported yet.")
+        previous_span = self_spans[0]
+        if hasattr(previous_span, "in_context_skills"):
+            current_span.in_context_skills = previous_span.in_context_skills
+
         # Extract conversation history from parent's LLM calls
         # TODO: Handle multiple call_ids for this subagent (we could access steps spans)
         llm_spans = parent_trace.get_path(self._llm._path)

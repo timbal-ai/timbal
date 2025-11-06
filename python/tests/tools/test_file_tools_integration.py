@@ -14,7 +14,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from timbal.state import RunContext, set_run_context, set_parent_call_id
+from timbal.state import RunContext, set_parent_call_id, set_run_context
 from timbal.tools.edit import Edit
 from timbal.tools.read import Read
 from timbal.tools.write import Write

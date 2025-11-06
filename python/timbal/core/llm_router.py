@@ -13,21 +13,33 @@ import os
 from typing import Any, Literal
 
 import structlog
+from anthropic import (
+    APIConnectionError as AnthropicAPIConnectionError,
+)
+from anthropic import (
+    APIStatusError as AnthropicAPIStatusError,
+)
+from anthropic import (
+    APITimeoutError as AnthropicAPITimeoutError,
+)
 from anthropic import AsyncAnthropic
 from anthropic import (
     # APIError as AnthropicAPIError,
     RateLimitError as AnthropicRateLimitError,
-    APIStatusError as AnthropicAPIStatusError,
-    APITimeoutError as AnthropicAPITimeoutError,
-    APIConnectionError as AnthropicAPIConnectionError,
+)
+from openai import (
+    APIConnectionError as OpenAIAPIConnectionError,
+)
+from openai import (
+    APIStatusError as OpenAIAPIStatusError,
+)
+from openai import (
+    APITimeoutError as OpenAIAPITimeoutError,
 )
 from openai import AsyncOpenAI
 from openai import (
     # APIError as OpenAIAPIError,
     RateLimitError as OpenAIRateLimitError,
-    APIStatusError as OpenAIAPIStatusError,
-    APITimeoutError as OpenAIAPITimeoutError,
-    APIConnectionError as OpenAIAPIConnectionError,
 )
 from pydantic import Field, SecretStr
 

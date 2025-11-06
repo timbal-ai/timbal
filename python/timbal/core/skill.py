@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 from pathlib import Path
+from typing import Any
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -9,33 +10,20 @@ except ImportError:
     from typing_extensions import override
 
 import yaml
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
+from ..state import get_run_context
 from .runnable import Runnable
 from .tool import Tool
 from .tool_set import ToolSet
-
-"""
-
-
-agent = Agent(
-    ...
-    skills=Path,
-    tools=[WebSearch(), Skill(...),],
-    tools=[WebSearch(), ToolSet(...)->[],],
-)
-
-[WebSearch, ReadSkill]
-
-
-"""
 
 
 class Skill(ToolSet):
     """Skill is a tool set that can be used to provide context to the agent."""
     path: str | Path
     tools: list[Tool] = []
-    is_in_context: bool = False
+    references: dict[str, str] = {}
+
 
     @model_validator(mode="after")
     def validate_skill_structure(self) -> "Skill":
@@ -59,15 +47,17 @@ class Skill(ToolSet):
         end_marker = content.find("---", 3)
         if end_marker == -1:
             raise ValueError(f"SKILL.md must contain a YAML frontmatter: {self.path}")
-        yaml_data = yaml.safe_load(content[3:end_marker].strip())
-        self.name = yaml_data.get("name")
+        metadata = yaml.safe_load(content[3:end_marker].strip())
+        # ? We could enforce the name of the skill to be the same as the name of the directory
+        self.name = metadata.get("name")
         if not self.name:
             raise ValueError(f"SKILL.md must contain a name: {self.path}")
-        self.description = yaml_data.get("description")
+        self.description = metadata.get("description")
         if not self.description:
             raise ValueError(f"SKILL.md must contain a description: {self.path}")
-
-        # ? We could enforce the name of the skill to be the same as the name of the directory
+        
+        # Since we already read it, store the rest of the content
+        self.content = content[end_marker + 3:].strip()
 
         # Load tools from the tools directory
         tools_dir = self.path / "tools"
@@ -99,10 +89,66 @@ class Skill(ToolSet):
 
         return self
 
+    
+    def get_reference(self, name: str) -> str:
+        """Get a specific reference file from the skill."""
+        if name in self.references:
+            return self.references[name]
+        path = self.path / name
+        if not path.exists():
+            raise ValueError(f"Reference file not found: {name}")
+        content = path.read_text(encoding="utf-8")
+        self.references[name] = content
+        return content
+
 
     @override
     async def resolve(self) -> list[Tool]:
         """See base class."""
-        if self.is_in_context:
-            return self.tools
+        # This will be resolved from the agent context. Thus we need to access the current span.
+        current_span = get_run_context().current_span()
+        if hasattr(current_span, "in_context_skills"):
+            # ? Can be an array, set, dict or any structure that can be checked for membership
+            if self.name in current_span.in_context_skills: 
+                return self.tools
         return []
+
+
+class ReadSkill(Tool):
+    """Read a skill from the skills directory."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        
+        async def _read_skill(
+            name: str, 
+            reference: str | None = Field(None, description="Referenced file from a skill."),
+        ) -> str:
+            """Read documentation for a specific skill. Pass an optional reference to read a specific file from the skill."""
+            # The skill will be called by the agent (i.e. nested in the agent). We need to access the parent span to get the tools.
+            parent_span = get_run_context().parent_span()
+            assert hasattr(parent_span.runnable, "tools"), \
+                f"Parent runnable at path '{parent_span.path}' does not have a 'tools' attribute. Cannot resolve skill '{name}'."
+
+            skill = next((t for t in parent_span.runnable.tools if isinstance(t, Skill) and t.name == name), None)
+            if not skill:
+                raise ValueError(f"Skill {name} not found")
+            
+            # Mark the skill as in context
+            if not hasattr(parent_span, "in_context_skills"):
+                parent_span.in_context_skills = []
+            parent_span.in_context_skills.append(name)
+
+            if reference:
+                return skill.get_reference(reference)
+            else:
+                return skill.content
+        
+        super().__init__(
+            name="read_skill",
+            description=(
+                "Read documentation for a specific skill."
+                "Provide the skill name to read its documentation file or provide reference to read a specific file from the skill."
+            ),
+            handler=_read_skill,
+            **kwargs
+        )

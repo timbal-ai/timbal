@@ -1,21 +1,23 @@
 """Tests for LLM router retry logic."""
 import asyncio
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
+import pytest
 from anthropic import (
-    RateLimitError as AnthropicRateLimitError,
     APIStatusError as AnthropicAPIStatusError,
+)
+from anthropic import (
     APITimeoutError as AnthropicAPITimeoutError,
-    APIConnectionError as AnthropicAPIConnectionError,
+)
+from openai import (
+    APIConnectionError as OpenAIAPIConnectionError,
+)
+from openai import (
+    APIStatusError as OpenAIAPIStatusError,
 )
 from openai import (
     RateLimitError as OpenAIRateLimitError,
-    APIStatusError as OpenAIAPIStatusError,
-    APITimeoutError as OpenAIAPITimeoutError,
-    APIConnectionError as OpenAIAPIConnectionError,
 )
-
 from timbal.core.llm_router import _retry_on_error
 
 
