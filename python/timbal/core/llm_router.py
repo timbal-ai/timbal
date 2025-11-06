@@ -44,6 +44,7 @@ from openai import (
 from pydantic import Field, SecretStr
 
 from ..errors import APIKeyNotFoundError
+from ..state import get_or_create_run_context, get_run_context
 from ..types.message import Message
 from ..utils import resolve_default
 from .runnable import Runnable
@@ -301,6 +302,14 @@ async def _llm_router(
         if not api_key:
             api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
+            run_context = get_or_create_run_context()
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                proxy_api = "openai-responses"
+                if OPENAI_API != "responses":
+                    proxy_api = "openai-completions"
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/{proxy_api}/v1"
+        if not api_key:
             raise APIKeyNotFoundError("OPENAI_API_KEY not found.")
         if base_url is not None:
             client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
@@ -314,6 +323,11 @@ async def _llm_router(
         if not api_key:
             api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
+            run_context = get_or_create_run_context()
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/anthropic"
+        if not api_key:
             raise APIKeyNotFoundError("ANTHROPIC_API_KEY not found.")
         if base_url is not None:
             client = AsyncAnthropic(api_key=api_key, base_url=base_url, default_headers=default_headers)
@@ -325,6 +339,11 @@ async def _llm_router(
         if not api_key:
             api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
+            run_context = get_or_create_run_context()
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
+        if not api_key:
             raise APIKeyNotFoundError("GEMINI_API_KEY not found.")
         if base_url is not None:
             client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
@@ -335,6 +354,11 @@ async def _llm_router(
         default_headers = {"x-provider": "togetherai",}
         if not api_key:
             api_key = os.getenv("TOGETHER_API_KEY")
+        if not api_key:
+            run_context = get_or_create_run_context()
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
         if not api_key:
             raise APIKeyNotFoundError("TOGETHER_API_KEY not found.")
         if base_url is not None:
