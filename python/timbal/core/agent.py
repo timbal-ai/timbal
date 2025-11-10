@@ -444,10 +444,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return memory
 
 
-    async def _resolve_tools(self, i: int) -> list[Tool]:
+    async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
         if i >= self.max_iter:
-            return []
+            return [], {}
         tools = []
         tools_names = set()
         commands = {}
