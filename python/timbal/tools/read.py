@@ -49,7 +49,10 @@ class Read(Tool):
             if not path.exists():
                 raise FileNotFoundError(f"File does not exist: {path}")
             if path.is_dir():
-                raise ValueError(f"Path is a directory, not a file: {path}")
+                contents = "\n".join(item.name for item in path.iterdir())
+                if not contents:
+                    return "Empty directory"
+                return contents
 
             # Update file state tracking with new hash
             if run_context and hasattr(run_context, "_fs_state"):
