@@ -53,6 +53,7 @@ class Span(BaseModel):
         default_factory=dict,
         description="Flexible metadata storage for run-specific metrics and data.",
     )
+
     runnable: Any = Field(
         None,
         description=(
@@ -62,11 +63,21 @@ class Span(BaseModel):
         ),
         exclude=True,
     )
+    memory: Any = Field(
+        None,
+        description=(
+            "This field is used by Agent to retrieve message histories between runs. "
+            "It can also be used to overwrite what an llm can see and whatnot. "
+        ),
+        exclude=True,
+    )
 
     _input_dump: Any = PrivateAttr()
     """The dumped/serialized version of input for internal use."""
     _output_dump: Any = PrivateAttr()
     """The dumped/serialized version of output for internal use."""
+    _memory_dump: Any = PrivateAttr()
+    """The dumped/serialized version of memory for internal use."""
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
         """Override model_dump to use dumped versions of input and output during serialization."""
@@ -76,4 +87,6 @@ class Span(BaseModel):
             data["input"] = self._input_dump
         if hasattr(self, "_output_dump"):
             data["output"] = self._output_dump
+        if hasattr(self, "_memory_dump"):
+            data["memory"] = self._memory_dump
         return data

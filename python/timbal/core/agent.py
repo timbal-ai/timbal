@@ -428,7 +428,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             for tool_result_span in tool_result_spans:
                 if tool_result_span.metadata.get("tool_call_id") == content.id:
                     tool_result_content = tool_result_span.output.content if isinstance(tool_result_span.output, Message) else tool_result_span.output
-                    if tool_result_span.status["code"] == "cancelled" and tool_result_span.status["reason"] == "interrupted":
+                    tool_result_status_code = tool_result_span.status.code if hasattr(tool_result_span.status, "code") else tool_result_span.status.get("code")
+                    tool_result_status_reason = tool_result_span.status.reason if hasattr(tool_result_span.status, "reason") else tool_result_span.status.get("reason")
+                    if tool_result_status_code == "cancelled" and tool_result_status_reason == "interrupted":
                         tool_result_content = "INTERRUPTED: Tool call was cancelled or interrupted by the user / system."
             # If there's no matching tool result, we create an empty one indicating there was an error
             if tool_result_content is None:
@@ -560,7 +562,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             messages = await self._resolve_memory()
             messages.append(kwargs.pop("prompt"))
         # Span memory will also be modified with messages array modification (it's the same object)
-        current_span.memory = await dump(messages) # ? Can we optimize the dumping the llm already does next
+        current_span.memory = messages
+        current_span._memory_dump = await dump(messages) # ? Can we optimize the dumping the llm already does next
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
@@ -586,7 +589,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if append_to_messages:
                 messages.append(tool_result)
             tool_result_dump = await dump(tool_result)
-            current_span.memory.append(tool_result_dump)
+            current_span._memory_dump.append(tool_result_dump)
 
         i = 0
         while True:
@@ -613,7 +616,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 tool_input[field_name] = args[i]
                             # Craft a fake tool_use so we can keep this interaction in the agent memory
                             tool_use_id = uuid7(as_type="str").replace("-", "")
-                            current_span.memory.append({
+                            current_span._memory_dump.append({
                                 "role": "assistant",
                                 "content": [{
                                     "type": "tool_use",
@@ -644,9 +647,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         raise InterruptError(event.call_id)
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
                     # Add LLM response to conversation for next iteration
-                    messages = messages + [event.output]
+                    messages.append(event.output)
                     # This breaks the reference to the original messages object. We need to manually append the output to the span memory.
-                    current_span.memory.append(event._output_dump)
+                    current_span._memory_dump.append(event._output_dump)
                 yield event
             
             tool_calls = [
