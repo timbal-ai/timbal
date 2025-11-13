@@ -557,13 +557,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             
         # We allow the user to pass a 'hardcoded' list of messages
         # Or simply a prompt and we attempt to resolve memory
-        messages = kwargs.pop("messages", [])
-        if not messages:
-            messages = await self._resolve_memory()
-            messages.append(kwargs.pop("prompt"))
+        current_span.memory = kwargs.pop("messages", [])
+        if not current_span.memory:
+            current_span.memory = await self._resolve_memory()
+            current_span.memory.append(kwargs.pop("prompt"))
         # Span memory will also be modified with messages array modification (it's the same object)
-        current_span.memory = messages
-        current_span._memory_dump = await dump(messages) # ? Can we optimize the dumping the llm already does next
+        # current_span.memory = messages
+        current_span._memory_dump = await dump(current_span.memory) # ? Can we optimize the dumping the llm already does next
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
@@ -587,7 +587,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 }]
             })
             if append_to_messages:
-                messages.append(tool_result)
+                current_span.memory.append(tool_result)
             tool_result_dump = await dump(tool_result)
             current_span._memory_dump.append(tool_result_dump)
 
@@ -597,8 +597,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             tools, commands = await self._resolve_tools(i)
             if commands:
                 # Commands will only be user messages with a single text content
-                if len(messages[-1].content) == 1:
-                    content = messages[-1].content[0]
+                if len(current_span.memory[-1].content) == 1:
+                    content = current_span.memory[-1].content[0]
                     if isinstance(content, TextContent) and content.text.startswith("/"):
                         import shlex
                         args = shlex.split(content.text)
@@ -633,7 +633,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
             async for event in self._llm(
                 model=self.model,
-                messages=messages,
+                messages=current_span.memory,
                 system_prompt=system_prompt,
                 tools=tools,
                 **kwargs, 
@@ -647,13 +647,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         raise InterruptError(event.call_id)
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
                     # Add LLM response to conversation for next iteration
-                    messages.append(event.output)
+                    current_span.memory.append(event.output)
                     # This breaks the reference to the original messages object. We need to manually append the output to the span memory.
                     current_span._memory_dump.append(event._output_dump)
                 yield event
             
             tool_calls = [
-                content for content in messages[-1].content
+                content for content in current_span.memory[-1].content
                 if isinstance(content, ToolUseContent) and not content.is_server_tool_use
             ]
             
