@@ -239,7 +239,7 @@ async def _llm_router(
         description="Chat history containing user and LLM messages.",
     ),
     tools: list[Runnable] | None = Field(
-        default_factory=list,
+        None,
         description="List of tools/functions the LLM can call.",
     ),
     max_tokens: int | None = Field(
@@ -279,12 +279,13 @@ async def _llm_router(
     """
     model = resolve_default("model", model)
     system_prompt = resolve_default("system_prompt", system_prompt)
-    messages = resolve_default("messages", messages)
     tools = resolve_default("tools", tools)
     max_tokens = resolve_default("max_tokens", max_tokens)
     thinking = resolve_default("thinking", thinking)
     base_url = resolve_default("base_url", base_url)
     api_key = resolve_default("api_key", api_key)
+    max_retries = resolve_default("max_retries", max_retries)
+    retry_delay = resolve_default("retry_delay", retry_delay)
 
     # Convert SecretStr to str if needed
     if isinstance(base_url, SecretStr):
@@ -385,11 +386,12 @@ async def _llm_router(
         if system_prompt:
             anthropic_kwargs["system"] = system_prompt
 
-        anthropic_tools = []
-        for tool in tools:
-            anthropic_tools.append(tool.anthropic_schema)
-        if anthropic_tools:
-            anthropic_kwargs["tools"] = anthropic_tools
+        if tools:
+            anthropic_tools = []
+            for tool in tools:
+                anthropic_tools.append(tool.anthropic_schema)
+            if anthropic_tools:
+                anthropic_kwargs["tools"] = anthropic_tools
 
         if thinking:
             # {"type": "enabled", "budget_tokens": int}
@@ -417,10 +419,11 @@ async def _llm_router(
 
         responses_kwargs["input"] = sum([message.to_openai_responses_input() for message in messages], [])
 
-        responses_tools = [tool.openai_responses_schema for tool in tools]
-        if responses_tools:
-            responses_kwargs["tools"] = responses_tools
-            responses_kwargs["parallel_tool_calls"] = True
+        if tools:
+            responses_tools = [tool.openai_responses_schema for tool in tools]
+            if responses_tools:
+                responses_kwargs["tools"] = responses_tools
+                responses_kwargs["parallel_tool_calls"] = True
 
         if max_tokens:
             responses_kwargs["max_output_tokens"] = max_tokens
@@ -453,11 +456,12 @@ async def _llm_router(
             "stream_options": {"include_usage": True},
         }
 
-        chat_completions_tools = []
-        for tool in tools:
-            chat_completions_tools.append(tool.openai_chat_completions_schema)
-        if chat_completions_tools:
-            chat_completions_kwargs["tools"] = chat_completions_tools
+        if tools:
+            chat_completions_tools = []
+            for tool in tools:
+                chat_completions_tools.append(tool.openai_chat_completions_schema)
+            if chat_completions_tools:
+                chat_completions_kwargs["tools"] = chat_completions_tools
 
         if max_tokens:
             chat_completions_kwargs["max_completion_tokens"] = max_tokens
