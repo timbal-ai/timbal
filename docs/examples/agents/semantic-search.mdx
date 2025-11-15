@@ -44,9 +44,9 @@ agent = Agent(
 )
 
 # First conversation: Setting up the knowledge base
-csv_file = File.validate("/Users/estherfanyanasropero/Downloads/documents.csv")
+csv_file = File.validate("/path/to/documents.csv")
 result1 = await agent(
-    prompt=["I need to set up a technical support knowledge base. Create an 'articles' table with the columns from the CSV file /Users/estherfanyanasropero/Downloads/documents.csv and add the CSV file to the table.", csv_file]
+    prompt=["I need to set up a technical support knowledge base. Create an 'articles' table with the columns from the CSV file /path/to/documents.csv and add the CSV file to the table.", csv_file]
 ).collect()
 
 # Second conversation: Creating embeddings for semantic search
