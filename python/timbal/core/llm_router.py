@@ -44,7 +44,7 @@ from openai import (
 from pydantic import Field, SecretStr
 
 from ..errors import APIKeyNotFoundError
-from ..state import get_or_create_run_context, get_run_context
+from ..state import get_or_create_run_context
 from ..types.message import Message
 from ..utils import resolve_default
 from .runnable import Runnable
@@ -59,6 +59,9 @@ Model = Literal[
     "openai/gpt-5",
     "openai/gpt-5-mini",
     "openai/gpt-5-nano",
+    "openai/gpt-5.1",
+    "openai/gpt-5.1-mini",
+    "openai/gpt-5.1-nano",
     "openai/gpt-4.1",
     "openai/gpt-4.1-mini",
     "openai/gpt-4.1-nano",
@@ -270,6 +273,13 @@ async def _llm_router(
         1.0,
         description="Base delay in seconds between retries (uses exponential backoff).",
     ),
+    cache_control: Any = Field(
+        None,
+        description=(
+            "Cache control configuration for the LLM. Provider-specific."
+            "For Anthropic models, this should be a dictionary with 'type' and 'ttl' keys."
+        ),
+    ),
 ) -> Message: # type: ignore
     """
     Internal LLM router function.
@@ -286,6 +296,7 @@ async def _llm_router(
     api_key = resolve_default("api_key", api_key)
     max_retries = resolve_default("max_retries", max_retries)
     retry_delay = resolve_default("retry_delay", retry_delay)
+    cache_control = resolve_default("anthropic_cache_system", cache_control)
 
     # Convert SecretStr to str if needed
     if isinstance(base_url, SecretStr):
@@ -384,7 +395,14 @@ async def _llm_router(
         }
 
         if system_prompt:
-            anthropic_kwargs["system"] = system_prompt
+            if cache_control:
+                anthropic_kwargs["system"] = [{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": cache_control
+                }]
+            else:
+                anthropic_kwargs["system"] = system_prompt
 
         if tools:
             anthropic_tools = []
