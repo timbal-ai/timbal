@@ -3,7 +3,7 @@ tests:
     description: Test time functionality
     turns:
       - input:
-          text: "What time is it?"
+          prompt: "What time is it?"
         output:
           validators:
             contains: ["2024"]
@@ -16,7 +16,7 @@ tests:
     description: Test mathematical operations
     turns:
       - input:
-          text: "What is 5 + 3?"
+          prompt: "What is 5 + 3?"
         output:
           validators:
             contains: ["8"]
@@ -32,7 +32,7 @@ tests:
     description: Test greeting functionality
     turns:
       - input:
-          text: "Please greet Charlie"
+          prompt: "Please greet Charlie"
         output:
           validators:
             contains: ["Charlie"]
@@ -47,11 +47,11 @@ tests:
     description: Test multi-turn conversation
     turns:
       - input:
-          text: "Hi, my name is Alice"
+          prompt: "Hi, my name is Alice"
         output:
-          text: "Hello Alice! Nice to meet you."
+          content: "Hello Alice! Nice to meet you."
       - input:
-          text: "Can you greet me properly?"
+          prompt: "Can you greet me properly?"
         output:
           validators:
             contains: ["Alice"]

@@ -3,8 +3,8 @@ tests:
     description: Test that agent can read and process files
     turns:
       - input:
-          text: "What is the answer?"
-          files:
+          prompt:
+            - "What is the answer?"
             - "./math_question.md"
         output:
           validators:

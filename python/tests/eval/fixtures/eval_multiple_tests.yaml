@@ -3,14 +3,14 @@ tests:
     description: First test
     turns:
       - input:
-          text: "What is 2+2?"
+          prompt: "What is 2+2?"
         output:
-          text: "The answer is 4"
+          content: "The answer is 4"
   
   - name: test2
     description: Second test
     turns:
       - input:
-          text: "What is 3+3?"
+          prompt: "What is 3+3?"
         output:
-          text: "The answer is 6"
+          content: "The answer is 6"

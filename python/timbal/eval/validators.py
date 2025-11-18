@@ -8,6 +8,42 @@ from ..state import RunContext, set_run_context
 from ..types.message import Message
 
 
+def _extract_json_from_text(text: str) -> str:
+    """Extract JSON from text, handling markdown code blocks if present."""
+    text = text.strip()
+    
+    # Try to find JSON in markdown code blocks (```json or ```)
+    # Match everything between ```json or ``` and the closing ```
+    json_block_pattern = r'```(?:json)?\s*(.*?)\s*```'
+    match = re.search(json_block_pattern, text, re.DOTALL)
+    if match:
+        # Extract the content inside the code block and try to parse it
+        content = match.group(1).strip()
+        # If it looks like JSON (starts with {), return it
+        if content.startswith('{'):
+            return content
+    
+    # Try to find JSON object directly (simple pattern for objects)
+    # Match from first { to matching closing }
+    start_idx = text.find('{')
+    if start_idx != -1:
+        brace_count = 0
+        end_idx = start_idx
+        for i in range(start_idx, len(text)):
+            if text[i] == '{':
+                brace_count += 1
+            elif text[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    end_idx = i + 1
+                    break
+        if brace_count == 0:
+            return text[start_idx:end_idx]
+    
+    # If no JSON found, return original text
+    return text
+
+
 class Validator:
     """Wraps a validator function to provide a better __repr__ and unified interface.
     This class is intended only for internal use.
@@ -39,9 +75,69 @@ def contains_steps(ref: list[dict]):
     """
     Validate that the steps contain the given tool names and, optionally, input key-value substrings.
     Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input substrings).
+    Input values can be:
+    - Direct values: will check if the value is contained in the step input
+    - Dicts with 'validators': will apply validators to the step input value
+    If an input value is a list, it will match if any of the values in the list is found (OR logic).
     """
     if not isinstance(ref, list):
         raise ValueError(f"Invalid contains_steps validator: expected list, got {type(ref)}")
+
+    def _check_value_match(step_val, expected_val):
+        """Check if step_val contains expected_val. If expected_val is a list, match if any value matches."""
+        if step_val is None:
+            return False
+        if isinstance(expected_val, list):
+            # OR logic: match if any value in the list is found
+            return any(str(v) in str(step_val) for v in expected_val)
+        else:
+            # Single value: check if it's contained
+            return str(expected_val) in str(step_val)
+    
+    def _apply_validators_to_value(step_val, validators_spec):
+        """Apply validators to a step input value. Returns True if all validators pass."""
+        from ..types.content import TextContent
+        from ..types.message import Message
+        
+        if not isinstance(validators_spec, dict):
+            return False
+        
+        # Create a message with the step value for validation
+        validation_message = Message(role="user", content=[TextContent(text=str(step_val) if step_val is not None else "")])
+        
+        # Process each validator (using functions defined in this module)
+        for validator_name, validator_arg in validators_spec.items():
+            if validator_name == "contains":
+                # Apply contains validator
+                validator = contains_output(validator_arg)
+                try:
+                    validator(validation_message)
+                except EvalError:
+                    return False
+            elif validator_name == "not_contains":
+                validator = not_contains_output(validator_arg)
+                try:
+                    validator(validation_message)
+                except EvalError:
+                    return False
+            elif validator_name == "equals":
+                validator = equals(validator_arg)
+                try:
+                    validator(validation_message)
+                except EvalError:
+                    return False
+            elif validator_name == "regex":
+                validator = regex(validator_arg)
+                try:
+                    validator(validation_message)
+                except EvalError:
+                    return False
+            # Add more validators as needed
+            else:
+                # Unknown validator, skip
+                continue
+        
+        return True
 
     def validator(steps: list[dict]):
         for expected in ref:
@@ -59,9 +155,18 @@ def contains_steps(ref: list[dict]):
                     all_match = True
                     for k, v in input_dict.items():
                         step_val = step_input.get(k)
-                        if step_val is None or str(v) not in str(step_val):
-                            all_match = False
-                            break
+                        
+                        # Check if v is a dict with validators
+                        if isinstance(v, dict) and "validators" in v:
+                            # Apply validators to the step value
+                            if not _apply_validators_to_value(step_val, v["validators"]):
+                                all_match = False
+                                break
+                        else:
+                            # Direct value matching
+                            if not _check_value_match(step_val, v):
+                                all_match = False
+                                break
                     if all_match:
                         found = True
                         break
@@ -77,9 +182,21 @@ def not_contains_steps(ref: list[dict]):
     """
     Validate that the steps do not contain the given tool names and, optionally, input key-value substrings.
     Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input substrings).
+    If an input value is a list, it will match if any of the values in the list is found (OR logic).
     """
     if not isinstance(ref, list):
         raise ValueError(f"Invalid not_contains_steps validator: expected list, got {type(ref)}")
+
+    def _check_value_match(step_val, expected_val):
+        """Check if step_val contains expected_val. If expected_val is a list, match if any value matches."""
+        if step_val is None:
+            return False
+        if isinstance(expected_val, list):
+            # OR logic: match if any value in the list is found
+            return any(str(v) in str(step_val) for v in expected_val)
+        else:
+            # Single value: check if it's contained
+            return str(expected_val) in str(step_val)
 
     def validator(steps: list[dict]):
         for expected in ref:
@@ -102,7 +219,7 @@ def not_contains_steps(ref: list[dict]):
                     all_match = True
                     for k, v in input_dict.items():
                         step_val = step_input.get(k)
-                        if step_val is None or str(v) not in str(step_val):
+                        if not _check_value_match(step_val, v):
                             all_match = False
                             break
                     if all_match:
@@ -117,7 +234,7 @@ def not_contains_steps(ref: list[dict]):
 
 
 def contains_output(ref: str | list[str]):
-    """Validate that the message contains the given substrings."""
+    """Validate that the message contains the given substrings (case-insensitive)."""
     if not isinstance(ref, list):
         ref = [ref]
     
@@ -128,8 +245,10 @@ def contains_output(ref: str | list[str]):
         if not message_text:
             raise EvalError("Message does not contain any text to validate.")
 
+        # Case-insensitive comparison
+        message_text_lower = message_text.lower()
         for v in ref:
-            if v not in message_text:
+            if v.lower() not in message_text_lower:
                 raise EvalError(f"Message does not contain '{v}'.")
 
     return Validator(validator, "contains", ref)
@@ -154,10 +273,10 @@ def not_contains_output(ref: str | list[str]):
     return Validator(validator, "not_contains", ref)
 
 
-def exact_output(ref: str):
+def equals(ref: str):
     """Validate that the message exactly matches the given text."""
     if not isinstance(ref, str):
-        raise ValueError(f"Invalid exact_output validator: expected str, got {type(ref)}")
+        raise ValueError(f"Invalid equals validator: expected str, got {type(ref)}")
 
     def validator(message: Message):
         message_text = message.collect_text()
@@ -167,7 +286,7 @@ def exact_output(ref: str):
         if message_text.strip() != ref.strip():
             raise EvalError(f"Message does not exactly match expected output. Expected: '{ref}', Got: '{message_text}'")
 
-    return Validator(validator, "exact_output", ref)
+    return Validator(validator, "equals", ref)
 
 
 def regex(ref: str):
@@ -228,7 +347,9 @@ You must respond with a valid JSON object containing:
         
         res_text = res.output.content[0].text
         try:
-            res = json.loads(res_text)
+            # Extract JSON from markdown code blocks if present
+            json_text = _extract_json_from_text(res_text)
+            res = json.loads(json_text)
         except json.JSONDecodeError as e:
             raise EvalError(f"Semantic validator agent returned invalid JSON: {res_text}. Error: {str(e)}")
 
@@ -265,9 +386,21 @@ def contains_any_steps(ref: list[dict]):
     """
     Validate that the steps contain any of the given tool names and, optionally, input key-value substrings (OR logic).
     Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input substrings).
+    If an input value is a list, it will match if any of the values in the list is found (OR logic).
     """
     if not isinstance(ref, list):
         raise ValueError(f"Invalid contains_any_steps validator: expected list, got {type(ref)}")
+
+    def _check_value_match(step_val, expected_val):
+        """Check if step_val contains expected_val. If expected_val is a list, match if any value matches."""
+        if step_val is None:
+            return False
+        if isinstance(expected_val, list):
+            # OR logic: match if any value in the list is found
+            return any(str(v) in str(step_val) for v in expected_val)
+        else:
+            # Single value: check if it's contained
+            return str(expected_val) in str(step_val)
 
     def validator(steps: list[dict]):
         for expected in ref:
@@ -284,7 +417,7 @@ def contains_any_steps(ref: list[dict]):
                     all_match = True
                     for k, v in input_dict.items():
                         step_val = step_input.get(k)
-                        if step_val is None or str(v) not in str(step_val):
+                        if not _check_value_match(step_val, v):
                             all_match = False
                             break
                     if all_match:
@@ -340,7 +473,9 @@ You must respond with a valid JSON object containing:
         
         res_text = res.output.content[0].text
         try:
-            res = json.loads(res_text)
+            # Extract JSON from markdown code blocks if present
+            json_text = _extract_json_from_text(res_text)
+            res = json.loads(json_text)
         except json.JSONDecodeError as e:
             raise EvalError(f"Semantic validator agent returned invalid JSON: {res_text}. Error: {str(e)}")
 

@@ -3,10 +3,13 @@ tests:
     description: Test agent with nested agent tool
     turns:
       - input:
-          text: "Please calculate 5 + 3 using the math helper"
+          prompt: "Please calculate 5 + 3 using the math helper"
         output:
           validators:
             contains: ["8"]
         steps:
-          contains: ["math_helper_agent"]  # Only the outer agent tool should be captured
-          not_contains: ["add"]  # Inner tool should NOT be captured
+          validators:
+            contains:
+              - name: math_helper_agent  # Only the outer agent tool should be captured
+            not_contains:
+              - name: add  # Inner tool should NOT be captured

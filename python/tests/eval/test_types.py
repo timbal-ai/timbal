@@ -18,68 +18,65 @@ TEST_FILE = Path(__file__).parent / "fixtures" / "math_question.md"
 class TestInput:
     """Test the Input model."""
 
-    def test_input_text_only(self):
-        """Test creating input with text only."""
-        input_obj = Input(text="Hello, world!")
+    def test_input_string(self):
+        """Test creating input with string (converts to prompt list)."""
+        input_obj = Input(prompt="Hello, world!")
         
-        assert input_obj.text == "Hello, world!"
-        assert input_obj.files is None
+        assert input_obj.prompt == ["Hello, world!"]
 
-    def test_input_with_files(self):
-        """Test creating input with files."""
-        files = [File.validate(str(TEST_FILE))]
-        input_obj = Input(text="Process this file", files=files)
+    def test_input_prompt_list(self):
+        """Test creating input with prompt as list."""
+        input_obj = Input(prompt=["Hello", "world"])
         
-        assert input_obj.text == "Process this file"
-        assert input_obj.files == files
-        assert len(input_obj.files) == 1
+        assert input_obj.prompt == ["Hello", "world"]
+
+    def test_input_with_files_in_prompt(self):
+        """Test creating input with files in prompt list."""
+        input_obj = Input(prompt=["Process this file", str(TEST_FILE)])
+        
+        assert len(input_obj.prompt) == 2
+        assert input_obj.prompt[0] == "Process this file"
+        assert input_obj.prompt[1] == str(TEST_FILE)
 
     def test_input_files_only(self):
         """Test creating input with files only (no text)."""
-        files = [File.validate(str(TEST_FILE))]
-        input_obj = Input(files=files)
+        input_obj = Input(prompt=[str(TEST_FILE)])
         
-        assert input_obj.text is None
-        assert input_obj.files == files
+        assert len(input_obj.prompt) == 1
+        assert input_obj.prompt[0] == str(TEST_FILE)
 
     def test_input_empty(self):
         """Test creating empty input."""
         with pytest.raises(ValidationError):
-            Input()  # Should require at least text or files
+            Input()  # Should require at least prompt
 
     def test_input_validation(self):
         """Test input validation."""
         # Valid inputs
-        Input(text="Hello")
-        Input(files=[File.validate(str(TEST_FILE))])
-        Input(text="Hello", files=[File.validate(str(TEST_FILE))])
+        Input(prompt="Hello")
+        Input(prompt=[str(TEST_FILE)])
+        Input(prompt=["Hello", str(TEST_FILE)])
         
-        # Invalid - both None
+        # Invalid - prompt is None
         with pytest.raises(ValidationError):
-            Input(text=None, files=None)
+            Input(prompt=None)
 
-    def test_input_empty_files_list(self):
-        """Test input with empty files list."""
-        input_obj = Input(text="Hello", files=[])
-        assert input_obj.files == []
+    def test_input_empty_prompt_list(self):
+        """Test input with empty prompt list."""
+        with pytest.raises(ValidationError):
+            Input(prompt=[])  # Should require at least one item
 
     def test_input_multiple_files(self):
-        """Test input with multiple files."""
-        files = [File.validate(str(TEST_FILE)), File.validate(str(TEST_FILE))]
-        input_obj = Input(text="Process these files", files=files)
+        """Test input with multiple files in prompt."""
+        input_obj = Input(prompt=["Process these files", str(TEST_FILE), str(TEST_FILE)])
         
-        assert len(input_obj.files) == 2
-        assert str(input_obj.files[0]) == str(TEST_FILE)
-        assert str(input_obj.files[1]) == str(TEST_FILE)
+        assert len(input_obj.prompt) == 3
+        assert input_obj.prompt[0] == "Process these files"
 
     def test_input_relative_path_resolution(self):
         """Test that relative paths are resolved correctly."""
-        # Create an input with a relative path string
-        input_obj = Input(text="Process this file", files=["./math_question.md"])
-        
-        # Test without test_file_dir (should fail validation)
-        with pytest.raises(ValueError):
-            input_obj.to_message(role="user")
+        # Create an input with a relative path string in prompt
+        input_obj = Input(prompt=["Process this file", "./math_question.md"])
         
         # Test with test_file_dir (should resolve)
         test_file_dir = Path(__file__).parent / "fixtures"
@@ -91,8 +88,8 @@ class TestInput:
         
     def test_input_absolute_path_no_resolution(self):
         """Test that absolute paths are not modified."""
-        # Create an input with an absolute path
-        input_obj = Input(text="Process this file", files=[str(TEST_FILE)])
+        # Create an input with an absolute path in prompt
+        input_obj = Input(prompt=["Process this file", str(TEST_FILE)])
         
         # Test with test_file_dir (should not change absolute path)
         test_file_dir = Path(__file__).parent / "fixtures"
@@ -105,50 +102,57 @@ class TestInput:
 class TestOutput:
     """Test the Output model."""
 
-    def test_output_text_only(self):
-        """Test creating output with text only."""
-        output = Output(text="Hello, world!")
+    def test_output_content_only(self):
+        """Test creating output with content only."""
+        output = Output(content=["Hello, world!"])
         
-        assert output.text == "Hello, world!"
+        assert output.content == ["Hello, world!"]
         assert output.validators is None
 
     def test_output_validators_only(self):
         """Test creating output with validators only."""
-        validators = [contains_output("hello")]
-        output = Output(validators=validators)
+        output = Output(validators={"contains": ["hello"]})
         
-        assert output.text is None
-        assert output.validators == validators
+        assert output.content is None
+        assert output.validators is not None
+        assert len(output.validators) == 1
 
-    def test_output_text_and_validators(self):
-        """Test creating output with both text and validators."""
-        validators = [contains_output("hello")]
-        output = Output(text="Hello", validators=validators)
+    def test_output_content_and_validators(self):
+        """Test creating output with both content and validators."""
+        output = Output(content=["Hello"], validators={"contains": ["hello"]})
         
-        assert output.text == "Hello"
-        assert output.validators == validators
+        assert output.content == ["Hello"]
+        assert output.validators is not None
 
     def test_output_empty(self):
         """Test creating empty output."""
         output = Output()
         
-        assert output.text is None
+        # Content should be None when not provided
+        assert output.content is None
+        # Validators should be None when not provided
         assert output.validators is None
 
     def test_output_multiple_validators(self):
         """Test output with multiple validators."""
-        validators = [
-            contains_output("hello"),
-            contains_output("world")
-        ]
-        output = Output(validators=validators)
+        output = Output(validators={"contains": ["hello", "world"]})
         
-        assert len(output.validators) == 2
+        assert output.validators is not None
+        assert len(output.validators) == 1
 
-    def test_output_empty_validators_list(self):
-        """Test output with empty validators list."""
-        output = Output(validators=[])
-        assert output.validators == []
+    def test_output_string_content(self):
+        """Test output with string content (converts to list)."""
+        output = Output(content="Hello")
+        
+        assert output.content == ["Hello"]
+
+    def test_output_with_files_in_content(self):
+        """Test output with files in content list."""
+        output = Output(content=["Hello", str(TEST_FILE)])
+        
+        assert len(output.content) == 2
+        assert output.content[0] == "Hello"
+        assert output.content[1] == str(TEST_FILE)
 
 
 class TestSteps:
@@ -187,7 +191,7 @@ class TestTurn:
 
     def test_turn_basic(self):
         """Test creating a basic turn."""
-        input_obj = Input(text="Hello")
+        input_obj = Input(prompt="Hello")
         turn = Turn(input=input_obj)
         
         assert turn.input == input_obj
@@ -197,8 +201,8 @@ class TestTurn:
 
     def test_turn_full(self):
         """Test creating a turn with all fields."""
-        input_obj = Input(text="Hello")
-        output_obj = Output(text="Hi there!")
+        input_obj = Input(prompt="Hello")
+        output_obj = Output(content=["Hi there!"])
         steps_obj = Steps(validators=[contains_steps([{"name": "greet"}])])
         usage = [{"max": 1000, "type": "tokens"}]
         
@@ -221,8 +225,8 @@ class TestTurn:
 
     def test_turn_with_output_validators(self):
         """Test turn with output validators."""
-        input_obj = Input(text="What is 2+2?")
-        output_obj = Output(validators=[contains_output("4")])
+        input_obj = Input(prompt="What is 2+2?")
+        output_obj = Output(validators={"contains": ["4"]})
         
         turn = Turn(input=input_obj, output=output_obj)
         
@@ -231,7 +235,7 @@ class TestTurn:
 
     def test_turn_usage_constraints(self):
         """Test turn with usage constraints."""
-        input_obj = Input(text="Hello")
+        input_obj = Input(prompt="Hello")
         usage = [
             {"max": 100, "type": "input_tokens"},
             {"min": 10, "type": "output_tokens"}
@@ -248,7 +252,7 @@ class TestTest:
 
     def test_test_basic(self):
         """Test creating a basic test."""
-        turn = Turn(input=Input(text="Hello"))
+        turn = Turn(input=Input(prompt="Hello"))
         test = Test(name="test1", turns=[turn])
         
         assert test.name == "test1"
@@ -257,7 +261,7 @@ class TestTest:
 
     def test_test_with_description(self):
         """Test creating test with description."""
-        turn = Turn(input=Input(text="Hello"))
+        turn = Turn(input=Input(prompt="Hello"))
         test = Test(
             name="test1",
             description="A simple test",
@@ -270,8 +274,8 @@ class TestTest:
 
     def test_test_multiple_turns(self):
         """Test test with multiple turns."""
-        turn1 = Turn(input=Input(text="Hello"))
-        turn2 = Turn(input=Input(text="How are you?"))
+        turn1 = Turn(input=Input(prompt="Hello"))
+        turn2 = Turn(input=Input(prompt="How are you?"))
         
         test = Test(name="multi_turn", turns=[turn1, turn2])
         
@@ -306,7 +310,7 @@ class TestTestSuite:
 
     def test_test_suite_basic(self):
         """Test creating a basic test suite."""
-        turn = Turn(input=Input(text="Hello"))
+        turn = Turn(input=Input(prompt="Hello"))
         test = Test(name="test1", turns=[turn])
         test_suite = TestSuite(tests=[test])
         
@@ -314,8 +318,8 @@ class TestTestSuite:
 
     def test_test_suite_multiple_tests(self):
         """Test test suite with multiple tests."""
-        turn1 = Turn(input=Input(text="Hello"))
-        turn2 = Turn(input=Input(text="Goodbye"))
+        turn1 = Turn(input=Input(prompt="Hello"))
+        turn2 = Turn(input=Input(prompt="Goodbye"))
         test1 = Test(name="test1", turns=[turn1])
         test2 = Test(name="test2", turns=[turn2])
         
@@ -332,7 +336,7 @@ class TestTestSuite:
 
     def test_test_suite_from_list(self):
         """Test creating test suite from list (validator)."""
-        turn = Turn(input=Input(text="Hello"))
+        turn = Turn(input=Input(prompt="Hello"))
         test = Test(name="test1", turns=[turn])
         
         # Should be able to create from list directly using model_validate
@@ -475,13 +479,12 @@ class TestTypeIntegration:
         """Test creating a complete evaluation structure."""
         # Create a complete test with all components
         input_obj = Input(
-            text="Calculate 2 + 3",
-            files=[File.validate(str(TEST_FILE))]
+            prompt=["Calculate 2 + 3", str(TEST_FILE)]
         )
         
         output_obj = Output(
-            text="The result is 5",
-            validators=[contains_output("5")]
+            content=["The result is 5"],
+            validators={"contains": ["5"]}
         )
         
         steps_obj = Steps(
@@ -505,27 +508,31 @@ class TestTypeIntegration:
         
         # Verify the complete structure
         assert test_suite.tests[0].name == "math_test"
-        assert test_suite.tests[0].turns[0].input.text == "Calculate 2 + 3"
-        assert test_suite.tests[0].turns[0].output.text == "The result is 5"
-        assert len(test_suite.tests[0].turns[0].input.files) == 1
-        assert len(test_suite.tests[0].turns[0].output.validators) == 1
+        assert test_suite.tests[0].turns[0].input.prompt[0] == "Calculate 2 + 3"
+        assert test_suite.tests[0].turns[0].output.content[0] == "The result is 5"
+        assert len(test_suite.tests[0].turns[0].input.prompt) == 2  # text + file
+        assert test_suite.tests[0].turns[0].output.validators is not None
         assert len(test_suite.tests[0].turns[0].steps.validators) == 1
 
     def test_serialization_roundtrip(self):
         """Test that types can be serialized and deserialized."""
         # Create a test object
         turn = Turn(
-            input=Input(text="Hello"),
-            output=Output(validators=[contains_output("hi")])
+            input=Input(prompt="Hello"),
+            output=Output(validators={"contains": ["hi"]})
         )
         test = Test(name="test1", turns=[turn])
         
         # Convert to dict and back
         test_dict = test.model_dump()
+        # to_dict may have issues with validators, so use model_dump_json and parse
         reconstructed = Test.model_validate(test_dict)
         
         assert reconstructed.name == test.name
         assert len(reconstructed.turns) == len(test.turns)
+        # Verify the structure is preserved
+        assert reconstructed.turns[0].input.prompt == ["Hello"]
+        assert reconstructed.turns[0].output.validators is not None
 
     def test_extra_fields_ignored(self):
         """Test that extra fields are ignored due to ConfigDict settings."""
@@ -546,9 +553,9 @@ class TestTypeValidation:
 
     def test_input_validation_errors(self):
         """Test various input validation errors."""
-        # Invalid file type - test with a non-string, non-File object
+        # Invalid - prompt is None
         with pytest.raises(ValidationError):
-            Input(text="Hello", files=[123])  # Should be File object or string, not int
+            Input(prompt=None)  # Should require prompt
 
     def test_turn_validation_errors(self):
         """Test turn validation errors."""
