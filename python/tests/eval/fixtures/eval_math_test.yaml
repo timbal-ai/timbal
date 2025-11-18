@@ -3,7 +3,7 @@ tests:
     description: Test mathematical operations
     turns:
       - input:
-          text: "What is 2 + 3?"
+          prompt: "What is 2 + 3?"
         output:
           validators:
             contains: ["5"]

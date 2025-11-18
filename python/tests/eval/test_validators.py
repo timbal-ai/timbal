@@ -7,7 +7,7 @@ from timbal.eval.validators import (
     contains_any_steps,
     contains_output,
     contains_steps,
-    exact_output,
+    equals,
     regex,
     semantic_output,
 )
@@ -84,15 +84,15 @@ class TestContainsOutput:
         # Should not raise an exception for matching content
         validator(message)  # No exception means success
 
-    def test_contains_output_case_sensitive(self):
-        """Test contains_output is case sensitive."""
-        validator = contains_output("Hello")  # match case
+    def test_contains_output_case_insensitive(self):
+        """Test contains_output is case insensitive."""
+        validator = contains_output("hello")  # lowercase
         message = Message.validate({
             "role": "assistant", 
-            "content": "Hello, world!"
+            "content": "Hello, world!"  # uppercase
         })
         
-        # Should not raise an exception for matching content
+        # Should not raise an exception for matching content (case insensitive)
         validator(message)
 
     def test_contains_output_failure(self):
@@ -222,6 +222,33 @@ class TestContainsSteps:
         with pytest.raises(ValueError):
             contains_steps("invalid_format")
 
+    def test_contains_steps_with_multiple_values(self):
+        """Test contains_steps with list of possible values for input field (OR logic)."""
+        validator = contains_steps([{
+            "name": "greet_person",
+            "input": {"name": ["emma", "Emma"]}
+        }])
+        steps = [
+            {"tool": "greet_person", "input": {"name": "Emma"}, "output": "Hello, Emma!"}
+        ]
+        
+        # Should not raise exception when any value in list matches
+        validator(steps)
+
+    def test_contains_steps_with_multiple_values_no_match(self):
+        """Test contains_steps with list of values where none match."""
+        validator = contains_steps([{
+            "name": "greet_person",
+            "input": {"name": ["alice", "bob"]}
+        }])
+        steps = [
+            {"tool": "greet_person", "input": {"name": "Emma"}, "output": "Hello, Emma!"}
+        ]
+        
+        # Should raise EvalError when none of the values match
+        with pytest.raises(EvalError):
+            validator(steps)
+
 
 class TestSemanticOutput:
     """Test the semantic_output validator."""
@@ -259,19 +286,19 @@ class TestSemanticOutput:
         assert validator.name == "semantic"
 
 
-class TestExactOutput:
-    """Test the exact_output validator."""
+class TestEquals:
+    """Test the equals validator."""
 
-    def test_exact_output_basic(self):
-        """Test basic exact_output functionality."""
-        validator = exact_output("Hello, world!")
+    def test_equals_basic(self):
+        """Test basic equals functionality."""
+        validator = equals("Hello, world!")
         
         assert isinstance(validator, Validator)
-        assert validator.name == "exact_output"
+        assert validator.name == "equals"
 
-    def test_exact_output_success(self):
-        """Test exact_output with exact match."""
-        validator = exact_output("Hello, world!")
+    def test_equals_success(self):
+        """Test equals with exact match."""
+        validator = equals("Hello, world!")
         message = Message.validate({
             "role": "assistant",
             "content": "Hello, world!"
@@ -280,9 +307,9 @@ class TestExactOutput:
         # Should not raise an exception for exact match
         validator(message)
 
-    def test_exact_output_failure(self):
-        """Test exact_output with non-exact match."""
-        validator = exact_output("Hello, world!")
+    def test_equals_failure(self):
+        """Test equals with non-exact match."""
+        validator = equals("Hello, world!")
         message = Message.validate({
             "role": "assistant",
             "content": "Hello, World!"  # Different case
@@ -292,15 +319,15 @@ class TestExactOutput:
         with pytest.raises(EvalError):
             validator(message)
 
-    def test_exact_output_whitespace_handling(self):
-        """Test exact_output handles whitespace by stripping."""
-        validator = exact_output("Hello")
+    def test_equals_whitespace_handling(self):
+        """Test equals handles whitespace by stripping."""
+        validator = equals("Hello")
         message = Message.validate({
             "role": "assistant",
             "content": " Hello "  # Extra whitespace should be stripped
         })
         
-        # Should not raise exception because exact_output strips whitespace
+        # Should not raise exception because equals strips whitespace
         validator(message)
 
 

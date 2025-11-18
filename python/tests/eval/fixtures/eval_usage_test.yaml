@@ -3,7 +3,7 @@ tests:
     description: Test with usage constraints
     turns:
       - input:
-          text: "Hello"
+          prompt: "Hello"
         output:
           validators:
             contains: ["hello"]

@@ -9,6 +9,8 @@ class EvalResult(BaseModel):
     input: str | dict
     reason: list[str] | None = None
     execution_error: dict | None = None
+    input_passed: bool | None = None
+    input_explanations: list[str] | None = None
     output_passed: bool | None = None
     output_explanations: list[str] | None = None
     actual_output: str | dict
@@ -25,6 +27,8 @@ class EvalTestSuiteResult(BaseModel):
     total_files: int = 0
     total_tests: int = 0
     total_turns: int = 0
+    inputs_passed: int = 0
+    inputs_failed: int = 0
     outputs_passed: int = 0
     outputs_failed: int = 0
     steps_passed: int = 0

@@ -10,6 +10,7 @@ from timbal.eval.types.result import EvalTestSuiteResult
 from timbal.eval.types.steps import Steps
 from timbal.eval.types.test_suite import TestSuite
 from timbal.eval.types.turn import Turn
+from timbal.state import get_run_context
 from timbal.types.message import Message
 
 # Get the fixtures directory path
@@ -83,7 +84,7 @@ class TestEvalSteps:
         turn = test.turns[0]
         
         assert isinstance(turn.input, Input)
-        assert turn.input.text == "What is 2 + 3?"
+        assert turn.input.prompt == ["What is 2 + 3?"]
         assert isinstance(turn.output, Output)
         assert isinstance(turn.steps, Steps)
         
@@ -181,18 +182,20 @@ class TestEvalOutput:
 
     @pytest.mark.asyncio
     async def test_eval_output_with_text_only_yaml(self):
-        """Test output evaluation with text only from YAML (uses semantic validation)."""
+        """Test output evaluation with content only from YAML (no validation, just fixed record)."""
         
         yaml_path = FIXTURES_DIR / "eval_multiple_tests.yaml"
         with open(yaml_path) as f:
             yaml_data = yaml.safe_load(f)
         test_suite = TestSuite.model_validate(yaml_data)
-        test = test_suite.tests[0]  # First test has text output
+        test = test_suite.tests[0]  # First test has content output
         turn = test.turns[0]
         
         assert isinstance(turn.input, Input)
         assert isinstance(turn.output, Output)
-        assert turn.output.text is not None
+        # Output has content but no validators (fixed record)
+        assert turn.output.content is not None
+        assert turn.output.validators is None
         
         message = Message.validate({
             "role": "assistant", 
@@ -201,15 +204,16 @@ class TestEvalOutput:
         
         success, errors = await eval_output(turn, message)
         
-        assert isinstance(success, bool)
-        assert isinstance(errors, list)
+        # When there are no validators, eval_output returns None
+        assert success is None
+        assert errors == []
 
     @pytest.mark.asyncio
     async def test_eval_output_no_output_yaml(self):
         """Test output evaluation when no output is specified in YAML."""
         
         # Create a minimal turn without output for testing
-        turn = Turn(input=Input(text="Hello"))
+        turn = Turn(input=Input(prompt="Hello"))
         
         # Validate that turn without output works
         assert isinstance(turn.input, Input)
@@ -222,7 +226,7 @@ class TestEvalOutput:
         
         success, errors = await eval_output(turn, message)
         
-        assert success is True  # Should pass when no output specified
+        assert success is None  # Returns None when no output specified (nothing to validate)
         assert errors == []
 
 
@@ -381,6 +385,36 @@ class TestRunTurn:
         assert test_results.total_turns == 1
         assert test_results.execution_errors >= 0  # Should handle the error gracefully
 
+
+    @pytest.mark.asyncio
+    async def test_pre_hook_persistence_with_yaml_fixture(self):
+        """Test pre_hook persistence using YAML fixture."""
+        
+        yaml_path = FIXTURES_DIR / "eval_pre_hook_persistence.yaml"
+        
+        async def pre_hook():
+            span = get_run_context().current_span()
+            prompt = span.input.get("prompt", "")
+            if isinstance(prompt, list):
+                prompt_text = " ".join(str(p) for p in prompt if not hasattr(p, 'path'))
+            else:
+                prompt_text = str(prompt)
+            # Set points as string "10" to match validator expectation
+            if "premium" in prompt_text:
+                # First turn: user is premium, set points to 10
+                span.input["points"] = "10"
+            return None
+
+        agent = Agent(name="pre_hook_persistence_agent", model="openai/gpt-4.1-mini", pre_hook=pre_hook)
+        test_results = EvalTestSuiteResult()
+        
+        # Run the full eval which handles multi-turn conversations
+        result = await eval_file(yaml_path, agent, test_results)
+        
+        # The test has 2 turns, and the second turn expects "10" in the output
+        # This tests that the pre_hook can set values that persist across turns
+        assert isinstance(result, EvalTestSuiteResult)
+        assert test_results.total_turns == 2
 
 class TestEngineIntegration:
     """Integration tests for the eval engine."""

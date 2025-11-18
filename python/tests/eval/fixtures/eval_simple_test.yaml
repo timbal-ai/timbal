@@ -3,7 +3,7 @@ tests:
     description: A basic test case
     turns:
       - input:
-          text: "Hello"
+          prompt: "Hello"
         output:
           validators:
             contains: ["hello"]
