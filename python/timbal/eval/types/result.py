@@ -19,8 +19,6 @@ class EvalResult(BaseModel):
     steps_explanations: list[str] | None = None
     actual_steps: list[dict[str, Any]] | None = None
     expected_steps: str | dict | None = None
-    usage_passed: bool | None = None
-    usage_explanations: list[str] | None = None
 
 
 class EvalTestSuiteResult(BaseModel):
@@ -33,7 +31,5 @@ class EvalTestSuiteResult(BaseModel):
     outputs_failed: int = 0
     steps_passed: int = 0
     steps_failed: int = 0
-    usage_passed: int = 0
-    usage_failed: int = 0
     execution_errors: int = 0
     tests_failed: list[EvalResult] = []

@@ -5,7 +5,20 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from ...types.file import File
 from ...types.message import Message
-from ..validators import Validator, contains_output, not_contains_output, equals, regex, semantic_output, contains_any_output
+from ..validators import (
+    contains_any_output,
+    contains_output,
+    equals,
+    not_contains_output,
+    regex,
+    semantic_output,
+)
+from ..validators import (
+    time as time_validator,
+)
+from ..validators import (
+    usage as usage_validator,
+)
 
 
 class Input(BaseModel):
@@ -100,32 +113,42 @@ class Input(BaseModel):
     @field_validator("validators", mode="before")
     @classmethod
     def validate_validators(cls, v):
-        """Converts validator specifications from a dictionary (e.g., YAML) into Validator instances per key.
-        Only processes if it looks like per-key validators (values are dicts with validator names).
-        Otherwise returns as-is for Output to handle.
+        """Converts validator specifications from a dictionary (e.g., YAML) into Validator instances.
+        Supports both per-key validators (values are dicts with validator names) and top-level validators
+        (keys are validator names like "time", "usage").
         """
         if v is None:
             return None
         
         if not isinstance(v, dict):
-            # Not a dict, let Output handle it or return as-is
+            # Not a dict, return as-is
             return v
         
         # Check if this looks like per-key validators (values are dicts with validator names)
-        # or top-level validators (keys are validator names like "contains")
+        # or top-level validators (keys are validator names like "time", "usage")
         is_per_key = False
         for key, value in v.items():
             # If value is a dict with validator names, it's per-key
-            if isinstance(value, dict) and any(k in ("contains", "not_contains", "equals", "regex", "semantic", "contains_any") for k in value.keys()):
+            if isinstance(value, dict) and any(k in ("contains", "not_contains", "equals", "regex", "semantic", "contains_any", "time", "usage") for k in value.keys()):
                 is_per_key = True
                 break
         
-        # If keys are validator names (top-level), don't process here - let Output handle it
-        if not is_per_key and any(k in ("contains", "not_contains", "equals", "regex", "semantic", "contains_any") for k in v.keys()):
-            return v  # Return as-is for Output to process
+        # If keys are top-level validators (time, usage), process them
+        if not is_per_key and any(k in ("time", "usage") for k in v.keys()):
+            # Process top-level validators for Input (time, usage)
+            result = {}
+            for validator_name, validator_arg in v.items():
+                if validator_name == "time":
+                    result[validator_name] = [time_validator(validator_arg)]
+                elif validator_name == "usage":
+                    result[validator_name] = [usage_validator(validator_arg)]
+                else:
+                    # Unknown top-level validator for Input
+                    raise ValueError(f"Unknown top-level validator '{validator_name}' for Input. Only 'time' and 'usage' are supported.")
+            return result
         
         if not is_per_key:
-            # Doesn't look like per-key validators, return as-is
+            # Doesn't look like per-key validators or top-level validators, return as-is
             return v
         
         # Process per-key validators
@@ -149,7 +172,8 @@ class Input(BaseModel):
                 elif validator_name == "contains_any":
                     validators.append(contains_any_output(validator_arg))
                 else:
-                    raise ValueError(f"Unknown validator '{validator_name}' for key '{key}'")
+                    # time and usage should not be per-key validators - they validate turn metrics, not key values
+                    raise ValueError(f"Validator '{validator_name}' cannot be used as a per-key validator. Use it as a top-level validator in input.validators instead.")
             
             result[key] = validators
         
@@ -238,15 +262,24 @@ class Input(BaseModel):
             # Convert validators back to dict format
             validators_dict = {}
             for key, validators in self.validators.items():
-                validators_dict[key] = {}
-                for v in validators:
-                    validator_name = getattr(v, "name", "unknown")
-                    validator_ref = getattr(v, "ref", None)
-                    if validator_name in validators_dict[key]:
-                        if not isinstance(validators_dict[key][validator_name], list):
-                            validators_dict[key][validator_name] = [validators_dict[key][validator_name]]
-                        validators_dict[key][validator_name].append(validator_ref)
-                    else:
-                        validators_dict[key][validator_name] = validator_ref
+                if key in ("time", "usage"):
+                    # Top-level validators
+                    if validators and len(validators) > 0:
+                        validator = validators[0]
+                        validator_name = getattr(validator, "name", "unknown")
+                        validator_ref = getattr(validator, "ref", None)
+                        validators_dict[validator_name] = validator_ref
+                else:
+                    # Per-key validators
+                    validators_dict[key] = {}
+                    for v in validators:
+                        validator_name = getattr(v, "name", "unknown")
+                        validator_ref = getattr(v, "ref", None)
+                        if validator_name in validators_dict[key]:
+                            if not isinstance(validators_dict[key][validator_name], list):
+                                validators_dict[key][validator_name] = [validators_dict[key][validator_name]]
+                            validators_dict[key][validator_name].append(validator_ref)
+                        else:
+                            validators_dict[key][validator_name] = validator_ref
             d["validators"] = validators_dict
         return d

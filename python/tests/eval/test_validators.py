@@ -10,7 +10,10 @@ from timbal.eval.validators import (
     equals,
     regex,
     semantic_output,
+    time,
+    usage,
 )
+from timbal.state import RunContext, set_run_context
 from timbal.types.message import Message
 
 
@@ -652,4 +655,526 @@ class TestContainsAnySteps:
         
         # Should not raise exception since multiply is found
         validator(steps)
+
+
+class TestTime:
+    """Test the time validator."""
+
+    def test_time_basic(self):
+        """Test basic time functionality."""
+        validator = time({"max": 5.0})
+        
+        assert isinstance(validator, Validator)
+        assert validator.name == "time"
+
+    def test_time_success_max(self):
+        """Test time validator with execution time below max."""
+        validator = time({"max": 5.0})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with execution time
+        run_context = RunContext()
+        run_context._last_execution_time = 3.0
+        set_run_context(run_context)
+        
+        # Should not raise an exception for time within limit
+        validator(message)
+
+    def test_time_success_min(self):
+        """Test time validator with execution time above min."""
+        validator = time({"min": 1.0})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with execution time
+        run_context = RunContext()
+        run_context._last_execution_time = 2.5
+        set_run_context(run_context)
+        
+        # Should not raise an exception for time above min
+        validator(message)
+
+    def test_time_success_between(self):
+        """Test time validator with execution time between min and max."""
+        validator = time({"min": 1.0, "max": 5.0})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with execution time
+        run_context = RunContext()
+        run_context._last_execution_time = 3.0
+        set_run_context(run_context)
+        
+        # Should not raise an exception for time within range
+        validator(message)
+
+    def test_time_failure_exceeds_max(self):
+        """Test time validator with execution time exceeding max."""
+        validator = time({"max": 5.0})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with execution time exceeding max
+        run_context = RunContext()
+        run_context._last_execution_time = 6.0
+        set_run_context(run_context)
+        
+        # Should raise EvalError for time exceeding max
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "greater than or equal to max value" in str(exc_info.value)
+        assert "6.000" in str(exc_info.value)
+        assert "5.0" in str(exc_info.value)
+
+    def test_time_failure_below_min(self):
+        """Test time validator with execution time below min."""
+        validator = time({"min": 2.0})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with execution time below min
+        run_context = RunContext()
+        run_context._last_execution_time = 1.0
+        set_run_context(run_context)
+        
+        # Should raise EvalError for time below min
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "less than or equal to min value" in str(exc_info.value)
+        assert "1.000" in str(exc_info.value)
+        assert "2.0" in str(exc_info.value)
+
+    def test_time_failure_no_run_context(self):
+        """Test time validator with no run context."""
+        validator = time({"max": 5.0})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Clear run context
+        set_run_context(None)
+        
+        # Should raise EvalError for missing run context
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "no run context available" in str(exc_info.value)
+
+    def test_time_failure_no_execution_time(self):
+        """Test time validator with no execution time in run context."""
+        validator = time({"max": 5.0})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context without execution time
+        run_context = RunContext()
+        set_run_context(run_context)
+        
+        # Should raise EvalError for missing execution time
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "execution time not available" in str(exc_info.value)
+
+    def test_time_invalid_ref_not_dict(self):
+        """Test time validator with invalid reference (not a dict)."""
+        with pytest.raises(ValueError) as exc_info:
+            time("invalid")
+        
+        assert "expected dict" in str(exc_info.value)
+
+    def test_time_invalid_ref_no_max_or_min(self):
+        """Test time validator with invalid reference (no max or min)."""
+        with pytest.raises(ValueError) as exc_info:
+            time({})
+        
+        assert "at least one of 'max' or 'min' keys" in str(exc_info.value)
+
+    def test_time_invalid_max_not_number(self):
+        """Test time validator with invalid max value (not a number)."""
+        with pytest.raises(ValueError) as exc_info:
+            time({"max": "not_a_number"})
+        
+        assert "time.max must be a number" in str(exc_info.value)
+
+    def test_time_invalid_min_not_number(self):
+        """Test time validator with invalid min value (not a number)."""
+        with pytest.raises(ValueError) as exc_info:
+            time({"min": "not_a_number"})
+        
+        assert "time.min must be a number" in str(exc_info.value)
+
+    def test_time_boundary_max_exact(self):
+        """Test time validator with execution time exactly at max boundary."""
+        validator = time({"max": 5.0})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with execution time exactly at max
+        run_context = RunContext()
+        run_context._last_execution_time = 5.0
+        set_run_context(run_context)
+        
+        # Should raise EvalError (max is exclusive: > not >=)
+        with pytest.raises(EvalError):
+            validator(message)
+
+    def test_time_boundary_min_exact(self):
+        """Test time validator with execution time exactly at min boundary."""
+        validator = time({"min": 2.0})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with execution time exactly at min
+        run_context = RunContext()
+        run_context._last_execution_time = 2.0
+        set_run_context(run_context)
+        
+        # Should raise EvalError (min is exclusive: < not <=)
+        with pytest.raises(EvalError):
+            validator(message)
+
+    def test_time_works_with_steps(self):
+        """Test time validator works with steps (not just messages)."""
+        validator = time({"max": 5.0})
+        steps = [{"tool": "add", "input": {"a": 2, "b": 3}}]
+        
+        # Set up run_context with steps execution time
+        run_context = RunContext()
+        run_context._last_steps_execution_time = 3.0
+        set_run_context(run_context)
+        
+        # Should not raise an exception (time validator works with steps)
+        validator(steps)
+
+
+class TestUsage:
+    """Test the usage validator."""
+
+    def test_usage_basic(self):
+        """Test basic usage functionality."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens": {"max": 1000}})
+        
+        assert isinstance(validator, Validator)
+        assert validator.name == "usage"
+
+    def test_usage_success_max(self):
+        """Test usage validator with usage below max."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens": {"max": 1000}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with usage
+        run_context = RunContext()
+        run_context._last_usage = {
+            "gpt-4.1-mini:input_text_tokens": 500
+        }
+        set_run_context(run_context)
+        
+        # Should not raise an exception for usage within limit
+        validator(message)
+
+    def test_usage_success_min(self):
+        """Test usage validator with usage above min."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens": {"min": 10}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with usage
+        run_context = RunContext()
+        run_context._last_usage = {
+            "gpt-4.1-mini:input_text_tokens": 50
+        }
+        set_run_context(run_context)
+        
+        # Should not raise an exception for usage above min
+        validator(message)
+
+    def test_usage_success_between(self):
+        """Test usage validator with usage between min and max."""
+        validator = usage({
+            "gpt-4.1-mini:input_text_tokens": {
+                "min": 10,
+                "max": 1000
+            }
+        })
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with usage
+        run_context = RunContext()
+        run_context._last_usage = {
+            "gpt-4.1-mini:input_text_tokens": 500
+        }
+        set_run_context(run_context)
+        
+        # Should not raise an exception for usage within range
+        validator(message)
+
+    def test_usage_failure_exceeds_max(self):
+        """Test usage validator with usage exceeding max."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens": {"max": 1000}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with usage exceeding max
+        run_context = RunContext()
+        run_context._last_usage = {
+            "gpt-4.1-mini:input_text_tokens": 1500
+        }
+        set_run_context(run_context)
+        
+        # Should raise EvalError for usage exceeding max
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "greater than max value" in str(exc_info.value)
+        assert "1500" in str(exc_info.value)
+        assert "1000" in str(exc_info.value)
+
+    def test_usage_failure_below_min(self):
+        """Test usage validator with usage below min."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens": {"min": 100}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with usage below min
+        run_context = RunContext()
+        run_context._last_usage = {
+            "gpt-4.1-mini:input_text_tokens": 50
+        }
+        set_run_context(run_context)
+        
+        # Should raise EvalError for usage below min
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "less than min value" in str(exc_info.value)
+        assert "50" in str(exc_info.value)
+        assert "100" in str(exc_info.value)
+
+    def test_usage_failure_no_run_context(self):
+        """Test usage validator with no run context."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens": {"max": 1000}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Clear run context
+        set_run_context(None)
+        
+        # Should raise EvalError for missing run context
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "no run context available" in str(exc_info.value)
+
+    def test_usage_failure_no_usage_data(self):
+        """Test usage validator with no usage data in run context."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens": {"max": 1000}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context without usage
+        run_context = RunContext()
+        set_run_context(run_context)
+        
+        # Should raise EvalError for missing usage data
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "usage data not available" in str(exc_info.value)
+
+    def test_usage_invalid_ref_not_dict(self):
+        """Test usage validator with invalid reference (not a dict)."""
+        with pytest.raises(ValueError) as exc_info:
+            usage("invalid")
+        
+        assert "expected dict" in str(exc_info.value)
+
+    def test_usage_invalid_limits_not_dict(self):
+        """Test usage validator with invalid limits (not a dict)."""
+        with pytest.raises(ValueError) as exc_info:
+            usage({"gpt-4.1-mini:input_text_tokens": "invalid"})
+        
+        assert "expected dict" in str(exc_info.value)
+
+    def test_usage_invalid_no_max_or_min(self):
+        """Test usage validator with invalid limits (no max or min)."""
+        with pytest.raises(ValueError) as exc_info:
+            usage({"gpt-4.1-mini:input_text_tokens": {}})
+        
+        assert "at least one of 'max', 'min', or 'equals' keys" in str(exc_info.value)
+
+    def test_usage_multiple_constraints(self):
+        """Test usage validator with multiple usage constraints."""
+        validator = usage({
+            "gpt-4.1-mini:input_text_tokens": {"max": 1000},
+            "gpt-4.1-mini:output_text_tokens": {"max": 500}
+        })
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with usage
+        run_context = RunContext()
+        run_context._last_usage = {
+            "gpt-4.1-mini:input_text_tokens": 500,
+            "gpt-4.1-mini:output_text_tokens": 200
+        }
+        set_run_context(run_context)
+        
+        # Should not raise an exception for usage within limits
+        validator(message)
+
+    def test_usage_prefix_matching(self):
+        """Test usage validator with model prefix matching."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens": {"max": 1000}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with usage (model name with date suffix)
+        run_context = RunContext()
+        run_context._last_usage = {
+            "gpt-4.1-mini-2024-01-01:input_text_tokens": 500
+        }
+        set_run_context(run_context)
+        
+        # Should not raise an exception (prefix matching should work)
+        validator(message)
+
+    def test_usage_prefix_matching_multiple_matches(self):
+        """Test usage validator with multiple model matches (should fail)."""
+        validator = usage({"gpt-4.1:input_text_tokens": {"max": 1000}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with multiple matching models
+        run_context = RunContext()
+        run_context._last_usage = {
+            "gpt-4.1-mini:input_text_tokens": 500,
+            "gpt-4.1-turbo:input_text_tokens": 300
+        }
+        set_run_context(run_context)
+        
+        # Should raise EvalError for multiple matches
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "Multiple models match prefix" in str(exc_info.value)
+
+    def test_usage_no_matching_model(self):
+        """Test usage validator with no matching model."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens": {"max": 1000}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with different model
+        run_context = RunContext()
+        run_context._last_usage = {
+            "claude-3:input_text_tokens": 500
+        }
+        set_run_context(run_context)
+        
+        # Should raise EvalError for no matching model
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "no matching model found" in str(exc_info.value)
+
+    def test_usage_works_with_steps(self):
+        """Test usage validator works with steps (not just messages)."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens": {"max": 1000}})
+        steps = [{"tool": "add", "input": {"a": 2, "b": 3}}]
+        
+        # Set up run_context with steps usage
+        run_context = RunContext()
+        run_context._last_steps_usage = {
+            "gpt-4.1-mini:input_text_tokens": 500
+        }
+        set_run_context(run_context)
+        
+        # Should not raise an exception (usage validator works with steps)
+        validator(steps)
+
+    def test_usage_sum_operator(self):
+        """Test usage validator with sum operator (+)."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens+output_text_tokens": {"max": 2000}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with usage
+        run_context = RunContext()
+        run_context._last_usage = {
+            "gpt-4.1-mini:input_text_tokens": 800,
+            "gpt-4.1-mini:output_text_tokens": 600
+        }
+        set_run_context(run_context)
+        
+        # Should not raise an exception (sum = 1400 < 2000)
+        validator(message)
+
+    def test_usage_sum_operator_exceeds(self):
+        """Test usage validator with sum operator exceeding max."""
+        validator = usage({"gpt-4.1-mini:input_text_tokens+output_text_tokens": {"max": 1000}})
+        message = Message.validate({
+            "role": "assistant",
+            "content": "Hello, world!"
+        })
+        
+        # Set up run_context with usage
+        run_context = RunContext()
+        run_context._last_usage = {
+            "gpt-4.1-mini:input_text_tokens": 600,
+            "gpt-4.1-mini:output_text_tokens": 500
+        }
+        set_run_context(run_context)
+        
+        # Should raise EvalError (sum = 1100 > 1000)
+        with pytest.raises(EvalError) as exc_info:
+            validator(message)
+        
+        assert "greater than max value" in str(exc_info.value)
 

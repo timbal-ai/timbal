@@ -10,6 +10,8 @@ from .validators import (
     regex,
     semantic_output,
     semantic_steps,
+    time,
+    usage,
 )
 
 __all__ = [
@@ -22,6 +24,8 @@ __all__ = [
     "not_contains_steps",
     "equals",
     "regex",
+    "time",
+    "usage",
     "semantic_output",
     "semantic_steps",
 ]

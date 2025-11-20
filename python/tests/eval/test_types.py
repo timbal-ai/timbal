@@ -9,8 +9,7 @@ from timbal.eval.types.steps import Steps
 from timbal.eval.types.test import Test
 from timbal.eval.types.test_suite import TestSuite
 from timbal.eval.types.turn import Turn
-from timbal.eval.validators import contains_output, contains_steps
-from timbal.types.file import File
+from timbal.eval.validators import contains_steps
 
 TEST_FILE = Path(__file__).parent / "fixtures" / "math_question.md"
 
@@ -197,26 +196,22 @@ class TestTurn:
         assert turn.input == input_obj
         assert turn.output is None
         assert turn.steps is None
-        assert turn.usage is None
 
     def test_turn_full(self):
         """Test creating a turn with all fields."""
         input_obj = Input(prompt="Hello")
         output_obj = Output(content=["Hi there!"])
         steps_obj = Steps(validators=[contains_steps([{"name": "greet"}])])
-        usage = [{"max": 1000, "type": "tokens"}]
         
         turn = Turn(
             input=input_obj,
             output=output_obj,
-            steps=steps_obj,
-            usage=usage
+            steps=steps_obj
         )
         
         assert turn.input == input_obj
         assert turn.output == output_obj
         assert turn.steps == steps_obj
-        assert turn.usage == usage
 
     def test_turn_missing_input(self):
         """Test turn validation requires input."""
@@ -233,18 +228,20 @@ class TestTurn:
         assert turn.output.validators is not None
         assert len(turn.output.validators) == 1
 
-    def test_turn_usage_constraints(self):
-        """Test turn with usage constraints."""
+    def test_turn_with_usage_validator(self):
+        """Test turn with usage validator in output."""
         input_obj = Input(prompt="Hello")
-        usage = [
-            {"max": 100, "type": "input_tokens"},
-            {"min": 10, "type": "output_tokens"}
-        ]
+        output_obj = Output(validators={
+            "usage": {
+                "gpt-4.1-mini:input_text_tokens": {"max": 100},
+                "gpt-4.1-mini:output_text_tokens": {"min": 10}
+            }
+        })
         
-        turn = Turn(input=input_obj, usage=usage)
+        turn = Turn(input=input_obj, output=output_obj)
         
-        assert turn.usage == usage
-        assert len(turn.usage) == 2
+        assert turn.output.validators is not None
+        assert len(turn.output.validators) == 1
 
 
 class TestTest:

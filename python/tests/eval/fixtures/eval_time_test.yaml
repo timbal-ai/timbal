@@ -1,0 +1,73 @@
+tests:
+  - name: time_validation_output
+    description: Test time validator for output validation
+    turns:
+      - input:
+          prompt: "What is 2 + 2?"
+        output:
+          validators:
+            contains: ["4"]
+            time:
+              max: 10.0
+
+  - name: time_validation_input
+    description: Test time validator for input validation
+    turns:
+      - input:
+          prompt: "Quick calculation: 5 * 3"
+          validators:
+            prompt:
+              time:
+                max: 5.0
+        output:
+          validators:
+            contains: ["15"]
+
+  - name: time_validation_steps
+    description: Test time validator for steps validation
+    turns:
+      - input:
+          prompt: "Calculate 10 + 20"
+        steps:
+          validators:
+            contains:
+              - name: add_numbers
+            time:
+              max: 8.0
+        output:
+          validators:
+            contains: ["30"]
+
+  - name: time_validation_min_max
+    description: Test time validator with both min and max constraints
+    turns:
+      - input:
+          prompt: "Process this request"
+        output:
+          validators:
+            contains: ["processed"]
+            time:
+              min: 0.5
+              max: 5.0
+
+  - name: time_validation_multiple
+    description: Test time validator in multiple places
+    turns:
+      - input:
+          prompt: "Do a quick calculation"
+          validators:
+            prompt:
+              time:
+                max: 2.0
+        steps:
+          validators:
+            contains:
+              - name: calculate
+            time:
+              max: 6.0
+        output:
+          validators:
+            contains: ["result"]
+            time:
+              max: 10.0
+
