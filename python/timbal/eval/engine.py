@@ -1,4 +1,5 @@
 import inspect
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,6 @@ from .types.result import EvalResult, EvalTestSuiteResult
 from .types.test import Test
 from .types.test_suite import TestSuite
 from .types.turn import Turn
-from .validators import semantic_output
 
 logger = structlog.get_logger("timbal.eval.engine")
 
@@ -34,6 +34,7 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
             
         # Extract tool calls from trace data
         actual_steps = []
+        steps_total_time = 0.0
         
         # First, extract from trace data (for explicit tool calls)
         for call_id, span in run_context._trace.items():
@@ -56,8 +57,11 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
                     "tool": tool_name,
                     "input": tool_input
                 })
+                
+                if span.t0 is not None and span.t1 is not None:
+                    step_duration = (span.t1 - span.t0) / 1000.0
+                    steps_total_time += step_duration
         
-        # Second, extract from usage data (for tools tracked via usage, like web_search_requests)
         if hasattr(run_context, '_last_usage') and run_context._last_usage:
             for key, value in run_context._last_usage.items():
                 if '_requests' in key or '_calls' in key:
@@ -79,6 +83,31 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
                                 "usage_count": value
                             })
 
+        if actual_steps:
+            run_context._last_steps_execution_time = steps_total_time
+        
+        steps_total_usage = {}
+        for call_id, span in run_context._trace.items():
+            path = span.path
+            if call_id is None or not path or "." not in path:
+                continue
+            path_parts = path.split(".")
+            if len(path_parts) >= 2:
+                tool_name = path_parts[1]
+                if tool_name == "llm":
+                    continue
+                if span.usage:
+                    for key, value in span.usage.items():
+                        steps_total_usage[key] = steps_total_usage.get(key, 0) + value
+        
+        if hasattr(run_context, '_last_usage') and run_context._last_usage:
+            for key, value in run_context._last_usage.items():
+                if '_requests' in key or '_calls' in key:
+                    steps_total_usage[key] = steps_total_usage.get(key, 0) + value
+        
+        if actual_steps:
+            run_context._last_steps_usage = steps_total_usage
+        
         explanations = []
         results = []
         if turn.steps and turn.steps.validators:
@@ -117,9 +146,10 @@ async def eval_input(
     turn: Turn,
     actual_input: dict
 ) -> tuple[bool | None, list[str]]:
-    """Evaluate the input keys of a turn using per-key validators.
+    """Evaluate the input keys of a turn using per-key validators or top-level validators.
     Validates keys that may be set in the input definition or by pre_hooks/agent.
     Gets actual values from run_context after pre_hook execution.
+    Supports both per-key validators (e.g., prompt: { contains: [...] }) and top-level validators (e.g., time: {...}, usage: {...}).
     Returns (False, explanations) if any validation fails, (True, []) if all pass.
     """
     explanations = []
@@ -129,86 +159,124 @@ async def eval_input(
         # No validators means nothing to validate - return None equivalent (handled by caller)
         return None, []
     
-    # Get per-key validators
+    # Get validators
     input_validators = turn.input.validators
     if not isinstance(input_validators, dict):
-        # Not a dict means no per-key validators - return None (handled by caller)
+        # Not a dict means no validators - return None (handled by caller)
         return None, []
     
-    # Get all actual input values from run_context (after pre_hook execution)
-    # This includes values set by pre_hooks
-    all_actual_values = {}
+    # Check if we have top-level validators (time, usage) or per-key validators
+    top_level_validators = {}
+    per_key_validators = {}
     
-    # First, get from turn.input (the definition)
-    if turn.input:
-        input_dict = turn.input.model_dump(exclude={"validators"})
-        all_actual_values.update(input_dict)
-    
-    # Then, get from run_context (after pre_hook modifications)
-    run_context = get_run_context()
-    if run_context:
-        agent_span = run_context.current_span()
-        if agent_span and hasattr(agent_span, 'input'):
-            # Get the actual input after pre_hook modifications
-            context_input = agent_span.input
-            if isinstance(context_input, dict):
-                # Merge context input (takes precedence as it's after pre_hook)
-                all_actual_values.update(context_input)
-            elif context_input is not None:
-                # If input is not a dict, try to extract values
-                all_actual_values["_raw_input"] = context_input
-    
-    # Finally, merge with actual_input (from to_dict, as fallback)
-    all_actual_values.update(actual_input)
-    
-    # Remove None values
-    all_actual_values = {k: v for k, v in all_actual_values.items() if v is not None}
-    
-    # Validate each key that has validators
     for key, validators in input_validators.items():
-        # Get the actual value for this key
-        actual_value = all_actual_values.get(key)
-        if actual_value is None:
-            # Try to get from prompt if key is prompt
-            if key == "prompt":
-                actual_value = all_actual_values.get("prompt")
-        
-        # If still None, the key might not exist - create empty string for validation
-        if actual_value is None:
-            actual_value = ""
-        
-        # Convert prompt list to string for validation
-        if key == "prompt" and isinstance(actual_value, list):
-            # Join list items, converting Files to their paths
-            text_parts = []
-            for item in actual_value:
-                if hasattr(item, 'path'):
-                    text_parts.append(str(item.path))
-                else:
-                    text_parts.append(str(item))
-            actual_value = " ".join(text_parts)
-        
-        # Create a message-like object for validation (validators expect Message)
-        # For input validation, we validate the string value
-        from ..types.content import TextContent
-        validation_message = Message(role="user", content=[TextContent(text=str(actual_value))])
+        if key in ("time", "usage"):
+            # Top-level validators - these validate turn metrics, not key values
+            top_level_validators[key] = validators
+        else:
+            # Per-key validators - these validate the value of a specific key
+            per_key_validators[key] = validators
+    
+    # Handle top-level validators (time, usage)
+    # These don't need a specific value - they validate turn metrics
+    for validator_name, validators in top_level_validators.items():
+        if not isinstance(validators, list):
+            validators = [validators]
         
         for validator in validators:
+            # For top-level validators, pass None as value (they get metrics from run_context)
             if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
                 try:
-                    await validator(validation_message)
+                    await validator(None)
                     correct = True
                 except EvalError as e:
                     correct = False
-                    explanations.append(f"Input key '{key}': {str(e)}")
+                    explanations.append(f"Input {validator_name}: {str(e)}")
             else:
                 try:
-                    validator(validation_message)
+                    validator(None)
                     correct = True
                 except EvalError as e:
                     correct = False
-                    explanations.append(f"Input key '{key}': {str(e)}")
+                    explanations.append(f"Input {validator_name}: {str(e)}")
             results.append(correct)
+    
+    # Handle per-key validators
+    if per_key_validators:
+        # Get all actual input values from run_context (after pre_hook execution)
+        # This includes values set by pre_hooks
+        all_actual_values = {}
+        
+        # First, get from turn.input (the definition)
+        if turn.input:
+            input_dict = turn.input.model_dump(exclude={"validators"})
+            all_actual_values.update(input_dict)
+        
+        # Then, get from run_context (after pre_hook modifications)
+        run_context = get_run_context()
+        if run_context:
+            agent_span = run_context.current_span()
+            if agent_span and hasattr(agent_span, 'input'):
+                # Get the actual input after pre_hook modifications
+                context_input = agent_span.input
+                if isinstance(context_input, dict):
+                    # Merge context input (takes precedence as it's after pre_hook)
+                    all_actual_values.update(context_input)
+                elif context_input is not None:
+                    # If input is not a dict, try to extract values
+                    all_actual_values["_raw_input"] = context_input
+        
+        # Finally, merge with actual_input (from to_dict, as fallback)
+        all_actual_values.update(actual_input)
+        
+        # Remove None values
+        all_actual_values = {k: v for k, v in all_actual_values.items() if v is not None}
+        
+        # Validate each key that has validators
+        for key, validators in per_key_validators.items():
+            if not isinstance(validators, list):
+                validators = [validators]
+            
+            # Get the actual value for this key
+            actual_value = all_actual_values.get(key)
+            if actual_value is None:
+                # Try to get from prompt if key is prompt
+                if key == "prompt":
+                    actual_value = all_actual_values.get("prompt")
+            
+            # If still None, the key might not exist - create empty string for validation
+            if actual_value is None:
+                actual_value = ""
+            
+            # Convert prompt list to string for validation
+            if key == "prompt" and isinstance(actual_value, list):
+                # Join list items, converting Files to their paths
+                text_parts = []
+                for item in actual_value:
+                    if hasattr(item, 'path'):
+                        text_parts.append(str(item.path))
+                    else:
+                        text_parts.append(str(item))
+                actual_value = " ".join(text_parts)
+            
+            validation_message = Message(role="user", content=[TextContent(text=str(actual_value))])
+            
+            for validator in validators:
+                if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
+                    try:
+                        await validator(validation_message)
+                        correct = True
+                    except EvalError as e:
+                        correct = False
+                        explanations.append(f"Input key '{key}': {str(e)}")
+                else:
+                    try:
+                        validator(validation_message)
+                        correct = True
+                    except EvalError as e:
+                        correct = False
+                        explanations.append(f"Input key '{key}': {str(e)}")
+                results.append(correct)
     
     return all(results), explanations
 
@@ -254,129 +322,6 @@ async def eval_output(
     return all(results), explanations
 
 
-def _find_matching_model(model_prefix: str, actual_usage: dict) -> tuple[str | None, str | None]:
-    """
-    Find matching model in actual_usage using prefix matching.
-    Returns (matched_model, error_message) where error_message is set if multiple matches found.
-    """
-    # Extract all model names from actual_usage keys (format: model:usage_type)
-    model_names = set()
-    for key in actual_usage.keys():
-        if ':' in key:
-            model_name = key.split(':', 1)[0]
-            model_names.add(model_name)
-    
-    # Find models that start with the prefix
-    matching_models = [model for model in model_names if model.startswith(model_prefix)]
-    
-    if len(matching_models) == 0:
-        return None, None
-    elif len(matching_models) == 1:
-        return matching_models[0], None
-    else:
-        return None, f"Multiple models match prefix '{model_prefix}': {', '.join(matching_models)}"
-
-
-def eval_usage(
-    turn: Turn,
-    actual_usage: dict
-) -> list[dict]:
-    """
-    For each model:key in turn.usage, compare with the corresponding value in actual_usage.
-    Returns a list of dicts with comparison results.
-    Flattens keys as model:usage_type (e.g., gpt-4.1:input_text_tokens)
-    Supports prefix matching for model names - if model is 'gpt-4.1', it will match 'gpt-4.1-2025-04-14'.
-    """
-    if turn.usage is None:
-        return []
-    
-    results = []
-    # Handle both list and dict for turn.usage
-    usage_items = []
-    if isinstance(turn.usage, dict):
-        usage_items = turn.usage.items()
-    elif isinstance(turn.usage, list):
-        for item in turn.usage:
-            if isinstance(item, dict):
-                for model, usage_types in item.items():
-                    for usage_type, limits in usage_types.items():
-                        usage_items.append((model, usage_type, limits))
-    else:
-        return []
-
-    for model, usage_type, limits in usage_items:
-        max_value = limits.get("max")
-        min_value = limits.get("min")
-        
-
-        # Find the actual model name using prefix matching
-        matched_model, prefix_error = _find_matching_model(model, actual_usage)
-        
-        if prefix_error:
-            # Handle multiple matches error
-            result = {
-                "usage_key": f"{model}:{usage_type}",
-                "max": max_value,
-                "min": min_value,
-                "actual": None,
-                "correct": False,
-                "explanation": prefix_error
-            }
-            results.append(result)
-            continue
-        
-        if matched_model is None:
-            # No matching model found
-            usage_key = f"{model}:{usage_type}"
-            actual_value = None
-        else:
-            # Use the matched model name
-            usage_key = f"{matched_model}:{usage_type}"
-            if "+" in usage_type:
-                keys = usage_type.split("+")
-                actual_value = sum(actual_usage.get(f"{matched_model}:{k}", 0) for k in keys)
-            else:
-                actual_value = actual_usage.get(f"{matched_model}:{usage_type}")
-        
-        # Update usage_key for display purposes to show matched model name
-        if matched_model:
-            display_usage_key = f"{matched_model}:{usage_type}"
-        else:
-            display_usage_key = f"{model}:{usage_type}"
-        
-
-        if max_value is not None and actual_value is not None and actual_value > max_value:
-            correct = False
-            explanation = f"Actual value {actual_value} is greater than max value {max_value} for {display_usage_key}."
-        elif min_value is not None and actual_value is not None and actual_value < min_value:
-            correct = False
-            explanation = f"Actual value {actual_value} is less than min value {min_value} for {display_usage_key}."
-        elif actual_value is not None:
-            correct = True
-            if min_value is not None and max_value is not None:
-                explanation = f"Actual value {actual_value} is between min value {min_value} and max value {max_value} for {display_usage_key}."
-            elif min_value is not None:
-                explanation = f"Actual value {actual_value} is greater than or equal to min value {min_value} for {display_usage_key}."
-            elif max_value is not None:
-                explanation = f"Actual value {actual_value} is less than or equal to max value {max_value} for {display_usage_key}."
-            else:
-                explanation = f"Actual value {actual_value} for {display_usage_key} (no min/max set)."
-        else:
-            correct = False
-            explanation = f"No actual value found for {display_usage_key}."
-        result = {
-            "usage_key": display_usage_key,
-            "max": max_value,
-            "min": min_value,
-            "actual": actual_value,
-            "correct": correct,
-            "explanation": explanation
-        }
-        results.append(result)
-
-    return results
-
-
 async def run_turn(
     agent: Agent,
     turn: Turn,
@@ -393,15 +338,18 @@ async def run_turn(
     execution_error = None
 
     # Run the agent
+    start_time = time.time()
     try:
         # Convert Input to Message to properly handle files
         user_message = user_input.to_message(role="user", test_file_dir=test_file_dir)
         agent_output_event = await agent(messages=conversation_history, prompt=user_message).collect()
         agent_usage = agent_output_event.usage
+        execution_time = time.time() - start_time
         
-        # Store usage in run_context for eval_steps to access
+        # Store usage and execution time in run_context for validators to access
         run_context = get_run_context()
         run_context._last_usage = agent_usage
+        run_context._last_execution_time = execution_time
         if agent_output_event.output and agent_output_event.output.content and len(agent_output_event.output.content) > 0:
             agent_output = agent_output_event.output.content[0].text
         else:
@@ -415,6 +363,7 @@ async def run_turn(
             
     except Exception as e:
         # Capture any exceptions that occur during agent execution
+        execution_time = time.time() - start_time
         execution_error = {
             "type": type(e).__name__,
             "message": str(e),
@@ -424,7 +373,10 @@ async def run_turn(
         test_results.execution_errors += 1
         agent_usage = {}
         agent_output = f"Execution failed: {str(e)}"
-        # Keep the existing run_context for error case
+        # Keep the existing run_context for error case and store execution time
+        run_context = get_run_context()
+        if run_context:
+            run_context._last_execution_time = execution_time
 
     # Evaluate the input keys
     input_passed = None
@@ -464,14 +416,6 @@ async def run_turn(
                 test_results.outputs_failed += 1
                 reason.append("output")
 
-    usage_comparisons = []
-    if turn.usage:
-        usage_comparisons = eval_usage(turn, agent_usage)
-        if all(comparison["correct"] for comparison in usage_comparisons):
-            test_results.usage_passed += 1
-        else:
-            test_results.usage_failed += 1
-            reason.append("usage")
 
     if len(reason) > 0:
         test_results.tests_failed.append(
@@ -490,8 +434,6 @@ async def run_turn(
                     "files": [c.file for c in agent_output_message.content if c.type == "file"] if agent_output_message else None
                 },
                 expected_output=turn.output.to_dict() if turn.output else None,
-                usage_passed=all(comparison["correct"] for comparison in usage_comparisons),
-                usage_explanations = [comparison["explanation"] for comparison in usage_comparisons if not comparison["correct"]],
                 steps_passed=steps_passed,
                 steps_explanations=steps_explanations,
                 actual_steps=actual_steps,

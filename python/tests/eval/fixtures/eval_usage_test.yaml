@@ -1,14 +1,67 @@
 tests:
-  - name: usage_test
-    description: Test with usage constraints
+  - name: usage_test_output
+    description: Test usage validator for output validation
     turns:
       - input:
           prompt: "Hello"
+          validators:
+            usage:
+              "gpt-4.1-mini:input_text_tokens":
+                max: 1000
+                min: 10
         output:
           validators:
             contains: ["hello"]
-        usage:
-          - gpt-4.1-mini:
-              input_tokens:
+            usage:
+              "gpt-4.1-mini:output_text_tokens":
+                max: 500
+
+  - name: usage_test_input
+    description: Test usage validator for input validation
+    turns:
+      - input:
+          prompt: "Quick question"
+          validators:
+            usage:
+              "gpt-4.1-mini:input_text_tokens":
+                max: 100
+        output:
+          validators:
+            contains: ["answer"]
+
+  - name: usage_test_step_specific
+    description: Test usage validator for specific step
+    turns:
+      - input:
+          prompt: "Search for girona and calculate 5 + 3"
+        steps:
+          validators:
+            contains:
+              - name: search
+                input:
+                  query: girona
+                validators:
+                  usage:
+                    "gpt-4.1-mini:input_text_tokens":
+                      max: 50
+              - name: add_numbers
+        output:
+          validators:
+            contains: ["girona"]
+
+  - name: usage_test_multiple_models
+    description: Test usage validator with multiple models
+    turns:
+      - input:
+          prompt: "Process this"
+          validators:
+            usage:
+              "gpt-4.1-mini:input_text_tokens":
                 max: 1000
-                min: 10
+              "claude-3:input_text_tokens":
+                max: 800
+        output:
+          validators:
+            usage:
+              "gpt-4.1-mini:output_text_tokens":
+                max: 500

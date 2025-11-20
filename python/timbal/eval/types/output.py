@@ -1,7 +1,7 @@
-import structlog
 from pathlib import Path
 from typing import Any
 
+import structlog
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from ...types.file import File
@@ -14,6 +14,12 @@ from ..validators import (
     not_contains_output,
     regex,
     semantic_output,
+)
+from ..validators import (
+    time as time_validator,
+)
+from ..validators import (
+    usage as usage_validator,
 )
 
 logger = structlog.get_logger("timbal.eval.types.output")
@@ -127,6 +133,10 @@ class Output(BaseModel):
                 validators.append(equals(validator_arg))
             elif validator_name == "regex":
                 validators.append(regex(validator_arg))
+            elif validator_name == "time":
+                validators.append(time_validator(validator_arg))
+            elif validator_name == "usage":
+                validators.append(usage_validator(validator_arg))
             elif validator_name == "semantic":
                 validators.append(semantic_output(validator_arg))
             elif validator_name == "contains_any":

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 from timbal import Agent
-from timbal.eval.engine import eval_file, eval_output, eval_steps, eval_usage, run_turn
+from timbal.eval.engine import eval_file, eval_output, eval_steps, run_turn
 from timbal.eval.types.input import Input
 from timbal.eval.types.output import Output
 from timbal.eval.types.result import EvalTestSuiteResult
@@ -230,11 +230,11 @@ class TestEvalOutput:
         assert errors == []
 
 
-class TestEvalUsage:
-    """Test the eval_usage function using real YAML fixtures."""
+class TestUsageValidator:
+    """Test the usage validator using real YAML fixtures."""
 
-    def test_eval_usage_basic_yaml(self):
-        """Test basic usage evaluation from YAML fixture."""
+    def test_usage_validator_in_output_yaml(self):
+        """Test usage validator in output from YAML fixture."""
         
         yaml_path = FIXTURES_DIR / "eval_usage_test.yaml"
         with open(yaml_path) as f:
@@ -244,23 +244,13 @@ class TestEvalUsage:
         turn = test.turns[0]
         
         assert isinstance(turn.input, Input)
-        assert turn.usage is not None
-        
-        actual_usage = {
-            "gpt-4.1-mini:input_tokens": 50
-        }
-        
-        results = eval_usage(turn, actual_usage)
-        
-        assert isinstance(results, list)
-        if results:
-            for result in results:
-                assert "usage_key" in result
-                assert "correct" in result
-                assert "explanation" in result
+        assert turn.output is not None
+        assert turn.output.validators is not None
+        # Check that usage validator is present
+        assert any(v.name == "usage" for v in turn.output.validators)
 
-    def test_eval_usage_no_constraints_yaml(self):
-        """Test usage evaluation when no usage constraints are specified."""
+    def test_no_usage_validator_yaml(self):
+        """Test when no usage validators are specified."""
         
         yaml_path = FIXTURES_DIR / "eval_simple_test.yaml"
         with open(yaml_path) as f:
@@ -270,34 +260,8 @@ class TestEvalUsage:
         turn = test.turns[0]
         
         assert isinstance(turn.input, Input)
-        assert turn.usage is None
-        
-        actual_usage = {"gpt-4:input_tokens": 50}
-        
-        results = eval_usage(turn, actual_usage)
-        
-        assert results == []
-
-    def test_eval_usage_prefix_matching_yaml(self):
-        """Test usage evaluation with model prefix matching from YAML."""
-
-        yaml_path = FIXTURES_DIR / "eval_usage_test.yaml"
-        with open(yaml_path) as f:
-            yaml_data = yaml.safe_load(f)
-        test_suite = TestSuite.model_validate(yaml_data)
-        test = test_suite.tests[0]
-        turn = test.turns[0]
-        
-        assert isinstance(turn.input, Input)
-        assert turn.usage is not None
-        
-        actual_usage = {
-            "gpt-4.1-mini-2024-01-01:input_tokens": 50
-        }
-        
-        results = eval_usage(turn, actual_usage)
-        
-        assert isinstance(results, list)
+        # No usage validator in output
+        assert turn.output is None or turn.output.validators is None or not any(v.name == "usage" for v in (turn.output.validators or []))
 
 
 class TestRunTurn:
@@ -530,3 +494,19 @@ class TestEngineEdgeCases:
         assert test_results.total_files == 1
         assert test_results.total_tests == 1
         assert test_results.outputs_passed == 1
+
+    @pytest.mark.asyncio
+    async def test_eval_file_with_usage_validator(self):
+        """Test eval_file with usage validator."""
+        def add(a: int, b: int) -> int:
+            return a + b
+        
+        agent = Agent(name="math_agent", model="openai/gpt-4o-mini", tools=[add])
+        test_file = FIXTURES_DIR / "eval_usage_test.yaml"
+        
+        test_results = EvalTestSuiteResult()
+        result = await eval_file(test_file, agent, test_results)
+        
+        assert isinstance(result, EvalTestSuiteResult)
+        assert test_results.total_files == 1
+        assert test_results.total_tests == 4  # 4 tests in eval_usage_test.yaml

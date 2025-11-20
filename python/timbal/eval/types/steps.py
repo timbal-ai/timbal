@@ -1,7 +1,18 @@
 import structlog
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from ..validators import Validator, contains_steps, not_contains_steps, semantic_steps
+from ..validators import (
+    Validator,
+    contains_steps,
+    not_contains_steps,
+    semantic_steps,
+)
+from ..validators import (
+    time as time_validator,
+)
+from ..validators import (
+    usage as usage_validator,
+)
 
 logger = structlog.get_logger("timbal.eval.types.steps")
 
@@ -81,6 +92,10 @@ class Steps(BaseModel):
                 validators.append(contains_steps(normalized_arg))
             # elif validator_name == "regex":
             #     validators.append(regex(validator_arg))
+            elif validator_name == "time":
+                validators.append(time_validator(validator_arg))
+            elif validator_name == "usage":
+                validators.append(usage_validator(validator_arg))
             elif validator_name == "semantic":
                 validators.append(semantic_steps(validator_arg))
             elif validator_name == "not_contains":
