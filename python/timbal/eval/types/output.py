@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from ...types.file import File
 from ...types.message import Message
+from .utils import has_file_extension, resolve_file_path, validators_to_dict
 from ..validators import (
     Validator,
     contains_any_output,
@@ -38,6 +39,12 @@ class Output(BaseModel):
         this output is treated as a fixed record to be added to the agent's
         memory or conversation history, influencing subsequent turns without
         undergoing validation itself.
+    
+    The output can have multiple keys (like Input). The shortcut without a key
+    (string or list) is assigned to `content`. Each key can have validators inside:
+    - Shortcut: `"Hello"` or `["Hello"]` → assigns to `content`
+    - With validators: `{content: {content: [...], validators: {...}}}`
+    - Multiple keys: `{content: [...], other_key: {...}}`
     """
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
@@ -45,13 +52,13 @@ class Output(BaseModel):
     """List of content items (text strings or Files) that represent the expected output.
     Used when this is a fixed record for conversation history (no validators).
     Elements ending with file extensions become Files, others are treated as text.
+    Shortcut without key (string or list) is assigned to this field.
     """
     
-    validators: dict[str, list[Any]] | list[Any] | None = None
-    """Validators to apply to the agent's actual output.
-    Can be:
-    - Top-level validators (dict with validator names like "contains") - validates the entire message
-    If this is empty and content is provided, the Output is treated as a fixed record.
+    validators: dict[str, list[Any]] | None = None
+    """Per-key validators. Each key in the output can have its own validators.
+    Validators can only exist inside keys (like content or other arbitrary keys).
+    Validators at top-level are not allowed - they must be associated with a key.
     """
 
     @model_validator(mode="before")
@@ -61,30 +68,81 @@ class Output(BaseModel):
         if v is None:
             return None
         if isinstance(v, str):
-            # Single string becomes content list
+            # Single string becomes content list (shortcut without key)
             return {"content": [v]}
         if isinstance(v, list):
-            # List can be content or validators - check if it looks like validators
-            if len(v) > 0 and isinstance(v[0], dict) and any(k in ("contains", "not_contains", "equals", "regex", "semantic", "contains_any") for k in v[0].keys()):
-                # Looks like validators
-                return {"validators": v}
-            else:
-                # Looks like content
-                return {"content": v}
+            # List is always content (shortcut without key, validators must be inside keys)
+            return {"content": v}
         if isinstance(v, dict):
-            # Dict - check if it has content or validators
+            # Handle case where output has keys with validators nested
             result = {}
-            if "content" in v:
-                result["content"] = v["content"]
-            if "validators" in v:
-                result["validators"] = v["validators"]
-            # If neither, check if keys are validator names
-            if "content" not in result and "validators" not in result:
-                if any(k in ("contains", "not_contains", "equals", "regex", "semantic", "contains_any") for k in v.keys()):
-                    result["validators"] = v
+            validators = {}
+            for key, value in v.items():
+                if key == "validators":
+                    # Top-level validators: only "time" and "usage" are allowed
+                    if isinstance(value, dict):
+                        # Check if values are already Validator objects (from serialization)
+                        all_validators = all(
+                            isinstance(v, Validator) or 
+                            (isinstance(v, list) and len(v) > 0 and all(isinstance(item, Validator) for item in v))
+                            for v in value.values()
+                        ) if value else False
+                        
+                        if all_validators:
+                            validators.update(value)
+                        else:
+                            # Check if this is per-key format: {"content": {"validators": {...}}}
+                            is_per_key_format = any(
+                                isinstance(v, dict) and "validators" in v 
+                                for v in value.values()
+                            ) or any(
+                                isinstance(v, dict) and any(k in ("contains", "not_contains", "equals", "regex", "semantic", "contains_any") for k in v.keys())
+                                for v in value.values()
+                            )
+                            
+                            if is_per_key_format:
+                                # Per-key format: {validators: {content: {validators: {...}}}}
+                                validators.update(value)
+                            else:
+                                # Check if keys are top-level validators (time, usage) only
+                                has_top_level = any(k in ("time", "usage") for k in value.keys())
+                                has_per_key = any(k in ("contains", "not_contains", "equals", "regex", "semantic", "contains_any") for k in value.keys())
+                                
+                                if has_per_key:
+                                    raise ValueError("Validators like 'contains', 'not_contains', 'equals', 'regex', 'semantic', 'contains_any' must be inside keys (like 'content'). Only 'time' and 'usage' can be top-level validators.")
+                                
+                                if has_top_level:
+                                    # Top-level format: {validators: {time: {...}, usage: {...}}}
+                                    validators.update(value)
+                                else:
+                                    raise ValueError("validators must be a dict with validator names. Only 'time' and 'usage' are allowed as top-level validators.")
+                    else:
+                        raise ValueError("validators must be a dict")
+                elif isinstance(value, dict) and "validators" in value:
+                    # Key with inline validators: {key: {value: "...", validators: {...}}}
+                    if "content" in value or "value" in value:
+                        value_key = "content" if key == "content" else "value"
+                        if value_key in value:
+                            result[key] = value[value_key]
+                        else:
+                            result[key] = None
+                    else:
+                        result[key] = None
+                    if "validators" in value:
+                        validators[key] = value["validators"]
+                elif isinstance(value, dict) and any(k in ("contains", "not_contains", "equals", "regex", "semantic", "contains_any", "time", "usage") for k in value.keys()):
+                    # Key with inline validators directly: {key: {contains: [...]}}
+                    result[key] = None
+                    validators[key] = value
                 else:
-                    # Assume it's content (list of values)
-                    result["content"] = list(v.values()) if v else []
+                    result[key] = value
+            
+            # Ensure content is a list if it's a string
+            if "content" in result and isinstance(result["content"], str):
+                result["content"] = [result["content"]]
+            
+            if validators:
+                result["validators"] = validators
             return result
         return v
 
@@ -104,64 +162,88 @@ class Output(BaseModel):
         return [str(v)]
 
     @field_validator("validators", mode="before")
+    @classmethod
     def validate_validators(cls, v):
-        """Converts validator specifications from a dictionary (e.g., YAML) into `Validator` instances."""
-        # Handle None case
+        """Converts validator specifications from a dictionary (e.g., YAML) into Validator instances.
+        Supports both per-key validators (values are dicts with validator names) and top-level validators
+        (keys are validator names like "time", "usage" only). 
+        Only 'time' and 'usage' can be top-level validators. Other validators must be inside keys like 'content'.
+        """
         if v is None:
             return None
-            
-        # Handle empty list case
-        if isinstance(v, list) and len(v) == 0:
-            return []
-            
-        # Handle case where validators are already Validator objects (direct instantiation)
-        if isinstance(v, list) and all(isinstance(item, Validator) for item in v):
+        
+        # If v is already a dict with Validator objects (from serialization), return as-is
+        if isinstance(v, dict):
+            # Check if values are already Validator objects or lists of Validators
+            all_validators = True
+            for key, value in v.items():
+                if isinstance(value, list):
+                    if not all(isinstance(item, Validator) for item in value):
+                        all_validators = False
+                        break
+                elif not isinstance(value, Validator):
+                    all_validators = False
+                    break
+            if all_validators:
+                return v
+        
+        if not isinstance(v, dict):
             return v
         
-        # Handle case where validators come from dict (e.g., YAML)
-        if not isinstance(v, dict):
-            raise ValueError("validators must be a dict or list of Validator objects")
+        # Separate top-level validators (time, usage) from per-key validators (content, etc.)
+        top_level_validators = {}
+        per_key_validators = {}
         
-        # Top-level validators (keys are validator names like "contains", "regex", etc.)
-        validators = []
-        for validator_name, validator_arg in v.items():
-            if validator_name == "contains":
-                validators.append(contains_output(validator_arg))
-            elif validator_name == "not_contains":
-                validators.append(not_contains_output(validator_arg))
-            elif validator_name == "equals":
-                validators.append(equals(validator_arg))
-            elif validator_name == "regex":
-                validators.append(regex(validator_arg))
-            elif validator_name == "time":
-                validators.append(time_validator(validator_arg))
-            elif validator_name == "usage":
-                validators.append(usage_validator(validator_arg))
-            elif validator_name == "semantic":
-                validators.append(semantic_output(validator_arg))
-            elif validator_name == "contains_any":
-                validators.append(contains_any_output(validator_arg))
-            # TODO Add more validators.
+        for key, value in v.items():
+            if key in ("time", "usage"):
+                top_level_validators[key] = value
             else:
-                logger.warning("unknown_validator", validator=validator_name)
+                per_key_validators[key] = value
         
-        return validators
+        result = {}
+        
+        # Process top-level validators (time, usage)
+        for validator_name, validator_arg in top_level_validators.items():
+            if validator_name == "time":
+                result[validator_name] = [time_validator(validator_arg)]
+            elif validator_name == "usage":
+                result[validator_name] = [usage_validator(validator_arg)]
+        
+        # Process per-key validators (content, etc.)
+        for key, validator_spec in per_key_validators.items():
+            if not isinstance(validator_spec, dict):
+                raise ValueError(f"validators for key '{key}' must be a dict")
+            
+            # Handle nested format: {"content": {"validators": {...}}}
+            if "validators" in validator_spec:
+                validator_spec = validator_spec["validators"]
+            
+            validators = []
+            for validator_name, validator_arg in validator_spec.items():
+                if validator_name == "contains":
+                    validators.append(contains_output(validator_arg))
+                elif validator_name == "not_contains":
+                    validators.append(not_contains_output(validator_arg))
+                elif validator_name == "equals":
+                    validators.append(equals(validator_arg))
+                elif validator_name == "regex":
+                    validators.append(regex(validator_arg))
+                elif validator_name == "semantic":
+                    validators.append(semantic_output(validator_arg))
+                elif validator_name == "contains_any":
+                    validators.append(contains_any_output(validator_arg))
+                elif validator_name == "time":
+                    validators.append(time_validator(validator_arg))
+                elif validator_name == "usage":
+                    validators.append(usage_validator(validator_arg))
+                else:
+                    # Unknown validator
+                    logger.warning("unknown_validator", validator=validator_name)
+            
+            result[key] = validators
+        
+        return result
     
-    def _has_file_extension(self, s: str) -> bool:
-        """Check if a string ends with a file extension."""
-        if not isinstance(s, str):
-            return False
-        # Common file extensions
-        extensions = ['.txt', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv', '.json', 
-                     '.xml', '.html', '.htm', '.png', '.jpg', '.jpeg', '.gif', '.svg',
-                     '.mp3', '.mp4', '.avi', '.zip', '.tar', '.gz', '.py', '.js', '.ts',
-                     '.md', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.log']
-        s_lower = s.lower().strip()
-        # Check if it ends with an extension (with optional query params for URLs)
-        for ext in extensions:
-            if s_lower.endswith(ext) or ext in s_lower.split('?')[0]:
-                return True
-        return False
 
     def to_message(self, role: str = "assistant", test_file_dir: Path | None = None) -> Message:
         """Convert the Output model instance to a Message instance.
@@ -171,32 +253,13 @@ class Output(BaseModel):
         if self.content:
             for item in self.content:
                 if isinstance(item, File):
-                    # Already a File object
-                    if test_file_dir and hasattr(item, 'path') and item.path:
-                        file_path = Path(item.path)
-                        if not file_path.is_absolute():
-                            resolved_path = (test_file_dir / file_path).resolve()
-                            item = File.validate(str(resolved_path))
-                    content.append(item)
+                    content.append(resolve_file_path(item, test_file_dir))
                 elif isinstance(item, str):
-                    # Check if it's a file path (ends with extension or is a path)
-                    if self._has_file_extension(item) or '/' in item or '\\' in item:
-                        # Treat as file
-                        if test_file_dir:
-                            file_path = Path(item)
-                            if not file_path.is_absolute():
-                                resolved_path = (test_file_dir / file_path).resolve()
-                                file = File.validate(str(resolved_path))
-                            else:
-                                file = File.validate(item)
-                        else:
-                            file = File.validate(item)
-                        content.append(file)
+                    if has_file_extension(item):
+                        content.append(resolve_file_path(item, test_file_dir))
                     else:
-                        # Treat as text
                         content.append(item)
                 else:
-                    # Convert to string
                     content.append(str(item))
         
         return Message.validate({
@@ -206,25 +269,25 @@ class Output(BaseModel):
     
     def to_dict(self) -> dict:
         d = {}
-        if self.content:
-            d["content"] = self.content
+        # Include all keys except validators
+        output_dict = self.model_dump(exclude={"validators"})
+        for key, value in output_dict.items():
+            if value is not None:
+                d[key] = value
+        
+        # Convert validators back to dict format inside each key
         if self.validators:
-            # Convert validators back to dict format
-            if isinstance(self.validators, list):
-                validators_dict = {}
-                for v in self.validators:
-                    key = getattr(v, "name", str(type(v)))
-                    value = getattr(v, "ref", str(v))
-                    if key in validators_dict:
-                        if isinstance(validators_dict[key], list):
-                            validators_dict[key].append(value)
-                        else:
-                            validators_dict[key] = [validators_dict[key], value]
+            for key, validators in self.validators.items():
+                validators_dict = validators_to_dict(validators)
+                if key in d:
+                    key_value = d.pop(key)
+                    d[key] = {}
+                    if key == "content":
+                        d[key]["content"] = key_value
                     else:
-                        validators_dict[key] = value
-                d["validators"] = validators_dict
-            else:
-                # Shouldn't happen with new structure, but handle it
-                d["validators"] = self.validators
+                        d[key]["value"] = key_value
+                    d[key]["validators"] = validators_dict
+                else:
+                    d[key] = {"validators": validators_dict}
         return d
     

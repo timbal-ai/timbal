@@ -74,8 +74,8 @@ class TestInput:
 
     def test_input_relative_path_resolution(self):
         """Test that relative paths are resolved correctly."""
-        # Create an input with a relative path string in prompt
-        input_obj = Input(prompt=["Process this file", "./math_question.md"])
+        # Create an input with a relative path string in prompt (must start with '@')
+        input_obj = Input(prompt=["Process this file", "@./math_question.md"])
         
         # Test with test_file_dir (should resolve)
         test_file_dir = Path(__file__).parent / "fixtures"
@@ -87,8 +87,8 @@ class TestInput:
         
     def test_input_absolute_path_no_resolution(self):
         """Test that absolute paths are not modified."""
-        # Create an input with an absolute path in prompt
-        input_obj = Input(prompt=["Process this file", str(TEST_FILE)])
+        # Create an input with an absolute path in prompt (must start with '@')
+        input_obj = Input(prompt=["Process this file", f"@{TEST_FILE}"])
         
         # Test with test_file_dir (should not change absolute path)
         test_file_dir = Path(__file__).parent / "fixtures"
@@ -110,7 +110,7 @@ class TestOutput:
 
     def test_output_validators_only(self):
         """Test creating output with validators only."""
-        output = Output(validators={"contains": ["hello"]})
+        output = Output(validators={"content": {"validators": {"contains": ["hello"]}}})
         
         assert output.content is None
         assert output.validators is not None
@@ -118,7 +118,7 @@ class TestOutput:
 
     def test_output_content_and_validators(self):
         """Test creating output with both content and validators."""
-        output = Output(content=["Hello"], validators={"contains": ["hello"]})
+        output = Output(content=["Hello"], validators={"content": {"validators": {"contains": ["hello"]}}})
         
         assert output.content == ["Hello"]
         assert output.validators is not None
@@ -134,7 +134,7 @@ class TestOutput:
 
     def test_output_multiple_validators(self):
         """Test output with multiple validators."""
-        output = Output(validators={"contains": ["hello", "world"]})
+        output = Output(validators={"content": {"validators": {"contains": ["hello", "world"]}}})
         
         assert output.validators is not None
         assert len(output.validators) == 1
@@ -221,7 +221,7 @@ class TestTurn:
     def test_turn_with_output_validators(self):
         """Test turn with output validators."""
         input_obj = Input(prompt="What is 2+2?")
-        output_obj = Output(validators={"contains": ["4"]})
+        output_obj = Output(validators={"content": {"validators": {"contains": ["4"]}}})
         
         turn = Turn(input=input_obj, output=output_obj)
         
@@ -481,7 +481,7 @@ class TestTypeIntegration:
         
         output_obj = Output(
             content=["The result is 5"],
-            validators={"contains": ["5"]}
+            validators={"content": {"validators": {"contains": ["5"]}}}
         )
         
         steps_obj = Steps(
@@ -516,7 +516,7 @@ class TestTypeIntegration:
         # Create a test object
         turn = Turn(
             input=Input(prompt="Hello"),
-            output=Output(validators={"contains": ["hi"]})
+            output=Output(validators={"content": {"validators": {"contains": ["hi"]}}})
         )
         test = Test(name="test1", turns=[turn])
         

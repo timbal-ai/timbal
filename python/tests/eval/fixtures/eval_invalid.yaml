@@ -1,4 +1,3 @@
-tests:
-  - name: malformed_test
-    # Missing required 'turns' field
-    description: "This test is missing the turns field"
+- name: malformed_test
+  # Missing required 'turns' field
+  description: "This test is missing the turns field"

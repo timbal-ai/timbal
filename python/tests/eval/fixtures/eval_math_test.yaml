@@ -1,16 +1,16 @@
-tests:
-  - name: math_test
-    description: Test mathematical operations
-    turns:
-      - input:
-          prompt: "What is 2 + 3?"
-        output:
+- name: math_test
+  description: Test mathematical operations
+  turns:
+    - input:
+        prompt: "What is 2 + 3?"
+      output:
+        content:
           validators:
             contains: ["5"]
-        steps:
-          validators:
-            contains:
-              - name: add
-                input:
-                  a: "2"
-                  b: "3"
+      steps:
+        validators:
+          contains:
+            - name: add
+              input:
+                a: "2"
+                b: "3"

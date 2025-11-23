@@ -57,10 +57,7 @@ def _find_matching_model_name(model_prefix: str, model_names: set[str]) -> tuple
         matching_models.sort(key=lambda x: (-len(x), x))
         return matching_models[0], None
     
-    matching_models = []
-    for model in model_names:
-        if model.startswith(model_prefix + "-"):
-            matching_models.append(model)
+    matching_models = [m for m in model_names if m.startswith(model_prefix + "-")]
     
     if not matching_models:
         return None, None
@@ -69,12 +66,7 @@ def _find_matching_model_name(model_prefix: str, model_names: set[str]) -> tuple
     
     unrelated_models = []
     for m1 in matching_models:
-        is_related = False
-        for m2 in matching_models:
-            if m1 != m2:
-                if (m1.startswith(m2 + "-") or m2.startswith(m1 + "-")):
-                    is_related = True
-                    break
+        is_related = any(m1 != m2 and (m1.startswith(m2 + "-") or m2.startswith(m1 + "-")) for m2 in matching_models)
         if not is_related:
             unrelated_models.append(m1)
     
@@ -93,6 +85,42 @@ def _find_matching_model_name(model_prefix: str, model_names: set[str]) -> tuple
     
     matching_models.sort(key=get_priority)
     return matching_models[0], None
+
+
+def _check_value_match(step_val, expected_val):
+    """Check if step_val exactly matches expected_val. If expected_val is a list, match if any value matches exactly."""
+    if step_val is None:
+        return False
+    if isinstance(expected_val, list):
+        return any(str(v) == str(step_val) for v in expected_val)
+    return str(expected_val) == str(step_val)
+
+
+def _apply_validators_to_value(step_val, validators_spec):
+    """Apply validators to a step input value. Returns True if all validators pass."""
+    if not isinstance(validators_spec, dict):
+        return False
+    
+    validation_message = Message(role="user", content=[TextContent(text=str(step_val) if step_val is not None else "")])
+    
+    for validator_name, validator_arg in validators_spec.items():
+        if validator_name == "contains":
+            validator = contains_output(validator_arg)
+        elif validator_name == "not_contains":
+            validator = not_contains_output(validator_arg)
+        elif validator_name == "equals":
+            validator = equals(validator_arg)
+        elif validator_name == "regex":
+            validator = regex(validator_arg)
+        else:
+            continue
+        
+        try:
+            validator(validation_message)
+        except EvalError:
+            return False
+    
+    return True
 
 
 class Validator:
@@ -124,69 +152,15 @@ class Validator:
 
 def contains_steps(ref: list[dict]):
     """
-    Validate that the steps contain the given tool names and, optionally, input key-value substrings.
-    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input substrings).
+    Validate that the steps contain the given tool names and, optionally, input key-value exact matches.
+    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input values).
     Input values can be:
-    - Direct values: will check if the value is contained in the step input
+    - Direct values: will check if the value exactly matches the step input
     - Dicts with 'validators': will apply validators to the step input value
-    If an input value is a list, it will match if any of the values in the list is found (OR logic).
+    If an input value is a list, it will match if any of the values in the list exactly matches (OR logic).
     """
     if not isinstance(ref, list):
         raise ValueError(f"Invalid contains_steps validator: expected list, got {type(ref)}")
-
-    def _check_value_match(step_val, expected_val):
-        """Check if step_val contains expected_val. If expected_val is a list, match if any value matches."""
-        if step_val is None:
-            return False
-        if isinstance(expected_val, list):
-            # OR logic: match if any value in the list is found
-            return any(str(v) in str(step_val) for v in expected_val)
-        else:
-            # Single value: check if it's contained
-            return str(expected_val) in str(step_val)
-    
-    def _apply_validators_to_value(step_val, validators_spec):
-        """Apply validators to a step input value. Returns True if all validators pass."""
-        
-        if not isinstance(validators_spec, dict):
-            return False
-        
-        # Create a message with the step value for validation
-        validation_message = Message(role="user", content=[TextContent(text=str(step_val) if step_val is not None else "")])
-        
-        # Process each validator (using functions defined in this module)
-        for validator_name, validator_arg in validators_spec.items():
-            if validator_name == "contains":
-                # Apply contains validator
-                validator = contains_output(validator_arg)
-                try:
-                    validator(validation_message)
-                except EvalError:
-                    return False
-            elif validator_name == "not_contains":
-                validator = not_contains_output(validator_arg)
-                try:
-                    validator(validation_message)
-                except EvalError:
-                    return False
-            elif validator_name == "equals":
-                validator = equals(validator_arg)
-                try:
-                    validator(validation_message)
-                except EvalError:
-                    return False
-            elif validator_name == "regex":
-                validator = regex(validator_arg)
-                try:
-                    validator(validation_message)
-                except EvalError:
-                    return False
-            # Add more validators as needed
-            else:
-                # Unknown validator, skip
-                continue
-        
-        return True
 
     def validator(steps: list[dict]):
         for expected in ref:
@@ -197,25 +171,19 @@ def contains_steps(ref: list[dict]):
             matched_step = None
             for step in steps:
                 if step.get("tool") == tool_name:
-                    # If no input dict specified, just match tool
                     if not input_dict:
                         found = True
                         matched_step = step
                         break
-                    # Otherwise, check all input keys/values
                     step_input = step.get("input", {})
                     all_match = True
                     for k, v in input_dict.items():
                         step_val = step_input.get(k)
-                        
-                        # Check if v is a dict with validators
                         if isinstance(v, dict) and "validators" in v:
-                            # Apply validators to the step value
                             if not _apply_validators_to_value(step_val, v["validators"]):
                                 all_match = False
                                 break
                         else:
-                            # Direct value matching
                             if not _check_value_match(step_val, v):
                                 all_match = False
                                 break
@@ -232,7 +200,6 @@ def contains_steps(ref: list[dict]):
             if step_validators and matched_step:
                 run_context = get_run_context()
                 if run_context and run_context._trace:
-                    # Find the step's span in the trace to get its execution time
                     step_tool_name = matched_step.get("tool")
                     step_execution_time = None
                     
@@ -240,12 +207,17 @@ def contains_steps(ref: list[dict]):
                         if span.path and "." in span.path:
                             path_parts = span.path.split(".")
                             if len(path_parts) >= 2 and path_parts[1] == step_tool_name:
-                                # Found the step's span, calculate its execution time
                                 if span.t0 is not None and span.t1 is not None:
-                                    step_execution_time = (span.t1 - span.t0) / 1000.0  # Convert to seconds
+                                    step_execution_time = (span.t1 - span.t0) / 1000.0
                                     break
                     
                     for validator_name, validator_arg in step_validators.items():
+                        run_context = get_run_context()
+                        if run_context and hasattr(run_context, "_eval_test_results"):
+                            test_results = run_context._eval_test_results
+                            if test_results is not None:
+                                test_results.total_validations += 1
+                        
                         if validator_name == "time":
                             max_value = validator_arg.get("max")
                             min_value = validator_arg.get("min")
@@ -279,7 +251,6 @@ def contains_steps(ref: list[dict]):
                                         step_usage = span.usage or {}
                                         break
                             
-                            # Tools like web_search register their usage in the agent/llm span via update_usage.
                             if step_usage is None or not step_usage:
                                 usage_keys_to_find = list(validator_arg.keys())
                                 for call_id, span in run_context._trace.items():
@@ -289,15 +260,12 @@ def contains_steps(ref: list[dict]):
                                             if usage_key in span.usage:
                                                 found = True
                                             else:
-                                                # Try prefix matching - check if any key in span.usage matches
-                                                # e.g., "gpt-4.1-mini:web_search_requests" matches
                                                 if ":" in usage_key:
                                                     prefix, usage_type = usage_key.split(":", 1)
                                                     matching_keys = [k for k in span.usage.keys() if k.endswith(":" + usage_type) or k == usage_type]
                                                     if matching_keys:
                                                         found = True
                                             if found:
-                                                # Found a span with at least one matching usage key - use it
                                                 step_usage = span.usage or {}
                                                 break
                                         if step_usage:
@@ -306,7 +274,6 @@ def contains_steps(ref: list[dict]):
                             if step_usage is None or not step_usage:
                                 raise EvalError(f"Cannot validate usage for step '{tool_name}': step usage not available in trace.")
                             
-                            # Validate each usage constraint
                             for usage_key, limits in validator_arg.items():
                                 if not isinstance(limits, dict):
                                     raise ValueError(f"Invalid usage limits for '{usage_key}': expected dict, got {type(limits)}")
@@ -336,11 +303,6 @@ def contains_steps(ref: list[dict]):
                                 if max_value is None and min_value is None and equals_value is None:
                                     raise ValueError(f"usage constraint for '{usage_key}' must have at least one of 'max', 'min', or 'equals' keys")
                                 
-                                # Parse usage_key and find matching model/tool
-                                # For step-specific validation, we support:
-                                # 1. "usage_type" - just the usage type (e.g., "api_calls")
-                                # 2. "model:usage_type" - with model prefix (e.g., "gpt-4.1-mini:input_text_tokens")
-                                # 3. "tool_name:usage_type" - with tool prefix (e.g., "my_tool:api_calls")
                                 if ":" in usage_key:
                                     prefix, usage_type = usage_key.split(":", 1)
                                     full_usage_key = usage_key
@@ -377,9 +339,8 @@ def contains_steps(ref: list[dict]):
                                     raise EvalError(f"Invalid usage key '{usage_key}': must be in format 'model:usage_type' (e.g., 'gpt-4o-mini:web_search_requests')")
                                 
                                 if actual_value is None:
-                                    raise EvalError(f"Cannot validate usage for '{usage_key}': usage value not found in step usage data.")
+                                            raise EvalError(f"Cannot validate usage for '{usage_key}': usage value not found in step usage data.")
                                 
-                                # Validate constraints
                                 if equals_value is not None:
                                     if actual_value != equals_value:
                                         raise EvalError(f"Step '{tool_name}' usage {full_usage_key} value {actual_value} is not equal to expected value {equals_value}.")
@@ -392,25 +353,397 @@ def contains_steps(ref: list[dict]):
     return Validator(validator, "contains_steps", ref)
 
 
+def contains_ordered_steps(ref: list[dict]):
+    """
+    Validate that the steps contain the given tool names in the specified order (relative order).
+    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input values).
+    Input values can be:
+    - Direct values: will check if the value exactly matches the step input
+    - Dicts with 'validators': will apply validators to the step input value
+    If an input value is a list, it will match if any of the values in the list exactly matches (OR logic).
+    
+    Unlike contains_steps, this validator requires that steps appear in the same relative order as specified.
+    Additional steps are allowed between expected steps, but the expected steps must appear in order.
+    Unlike equals_steps, this validator does NOT require exact matching - additional steps are allowed.
+    """
+    if not isinstance(ref, list):
+        raise ValueError(f"Invalid contains_ordered_steps validator: expected list, got {type(ref)}")
+
+    def validator(steps: list[dict]):
+        expected_index = 0
+        
+        for step in steps:
+            if expected_index >= len(ref):
+                break
+            
+            expected = ref[expected_index]
+            tool_name = expected.get("name")
+            input_dict = expected.get("input", {})
+            step_validators = expected.get("validators", {})
+            
+            if step.get("tool") == tool_name:
+                if not input_dict:
+                    expected_index += 1
+                    matched_step = step
+                else:
+                    step_input = step.get("input", {})
+                    all_match = True
+                    for k, v in input_dict.items():
+                        step_val = step_input.get(k)
+                        if isinstance(v, dict) and "validators" in v:
+                            if not _apply_validators_to_value(step_val, v["validators"]):
+                                all_match = False
+                                break
+                        else:
+                            if not _check_value_match(step_val, v):
+                                all_match = False
+                                break
+                    
+                    if all_match:
+                        expected_index += 1
+                        matched_step = step
+                    else:
+                        continue
+                
+                if step_validators and matched_step:
+                    run_context = get_run_context()
+                    if run_context and run_context._trace:
+                        step_tool_name = matched_step.get("tool")
+                        step_execution_time = None
+                        
+                        for call_id, span in run_context._trace.items():
+                            if span.path and "." in span.path:
+                                path_parts = span.path.split(".")
+                                if len(path_parts) >= 2 and path_parts[1] == step_tool_name:
+                                    if span.t0 is not None and span.t1 is not None:
+                                        step_execution_time = (span.t1 - span.t0) / 1000.0
+                                        break
+                        
+                        for validator_name, validator_arg in step_validators.items():
+                            run_context = get_run_context()
+                            if run_context and hasattr(run_context, "_eval_test_results"):
+                                test_results = run_context._eval_test_results
+                                if test_results is not None:
+                                    test_results.total_validations += 1
+                            
+                            if validator_name == "time":
+                                max_value = validator_arg.get("max")
+                                min_value = validator_arg.get("min")
+                                
+                                if step_execution_time is not None:
+                                    if max_value is not None:
+                                        try:
+                                            max_value = float(max_value)
+                                        except (ValueError, TypeError):
+                                            raise ValueError(f"time.max must be a number, got {type(max_value)}")
+                                        if step_execution_time >= max_value:
+                                            raise EvalError(f"Step '{tool_name}' execution time {step_execution_time:.3f}s is greater than or equal to max value {max_value}s.")
+                                    
+                                    if min_value is not None:
+                                        try:
+                                            min_value = float(min_value)
+                                        except (ValueError, TypeError):
+                                            raise ValueError(f"time.min must be a number, got {type(min_value)}")
+                                        if step_execution_time <= min_value:
+                                            raise EvalError(f"Step '{tool_name}' execution time {step_execution_time:.3f}s is less than or equal to min value {min_value}s.")
+                                else:
+                                    raise EvalError(f"Cannot validate time for step '{tool_name}': step execution time not available in trace.")
+                            
+                            elif validator_name == "usage":
+                                step_usage = None
+                                for call_id, span in run_context._trace.items():
+                                    if span.path and "." in span.path:
+                                        path_parts = span.path.split(".")
+                                        if len(path_parts) >= 2 and path_parts[1] == step_tool_name:
+                                            step_usage = span.usage or {}
+                                            break
+                                
+                                if step_usage is None or not step_usage:
+                                    raise EvalError(f"Cannot validate usage for step '{tool_name}': step usage not available in trace.")
+                                
+                                for usage_key, limits in validator_arg.items():
+                                    if not isinstance(limits, dict):
+                                        raise ValueError(f"Invalid usage limits for '{usage_key}': expected dict, got {type(limits)}")
+                                    
+                                    max_value = limits.get("max")
+                                    min_value = limits.get("min")
+                                    equals_value = limits.get("equals")
+                                    
+                                    if max_value is not None:
+                                        try:
+                                            max_value = float(max_value)
+                                        except (ValueError, TypeError):
+                                            raise ValueError(f"usage.max must be a number for '{usage_key}', got {type(max_value)}")
+                                    
+                                    if min_value is not None:
+                                        try:
+                                            min_value = float(min_value)
+                                        except (ValueError, TypeError):
+                                            raise ValueError(f"usage.min must be a number for '{usage_key}', got {type(min_value)}")
+                                    
+                                    if equals_value is not None:
+                                        try:
+                                            equals_value = float(equals_value)
+                                        except (ValueError, TypeError):
+                                            raise ValueError(f"usage.equals must be a number for '{usage_key}', got {type(equals_value)}")
+                                    
+                                    if max_value is None and min_value is None and equals_value is None:
+                                        raise ValueError(f"usage constraint for '{usage_key}' must have at least one of 'max', 'min', or 'equals' keys")
+                                    
+                                    if ":" in usage_key:
+                                        prefix, usage_type = usage_key.split(":", 1)
+                                        full_usage_key = usage_key
+                                        actual_value = step_usage.get(full_usage_key)
+                                        
+                                        if actual_value is None:
+                                            model_names = set()
+                                            for k in step_usage.keys():
+                                                if ":" in k and k.endswith(":" + usage_type):
+                                                    model_names.add(k.split(":")[0])
+                                            
+                                            matched_model, match_error = _find_matching_model_name(prefix, model_names)
+                                            if match_error:
+                                                raise EvalError(f"Cannot validate usage for '{usage_key}': {match_error}")
+                                            if matched_model:
+                                                full_usage_key = f"{matched_model}:{usage_type}"
+                                                actual_value = step_usage.get(full_usage_key)
+                                        
+                                        if actual_value is None:
+                                            available_models_str = ", ".join(sorted(model_names)) if model_names else "none"
+                                            raise EvalError(f"Cannot validate usage for '{usage_key}': no matching usage found in step usage data. Expected model prefix '{prefix}'. Available models: {available_models_str}")
+                                        
+                                        if "+" in usage_type and actual_value is None:
+                                            matched_model, match_error = _find_matching_model_name(prefix, model_names)
+                                            if match_error:
+                                                raise EvalError(f"Cannot validate usage for '{usage_key}': {match_error}")
+                                            if matched_model:
+                                                keys = usage_type.split("+")
+                                                actual_value = sum(step_usage.get(f"{matched_model}:{k}", 0) for k in keys)
+                                                full_usage_key = f"{matched_model}:{usage_type}"
+                                            else:
+                                                raise EvalError(f"Cannot validate usage for '{usage_key}': cannot aggregate without matching prefix.")
+                                    else:
+                                        raise EvalError(f"Invalid usage key '{usage_key}': must be in format 'model:usage_type' (e.g., 'gpt-4o-mini:web_search_requests')")
+                                    
+                                    if actual_value is None:
+                                            raise EvalError(f"Cannot validate usage for '{usage_key}': usage value not found in step usage data.")
+                                
+                                if equals_value is not None:
+                                    if actual_value != equals_value:
+                                        raise EvalError(f"Step '{tool_name}' usage {full_usage_key} value {actual_value} is not equal to expected value {equals_value}.")
+                                
+                                if max_value is not None and actual_value > max_value:
+                                    raise EvalError(f"Step '{tool_name}' usage {full_usage_key} value {actual_value} is greater than max value {max_value}.")
+                                
+                                if min_value is not None and actual_value < min_value:
+                                    raise EvalError(f"Step '{tool_name}' usage {full_usage_key} value {actual_value} is less than min value {min_value}.")
+        
+        if expected_index < len(ref):
+            missing_expected = ref[expected_index]
+            tool_name = missing_expected.get("name")
+            input_dict = missing_expected.get("input", {})
+            if input_dict:
+                raise EvalError(f"Expected step '{tool_name}' with input {input_dict} not found in the correct order.")
+            else:
+                raise EvalError(f"Expected step '{tool_name}' not found in the correct order.")
+    
+    return Validator(validator, "contains_ordered_steps", ref)
+
+
+def equals_steps(ref: list[dict]):
+    """
+    Validate that the steps exactly match the given tool names in the exact order, with no additional steps.
+    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input values).
+    Input values can be:
+    - Direct values: will check if the value exactly matches the step input
+    - Dicts with 'validators': will apply validators to the step input value
+    If an input value is a list, it will match if any of the values in the list exactly matches (OR logic).
+    
+    Unlike contains_steps, this validator requires:
+    1. Steps appear in the exact same order as specified
+    2. No additional steps beyond those specified
+    3. Each step matches exactly (tool name and inputs)
+    """
+    if not isinstance(ref, list):
+        raise ValueError(f"Invalid equals_steps validator: expected list, got {type(ref)}")
+
+    def validator(steps: list[dict]):
+        if len(steps) != len(ref):
+            raise EvalError(f"Expected {len(ref)} step(s), but got {len(steps)} step(s).")
+        
+        for i, expected in enumerate(ref):
+            step = steps[i]
+            tool_name = expected.get("name")
+            input_dict = expected.get("input", {})
+            step_validators = expected.get("validators", {})
+            
+            if step.get("tool") != tool_name:
+                raise EvalError(f"Step {i+1}: expected tool '{tool_name}', but got '{step.get('tool')}'.")
+            
+            # Check inputs match
+            if input_dict:
+                step_input = step.get("input", {})
+                for k, v in input_dict.items():
+                    step_val = step_input.get(k)
+                    if isinstance(v, dict) and "validators" in v:
+                        if not _apply_validators_to_value(step_val, v["validators"]):
+                            raise EvalError(f"Step {i+1} (tool '{tool_name}'): input '{k}' validation failed.")
+                    else:
+                        if not _check_value_match(step_val, v):
+                            raise EvalError(f"Step {i+1} (tool '{tool_name}'): input '{k}' expected '{v}', but got '{step_val}'.")
+            
+            if step_validators:
+                run_context = get_run_context()
+                if run_context and run_context._trace:
+                    step_tool_name = step.get("tool")
+                    step_execution_time = None
+                    
+                    for call_id, span in run_context._trace.items():
+                        if span.path and "." in span.path:
+                            path_parts = span.path.split(".")
+                            if len(path_parts) >= 2 and path_parts[1] == step_tool_name:
+                                if span.t0 is not None and span.t1 is not None:
+                                    step_execution_time = (span.t1 - span.t0) / 1000.0
+                                    break
+                    
+                    for validator_name, validator_arg in step_validators.items():
+                        run_context = get_run_context()
+                        if run_context and hasattr(run_context, "_eval_test_results"):
+                            test_results = run_context._eval_test_results
+                            if test_results is not None:
+                                test_results.total_validations += 1
+                        
+                        if validator_name == "time":
+                            max_value = validator_arg.get("max")
+                            min_value = validator_arg.get("min")
+                            
+                            if step_execution_time is not None:
+                                if max_value is not None:
+                                    try:
+                                        max_value = float(max_value)
+                                    except (ValueError, TypeError):
+                                        raise ValueError(f"time.max must be a number, got {type(max_value)}")
+                                    if step_execution_time >= max_value:
+                                        raise EvalError(f"Step {i+1} (tool '{tool_name}') execution time {step_execution_time:.3f}s is greater than or equal to max value {max_value}s.")
+                                
+                                if min_value is not None:
+                                    try:
+                                        min_value = float(min_value)
+                                    except (ValueError, TypeError):
+                                        raise ValueError(f"time.min must be a number, got {type(min_value)}")
+                                    if step_execution_time <= min_value:
+                                        raise EvalError(f"Step {i+1} (tool '{tool_name}') execution time {step_execution_time:.3f}s is less than or equal to min value {min_value}s.")
+                            else:
+                                raise EvalError(f"Cannot validate time for step {i+1} (tool '{tool_name}'): step execution time not available in trace.")
+                        
+                        elif validator_name == "usage":
+                            step_usage = None
+                            for call_id, span in run_context._trace.items():
+                                if span.path and "." in span.path:
+                                    path_parts = span.path.split(".")
+                                    if len(path_parts) >= 2 and path_parts[1] == step_tool_name:
+                                        step_usage = span.usage or {}
+                                        break
+                                
+                                if step_usage is None or not step_usage:
+                                    raise EvalError(f"Cannot validate usage for step {i+1} (tool '{tool_name}'): step usage not available in trace.")
+                                
+                                for usage_key, limits in validator_arg.items():
+                                    if not isinstance(limits, dict):
+                                        raise ValueError(f"Invalid usage limits for '{usage_key}': expected dict, got {type(limits)}")
+                                    
+                                    max_value = limits.get("max")
+                                    min_value = limits.get("min")
+                                    equals_value = limits.get("equals")
+                                    
+                                    if max_value is not None:
+                                        try:
+                                            max_value = float(max_value)
+                                        except (ValueError, TypeError):
+                                            raise ValueError(f"usage.max must be a number for '{usage_key}', got {type(max_value)}")
+                                    
+                                    if min_value is not None:
+                                        try:
+                                            min_value = float(min_value)
+                                        except (ValueError, TypeError):
+                                            raise ValueError(f"usage.min must be a number for '{usage_key}', got {type(min_value)}")
+                                    
+                                    if equals_value is not None:
+                                        try:
+                                            equals_value = float(equals_value)
+                                        except (ValueError, TypeError):
+                                            raise ValueError(f"usage.equals must be a number for '{usage_key}', got {type(equals_value)}")
+                                    
+                                    if max_value is None and min_value is None and equals_value is None:
+                                        raise ValueError(f"usage constraint for '{usage_key}' must have at least one of 'max', 'min', or 'equals' keys")
+                                    
+                                    if ":" in usage_key:
+                                        prefix, usage_type = usage_key.split(":", 1)
+                                        full_usage_key = usage_key
+                                        actual_value = step_usage.get(full_usage_key)
+                                        
+                                        if actual_value is None:
+                                            model_names = set()
+                                            for k in step_usage.keys():
+                                                if ":" in k and k.endswith(":" + usage_type):
+                                                    model_names.add(k.split(":")[0])
+                                            
+                                            matched_model, match_error = _find_matching_model_name(prefix, model_names)
+                                            if match_error:
+                                                raise EvalError(f"Cannot validate usage for '{usage_key}': {match_error}")
+                                            if matched_model:
+                                                full_usage_key = f"{matched_model}:{usage_type}"
+                                                actual_value = step_usage.get(full_usage_key)
+                                        
+                                        if actual_value is None:
+                                            available_models_str = ", ".join(sorted(model_names)) if model_names else "none"
+                                            raise EvalError(f"Cannot validate usage for '{usage_key}': no matching usage found in step usage data. Expected model prefix '{prefix}'. Available models: {available_models_str}")
+                                        
+                                        if "+" in usage_type and actual_value is None:
+                                            matched_model, match_error = _find_matching_model_name(prefix, model_names)
+                                            if match_error:
+                                                raise EvalError(f"Cannot validate usage for '{usage_key}': {match_error}")
+                                            if matched_model:
+                                                keys = usage_type.split("+")
+                                                actual_value = sum(step_usage.get(f"{matched_model}:{k}", 0) for k in keys)
+                                                full_usage_key = f"{matched_model}:{usage_type}"
+                                            else:
+                                                raise EvalError(f"Cannot validate usage for '{usage_key}': cannot aggregate without matching prefix.")
+                                    else:
+                                        raise EvalError(f"Invalid usage key '{usage_key}': must be in format 'model:usage_type' (e.g., 'gpt-4o-mini:web_search_requests')")
+                                    
+                                    if actual_value is None:
+                                        raise EvalError(f"Cannot validate usage for '{usage_key}': usage value not found in step usage data.")
+                                    
+                                    if equals_value is not None:
+                                        if actual_value != equals_value:
+                                            raise EvalError(f"Step {i+1} (tool '{tool_name}') usage {full_usage_key} value {actual_value} is not equal to expected value {equals_value}.")
+                                    
+                                    if max_value is not None and actual_value > max_value:
+                                        raise EvalError(f"Step {i+1} (tool '{tool_name}') usage {full_usage_key} value {actual_value} is greater than max value {max_value}.")
+                                    
+                                    if min_value is not None and actual_value < min_value:
+                                        raise EvalError(f"Step {i+1} (tool '{tool_name}') usage {full_usage_key} value {actual_value} is less than min value {min_value}.")
+    
+    return Validator(validator, "equals_steps", ref)
+
+
 def not_contains_steps(ref: list[dict]):
     """
-    Validate that the steps do not contain the given tool names and, optionally, input key-value substrings.
-    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input substrings).
-    If an input value is a list, it will match if any of the values in the list is found (OR logic).
+    Validate that the steps do not contain the given tool names and, optionally, input key-value exact matches.
+    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input values).
+    If an input value is a list, it will match if any of the values in the list exactly matches (OR logic).
     """
     if not isinstance(ref, list):
         raise ValueError(f"Invalid not_contains_steps validator: expected list, got {type(ref)}")
 
     def _check_value_match(step_val, expected_val):
-        """Check if step_val contains expected_val. If expected_val is a list, match if any value matches."""
+        """Check if step_val exactly matches expected_val. If expected_val is a list, match if any value matches exactly."""
         if step_val is None:
             return False
         if isinstance(expected_val, list):
-            # OR logic: match if any value in the list is found
-            return any(str(v) in str(step_val) for v in expected_val)
-        else:
-            # Single value: check if it's contained
-            return str(expected_val) in str(step_val)
+            return any(str(v) == str(step_val) for v in expected_val)
+        return str(expected_val) == str(step_val)
 
     def validator(steps: list[dict]):
         for expected in ref:
@@ -428,7 +761,6 @@ def not_contains_steps(ref: list[dict]):
                     if not input_dict:
                         found = True
                         break
-                    # Otherwise, check all input keys/values
                     step_input = step.get("input", {})
                     all_match = True
                     for k, v in input_dict.items():
@@ -487,18 +819,38 @@ def not_contains_output(ref: str | list[str]):
     return Validator(validator, "not_contains", ref)
 
 
-def equals(ref: str):
-    """Validate that the message exactly matches the given text."""
-    if not isinstance(ref, str):
-        raise ValueError(f"Invalid equals validator: expected str, got {type(ref)}")
+def equals(ref: str | bool | int | float):
+    """Validate that the message exactly matches the given value (string, bool, int, or float)."""
+    if not isinstance(ref, (str, bool, int, float)):
+        raise ValueError(f"Invalid equals validator: expected str, bool, int, or float, got {type(ref)}")
 
     def validator(message: Message):
         message_text = message.collect_text()
         if not message_text:
             raise EvalError("Message does not contain any text to validate.")
         
-        if message_text.strip() != ref.strip():
-            raise EvalError(f"Message does not exactly match expected output. Expected: '{ref}', Got: '{message_text}'")
+        # Convert the reference value to string for comparison
+        ref_str = str(ref).strip()
+        message_str = message_text.strip()
+        
+        # For boolean values, also check "True"/"False" vs "true"/"false"
+        if isinstance(ref, bool):
+            # Try exact match first
+            if message_str == ref_str:
+                return
+            # Also check case-insensitive for boolean strings
+            if message_str.lower() == ref_str.lower():
+                return
+            # Check if message is "1" or "0" for True/False
+            if ref is True and message_str == "1":
+                return
+            if ref is False and message_str == "0":
+                return
+            raise EvalError(f"Message does not exactly match expected output. Expected: '{ref_str}', Got: '{message_str}'")
+        else:
+            # For other types, do exact string comparison
+            if message_str != ref_str:
+                raise EvalError(f"Message does not exactly match expected output. Expected: '{ref_str}', Got: '{message_str}'")
 
     return Validator(validator, "equals", ref)
 
@@ -524,8 +876,12 @@ def regex(ref: str):
 def time(ref: dict):
     """Validate that the execution time meets the specified criteria.
     
-    Works for input, output, and steps validators. The execution time is measured
+    Works for input and output validators. The execution time is measured
     for the entire turn and stored in run_context.
+    
+    Note: Time validator is NOT supported at steps.validators level since tools
+    can execute in parallel. Use time validator within a specific step instead
+    (e.g., steps.validators.contains[].validators.time).
     
     Args:
         ref: Dictionary with validation criteria. Supported keys:
@@ -533,13 +889,20 @@ def time(ref: dict):
             - "min": float - minimum execution time in seconds
     
     Examples:
-        time:
-          max: 5.0  # execution time must be < 5 seconds
-        time:
-          min: 1.0  # execution time must be > 1 second
-        time:
-          max: 5.0
-          min: 1.0  # execution time must be between 1 and 5 seconds
+        # Output time validation
+        output:
+          validators:
+            time:
+              max: 5.0  # execution time must be < 5 seconds
+        
+        # Step-specific time validation (recommended)
+        steps:
+          validators:
+            contains:
+              - name: my_tool
+                validators:
+                  time:
+                    max: 0.5  # this specific step must complete in < 0.5 seconds
     """
     from ..state import get_run_context
     
@@ -565,22 +928,16 @@ def time(ref: dict):
         raise ValueError("time validator must have at least one of 'max' or 'min' keys")
     
     def validator(value):
-        # Get execution time from run_context
-        # value can be Message (for input/output) or list (for steps)
         run_context = get_run_context()
         if not run_context:
             raise EvalError("Cannot validate time: no run context available.")
         
-        # If value is a list, it's being used in steps validation - use steps time
-        # Otherwise, use the total turn execution time
         if isinstance(value, list):
-            execution_time = getattr(run_context, "_last_steps_execution_time", None)
-            if execution_time is None:
-                raise EvalError("Cannot validate time: steps execution time not available in run context.")
-        else:
-            execution_time = getattr(run_context, "_last_execution_time", None)
-            if execution_time is None:
-                raise EvalError("Cannot validate time: execution time not available in run context.")
+            raise EvalError("Time validator is not supported at steps.validators level. Use time validator within a specific step (e.g., steps.validators.contains[].validators.time) since tools can execute in parallel.")
+        
+        execution_time = getattr(run_context, "_last_execution_time", None)
+        if execution_time is None:
+            raise EvalError("Cannot validate time: execution time not available in run context.")
         
         if max_value is not None and execution_time >= max_value:
             raise EvalError(f"Execution time {execution_time:.3f}s is greater than or equal to max value {max_value}s.")
@@ -692,9 +1049,13 @@ def usage(ref: dict):
             if actual_usage is None:
                 raise EvalError("Cannot validate usage: steps usage data not available in run context.")
         else:
-            actual_usage = getattr(run_context, "_last_usage", {})
-            if not actual_usage:
+            if not hasattr(run_context, "_last_usage"):
+                raise EvalError("Cannot validate usage: usage data not available in run context (attribute not found).")
+            actual_usage = getattr(run_context, "_last_usage", None)
+            if actual_usage is None:
                 raise EvalError("Cannot validate usage: usage data not available in run context.")
+            if not isinstance(actual_usage, dict):
+                raise EvalError(f"Cannot validate usage: usage data has invalid type {type(actual_usage)}, expected dict.")
         
         for usage_key, limits in ref.items():
             max_value = limits.get("max")
@@ -719,12 +1080,10 @@ def usage(ref: dict):
                 except (ValueError, TypeError):
                     raise ValueError(f"usage.equals must be a number for '{usage_key}', got {type(equals_value)}")
             
-            # Must be in format "model:usage_type"
             if ":" not in usage_key:
                 raise EvalError(f"Invalid usage key '{usage_key}': must be in format 'model:usage_type' (e.g., 'gpt-4o-mini:web_search_requests')")
             
             model_prefix, usage_type = usage_key.split(":", 1)
-            # Find matching model using exact matching
             matched_model, prefix_error = _find_matching_model(model_prefix, actual_usage)
             
             if prefix_error:
@@ -733,12 +1092,9 @@ def usage(ref: dict):
             if matched_model is None:
                 raise EvalError(f"Cannot validate usage for '{usage_key}': no matching model found in usage data. Expected model prefix '{model_prefix}'.")
             
-            # Use the matched model name
             full_usage_key = f"{matched_model}:{usage_type}"
             
-            # Get actual value
             if "+" in usage_type:
-                # Sum multiple usage types
                 keys = usage_type.split("+")
                 actual_value = sum(actual_usage.get(f"{matched_model}:{k}", 0) for k in keys)
             else:
@@ -747,7 +1103,6 @@ def usage(ref: dict):
             if actual_value is None:
                 raise EvalError(f"Cannot validate usage for '{usage_key}': usage value not found in usage data.")
             
-            # Validate constraints
             if equals_value is not None:
                 if actual_value != equals_value:
                     raise EvalError(f"Usage {full_usage_key} value {actual_value} is not equal to expected value {equals_value}.")
@@ -788,7 +1143,9 @@ You must respond with a valid JSON object containing:
         prompt = "<output>\n" + str(message_text) + "\n</output>\n\n"
         prompt += "\n".join(["<reference>\n" + str(v) + "\n</reference>\n" for v in ref])
 
-        # Create agent in fresh context without parent
+        original_run_context = get_run_context()
+        original_last_usage = getattr(original_run_context, "_last_usage", None) if original_run_context else None
+        
         set_run_context(RunContext())
         agent = Agent(
             name="SemanticOutputValidator",
@@ -796,12 +1153,15 @@ You must respond with a valid JSON object containing:
             system_prompt=system_prompt,
         )
         res = await agent(prompt=Message.validate(prompt)).collect()
+        
+        if original_run_context:
+            set_run_context(original_run_context)
+            original_run_context._last_usage = original_last_usage if original_last_usage is not None else {}
         if not res.output or not res.output.content or not res.output.content[0].text:
             raise EvalError("Semantic validator agent failed to generate a response. This may be due to missing API key or other configuration issues.")
         
         res_text = res.output.content[0].text
         try:
-            # Extract JSON from markdown code blocks if present
             json_text = _extract_json_from_text(res_text)
             res = json.loads(json_text)
         except json.JSONDecodeError as e:
@@ -827,9 +1187,8 @@ def contains_any_output(ref: str | list[str]):
 
         for v in ref:
             if v in message_text:
-                return  # Found at least one, validation passes
+                return
 
-        # If we get here, none were found
         ref_str = "', '".join(ref)
         raise EvalError(f"Message does not contain any of: '{ref_str}'.")
 
@@ -838,23 +1197,20 @@ def contains_any_output(ref: str | list[str]):
 
 def contains_any_steps(ref: list[dict]):
     """
-    Validate that the steps contain any of the given tool names and, optionally, input key-value substrings (OR logic).
-    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input substrings).
-    If an input value is a list, it will match if any of the values in the list is found (OR logic).
+    Validate that the steps contain any of the given tool names and, optionally, input key-value exact matches (OR logic).
+    Each ref item should be a dict with 'name' (tool name) and optionally 'input' (a dict of expected input values).
+    If an input value is a list, it will match if any of the values in the list exactly matches (OR logic).
     """
     if not isinstance(ref, list):
         raise ValueError(f"Invalid contains_any_steps validator: expected list, got {type(ref)}")
 
     def _check_value_match(step_val, expected_val):
-        """Check if step_val contains expected_val. If expected_val is a list, match if any value matches."""
+        """Check if step_val exactly matches expected_val. If expected_val is a list, match if any value matches exactly."""
         if step_val is None:
             return False
         if isinstance(expected_val, list):
-            # OR logic: match if any value in the list is found
-            return any(str(v) in str(step_val) for v in expected_val)
-        else:
-            # Single value: check if it's contained
-            return str(expected_val) in str(step_val)
+            return any(str(v) == str(step_val) for v in expected_val)
+        return str(expected_val) == str(step_val)
 
     def validator(steps: list[dict]):
         for expected in ref:
@@ -863,10 +1219,8 @@ def contains_any_steps(ref: list[dict]):
             
             for step in steps:
                 if step.get("tool") == tool_name:
-                    # If no input dict specified, just match tool
                     if not input_dict:
-                        return  # Found a match, validation passes
-                    # Otherwise, check all input keys/values
+                        return
                     step_input = step.get("input", {})
                     all_match = True
                     for k, v in input_dict.items():
@@ -875,9 +1229,8 @@ def contains_any_steps(ref: list[dict]):
                             all_match = False
                             break
                     if all_match:
-                        return  # Found a match, validation passes
+                        return
         
-        # If we get here, none were found
         tool_names = [expected.get("name") for expected in ref]
         tools_str = "', '".join(tool_names)
         raise EvalError(f"No step found with any of the tools: '{tools_str}'.")
@@ -893,7 +1246,6 @@ def semantic_steps(ref: str | list[str]):
     ref = [str(v) for v in ref]
 
     async def validator(steps: list[dict]):
-        # Convert steps list to text representation
         if not steps:
             steps_text = "No steps were executed."
         else:
@@ -914,7 +1266,9 @@ You must respond with a valid JSON object containing:
         prompt = "<steps>\n" + str(steps_text) + "\n</steps>\n\n"
         prompt += "\n".join(["<reference>\n" + str(v) + "\n</reference>\n" for v in ref])
 
-        # Create agent in fresh context without parent
+        original_run_context = get_run_context()
+        original_last_usage = getattr(original_run_context, "_last_usage", None) if original_run_context else None
+        
         set_run_context(RunContext())
         agent = Agent(
             name="SemanticStepsValidator",
@@ -922,12 +1276,15 @@ You must respond with a valid JSON object containing:
             system_prompt=system_prompt,
         )
         res = await agent(prompt=Message.validate(prompt)).collect()
+        
+        if original_run_context:
+            set_run_context(original_run_context)
+            original_run_context._last_usage = original_last_usage if original_last_usage is not None else {}
         if not res.output or not res.output.content or not res.output.content[0].text:
             raise EvalError("Semantic validator agent failed to generate a response. This may be due to missing API key or other configuration issues.")
         
         res_text = res.output.content[0].text
         try:
-            # Extract JSON from markdown code blocks if present
             json_text = _extract_json_from_text(res_text)
             res = json.loads(json_text)
         except json.JSONDecodeError as e:

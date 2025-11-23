@@ -58,7 +58,7 @@ class TestMainWorkflow:
         await run_evals(files, sample_agent, test_results)
         
         assert test_results.total_files == 1  # 1 file processed
-        assert test_results.total_tests == 4  # 4 tests in eval_agent.yaml
+        assert test_results.total_tests == 5  # 5 tests in eval_agent.yaml
         
         # Test multiple files
         files = [agent_test_file, simple_test_file]
@@ -67,7 +67,7 @@ class TestMainWorkflow:
         await run_evals(files, sample_agent, test_results)
         
         assert test_results.total_files == 2  # 2 files processed
-        assert test_results.total_tests == 5  # 4 from eval_agent.yaml + 1 from eval_simple_test.yaml
+        assert test_results.total_tests == 6  # 5 from eval_agent.yaml + 1 from eval_simple_test.yaml
 
 
 class TestMainErrorHandling:

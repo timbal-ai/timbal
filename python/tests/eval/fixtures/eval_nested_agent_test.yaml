@@ -1,15 +1,15 @@
-tests:
-  - name: nested_agent_test
-    description: Test agent with nested agent tool
-    turns:
-      - input:
-          prompt: "Please calculate 5 + 3 using the math helper"
-        output:
+- name: nested_agent_test
+  description: Test agent with nested agent tool
+  turns:
+    - input:
+        prompt: "Please calculate 5 + 3 using the math helper"
+      output:
+        content:
           validators:
             contains: ["8"]
-        steps:
-          validators:
-            contains:
-              - name: math_helper_agent  # Only the outer agent tool should be captured
-            not_contains:
-              - name: add  # Inner tool should NOT be captured
+      steps:
+        validators:
+          contains:
+            - name: math_helper_agent  # Only the outer agent tool should be captured
+          not_contains:
+            - name: add  # Inner tool should NOT be captured
