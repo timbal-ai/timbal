@@ -5,9 +5,11 @@ from timbal.eval.validators import (
     Validator,
     contains_any_output,
     contains_any_steps,
+    contains_ordered_steps,
     contains_output,
     contains_steps,
     equals,
+    equals_steps,
     regex,
     semantic_output,
     time,
@@ -251,6 +253,248 @@ class TestContainsSteps:
         # Should raise EvalError when none of the values match
         with pytest.raises(EvalError):
             validator(steps)
+
+
+class TestEqualsSteps:
+    """Test the equals_steps validator."""
+
+    def test_equals_steps_basic(self):
+        """Test basic equals_steps functionality."""
+        validator = equals_steps([{"name": "test_tool"}])
+        
+        assert isinstance(validator, Validator)
+        assert validator.name == "equals_steps"
+
+    def test_equals_steps_success_exact_match(self):
+        """Test equals_steps with exact match."""
+        validator = equals_steps([{"name": "add"}])
+        steps = [
+            {"tool": "add", "input": {"a": 2, "b": 3}, "output": 5}
+        ]
+        
+        # Should not raise an exception for exact match
+        validator(steps)
+
+    def test_equals_steps_success_multiple_steps(self):
+        """Test equals_steps with multiple steps in exact order."""
+        validator = equals_steps([
+            {"name": "search"},
+            {"name": "calculate"}
+        ])
+        steps = [
+            {"tool": "search", "input": {"query": "test"}},
+            {"tool": "calculate", "input": {"a": 2, "b": 3}}
+        ]
+        
+        # Should not raise exception for exact match in order
+        validator(steps)
+
+    def test_equals_steps_wrong_order(self):
+        """Test equals_steps with steps in wrong order."""
+        validator = equals_steps([
+            {"name": "search"},
+            {"name": "calculate"}
+        ])
+        steps = [
+            {"tool": "calculate", "input": {"a": 2, "b": 3}},
+            {"tool": "search", "input": {"query": "test"}}
+        ]
+        
+        # Should raise EvalError for wrong order
+        with pytest.raises(EvalError) as exc_info:
+            validator(steps)
+        
+        assert "expected tool 'search'" in str(exc_info.value)
+
+    def test_equals_steps_additional_steps(self):
+        """Test equals_steps with additional steps (should fail)."""
+        validator = equals_steps([{"name": "add"}])
+        steps = [
+            {"tool": "add", "input": {"a": 2, "b": 3}},
+            {"tool": "multiply", "input": {"a": 2, "b": 4}}
+        ]
+        
+        # Should raise EvalError for additional steps
+        with pytest.raises(EvalError) as exc_info:
+            validator(steps)
+        
+        assert "Expected 1 step(s), but got 2 step(s)" in str(exc_info.value)
+
+    def test_equals_steps_missing_steps(self):
+        """Test equals_steps with missing steps."""
+        validator = equals_steps([
+            {"name": "search"},
+            {"name": "calculate"}
+        ])
+        steps = [
+            {"tool": "search", "input": {"query": "test"}}
+        ]
+        
+        # Should raise EvalError for missing steps
+        with pytest.raises(EvalError) as exc_info:
+            validator(steps)
+        
+        assert "Expected 2 step(s), but got 1 step(s)" in str(exc_info.value)
+
+    def test_equals_steps_with_input_validation(self):
+        """Test equals_steps with input validation."""
+        validator = equals_steps([{
+            "name": "add",
+            "input": {"a": "2", "b": "3"}
+        }])
+        steps = [
+            {"tool": "add", "input": {"a": 2, "b": 3}, "output": 5}
+        ]
+        
+        # Should not raise exception for matching steps with input validation
+        validator(steps)
+
+    def test_equals_steps_wrong_input(self):
+        """Test equals_steps with wrong input values."""
+        validator = equals_steps([{
+            "name": "add",
+            "input": {"a": "5", "b": "6"}
+        }])
+        steps = [
+            {"tool": "add", "input": {"a": 2, "b": 3}, "output": 5}
+        ]
+        
+        # Should raise EvalError for wrong input values
+        with pytest.raises(EvalError) as exc_info:
+            validator(steps)
+        
+        assert "input 'a' expected '5'" in str(exc_info.value)
+
+    def test_equals_steps_invalid_ref(self):
+        """Test equals_steps with invalid reference format."""
+        with pytest.raises(ValueError):
+            equals_steps("invalid_format")
+
+
+class TestContainsOrderedSteps:
+    """Test the contains_ordered_steps validator."""
+
+    def test_contains_ordered_steps_basic(self):
+        """Test basic contains_ordered_steps functionality."""
+        validator = contains_ordered_steps([{"name": "test_tool"}])
+        
+        assert isinstance(validator, Validator)
+        assert validator.name == "contains_ordered_steps"
+
+    def test_contains_ordered_steps_success_exact_order(self):
+        """Test contains_ordered_steps with steps in exact order."""
+        validator = contains_ordered_steps([
+            {"name": "search"},
+            {"name": "calculate"}
+        ])
+        steps = [
+            {"tool": "search", "input": {"query": "test"}},
+            {"tool": "calculate", "input": {"a": 2, "b": 3}}
+        ]
+        
+        # Should not raise exception for correct order
+        validator(steps)
+
+    def test_contains_ordered_steps_success_with_additional_steps(self):
+        """Test contains_ordered_steps with additional steps between expected ones."""
+        validator = contains_ordered_steps([
+            {"name": "search"},
+            {"name": "calculate"}
+        ])
+        steps = [
+            {"tool": "search", "input": {"query": "test"}},
+            {"tool": "other_tool", "input": {"x": 1}},  # Additional step
+            {"tool": "calculate", "input": {"a": 2, "b": 3}}
+        ]
+        
+        # Should not raise exception - additional steps are allowed
+        validator(steps)
+
+    def test_contains_ordered_steps_wrong_order(self):
+        """Test contains_ordered_steps with steps in wrong order."""
+        validator = contains_ordered_steps([
+            {"name": "search"},
+            {"name": "calculate"}
+        ])
+        steps = [
+            {"tool": "calculate", "input": {"a": 2, "b": 3}},
+            {"tool": "search", "input": {"query": "test"}}
+        ]
+        
+        # Should raise EvalError for wrong order
+        with pytest.raises(EvalError) as exc_info:
+            validator(steps)
+        
+        assert "not found in the correct order" in str(exc_info.value)
+
+    def test_contains_ordered_steps_missing_step(self):
+        """Test contains_ordered_steps with missing step."""
+        validator = contains_ordered_steps([
+            {"name": "search"},
+            {"name": "calculate"}
+        ])
+        steps = [
+            {"tool": "search", "input": {"query": "test"}}
+        ]
+        
+        # Should raise EvalError for missing step
+        with pytest.raises(EvalError) as exc_info:
+            validator(steps)
+        
+        assert "not found in the correct order" in str(exc_info.value)
+        assert "calculate" in str(exc_info.value)
+
+    def test_contains_ordered_steps_with_input_validation(self):
+        """Test contains_ordered_steps with input validation."""
+        validator = contains_ordered_steps([{
+            "name": "add",
+            "input": {"a": "2", "b": "3"}
+        }])
+        steps = [
+            {"tool": "add", "input": {"a": 2, "b": 3}, "output": 5}
+        ]
+        
+        # Should not raise exception for matching steps with input validation
+        validator(steps)
+
+    def test_contains_ordered_steps_wrong_input(self):
+        """Test contains_ordered_steps with wrong input values."""
+        validator = contains_ordered_steps([{
+            "name": "add",
+            "input": {"a": "5", "b": "6"}
+        }])
+        steps = [
+            {"tool": "add", "input": {"a": 2, "b": 3}, "output": 5}
+        ]
+        
+        # Should raise EvalError for wrong input values
+        with pytest.raises(EvalError) as exc_info:
+            validator(steps)
+        
+        assert "not found in the correct order" in str(exc_info.value)
+
+    def test_contains_ordered_steps_multiple_steps_with_additional(self):
+        """Test contains_ordered_steps with multiple expected steps and additional ones."""
+        validator = contains_ordered_steps([
+            {"name": "search"},
+            {"name": "process"},
+            {"name": "calculate"}
+        ])
+        steps = [
+            {"tool": "search", "input": {"query": "test"}},
+            {"tool": "other_tool1", "input": {}},  # Additional step
+            {"tool": "process", "input": {"data": "x"}},
+            {"tool": "other_tool2", "input": {}},  # Additional step
+            {"tool": "calculate", "input": {"a": 2, "b": 3}}
+        ]
+        
+        # Should not raise exception - order is correct, additional steps allowed
+        validator(steps)
+
+    def test_contains_ordered_steps_invalid_ref(self):
+        """Test contains_ordered_steps with invalid reference format."""
+        with pytest.raises(ValueError):
+            contains_ordered_steps("invalid_format")
 
 
 class TestSemanticOutput:
@@ -854,8 +1098,8 @@ class TestTime:
         with pytest.raises(EvalError):
             validator(message)
 
-    def test_time_works_with_steps(self):
-        """Test time validator works with steps (not just messages)."""
+    def test_time_not_supported_with_steps(self):
+        """Test time validator does not work with steps (time validator only works for input/output)."""
         validator = time({"max": 5.0})
         steps = [{"tool": "add", "input": {"a": 2, "b": 3}}]
         
@@ -864,8 +1108,9 @@ class TestTime:
         run_context._last_steps_execution_time = 3.0
         set_run_context(run_context)
         
-        # Should not raise an exception (time validator works with steps)
-        validator(steps)
+        # Should raise an exception (time validator is not supported at step level)
+        with pytest.raises(EvalError, match="Time validator is not supported at step"):
+            validator(steps)
 
 
 class TestUsage:

@@ -1,30 +1,21 @@
 ---
-title: "Tools Used Validation"
-description: "Test that agents use the correct tools in the right order with proper parameters"
+title: "Tool Usage Validation"
+description: "Validate that agents use the correct tools with proper parameters and in the expected sequence"
 ---
 
-Evals can validate which tools agents use during execution. Ensure your agent follows the expected workflow by using the right tools with correct parameters:
+Tool usage validation ensures your agent uses the right tools with correct parameters. Verify tool selection, parameter values, execution order, and workflow compliance.
 
 ## Search Agent
 
 ```python agent.py
-from timbal import Agent, Tool
+from timbal import Agent
+from timbal.tools import WebSearch
 
-def web_search(query: str) -> str:
-    """Search the web for information about a given query."""
-    return f"Web search results for '{query}': Found comprehensive information about renewable energy trends, including solar and wind power growth statistics."
-
-def search_table(table_name: str, criteria: str) -> str:
-    """Search within a specific table for data matching criteria."""
-    return f"Table search results from '{table_name}' for '{criteria}': Found specific data entries."
 
 agent = Agent(
     name="search_agent",
     model="openai/gpt-4.1-mini",
-    tools=[
-        Tool(handler=web_search, description="Search the web for information about a given query."),
-        Tool(handler=search_table, description="Search within a specific table for data matching criteria."),
-    ],
+    tools=[WebSearch()],
 )
 ```
 
@@ -34,21 +25,52 @@ agent = Agent(
 python -m timbal.eval --fqn agent.py::agent --tests evals.yaml
 ```
 
-## Example Evaluation Output
+## Validation Configuration
+
+```yaml evals.yaml
+- name: eval_search_workflow
+  description: Test search agent uses web_search tool with correct query parameter
+  turns:
+    - input: "Find information about renewable energy trends in the web"
+      steps:
+        validators:
+          contains:
+            - name: web_search
+          not_contains:
+            - name: search_table
+```
+
+## How It Works
+
+1. **Tool Execution**: The agent executes tools during the turn, and each tool call is captured in the trace.
+
+2. **Step Extraction**: The evaluation engine extracts tool calls from the trace, including the tool name and input parameters.
+
+3. **Validation**: Validators check if the actual steps match the expected configuration:
+   - `contains`: Verifies required tools are used
+   - `not_contains`: Ensures unwanted tools are not used
+   - `equals`: Validates exact step sequence
+   - `semantic`: Uses LLM to validate tool appropriateness
+
+4. **Input Parameters**: Tool input parameters are captured and displayed in `actual_steps`, allowing you to verify correct parameter values.
+
+## Evaluation Results
 
 ### Successful Validation
+
+When the agent uses the expected tools:
 
 ```json summary.json
 {
   "total_files": 1,
   "total_tests": 1,
-  "total_turns": 1,
+  "total_validations": 2,
+  "inputs_passed": 0,
+  "inputs_failed": 0,
   "outputs_passed": 0,
   "outputs_failed": 0,
   "steps_passed": 1,
   "steps_failed": 0,
-  "usage_passed": 0,
-  "usage_failed": 0,
   "execution_errors": 0,
   "tests_failed": []
 }
@@ -56,85 +78,75 @@ python -m timbal.eval --fqn agent.py::agent --tests evals.yaml
 
 ### Failed Validation
 
+When the agent uses incorrect tools or misses required ones:
+
 ```json summary.json
 {
   "total_files": 1,
   "total_tests": 1,
-  "total_turns": 1,
+  "total_validations": 2,
+  "inputs_passed": 0,
+  "inputs_failed": 0,
   "outputs_passed": 0,
   "outputs_failed": 0,
   "steps_passed": 0,
   "steps_failed": 1,
-  "usage_passed": 0,
-  "usage_failed": 0,
   "execution_errors": 0,
   "tests_failed": [
     {
       "test_name": "eval_search_workflow",
       "test_path": "evals.yaml::eval_search_workflow",
       "input": {
-        "text": "Find information about renewable energy trends in the web"
+        "prompt": [
+          "Find information about renewable energy trends in the web"
+        ]
       },
       "reason": [
         "steps"
       ],
       "execution_error": null,
+      "input_passed": null,
+      "input_explanations": [],
       "output_passed": null,
       "output_explanations": [],
       "actual_output": {
-        "text": "The table \"Energy_Trends_2024\" contains specific data entries related to renewable energy trends. Would you like a summary of key trends, statistical data, or detailed entries from the table? Please specify your preference.",
+        "text": "I found information about renewable energy trends in the database table.",
         "files": []
       },
       "expected_output": null,
       "steps_passed": false,
       "steps_explanations": [
-        "No step found with tool 'web_search' and input containing {'query': 'renewable energy trends'}.",
+        "No step found with tool 'web_search'.",
         "Step found with tool 'search_table'."
       ],
       "actual_steps": [
         {
           "tool": "search_table",
           "input": {
-            "table_name": "Energy_Trends_2024",
-            "criteria": "renewable energy"
+            "query": "renewable energy trends"
           }
         }
       ],
       "expected_steps": {
         "contains": [
-          "web_search"
+          {
+            "name": "web_search"
+          }
         ],
         "not_contains": [
-          "search_table"
+          {
+            "name": "search_table"
+          }
         ]
-      },
-      "usage_passed": true,
-      "usage_explanations": []
+      }
     }
   ]
 }
 ```
 
-## Validation Configuration
-
-```yaml evals.yaml
-- name: eval_search_workflow
-  description: Test search agent uses correct tools in proper sequence
-  turns:
-    - input: "Find information about renewable energy trends in the web"
-      steps:
-        validators:
-          contains:
-            - name: web_search
-              input:
-                query: "renewable energy trends"
-          not_contains:
-            - name: search_table
-```
-
 ## Key Features
 
-- **Tools Used Validation**: Verify agents use the correct tools with proper parameters
-- **Tool Sequence Validation**: Check that tools are used in the expected order
-- **Workflow Enforcement**: Ensure agents follow expected business logic
-- **Semantic Tool Validation**: Use LLM to validate tool usage appropriateness
+- **Tool Selection**: Verify agents use the correct tools (`contains`, `not_contains`)
+- **Tool Input**: View and validate tool input parameters in `actual_steps`
+- **Sequence Validation**: Check tools are used in the expected order (`equals`, `contains_ordered`)
+- **Semantic Validation**: Use LLM to validate tool usage appropriateness (`semantic`)

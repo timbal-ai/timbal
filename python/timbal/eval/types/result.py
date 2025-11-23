@@ -24,7 +24,7 @@ class EvalResult(BaseModel):
 class EvalTestSuiteResult(BaseModel):
     total_files: int = 0
     total_tests: int = 0
-    total_turns: int = 0
+    total_validations: int = 0
     inputs_passed: int = 0
     inputs_failed: int = 0
     outputs_passed: int = 0

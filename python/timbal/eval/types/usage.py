@@ -1,7 +1,4 @@
-import structlog
 from pydantic import BaseModel, ConfigDict, field_validator
-
-logger = structlog.get_logger("timbal.eval.types.steps")
 
 
 class Usage(BaseModel):
@@ -24,9 +21,12 @@ class Usage(BaseModel):
     """
     @field_validator("usage", mode="before")
     def validate_usage(cls, v):
+        """Normalize usage from dict or list format to flat dict format."""
         if isinstance(v, dict):
+            # Already in flat format if all values are dicts with max/min
             if all(isinstance(val, dict) and ("max" in val or "min" in val) for val in v.values()):
                 return v
+            # Convert nested format to flat
             flat_usage = {}
             for name, value_type in v.items():
                 if value_type is None:
@@ -36,10 +36,12 @@ class Usage(BaseModel):
                         flat_usage[f"{name}:{name_type}"] = limits
             return flat_usage
         elif isinstance(v, list):
+            # Merge all dicts from list into one
             usage = {}
             for item in v:
                 if isinstance(item, dict):
                     usage.update(item)
+            # Convert nested format to flat
             flat_usage = {}
             for name, value_type in usage.items():
                 if value_type is None:

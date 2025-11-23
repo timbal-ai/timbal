@@ -1,51 +1,68 @@
-tests:
-  - name: time_test
-    description: Test time functionality
-    turns:
+- name: eval_multilang_agent
+  description: Test multilang_agent saves language in span via pre_hook and uses it in system_prompt
+  turns:
+    - input: "What was the last match of Liverpool?"
+      steps:
+        validators:
+          contains:
+            - name: web_search
+
+- name: time_test
+  description: Test time functionality
+  turns:
       - input:
           prompt: "What time is it?"
         output:
-          validators:
-            contains: ["2024"]
+          content:
+            validators:
+              contains: ["2024"]
         steps:
           validators:
             contains:
               - name: get_current_time
 
-  - name: math_test
-    description: Test mathematical operations
-    turns:
+- name: math_test
+  description: Test mathematical operations
+  turns:
       - input:
           prompt: "What is 5 + 3?"
         output:
-          validators:
-            contains: ["8"]
+          content:
+            validators:
+              contains: ["8"]
         steps:
           validators:
             contains:
               - name: add_numbers
                 input:
-                  a: "5"
-                  b: "3"
+                    a:
+                      validators:
+                        equals: "5"
+                    b:
+                      validators:
+                        equals: "3"
 
-  - name: greeting_test
-    description: Test greeting functionality
-    turns:
+- name: greeting_test
+  description: Test greeting functionality
+  turns:
       - input:
           prompt: "Please greet Charlie"
         output:
-          validators:
-            contains: ["Charlie"]
+          content:
+            validators:
+              contains: ["Charlie"]
         steps:
           validators:
             contains:
               - name: greet_person
                 input:
-                  name: "Charlie"
+                  name:
+                    validators:
+                      contains: "Charlie"
 
-  - name: conversation_test
-    description: Test multi-turn conversation
-    turns:
+- name: conversation_test
+  description: Test multi-turn conversation
+  turns:
       - input:
           prompt: "Hi, my name is Alice"
         output:
@@ -53,8 +70,9 @@ tests:
       - input:
           prompt: "Can you greet me properly?"
         output:
-          validators:
-            contains: ["Alice"]
+          content:
+            validators:
+              contains: ["Alice"]
         steps:
           validators:
             contains:

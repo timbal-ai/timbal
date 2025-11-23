@@ -3,18 +3,32 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from ..validators import (
     Validator,
+    contains_ordered_steps,
     contains_steps,
+    equals_steps,
     not_contains_steps,
     semantic_steps,
-)
-from ..validators import (
-    time as time_validator,
 )
 from ..validators import (
     usage as usage_validator,
 )
 
 logger = structlog.get_logger("timbal.eval.types.steps")
+
+
+def _normalize_step_items(items: list, validator_name: str) -> list[dict]:
+    """Normalize step items from string or dict format to dict format with 'name' field."""
+    normalized = []
+    for item in items:
+        if isinstance(item, str):
+            normalized.append({"name": item})
+        elif isinstance(item, dict):
+            if "name" not in item:
+                raise ValueError(f"Invalid {validator_name} step item: {item}. Must have 'name' field.")
+            normalized.append(item)
+        else:
+            raise ValueError(f"Invalid {validator_name} step item: {item}")
+    return normalized
 
 
 class Steps(BaseModel):
@@ -55,64 +69,32 @@ class Steps(BaseModel):
     @field_validator("validators", mode="before")
     def validate_validators(cls, v):
         """Converts validator specifications from a dictionary (e.g., YAML) into `Validator` instances."""
-        # Handle None case
         if v is None:
             return None
             
-        # Handle empty list case
         if isinstance(v, list) and len(v) == 0:
             return []
             
-        # Handle case where validators are already Validator objects (direct instantiation)
         if isinstance(v, list) and all(isinstance(item, Validator) for item in v):
             return v
             
-        # Handle case where validators come from dict (e.g., YAML)
         if not isinstance(v, dict):
             raise ValueError("validators must be a dict or list of Validator objects")
         
         validators = []
         for validator_name, validator_arg in v.items():
             if validator_name == "contains":
-                # Handle multiple formats:
-                # 1. ["tool_name"] - list of strings
-                # 2. [{"name": "tool_name"}] - list of dicts with just name
-                # 3. [{"name": "tool_name", "input": {...}}] - list of dicts with name and input
-                normalized_arg = []
-                for item in validator_arg:
-                    if isinstance(item, str):
-                        normalized_arg.append({"name": item})
-                    elif isinstance(item, dict):
-                        # Ensure the dict has a "name" field
-                        if "name" not in item:
-                            raise ValueError(f"Invalid contains step item: {item}. Must have 'name' field.")
-                        normalized_arg.append(item)
-                    else:
-                        raise ValueError(f"Invalid contains step item: {item}")
-                validators.append(contains_steps(normalized_arg))
-            # elif validator_name == "regex":
-            #     validators.append(regex(validator_arg))
-            elif validator_name == "time":
-                validators.append(time_validator(validator_arg))
+                validators.append(contains_steps(_normalize_step_items(validator_arg, validator_name)))
+            elif validator_name == "contains_ordered":
+                validators.append(contains_ordered_steps(_normalize_step_items(validator_arg, validator_name)))
+            elif validator_name == "equals":
+                validators.append(equals_steps(_normalize_step_items(validator_arg, validator_name)))
             elif validator_name == "usage":
                 validators.append(usage_validator(validator_arg))
             elif validator_name == "semantic":
                 validators.append(semantic_steps(validator_arg))
             elif validator_name == "not_contains":
-                # Handle both formats: ["tool_name"] and [{"name": "tool_name"}]
-                normalized_arg = []
-                for item in validator_arg:
-                    if isinstance(item, str):
-                        normalized_arg.append({"name": item})
-                    elif isinstance(item, dict):
-                        # Ensure the dict has a "name" field
-                        if "name" not in item:
-                            raise ValueError(f"Invalid not_contains step item: {item}. Must have 'name' field.")
-                        normalized_arg.append(item)
-                    else:
-                        raise ValueError(f"Invalid not_contains step item: {item}")
-                validators.append(not_contains_steps(normalized_arg))
-            # TODO Add more validators.
+                validators.append(not_contains_steps(_normalize_step_items(validator_arg, validator_name)))
             else:
                 logger.warning("unknown_validator", validator=validator_name)
 
@@ -121,13 +103,11 @@ class Steps(BaseModel):
     @model_validator(mode="after")
     def convert_direct_fields_to_validators(self):
         """Convert direct step specification fields to validators."""
-        # If we already have validators from explicit validators field, don't override
         if self.validators is not None:
             return self
         
         validators = []
         
-        # Convert direct field specifications to validators
         if self.contains:
             normalized_arg = [{"name": item} for item in self.contains]
             validators.append(contains_steps(normalized_arg))
@@ -139,7 +119,6 @@ class Steps(BaseModel):
         if self.semantic:
             validators.append(semantic_steps(self.semantic))
         
-        # Only set validators if we have any, otherwise leave as None
         if validators:
             self.validators = validators
         
@@ -148,7 +127,6 @@ class Steps(BaseModel):
     def to_dict(self) -> dict:
         d = {}
         
-        # Show direct field values first
         if self.contains:
             d["contains"] = self.contains
         if self.not_contains:
@@ -156,25 +134,19 @@ class Steps(BaseModel):
         if self.semantic:
             d["semantic"] = self.semantic
             
-        # If no direct fields, extract from validators
         if not d and getattr(self, "validators", None):
             validators_dict = {}
             for v in self.validators:
                 key = getattr(v, "name", str(type(v)))
                 value = getattr(v, "ref", str(v))
                 
-                # For contains_steps and not_contains_steps, show the expected tools with full structure
                 if key == "contains_steps":
-                    # Extract full structure from the validator reference
                     if isinstance(value, list):
-                        # Keep the full structure including input if present
                         d["contains"] = value
                 elif key == "not_contains_steps":
                     if isinstance(value, list):
-                        # Keep the full structure including input if present
                         d["not_contains"] = value
                 else:
-                    # Group multiple validators of the same type
                     if key in validators_dict:
                         if isinstance(validators_dict[key], list):
                             validators_dict[key].append(value)

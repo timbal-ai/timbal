@@ -137,6 +137,7 @@
               {
                 "group": "Evals",
                 "pages": [
+                  "examples/agents/input-validation",
                   "examples/agents/output-validation",
                   "examples/agents/tool-usage-validation",
                   "examples/agents/multi-turn-conversation"

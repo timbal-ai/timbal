@@ -3,18 +3,19 @@ title: "Multi-turn Conversation Testing"
 description: "Test agent memory, context retention, and complex conversational flows across multiple interactions"
 ---
 
-Evals can test complex multi-turn conversations to ensure agents maintain context and provide coherent responses throughout extended interactions:
+Multi-turn conversation testing ensures your agent maintains context across multiple interactions. Only the last turn is validated; previous turns establish conversation history and memory.
+
+## Weather Assistant Agent
 
 ```python agent.py
 from timbal import Agent
 
 def get_weather(location: str) -> str:
     """Get current weather information for a specific location."""
-    # Simulate weather data - in real implementation this would call a weather API
     weather_data = {
-        "New York": "15°C",
-        "London": "12°C",
-        "Tokyo": "22°C"
+        "New York": "15°C and raining",
+        "London": "12°C and cloudy",
+        "Tokyo": "22°C and sunny"
     }
     return weather_data.get(location, f"Weather data not available for {location}")
 
@@ -32,7 +33,7 @@ agent = Agent(
 python -m timbal.eval --fqn agent.py::agent --tests evals.yaml
 ```
 
-## Multi-turn Memory Testing
+## Validation Configuration
 
 ```yaml evals.yaml
 - name: eval_weather_advice
@@ -46,26 +47,37 @@ python -m timbal.eval --fqn agent.py::agent --tests evals.yaml
           not_contains:
             - name: get_weather
       output:
-        validators:
-          contains:
-          - "Yes"
+        content:
+          validators:
+            contains:
+              - "yes"
 ```
 
-## Example Evaluation Output
+## How It Works
+
+1. **First Turn (Context)**: The first turn has no validators. It establishes conversation history by providing the user input and expected output. The agent receives this information but it's not validated.
+
+2. **Second Turn (Validation)**: The last turn has validators for `steps` and `output`.
+
+3. **Memory**: The agent receives the entire conversation history, so it can remember what was said in previous turns and answer accordingly.
+
+## Evaluation Results
 
 ### Successful Validation
+
+When the agent remembers context and provides the correct response:
 
 ```json summary.json
 {
   "total_files": 1,
   "total_tests": 1,
-  "total_turns": 2,
+  "total_validations": 2,
+  "inputs_passed": 0,
+  "inputs_failed": 0,
   "outputs_passed": 1,
   "outputs_failed": 0,
   "steps_passed": 1,
   "steps_failed": 0,
-  "usage_passed": 0,
-  "usage_failed": 0,
   "execution_errors": 0,
   "tests_failed": []
 }
@@ -73,68 +85,62 @@ python -m timbal.eval --fqn agent.py::agent --tests evals.yaml
 
 ### Failed Validation
 
+When the agent doesn't use context or provides an incorrect response:
+
 ```json summary.json
 {
   "total_files": 1,
   "total_tests": 1,
-  "total_turns": 2,
+  "total_validations": 2,
+  "inputs_passed": 0,
+  "inputs_failed": 0,
   "outputs_passed": 0,
   "outputs_failed": 1,
-  "steps_passed": 0,
-  "steps_failed": 1,
-  "usage_passed": 0,
-  "usage_failed": 0,
+  "steps_passed": 1,
+  "steps_failed": 0,
   "execution_errors": 0,
   "tests_failed": [
     {
       "test_name": "eval_weather_advice",
       "test_path": "evals.yaml::eval_weather_advice",
       "input": {
-        "text": "Should I bring an umbrella?"
+        "prompt": [
+          "Should I bring an umbrella?"
+        ]
       },
       "reason": [
-        "output",
-        "steps"
+        "output"
       ],
       "execution_error": null,
+      "input_passed": null,
+      "input_explanations": [],
       "output_passed": false,
       "output_explanations": [
-        "Message does not contain 'Yes'."
+        "Validator contains: Message does not contain 'yes'."
       ],
       "actual_output": {
-        "text": "Could you please tell me your location or the location where you want to know the weather? This will help me determine if you need an umbrella.",
+        "text": "I can help you decide! Could you please tell me your location so I can check the weather report for you?",
         "files": []
       },
       "expected_output": {
-        "validators": {
-          "contains": [
-            "Yes"
-          ]
-        }
-      },
-      "steps_passed": false,
-      "steps_explanations": [
-        "Tool 'get_weather' was called when it should not have been"
-      ],
-      "actual_steps": [
-        {
-          "tool": "get_weather",
-          "input": {
-            "location": "New York"
+        "content": {
+          "validators": {
+            "contains": [
+              "yes"
+            ]
           }
         }
-      ],
-      "expected_steps": {
-        "validators": {
-          "not_contains": [
-            {
-              "name": "get_weather"
-            }
-          ]
-        }
       },
-      "usage_passed": true,
-      "usage_explanations": []
+      "steps_passed": true,
+      "steps_explanations": [],
+      "actual_steps": [],
+      "expected_steps": {
+        "not_contains": [
+          {
+            "name": "get_weather"
+          }
+        ]
+      }
     }
   ]
 }
@@ -142,7 +148,7 @@ python -m timbal.eval --fqn agent.py::agent --tests evals.yaml
 
 ## Key Features
 
-- **Memory Testing**: Verify agents remember information from previous turns
-- **Context Continuity**: Ensure responses build logically on previous interactions
-- **Task Progression**: Test agents guide users through multi-step processes
-- **Conversation Flow**: Validate natural, coherent dialogue progression
+- **Context Memory**: Previous turns establish conversation history that agents can access
+- **Last Turn Validation**: Only the final turn is validated; earlier turns provide context
+- **Tool Usage Control**: Verify agents don't call tools unnecessarily when context is available
+- **Response Continuity**: Ensure agents build logically on previous interactions

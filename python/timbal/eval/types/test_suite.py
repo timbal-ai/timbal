@@ -21,3 +21,7 @@ class TestSuite(BaseModel):
         if isinstance(v, list):
             return {"tests": v}
         return v
+    
+    def to_dict(self) -> list[dict]:
+        """Serialize TestSuite to a list of tests (without 'tests' key)."""
+        return [test.model_dump() for test in self.tests]

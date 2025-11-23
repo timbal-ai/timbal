@@ -20,11 +20,23 @@ from .types.turn import Turn
 logger = structlog.get_logger("timbal.eval.engine")
 
 
-
-async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[dict]]:
-    """"""
+async def eval_steps(turn: Turn, test_results: EvalTestSuiteResult | None = None) -> tuple[bool, list[str], list[dict]]:
+    """Evaluate the steps taken by the agent during a turn.
+    
+    Extracts actual steps from the run context trace and validates them against
+    the expected steps defined in turn.steps.validators.
+    
+    Args:
+        turn: The turn object containing expected steps and validators
+        test_results: Optional test results object to track validation counts
+        
+    Returns:
+        Tuple of (success, explanations, actual_steps) where:
+        - success: True if all validators pass, False otherwise
+        - explanations: List of error messages if validators fail
+        - actual_steps: List of actual steps extracted from trace
+    """
     try:
-        # If turn has no steps field, no step validation needed
         if turn.steps is None:
             return True, [], []
             
@@ -32,73 +44,43 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
         if not run_context or not run_context._trace:
             return False, ["No trace data available"], []
             
-        # Extract tool calls from trace data
         actual_steps = []
-        steps_total_time = 0.0
         
-        # First, extract from trace data (for explicit tool calls)
         for call_id, span in run_context._trace.items():
-            path = span.path
-            # Skip the root agent call (call_id=None or no path separators)
-            if call_id is None or not path or "." not in path:
+            if call_id is None or not span.path or "." not in span.path:
                 continue
                 
-            path_parts = path.split(".")
+            path_parts = span.path.split(".")
             if len(path_parts) >= 2:
-                # The tool name is the second part (after "agent")
                 tool_name = path_parts[1]
-                
-                # Skip LLM calls - we only want actual tools that the LLM calls
                 if tool_name == "llm":
                     continue
-                
-                tool_input = span.input or {}
                 actual_steps.append({
                     "tool": tool_name,
-                    "input": tool_input
+                    "input": span.input or {}
                 })
-                
-                if span.t0 is not None and span.t1 is not None:
-                    step_duration = (span.t1 - span.t0) / 1000.0
-                    steps_total_time += step_duration
         
         if hasattr(run_context, '_last_usage') and run_context._last_usage:
             for key, value in run_context._last_usage.items():
-                if '_requests' in key or '_calls' in key:
-                    # Extract tool name from key like "gpt-4.1-mini:web_search_requests"
+                if ('_requests' in key or '_calls' in key) and value > 0:
                     parts = key.split(':')
                     if len(parts) == 2:
                         tool_key = parts[1]
-                        if tool_key.endswith('_requests'):
-                            tool_name = tool_key.replace('_requests', '')
-                        elif tool_key.endswith('_calls'):
-                            tool_name = tool_key.replace('_calls', '')
-                        else:
-                            tool_name = tool_key
-                        
-                        # Only add if not already in actual_steps
-                        if not any(step.get("tool") == tool_name for step in actual_steps) and value > 0:
+                        tool_name = tool_key.replace('_requests', '').replace('_calls', '')
+                        if not any(step.get("tool") == tool_name for step in actual_steps):
                             actual_steps.append({
                                 "tool": tool_name,
                                 "usage_count": value
                             })
-
-        if actual_steps:
-            run_context._last_steps_execution_time = steps_total_time
         
         steps_total_usage = {}
         for call_id, span in run_context._trace.items():
-            path = span.path
-            if call_id is None or not path or "." not in path:
+            if call_id is None or not span.path or "." not in span.path:
                 continue
-            path_parts = path.split(".")
-            if len(path_parts) >= 2:
-                tool_name = path_parts[1]
-                if tool_name == "llm":
-                    continue
-                if span.usage:
-                    for key, value in span.usage.items():
-                        steps_total_usage[key] = steps_total_usage.get(key, 0) + value
+            path_parts = span.path.split(".")
+            if len(path_parts) >= 2 and path_parts[1] != "llm" and span.usage:
+                for key, value in span.usage.items():
+                    steps_total_usage[key] = steps_total_usage.get(key, 0) + value
         
         if hasattr(run_context, '_last_usage') and run_context._last_usage:
             for key, value in run_context._last_usage.items():
@@ -108,35 +90,32 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
         if actual_steps:
             run_context._last_steps_usage = steps_total_usage
         
+        if test_results is not None and run_context:
+            run_context._eval_test_results = test_results
+        
         explanations = []
         results = []
         if turn.steps and turn.steps.validators:
             for i, validator in enumerate(turn.steps.validators):
-                if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
-                    try:
+                if test_results is not None:
+                    test_results.total_validations += 1
+                
+                is_async = hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func)
+                try:
+                    if is_async:
                         await validator(actual_steps)
-                        correct = True
-                        logger.info("eval_steps_validator_result", validator_index=i, result="passed")
-                    except EvalError as e:
-                        correct = False
-                        explanations.append(str(e))
-                        logger.info("eval_steps_validator_result", validator_index=i, result="failed", error=str(e))
-                else:
-                    try:
+                    else:
                         validator(actual_steps)
-                        correct = True
-                        logger.info("eval_steps_validator_result", validator_index=i, result="passed")
-                    except EvalError as e:
-                        correct = False
-                        explanations.append(str(e))
-                        logger.info("eval_steps_validator_result", validator_index=i, result="failed", error=str(e))
-                results.append(correct)
+                    results.append(True)
+                except EvalError as e:
+                    explanations.append(str(e))
+                    results.append(False)
+                    logger.info("eval_steps_validator_result", validator_index=i, result="failed", error=str(e))
         
         final_result = all(results) if results else True
         logger.info("eval_steps_final_result", results=results, final_result=final_result, explanations=explanations)
         return final_result, explanations, actual_steps
     except Exception as e:
-        # If there's an error accessing agent memory or evaluating steps
         error_msg = f"Error evaluating steps: {str(e)}"
         logger.error("eval_steps_exception", error=error_msg, exception=str(e))
         return False, [error_msg], []
@@ -144,180 +123,209 @@ async def eval_steps(turn: Turn, agent: Agent) -> tuple[bool, list[str], list[di
 
 async def eval_input(
     turn: Turn,
-    actual_input: dict
+    actual_input: dict,
+    test_results: EvalTestSuiteResult | None = None
 ) -> tuple[bool | None, list[str]]:
-    """Evaluate the input keys of a turn using per-key validators or top-level validators.
-    Validates keys that may be set in the input definition or by pre_hooks/agent.
-    Gets actual values from run_context after pre_hook execution.
-    Supports both per-key validators (e.g., prompt: { contains: [...] }) and top-level validators (e.g., time: {...}, usage: {...}).
-    Returns (False, explanations) if any validation fails, (True, []) if all pass.
-    """
-    explanations = []
-    results = []
+    """Validate the input provided to the agent during a turn.
     
+    Validates top-level validators (like usage) and per-key validators
+    (like content validation for specific input fields).
+    
+    Args:
+        turn: The turn object containing input validators
+        actual_input: The actual input dictionary to validate
+        test_results: Optional test results object to track validation counts
+        
+    Returns:
+        Tuple of (success, explanations) where:
+        - success: True if all validators pass, False if any fail, None if no validators
+        - explanations: List of error messages if validators fail
+    """
     if not turn.input or not turn.input.validators:
-        # No validators means nothing to validate - return None equivalent (handled by caller)
         return None, []
     
-    # Get validators
     input_validators = turn.input.validators
     if not isinstance(input_validators, dict):
-        # Not a dict means no validators - return None (handled by caller)
         return None, []
     
-    # Check if we have top-level validators (time, usage) or per-key validators
     top_level_validators = {}
     per_key_validators = {}
     
     for key, validators in input_validators.items():
-        if key in ("time", "usage"):
-            # Top-level validators - these validate turn metrics, not key values
+        if key == "usage":
             top_level_validators[key] = validators
         else:
-            # Per-key validators - these validate the value of a specific key
             per_key_validators[key] = validators
     
-    # Handle top-level validators (time, usage)
-    # These don't need a specific value - they validate turn metrics
+    if test_results is not None:
+        run_context = get_run_context()
+        if run_context:
+            run_context._eval_test_results = test_results
+    
+    explanations = []
+    results = []
+    
     for validator_name, validators in top_level_validators.items():
         if not isinstance(validators, list):
             validators = [validators]
         
         for validator in validators:
-            # For top-level validators, pass None as value (they get metrics from run_context)
-            if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
-                try:
+            if test_results is not None:
+                test_results.total_validations += 1
+            
+            is_async = hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func)
+            try:
+                if is_async:
                     await validator(None)
-                    correct = True
-                except EvalError as e:
-                    correct = False
-                    explanations.append(f"Input {validator_name}: {str(e)}")
-            else:
-                try:
+                else:
                     validator(None)
-                    correct = True
-                except EvalError as e:
-                    correct = False
-                    explanations.append(f"Input {validator_name}: {str(e)}")
-            results.append(correct)
+                results.append(True)
+            except EvalError as e:
+                explanations.append(f"Input {validator_name}: {str(e)}")
+                results.append(False)
     
-    # Handle per-key validators
     if per_key_validators:
-        # Get all actual input values from run_context (after pre_hook execution)
-        # This includes values set by pre_hooks
         all_actual_values = {}
         
-        # First, get from turn.input (the definition)
         if turn.input:
-            input_dict = turn.input.model_dump(exclude={"validators"})
-            all_actual_values.update(input_dict)
+            all_actual_values.update(turn.input.model_dump(exclude={"validators"}))
         
-        # Then, get from run_context (after pre_hook modifications)
         run_context = get_run_context()
         if run_context:
             agent_span = run_context.current_span()
             if agent_span and hasattr(agent_span, 'input'):
-                # Get the actual input after pre_hook modifications
                 context_input = agent_span.input
                 if isinstance(context_input, dict):
-                    # Merge context input (takes precedence as it's after pre_hook)
                     all_actual_values.update(context_input)
                 elif context_input is not None:
-                    # If input is not a dict, try to extract values
                     all_actual_values["_raw_input"] = context_input
         
-        # Finally, merge with actual_input (from to_dict, as fallback)
-        all_actual_values.update(actual_input)
+        for key, value in actual_input.items():
+            if not (isinstance(value, dict) and "validators" in value and len(value) == 1):
+                all_actual_values[key] = value
         
-        # Remove None values
         all_actual_values = {k: v for k, v in all_actual_values.items() if v is not None}
         
-        # Validate each key that has validators
         for key, validators in per_key_validators.items():
             if not isinstance(validators, list):
                 validators = [validators]
             
-            # Get the actual value for this key
-            actual_value = all_actual_values.get(key)
-            if actual_value is None:
-                # Try to get from prompt if key is prompt
-                if key == "prompt":
-                    actual_value = all_actual_values.get("prompt")
+            actual_value = all_actual_values.get(key) or ""
             
-            # If still None, the key might not exist - create empty string for validation
-            if actual_value is None:
-                actual_value = ""
-            
-            # Convert prompt list to string for validation
             if key == "prompt" and isinstance(actual_value, list):
-                # Join list items, converting Files to their paths
                 text_parts = []
                 for item in actual_value:
-                    if hasattr(item, 'path'):
-                        text_parts.append(str(item.path))
-                    else:
-                        text_parts.append(str(item))
+                    text_parts.append(str(getattr(item, 'path', item)))
                 actual_value = " ".join(text_parts)
             
             validation_message = Message(role="user", content=[TextContent(text=str(actual_value))])
             
             for validator in validators:
-                if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
-                    try:
+                if test_results is not None:
+                    test_results.total_validations += 1
+                
+                is_async = hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func)
+                try:
+                    if is_async:
                         await validator(validation_message)
-                        correct = True
-                    except EvalError as e:
-                        correct = False
-                        explanations.append(f"Input key '{key}': {str(e)}")
-                else:
-                    try:
+                    else:
                         validator(validation_message)
-                        correct = True
-                    except EvalError as e:
-                        correct = False
-                        explanations.append(f"Input key '{key}': {str(e)}")
-                results.append(correct)
+                    results.append(True)
+                except EvalError as e:
+                    explanations.append(f"Input key '{key}': {str(e)}")
+                    results.append(False)
     
     return all(results), explanations
 
 
 async def eval_output(
     turn: Turn,
-    agent_output_message: Message
+    agent_output_message: Message,
+    test_results: EvalTestSuiteResult | None = None
 ) -> tuple[bool | None, list[str]]:
-    """Evaluate the output of a turn using validators."""
-    explanations = []
-    results = []
-
+    """Validate the output produced by the agent during a turn.
+    
+    Validates top-level validators (like time, usage) and per-key validators
+    (like content validation for output fields).
+    
+    Args:
+        turn: The turn object containing output validators
+        agent_output_message: The actual message output from the agent
+        test_results: Optional test results object to track validation counts
+        
+    Returns:
+        Tuple of (success, explanations) where:
+        - success: True if all validators pass, False if any fail, None if no validators
+        - explanations: List of error messages if validators fail
+    """
     if not turn.output or not turn.output.validators:
-        # No validators means nothing to validate
         return None, []
     
     validators = turn.output.validators
+    if not isinstance(validators, dict):
+        return None, []
     
-    # Top-level validators - validate the entire message
-    if isinstance(validators, list):
-        validator_list = validators
-    else:
-        # Shouldn't happen with new structure, but handle it
-        validator_list = []
+    top_level_validators = {}
+    per_key_validators = {}
     
-    for validator in validator_list:
-        if hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func):
-            try:
-                await validator(agent_output_message)
-                correct = True
-            except EvalError as e:
-                correct = False
-                explanations.append(str(e))
+    for key, validator_list in validators.items():
+        if key in ("time", "usage"):
+            top_level_validators[key] = validator_list
         else:
+            per_key_validators[key] = validator_list
+    
+    if test_results is not None:
+        run_context = get_run_context()
+        if run_context:
+            run_context._eval_test_results = test_results
+    
+    explanations = []
+    results = []
+    
+    for validator_name, validator_list in top_level_validators.items():
+        if not isinstance(validator_list, list):
+            validator_list = [validator_list]
+        
+        validator_value = None if validator_name in ("time", "usage") else agent_output_message
+        for validator in validator_list:
+            if test_results is not None:
+                test_results.total_validations += 1
+            
+            is_async = hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func)
             try:
-                validator(agent_output_message)
-                correct = True
+                if is_async:
+                    await validator(validator_value)
+                else:
+                    validator(validator_value)
+                results.append(True)
             except EvalError as e:
-                correct = False
-                explanations.append(str(e))
-        results.append(correct)
+                explanations.append(f"Output {validator_name}: {str(e)}")
+                results.append(False)
+    
+    if per_key_validators:
+        content_validators = per_key_validators.get("content", [])
+        if content_validators:
+            if not isinstance(content_validators, list):
+                content_validators = [content_validators]
+            
+            for validator in content_validators:
+                if test_results is not None:
+                    test_results.total_validations += 1
+                
+                validator_name = getattr(validator, "name", "unknown")
+                is_async = hasattr(validator, "func") and inspect.iscoroutinefunction(validator.func)
+                try:
+                    if is_async:
+                        await validator(agent_output_message)
+                    else:
+                        validator(agent_output_message)
+                    results.append(True)
+                except EvalError as e:
+                    explanations.append(f"Validator {validator_name}: {str(e)}")
+                    results.append(False)
+        
+    if not results:
+        return None, []
         
     return all(results), explanations
 
@@ -330,39 +338,68 @@ async def run_turn(
     test_results: EvalTestSuiteResult,
     test_file_name: str,
     test_file_dir: Path
-) -> None:
-    """"""
-    test_results.total_turns += 1
-    user_input = turn.input
+) -> Message | None:
+    """Execute a single turn in an evaluation test.
+    
+    Runs the agent with the turn's input, validates the response using input/output/step
+    validators, and records results. Handles execution errors and validation failures.
+    
+    Args:
+        agent: The agent to evaluate
+        turn: The turn object defining input, expected output, and validators
+        test: The test case containing this turn
+        conversation_history: Previous messages in the conversation
+        test_results: Test results object to update with validation outcomes
+        test_file_name: Name of the test file (for error reporting)
+        test_file_dir: Directory of the test file (for resolving file paths)
+        
+    Returns:
+        The agent's output message, or None if execution failed
+    """
     reason = []
     execution_error = None
+    agent_usage = {}
+    agent_output_event = None
 
-    # Run the agent
     start_time = time.time()
     try:
-        # Convert Input to Message to properly handle files
-        user_message = user_input.to_message(role="user", test_file_dir=test_file_dir)
-        agent_output_event = await agent(messages=conversation_history, prompt=user_message).collect()
-        agent_usage = agent_output_event.usage
+        user_message = turn.input.to_message(role="user", test_file_dir=test_file_dir)
+        input_dict = turn.input.model_dump(exclude={"validators"})
+        input_dict.pop("prompt", None)
+        
+        messages = conversation_history + [user_message]
+        agent_output_event = await agent(messages=messages, **input_dict).collect()
+        agent_usage = agent_output_event.usage or {}
         execution_time = time.time() - start_time
         
-        # Store usage and execution time in run_context for validators to access
         run_context = get_run_context()
-        run_context._last_usage = agent_usage
-        run_context._last_execution_time = execution_time
-        if agent_output_event.output and agent_output_event.output.content and len(agent_output_event.output.content) > 0:
+        if run_context:
+            run_context._last_usage = agent_usage
+            run_context._last_execution_time = execution_time
+        
+        if agent_output_event.output and agent_output_event.output.content:
             agent_output = agent_output_event.output.content[0].text
         else:
             agent_output = "No output generated"
         
-        # Check if there was an execution error in the agent output event
         if agent_output_event.error is not None:
             execution_error = agent_output_event.error
             reason.append("execution_error")
             test_results.execution_errors += 1
+        
+        if execution_error is None:
+            run_context = get_run_context()
+            if run_context and run_context._trace:
+                for call_id, span in run_context._trace.items():
+                    if span.path and "." in span.path:
+                        path_parts = span.path.split(".")
+                        if len(path_parts) >= 2 and path_parts[1] != "llm" and span.error is not None:
+                            execution_error = span.error
+                            reason.append("execution_error")
+                            test_results.execution_errors += 1
+                            break
             
     except Exception as e:
-        # Capture any exceptions that occur during agent execution
         execution_time = time.time() - start_time
         execution_error = {
             "type": type(e).__name__,
@@ -373,18 +410,15 @@ async def run_turn(
         test_results.execution_errors += 1
         agent_usage = {}
         agent_output = f"Execution failed: {str(e)}"
-        # Keep the existing run_context for error case and store execution time
         run_context = get_run_context()
         if run_context:
+            run_context._last_usage = agent_usage
             run_context._last_execution_time = execution_time
 
-    # Evaluate the input keys
     input_passed = None
     input_explanations = []
     if turn.input and turn.input.validators and execution_error is None:
-        actual_input_dict = user_input.to_dict()
-        input_passed, input_explanations = await eval_input(turn, actual_input_dict)
-        # Only count if there were actual validators to check (input_passed is not None)
+        input_passed, input_explanations = await eval_input(turn, turn.input.to_dict(), test_results)
         if input_passed is not None:
             if input_passed:
                 test_results.inputs_passed += 1
@@ -392,23 +426,30 @@ async def run_turn(
                 test_results.inputs_failed += 1
                 reason.append("input")
 
-    # Evaluate the steps
     steps_passed, steps_explanations, actual_steps = None, [], []
-    if turn.steps and execution_error is None:  # Only evaluate steps if no execution error
-        steps_passed, steps_explanations, actual_steps = await eval_steps(turn, agent)
+    if turn.steps and execution_error is None:
+        steps_passed, steps_explanations, actual_steps = await eval_steps(turn, test_results)
         if steps_passed:
             test_results.steps_passed += 1
         else:
             test_results.steps_failed += 1
             reason.append("steps")
+        run_context = get_run_context()
+        if run_context and (not hasattr(run_context, "_last_usage") or getattr(run_context, "_last_usage", None) is None):
+            run_context._last_usage = agent_usage
 
     output_passed = None
     output_explanations = []
-    agent_output_message = Message(role="assistant", content=[TextContent(text=agent_output)])
-    # Evaluate the output only if it has validators (otherwise it's a fixed record for conversation history)
+    if agent_output_event and agent_output_event.output:
+        agent_output_message = agent_output_event.output
+    else:
+        agent_output_message = Message(role="assistant", content=[TextContent(text=agent_output)])
+    
     if turn.output and turn.output.validators and execution_error is None:
-        output_passed, output_explanations = await eval_output(turn, agent_output_message)
-        # Only count if there were actual validators to check (output_passed is not None)
+        run_context = get_run_context()
+        if run_context and (not hasattr(run_context, "_last_usage") or getattr(run_context, "_last_usage", None) is None):
+            run_context._last_usage = agent_usage
+        output_passed, output_explanations = await eval_output(turn, agent_output_message, test_results)
         if output_passed is not None:
             if output_passed:
                 test_results.outputs_passed += 1
@@ -416,13 +457,12 @@ async def run_turn(
                 test_results.outputs_failed += 1
                 reason.append("output")
 
-
-    if len(reason) > 0:
+    if reason:
         test_results.tests_failed.append(
             EvalResult(
                 test_name=test.name,
                 test_path=f"{test_file_name}::{test.name}",
-                input=user_input.to_dict(),
+                input=turn.input.to_dict(),
                 reason=reason,
                 execution_error=execution_error,
                 input_passed=input_passed,
@@ -440,9 +480,8 @@ async def run_turn(
                 expected_steps=turn.steps.to_dict() if turn.steps else None,
             )
         )
-
-
-
+    
+    return agent_output_message
 
 
 async def eval_file(
@@ -451,14 +490,25 @@ async def eval_file(
     test_results: EvalTestSuiteResult,
     test_name: str | None = None
 ) -> Any:
-    """Parse and run all the tests in the given file. Optionally, only run a specific test by name."""
+    """Load and run all tests from a YAML evaluation file.
+    
+    Parses the YAML file, validates the test suite structure, and executes each test.
+    Tests without validators are treated as context-setting turns and added to
+    conversation history without validation.
+    
+    Args:
+        path: Path to the YAML evaluation file
+        _agent: The agent to evaluate
+        test_results: Test results object to update with outcomes
+        test_name: Optional specific test name to run (if None, runs all tests)
+        
+    Returns:
+        The updated test_results object
+    """
     with open(path) as f:
-        test_suite = yaml.safe_load(f)
-
-    test_suite = TestSuite.model_validate(test_suite)
+        test_suite = TestSuite.model_validate(yaml.safe_load(f))
     
     test_results.total_files += 1
-
     test_file_dir = path.parent
     
     for test in test_suite.tests:
@@ -467,11 +517,16 @@ async def eval_file(
         test_results.total_tests += 1
         conversation_history = []
         for turn in test.turns:
-            await run_turn(_agent, turn, test, conversation_history, test_results, str(path.name), test_file_dir)
-            # Add to conversation history after processing
-            conversation_history.append(turn.input.to_message(role="user", test_file_dir=test_file_dir))
-            # Only add expected output to conversation history if there are no validators
-            if turn.output and not turn.output.validators:
+            has_validators = (
+                (turn.input and turn.input.validators) or
+                (turn.output and turn.output.validators) or
+                (turn.steps and turn.steps.validators)
+            )
+            
+            if has_validators:
+                await run_turn(_agent, turn, test, conversation_history, test_results, str(path.name), test_file_dir)
+            else:
+                conversation_history.append(turn.input.to_message(role="user", test_file_dir=test_file_dir))
                 conversation_history.append(turn.output.to_message(role="assistant", test_file_dir=test_file_dir))
     
     return test_results

@@ -3,7 +3,9 @@ title: "Evals"
 description: "Automated Testing for Timbal Agents"
 ---
 
-AI outputs are non-deterministic — the same input can yield different results. **Evals** in Timbal help you measure, test, and improve your agents and flows with automated, LLM-powered checks.
+AI outputs are non-deterministic — the same input can yield different results. 
+
+**Evals** in Timbal help you measure, test, and improve your agents and flows with automated, LLM-powered checks.
 
 ## What Are Evals in Timbal?
 
@@ -11,9 +13,9 @@ Evals are automated tests that assess your agent's outputs and tool usage. They 
 
 ### Types of Evals
 
+- **Input Evals**: Did the agent receive the correct input, with proper formatting and expected values?
 - **Output Evals**: Did the agent produce the correct answer, with proper content and formatting?
 - **Steps Evals**: Did the agent use the right tools, in the right order, with the right inputs?
-- **Usage Evals**: Did the agent's resource consumption (tokens, API calls) meet expectations or stay within expected bounds?
 
 ## How Evals Work
 
@@ -21,143 +23,264 @@ Evals are automated tests that assess your agent's outputs and tool usage. They 
 
 #### Test Suite
 
-A collection of test cases defined in YAML format. A test suite can contain multiple tests that validate different aspects of your agent's behavior. Timbal automatically discovers all files matching the pattern `eval*.yaml` in your test directory.
+A YAML file containing one or more test cases. A test suite file can contain multiple tests that validate different aspects of your agent's behavior. Timbal automatically discovers all files matching the pattern `eval*.yaml` in your test directory.
 
 #### Test
 
-A single test case with multiple turns. Each test focuses on a specific scenario or functionality of your agent. Tests are defined within YAML files and can be run individually or as part of a suite.
+A single test case with multiple turns, defined within a test suite (YAML file). Each test focuses on a specific scenario or functionality of your agent and has a unique name. Multiple tests can be defined in the same YAML file, and tests can be run individually or as part of a suite.
 
 #### Turn
 
-One interaction between user and agent. A test can contain multiple turns to validate multi-step conversations. Each turn consists of:
+One interaction between user and agent. A test can contain multiple turns to validate multi-step conversations. **Only the last turn is evaluated** - previous turns establish conversation context by setting inputs and outputs (no validation occurs). The last turn consists of:
 - **Input**: What the user says or asks (text and optionally files) - **required**
 - **Output**: What the agent should respond (validated against expected content) - *optional*
 - **Steps**: Tools the agent should use (validated against expected tool calls) - *optional*
-- **Usage**: Resource consumption limits (token counts) - *optional*
 
 #### Validators
 
 Programmatic checks that compare actual vs expected behavior. Validators use both exact matching and LLM-powered semantic evaluation to assess correctness.
 
-## Test Structure
+## Writing Tests
 
-Evals are defined in YAML files with the following structure:
+Evals are defined in YAML files. A test file contains one or more tests, each with one or more turns. Let's break down each part:
+
+### Basic Test Structure
 
 ```yaml
 - name: test_name
   description: Optional test description
   turns:
-    - input:
-        text: User input here
-        files: ["path/to/file.pdf"]  # Optional file attachments
-      output:
-        text: Expected output text  # Optional: can use validators instead
-        validators:
-          contains:
-            - "expected substring"
-            - "another substring"
-          not_contains:
-            - "unwanted text"
-          regex: "^Success.*"
-          semantic: 
-            - "Should provide helpful response about the topic"
-      steps:
-        validators:
-          contains:
-            - name: tool_name
-              input:
-                parameter: expected_value
-          not_contains:
-            - name: unwanted_tool
-          semantic: "Should use search tools to find information"
-      usage:
-        gpt-4.1:
-          input_text_tokens:
-            max: 5000
-            min: 1000
-          output_text_tokens:
-            max: 2000
-          input_text_tokens+output_text_tokens:  # Combined usage
-            max: 6000
+    - input: "User message here"
+      output: "Expected agent response"
 ```
 
-### Fields Reference
+### Input
 
-#### Test Level
+The `input` defines what the user says to the agent. The user's text message goes in `prompt`:
 
-- **`name`**: Unique identifier for the test (required)
-- **`description`**: Human-readable description of what the test validates (optional)
-- **`turns`**: Array of user-agent interactions to test (required)
+```yaml
+input:
+  prompt: "What is 2 + 2?"
+```
 
-#### Turn Level
+**Shorthand**: `input: "What is 2 + 2?"` is equivalent to `input: { prompt: "What is 2 + 2?" }`
 
-- **`input`**: The user's message or query (required)
-  - **`text`**: Text content of the message
-  - **`files`**: Array of file paths to attach (optional)
+**Files**: Include files using the `"@"` prefix:
+```yaml
+input:
+  prompt:
+    - "Analyze this file"
+    - "@./document.pdf"
+```
 
-  **Note**: You can use shorthand syntax: `input: "Your message"` is equivalent to `input: { text: "Your message" }`
-- **`output`**: Expected agent response (optional)
-  - **`text`**: Response text to store in conversation memory (optional)
+**Additional keys**: You can add other keys that are passed to the agent as default values:
+```yaml
+input:
+  prompt: "Hello"
+  points: "10"  # This value is passed to the agent
+```
 
-  **Note**: You can use shorthand syntax: `output: "Response text"` is equivalent to `output: { text: "Response text" }`
-- **`validators`**: Validation rules for the output (optional)
-- **`steps`**: Expected tool usage (optional)
-  - **`validators`**: Validation rules for tool calls (optional)
-- **`usage`**: Resource consumption limits (optional)
+**Validators**: You can validate input values. There are two types:
+- **Top-level**: Only `usage` can be top-level (validates turn metrics):
+  ```yaml
+  input:
+    prompt: "Hello"
+    validators:
+      usage:
+        "gpt-4.1-mini:input_text_tokens":
+          max: 5000
+  ```
+- **Per-key**: Other validators go inside specific keys:
+  ```yaml
+  input:
+    prompt: "Hello"
+    points:
+      validators:
+        equals: "10"  # Validates that points equals "10"
+  ```
+
+### Output
+
+The `output` defines what the agent should respond. The response content goes in `content`:
+
+```yaml
+output:
+  content: "Expected response"
+```
+
+**Shorthand**: `output: "Expected response"` is equivalent to `output: { content: "Expected response" }`
+
+**Default value**: If no validators, used as fixed record for conversation history:
+```yaml
+output:
+  content: "You have 10 points"  # Goes to memory, not validated
+```
+
+**Validators**: There are two types:
+- **Top-level**: `time` and `usage` can be top-level (validate turn metrics):
+  ```yaml
+  output:
+    content: "Response"
+    validators:
+      time:
+        max: 10.0
+      usage:
+        "gpt-4.1-mini:output_text_tokens":
+          max: 500
+  ```
+- **Per-key**: Other validators go inside `content.validators`:
+  ```yaml
+  output:
+    content:
+      validators:
+        contains: ["expected"]
+        regex: "^Success.*"
+  ```
+
+### Steps
+
+The `steps` define which tools the agent should use:
+
+```yaml
+steps:
+  validators:
+    contains:
+      - name: tool_name
+```
+
+**Step input validation**: You can validate tool input parameters. There are two ways:
+
+1. **Direct values** (exact match by default):
+```yaml
+steps:
+  validators:
+    contains:
+      - name: tool_name
+        input:
+          parameter: "value"
+```
+
+2. **With validators** for each input key:
+```yaml
+steps:
+  validators:
+    contains:
+      - name: tool_name
+        input:
+          parameter:
+            validators:
+              equals: "exact_value"
+              contains: "substring"
+```
+
+**Step-specific validators**: `time` and `usage` can be nested within steps:
+```yaml
+steps:
+  validators:
+    contains:
+      - name: tool_name
+        validators:
+          time:
+            max: 0.5
+          usage:
+            "gpt-4.1-mini:web_search_requests":
+              equals: 1
+```
 
 ## Validators
 
-Timbal provides several types of validators for comprehensive testing:
+Timbal provides several types of validators organized by where they are used:
+
+### Input Validators
+
+#### Input Top-Level Validators
+
+Validators placed at `input.validators` level (validates turn metrics):
+
+| Validator | Description | Example Usage |
+|-----------|-------------|---------------|
+| `usage` | Validates resource consumption at turn level. Format: `"model_name:usage_type"` (e.g., `"gpt-4.1-mini:input_text_tokens"`) | `input: { validators: { usage: { "gpt-4.1-mini:input_text_tokens": { max: 1000 } } } }` |
+
+#### Input Per-Key Validators
+
+Validators nested under specific input keys (validates key values):
+
+| Validator | Description | Example Usage |
+|-----------|-------------|---------------|
+| `contains` | Checks if value includes specified substrings | `points: { validators: { contains: ["10"] } }` |
+| `not_contains` | Checks if value does NOT include specified substrings | `points: { validators: { not_contains: ["error"] } }` |
+| `equals` | Checks if value exactly matches the specified text | `points: { validators: { equals: "10" } }` |
+| `regex` | Checks if value matches a regular expression pattern | `points: { validators: { regex: "^\\d+$" } }` |
+| `semantic` | Uses LLM to validate semantic correctness against reference | `points: { validators: { semantic: "Should be a number" } }` |
+| `contains_any` | Checks if value includes any of the specified substrings | `points: { validators: { contains_any: ["10", "20", "30"] } }` |
 
 ### Output Validators
 
-| Validator      | Description                                                    | Example Usage                           |
-|---------------|----------------------------------------------------------------|-----------------------------------------|
-| `contains`     | Checks if output includes specified substrings                | `contains: ["hello", "world"]`         |
-| `not_contains` | Checks if output does NOT include specified substrings        | `not_contains: ["error", "failed"]`    |
-| `regex`        | Checks if output matches a regular expression pattern          | `regex: "^Success: .+"`               |
-| `semantic`     | Uses LLM to validate semantic correctness against reference    | `semantic: "Should greet user politely"` |
+#### Output Top-Level Validators
+
+Validators placed at `output.validators` level (validates turn metrics):
+
+| Validator | Description | Example Usage |
+|-----------|-------------|---------------|
+| `time` | Validates execution time for the turn | `output: { validators: { time: { max: 10.0, min: 0.5 } } }` |
+| `usage` | Validates resource consumption at turn level. Format: `"model_name:usage_type"` (e.g., `"gpt-4.1-mini:output_text_tokens"`) | `output: { validators: { usage: { "gpt-4.1-mini:output_text_tokens": { max: 500 } } } }` |
+
+#### Output Per-Key Validators
+
+Validators nested under `content.validators` (validates output content):
+
+| Validator | Description | Example Usage |
+|-----------|-------------|---------------|
+| `contains` | Checks if output includes specified substrings | `content: { validators: { contains: ["hello", "world"] } }` |
+| `not_contains` | Checks if output does NOT include specified substrings | `content: { validators: { not_contains: ["error", "failed"] } }` |
+| `equals` | Checks if output exactly matches the specified text | `content: { validators: { equals: "Hello, world!" } }` |
+| `regex` | Checks if output matches a regular expression pattern | `content: { validators: { regex: "^Success: .+" } }` |
+| `semantic` | Uses LLM to validate semantic correctness against reference | `content: { validators: { semantic: "Should greet user politely" } }` |
+| `contains_any` | Checks if output includes any of the specified substrings | `content: { validators: { contains_any: ["hello", "hi", "greetings"] } }` |
 
 ### Steps Validators
 
-| Validator      | Description                                                    | Example Usage                           |
-|---------------|----------------------------------------------------------------|-----------------------------------------|
-| `contains`     | Checks if steps include specified tool calls with inputs      | `contains: [{"name": "search", "input": {"query": "test"}}]` |
-| `not_contains` | Checks if steps do NOT include specified tool calls           | `not_contains: [{"name": "delete_file"}]` |
-| `semantic`     | Uses LLM to validate tool usage against expected behavior     | `semantic: "Should search before providing answer"` |
+#### Steps Top-Level Validators
 
-### Usage Validators
+Validators placed at `steps.validators` level (validates all steps):
 
-Usage validators monitor resource consumption:
+| Validator | Description | Example Usage |
+|-----------|-------------|---------------|
+| `contains` | Checks if steps include specified tool calls with inputs (order is NOT validated) | `steps: { validators: { contains: [{"name": "search", "input": {"query": "test"}}] } }` |
+| `contains_ordered` | Checks if steps include specified tool calls in the specified order (allows additional steps between them) | `steps: { validators: { contains_ordered: [{"name": "search"}, {"name": "calculate"}] } }` |
+| `equals` | Checks if steps exactly match the specified tool calls in the exact order, with no additional steps | `steps: { validators: { equals: [{"name": "search"}, {"name": "calculate"}] } }` |
+| `not_contains` | Checks if steps do NOT include specified tool calls | `steps: { validators: { not_contains: [{"name": "delete_file"}] } }` |
+| `contains_any` | Checks if steps include any of the specified tool calls | `steps: { validators: { contains_any: [{"name": "search"}, {"name": "find"}] } }` |
+| `semantic` | Uses LLM to validate tool usage against expected behavior (may consider logical order) | `steps: { validators: { semantic: "Should search before providing answer" } }` |
 
-```yaml
-usage:
-  model_name:
-    # OpenAI models exact token field names:
-    input_text_tokens:
-      max: 5000
-      min: 100
-    input_cached_tokens:
-      max: 1000
-    input_audio_tokens:
-      max: 500
-    output_text_tokens:
-      max: 1000
-    output_audio_tokens:
-      max: 500
-    output_reasoning_tokens:
-      max: 2000
-    
-    # Anthropic models exact token field names:
-    input_tokens:
-      max: 5000
-    output_tokens:
-      max: 1000
-    
-    # Combined metrics using +
-    input_text_tokens+output_text_tokens:
-      max: 6000
-```
+**Note**: 
+- The `contains` validator does NOT validate the order of steps. It only verifies that each expected step exists somewhere in the actual steps, regardless of their position.
+- The `contains_ordered` validator validates that steps appear in the specified relative order, but allows additional steps between them.
+- The `equals` validator validates the exact order and ensures no additional steps are present. Steps must match exactly in the same order.
+
+#### Steps Step-Specific Validators
+
+Validators nested within `contains` items (validates individual steps):
+
+| Validator | Description | Example Usage |
+|-----------|-------------|---------------|
+| `time` | Validates execution time for a specific step | `contains: [{"name": "tool", "validators": {"time": {"max": 0.5}}}]` |
+| `usage` | Validates resource consumption for a specific step. Format: `"model_name:usage_type"` | `contains: [{"name": "web_search", "validators": {"usage": {"gpt-4.1-mini:web_search_requests": {"equals": 1}}}}]` |
+
+**Note**: `time` validator is NOT supported at `steps.validators` level since tools can execute in parallel. Use step-specific validators instead.
+
+#### Steps Step Input Validators
+
+Validators for step input parameters (nested under `input.parameter.validators`):
+
+| Validator | Description | Example Usage |
+|-----------|-------------|---------------|
+| `equals` | Exact string match | `input: { parameter: { validators: { equals: "5" } } }` |
+| `contains` | Value must contain substring | `input: { parameter: { validators: { contains: "substring" } } }` |
+| `not_contains` | Value must NOT contain substring | `input: { parameter: { validators: { not_contains: "error" } } }` |
+| `regex` | Value must match regular expression pattern | `input: { parameter: { validators: { regex: "^[A-Z]" } } }` |
+
+**Note**: If no validator is specified, the value is checked for exact match (string comparison).
 
 ## Running Evals
 
@@ -188,7 +311,12 @@ python -m timbal.eval --fqn path/to/agent.py::agent_name --tests path/to/tests/e
   description: Test product search by reference code
   turns:
     - input:
-        text: tell me the measurements of H214E/1
+        prompt: "tell me the measurements of H214E/1"
+        validators:
+          usage:
+            "gpt-4.1-mini:input_text_tokens":
+              max: 5000
+              min: 1000
       steps: 
         validators:
           contains:
@@ -197,21 +325,19 @@ python -m timbal.eval --fqn path/to/agent.py::agent_name --tests path/to/tests/e
                 reference_code: H214E/1
           semantic: "Should search for product using the exact reference code H214E/1"
       output: 
-        validators: 
-          contains:
-            - "H214E/1"
-            - "95 mm"
-            - "120 mm"
-          not_contains:
-            - "error"
-            - "not found"
-          semantic: "Should provide complete product measurements including diameter and height specifications"
-      usage:
-        - gpt-4.1:
-            input_text_tokens:
-              max: 5000
-              min: 1000
-            output_text_tokens:
+        content:
+          validators: 
+            contains:
+              - "H214E/1"
+              - "95 mm"
+              - "120 mm"
+            not_contains:
+              - "error"
+              - "not found"
+            semantic: "Should provide complete product measurements including diameter and height specifications"
+        validators:
+          usage:
+            "gpt-4.1-mini:output_text_tokens":
               max: 2000
 ```
 
@@ -232,19 +358,20 @@ python -m timbal.eval --fqn path/to/agent.py::agent_name --tests path/to/tests/e
 - name: eval_memory_retention
   description: Test agent's ability to remember information across turns
   turns:
-    - input: Hi, my name is David and I work in engineering
-      output: Nice to meet you David! How can I help you?
+    - input: "Hi, my name is David and I work in engineering"
+      output: "Nice to meet you David! How can I help you?"
     - input:
-        text: What's my name and what do I do for work?
+        prompt: "What is my name and what is my profession?"
       steps:
         validators:
           not_contains:
             - name: search_external
           semantic: "Must not contain any tools"
       output:
-        validators:
-          contains: ["David", "engineering"]
-          semantic: "Should recall both name and profession from previous turn"
+        content:
+          validators:
+            contains: ["David", "engineering"]
+            semantic: "Should recall both name and profession from previous turn"
 ```
 
 **How multi-turn tests work:**
@@ -259,24 +386,55 @@ python -m timbal.eval --fqn path/to/agent.py::agent_name --tests path/to/tests/e
   description: Test file upload and processing with error scenarios
   turns:
     - input:
-        text: Analyze this document for key metrics
-        files: ["test_data/report.pdf"]
+        prompt:
+          - "Analyze this document for key metrics"
+          - "@./test_data/report.pdf"
       steps:
         validators:
           contains:
-            - name: extract_text_from_pdf
+            - name: process_pdf
               input:
                 file_path: report.pdf
             - name: analyze_metrics
           not_contains:
             - name: delete_file
-          semantic: "Should extract text from PDF then analyze for metrics"
+          semantic: "Should process the PDF file and then analyze it for metrics"
       output:
+        content:
+          validators:
+            contains: ["metrics", "analysis"]
+            not_contains: ["error", "failed", "unable"]
+            regex: ".*\\d+.*%.*"
+            semantic: "Should provide quantitative analysis with specific metrics"
+```
+
+### Example 4: Time and Usage Validation
+
+```yaml
+- name: eval_time_validation
+  description: Test time validator for output and steps
+  turns:
+    - input:
+        prompt: "Calculate 10 + 20 and get current time"
+      steps:
         validators:
-          contains: ["metrics", "analysis"]
-          not_contains: ["error", "failed", "unable"]
-          regex: ".*\\d+.*%.*"  # Should contain percentage
-          semantic: "Should provide quantitative analysis with specific metrics"`}/>
+          contains:
+            - name: calculate_expression
+            - name: get_current_time
+              validators:
+                time:
+                  max: 0.5
+      output:
+        content:
+          validators:
+            contains: ["30"]
+        validators:
+          time:
+            max: 10.0
+          usage:
+            "gpt-4.1-mini:output_text_tokens":
+              max: 500
+```
 
 ## Understanding Eval Results
 
@@ -284,25 +442,28 @@ Timbal generates comprehensive evaluation results in JSON format:
 
 ```json
 {
-  "total_tests": 5,
-  "total_turns": 12,
-  "outputs_passed": 10,
+  "total_files": 1,
+  "total_tests": 3,
+  "total_validations": 5,
+  "inputs_passed": 0,
+  "inputs_failed": 0,
+  "outputs_passed": 1,
   "outputs_failed": 2,
-  "steps_passed": 8,
-  "steps_failed": 4,
-  "usage_passed": 12,
-  "usage_failed": 0,
-  "execution_errors": 1,
+  "steps_passed": 0,
+  "steps_failed": 1,
+  "execution_errors": 0,
   "tests_failed": [
     {
       "test_name": "eval_product_search",
       "test_path": "evals/product.yaml::eval_product_search",
       "input": {
-        "text": "Find product X123",
+        "prompt": ["Find product X123"],
         "files": []
       },
       "reason": ["steps", "output"],
       "execution_error": null,
+      "input_passed": null,
+      "input_explanations": [],
       "output_passed": false,
       "output_explanations": [
         "Response did not include required product specifications"
@@ -312,8 +473,10 @@ Timbal generates comprehensive evaluation results in JSON format:
         "files": []
       },
       "expected_output": {
-        "validators": {
-          "semantic": ["Should provide product details and availability"]
+        "content": {
+          "validators": {
+            "semantic": ["Should provide product details and availability"]
+          }
         }
       },
       "steps_passed": false,
@@ -327,12 +490,12 @@ Timbal generates comprehensive evaluation results in JSON format:
         }
       ],
       "expected_steps": {
-        "validators": {
-          "contains": [{"name": "search_product_catalog"}]
-        }
-      },
-      "usage_passed": true,
-      "usage_explanations": []
+        "contains": [
+          {
+            "name": "search_product_catalog"
+          }
+        ]
+      }
     }
   ]
 }
@@ -340,7 +503,9 @@ Timbal generates comprehensive evaluation results in JSON format:
 
 ### Result Analysis
 
-- **Summary metrics**: Total counts of passed/failed validations across all test types
+- **Summary metrics**: 
+  - `total_tests`: Number of test cases executed. Each test validates one turn (the last turn in a multi-turn test), with previous turns providing conversation context.
+  - `total_validations`: Total number of validators executed across all tests. Includes validators for input, output, steps, and step input parameters.
 - **Detailed failures**: Complete information about each failed test including:
   - **Actual vs Expected**: What the agent actually did vs what was expected
   - **Explanations**: Detailed reasons for failures from each validator
