@@ -81,6 +81,7 @@ Model = Literal[
     # Anthropic models
     "anthropic/claude-opus-4-1",
     "anthropic/claude-opus-4-0",
+    "anthropic/claude-opus-4-5",
     "anthropic/claude-sonnet-4-0",
     "anthropic/claude-sonnet-4-5",
     "anthropic/claude-haiku-4-5",
@@ -98,6 +99,7 @@ Model = Literal[
     "togetherai/deepseek-ai/DeepSeek-V3.1",
     "togetherai/deepseek-ai/DeepSeek-R1",
     # Gemini models
+    "google/gemini-3-pro-preview",
     "google/gemini-2.5-pro",
     "google/gemini-2.5-flash",
     "google/gemini-2.5-flash-lite",
@@ -109,6 +111,12 @@ Model = Literal[
     "google/gemini-2.0-flash-preview-image-generation",
     "google/gemini-2.0-flash",
     "google/gemini-2.0-flash-lite",
+    # x.ai/Grok models
+    "xai/grok-4",
+    "xai/grok-4-fast-reasoning",
+    "xai/grok-4-fast-non-reasoning",
+    "xai/grok-4.1-mini",
+    "xai/grok-4.1-fast-non-reasoning",
 ]
 
 
@@ -254,7 +262,8 @@ async def _llm_router(
         description=(
             "Thinking configuration for the LLM. Provider-specific. "
             "For OpenAI models, this should be a dictionary with 'effort' and 'summary' keys. "
-            "For Anthropic models, this should be a dictionary with 'budget_tokens' key."
+            "For Anthropic models, this should be a dictionary with 'budget_tokens' key. "
+            "For Google models, this should be a dictionary with 'thinking_level' key."
         ),
     ),
     base_url: str | SecretStr | None = Field(
@@ -377,6 +386,22 @@ async def _llm_router(
             client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
         else:
             client = AsyncOpenAI(api_key=api_key, base_url="https://api.together.xyz/v1/", default_headers=default_headers)
+    
+    elif provider == "xai":
+        default_headers = {"x-provider": "xai",}
+        if not api_key:
+            api_key = os.getenv("XAI_API_KEY")
+        if not api_key:
+            run_context = get_or_create_run_context()
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
+        if not api_key:
+            raise APIKeyNotFoundError("XAI_API_KEY not found.")
+        if base_url is not None:
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
+        else:
+            client = AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1", default_headers=default_headers)
 
     else:
         raise ValueError(f"Unsupported provider: {provider}")

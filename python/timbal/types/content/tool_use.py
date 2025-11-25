@@ -22,6 +22,7 @@ class ToolUseContent(BaseContent):
     id: str
     name: str
     input: dict[str, Any]
+    thought_signature: str | None = None
     is_server_tool_use: bool = False
 
     @field_validator("input", mode="before")
@@ -65,7 +66,8 @@ class ToolUseContent(BaseContent):
         """See base class."""
         if self.is_server_tool_use:
             raise ValueError("is_server_tool_use is not supported for OpenAI chat completions")
-        return {
+        
+        data = {
             "id": self.id,
             "type": "function",
             "function": {
@@ -73,6 +75,15 @@ class ToolUseContent(BaseContent):
                 "name": self.name
             }
         }
+        
+        if self.thought_signature:
+            data["extra_content"] = {
+                "google": {
+                    "thought_signature": self.thought_signature
+                }
+            }
+            
+        return data
 
     @override
     def to_anthropic_input(self, **kwargs: Any) -> dict[str, Any]:

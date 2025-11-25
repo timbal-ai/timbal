@@ -164,6 +164,14 @@ class ChatCompletionCollector(BaseCollector):
                 "name": tool_call.function.name,
                 "input": tool_call.function.arguments
             }
+            
+            # Check for extra_content (Google Gemini thought signature)
+            extra_content = getattr(tool_call, "extra_content", None)
+            if extra_content:
+                google_extra = extra_content.get("google")
+                if google_extra:
+                    self._current_tool_call["thought_signature"] = google_extra.get("thought_signature")
+
             self._tool_calls.append(self._current_tool_call)
         else:
             self._current_tool_call["input"] += tool_call.function.arguments
