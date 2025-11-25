@@ -15,7 +15,7 @@ A Table in a Knowledge Base is a structured container for your data with:
 Creates a new structured table in a Knowledge Base - Defines a table schema with columns, data types, constraints, and documentation.
 
 ```python
-from timbal.platform.tables import Column, create_table
+from timbal.platform.kbs.tables import Column, create_table
 
 await create_table(
     org_id="your-org-id",
@@ -230,7 +230,7 @@ Unleash the full power of PostgreSQL against your knowledge base tables. Execute
 </Note>
 
 ```python
-from timbal.platform.tables import query
+from timbal.platform.kbs.tables import query
 
 results = await query(
     org_id="your-org-id",
@@ -252,7 +252,7 @@ For semantic search capabilities, you'll need to [create an embedding](/kb/embed
 </Warning>
 
 ```python
-from timbal.platform.tables import search_table
+from timbal.platform.kbs.tables import search_table
 
 # Pure semantic search
 results = await search_table(
