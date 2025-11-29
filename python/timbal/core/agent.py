@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import inspect
+import json
 import re
 import sys
 from collections.abc import AsyncGenerator
@@ -631,6 +632,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 yield event
                             return
 
+            is_output_model = False
             async for event in self._llm(
                 model=self.model,
                 messages=current_span.memory,
@@ -646,12 +648,28 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     if event.status.code == "cancelled" and event.status.reason == "interrupted":
                         raise InterruptError(event.call_id)
                     assert isinstance(event.output, Message), f"Expected event.output to be a Message, got {type(event.output)}"
+
+
                     # Add LLM response to conversation for next iteration
                     current_span.memory.append(event.output)
                     # This breaks the reference to the original messages object. We need to manually append the output to the span memory.
                     current_span._memory_dump.append(event._output_dump)
+
+                    for content in event.output.content:
+                        if isinstance(content, TextContent):
+                            try:
+                                json_data = json.loads(content.text)
+                                event.output = self.output_model(**json_data)
+                                is_output_model = True
+                                break
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                
                 yield event
-            
+
+            if is_output_model:
+                break
+
             tool_calls = [
                 content for content in current_span.memory[-1].content
                 if isinstance(content, ToolUseContent) and not content.is_server_tool_use
