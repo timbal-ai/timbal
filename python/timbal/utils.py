@@ -5,6 +5,7 @@ import inspect
 import json
 import math
 import socket
+from ast import literal_eval
 from collections.abc import AsyncGenerator, Callable, Generator
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ logger = structlog.get_logger("timbal.utils")
 
 class ImportSpec(BaseModel):
     """Specification for importing an object from a Python module."""
+
     path: Path
     target: str | None = None
 
@@ -63,6 +65,7 @@ async def dump(value: Any) -> Any:
     """Dumps all models that live within a nested structure of arbitrary depth."""
     from .types.file import File
     from .types.message import Message
+
     # Handle float("nan"), np.nan, pd.NA, etc. (might need to handle more scenarios here)
     if safe_is_nan(value):
         return None
@@ -81,14 +84,14 @@ async def dump(value: Any) -> Any:
     elif any(cls.__name__ == "Runnable" for cls in value.__class__.__mro__):
         return value.model_dump()
     # Handle the rest of BaseModel instances as we handle dictionaries
-    elif isinstance(value, BaseModel): 
+    elif isinstance(value, BaseModel):
         items = await asyncio.gather(*[dump(v) for v in value.__dict__.values()])
         return dict(zip(value.__dict__.keys(), items, strict=False))
     elif isinstance(value, dict):
         keys, values = zip(*value.items(), strict=False) if value else ([], [])
         dumped_values = await asyncio.gather(*[dump(v) for v in values])
         return dict(zip(keys, dumped_values, strict=False))
-    elif isinstance(value, (list, tuple)): # noqa: UP038
+    elif isinstance(value, (list, tuple)):  # noqa: UP038
         dumped_items = await asyncio.gather(*[dump(v) for v in value])
         return dumped_items if isinstance(value, list) else tuple(dumped_items)
     elif isinstance(value, File):
@@ -118,9 +121,9 @@ def create_model_from_handler(name: str, handler: Callable[..., Any]) -> BaseMod
     fields = {}
     defaults = {}
     if argspec.defaults:
-        defaults = dict(zip(argspec.args[-len(argspec.defaults):], argspec.defaults, strict=True))
+        defaults = dict(zip(argspec.args[-len(argspec.defaults) :], argspec.defaults, strict=True))
     for field_name in argspec.args[skip_args_idx:]:
-        field_info = defaults.get(field_name, ...) # Pydantic will use ... to mark this field as required.
+        field_info = defaults.get(field_name, ...)  # Pydantic will use ... to mark this field as required.
         if not isinstance(field_info, FieldInfo):
             field_info = Field(field_info)
         field_type = argspec.annotations.get(field_name, Any)
@@ -149,7 +152,7 @@ def resolve_default(key: str, value: Any) -> Any:
 
 
 async def sync_to_async_gen(
-    gen: Generator[Any, None, None], 
+    gen: Generator[Any, None, None],
     loop: asyncio.AbstractEventLoop,
     ctx: contextvars.Context,
 ) -> AsyncGenerator[Any, None]:
@@ -158,14 +161,35 @@ async def sync_to_async_gen(
     """
     while True:
         # StopIteration is special in Python. It's used to implement generator protocol and can't
-        # be pickled/transferred across threads properly. By catching it explicitly in the executor 
+        # be pickled/transferred across threads properly. By catching it explicitly in the executor
         # function and converting it to a sentinel value, we avoid problematic exception propagation.
         def _next():
             try:
                 return next(gen)
-            except StopIteration: 
+            except StopIteration:
                 return None
+
         value = await loop.run_in_executor(None, lambda: ctx.run(_next))
         if value is None:
             break
         yield value
+
+
+def coerce_to_dict(v: Any) -> dict[str, Any]:
+    """Utility function to convert LLM outputs into python objects."""
+    if isinstance(v, dict):
+        return v
+    elif isinstance(v, str):
+        if v.strip() == "":
+            return {}
+        try:
+            v = json.loads(v)
+            return v
+        except Exception:
+            try:
+                v = literal_eval(v)
+                return v
+            except Exception as e:
+                raise ValueError(f"Cannot coerce value to dict: {v}") from e
+    else:
+        raise ValueError(f"Cannot coerce value to dict: {v}")
