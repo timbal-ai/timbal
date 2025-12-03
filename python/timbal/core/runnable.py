@@ -49,21 +49,29 @@ from ..utils import dump, sync_to_async_gen
 
 logger = structlog.get_logger("timbal.core.runnable")
 
-TIMBAL_DELTA_EVENTS = os.getenv("TIMBAL_DELTA_EVENTS", "false").lower() in ["true", "1", "t", "yes", "y", "enabled", "on"]
-if TIMBAL_DELTA_EVENTS:
-    logger.warning("TIMBAL_DELTA_EVENTS is enabled. This is an experimental feature and may not work properly with all providers.")
-else:
-    logger.warning("ChunkEvents will be deprecated in a future release. Enable TIMBAL_DELTA_EVENTS=true to use the new structured DeltaEvents system.")
+TIMBAL_DELTA_EVENTS = os.getenv("TIMBAL_DELTA_EVENTS", "false").lower() in [
+    "true",
+    "1",
+    "t",
+    "yes",
+    "y",
+    "enabled",
+    "on",
+]
+if not TIMBAL_DELTA_EVENTS:
+    logger.warning(
+        "ChunkEvents will be deprecated in a future release. Enable TIMBAL_DELTA_EVENTS=true to use the new structured DeltaEvents system."
+    )
 
 
 # TODO Add timeout
 class Runnable(ABC, BaseModel):
     """Abstract base class for all runnable components in the Timbal framework.
-    
+
     A Runnable represents an executable unit that can process inputs and produce outputs
     through an async generator interface. Runnables can be nested to form complex
     execution graphs and support various execution patterns (sync, async, generators).
-    
+
     Key features:
     - Parameter validation using Pydantic models
     - Schema generation for LLM tool calling (OpenAI/Anthropic formats)
@@ -77,6 +85,7 @@ class Runnable(ABC, BaseModel):
     - Automatic error handling and recovery
     - Integration with collectors system for output processing
     """
+
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
     name: str
@@ -108,12 +117,12 @@ class Runnable(ABC, BaseModel):
 
     command: str | None = None
     """Optional command string that triggers automatic invocation of this runnable.
-    
+
     When specified, this runnable will be automatically invoked when the command is received,
     bypassing LLM decision-making. This is particularly useful for Agents where you want
     direct command-based routing (e.g., '/help', '/search') without requiring the LLM to
     decide which tool to call.
-    
+
     Note: This feature is primarily designed for Agent orchestrators and may not be
     applicable to all Runnable types.
     """
@@ -145,7 +154,6 @@ class Runnable(ABC, BaseModel):
     _log_events: set[str] = PrivateAttr()
     """Which timbal events to log."""
 
-
     @classmethod
     def _inspect_callable(
         cls,
@@ -158,7 +166,7 @@ class Runnable(ABC, BaseModel):
         """Inspect a runtime callable, return if the callable is a coroutine and its step dependencies."""
         if not callable(fn):
             raise ValueError(f"fn must be a callable, got {type(fn)}")
-        
+
         is_coroutine = inspect.iscoroutinefunction(fn)
         if not allow_coroutine and is_coroutine:
             raise NotImplementedError("Coroutine functions are not supported for runtime callables yet.")
@@ -168,11 +176,12 @@ class Runnable(ABC, BaseModel):
         is_async_gen = inspect.isasyncgenfunction(fn)
         if not allow_async_gen and is_async_gen:
             raise NotImplementedError("Async generator functions are not supported for runtime callables yet.")
-        
+
         if not allow_required_params:
             sig = inspect.signature(fn)
             required_params = [
-                name for name, param in sig.parameters.items()
+                name
+                for name, param in sig.parameters.items()
                 if param.default is inspect.Parameter.empty
                 and param.kind != inspect.Parameter.VAR_POSITIONAL
                 and param.kind != inspect.Parameter.VAR_KEYWORD
@@ -181,12 +190,11 @@ class Runnable(ABC, BaseModel):
                 raise ValueError(f"Callable must not have any required parameters, got required: {required_params}")
 
         dependencies = []
-        # TODO Fix errors with system prompt callables
         try:
             source_file = inspect.getsourcefile(fn)
             if not source_file:
                 raise ValueError("Could not determine source file for runtime callable.")
-            with open(source_file) as f:
+            with open(source_file, encoding="utf-8") as f:
                 full_file_source = f.read()
 
             tree = ast.parse(full_file_source)
@@ -194,8 +202,11 @@ class Runnable(ABC, BaseModel):
             # Strategy 1: Find by function name (most reliable for decorated functions)
             func_name = fn.__name__
             for node in ast.walk(tree):
-                if (isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and
-                    hasattr(node, 'name') and node.name == func_name):
+                if (
+                    isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+                    and hasattr(node, "name")
+                    and node.name == func_name
+                ):
                     target_node = node
                     break
             # Strategy 2: If we have multiple functions with the same name, use source lines to narrow it down
@@ -204,20 +215,22 @@ class Runnable(ABC, BaseModel):
                     source_lines, start_line = inspect.getsourcelines(fn)
                     # Look for FunctionDef nodes within a few lines of the start_line
                     for node in ast.walk(tree):
-                        if (isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and
-                            hasattr(node, 'name') and node.name == func_name and
-                            hasattr(node, 'lineno') and
-                            start_line <= node.lineno <= start_line + len(source_lines)):
+                        if (
+                            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+                            and hasattr(node, "name")
+                            and node.name == func_name
+                            and hasattr(node, "lineno")
+                            and start_line <= node.lineno <= start_line + len(source_lines)
+                        ):
                             target_node = node
                             break
-                except: # noqa: E722
+                except:  # noqa: E722
                     pass
             # Strategy 3: Fallback to line number matching for lambdas
             if not target_node:
                 first_line = fn.__code__.co_firstlineno
                 for node in ast.walk(tree):
-                    if (hasattr(node, "lineno") and node.lineno == first_line and
-                        isinstance(node, ast.Lambda)):
+                    if hasattr(node, "lineno") and node.lineno == first_line and isinstance(node, ast.Lambda):
                         target_node = node
                         break
             if target_node:
@@ -226,14 +239,13 @@ class Runnable(ABC, BaseModel):
                 dependencies = target_node_analyzer.dependencies
         except Exception as e:
             logger.error("Could not determine step dependencies for runtime callable.", exc_info=e)
-        
+
         return {
             "is_coroutine": is_coroutine,
             "is_gen": is_gen,
             "is_async_gen": is_async_gen,
             "dependencies": dependencies,
         }
-
 
     @field_validator("pre_hook", "post_hook")
     @classmethod
@@ -250,7 +262,6 @@ class Runnable(ABC, BaseModel):
             cls._post_hook_dependencies = inspect_result["dependencies"]
         return v
 
-
     def _prepare_default_params(self, default_params: dict[str, Any]) -> None:
         """Separates default_params into fixed (static) and runtime (callable) parameters."""
         if not isinstance(default_params, dict):
@@ -265,7 +276,6 @@ class Runnable(ABC, BaseModel):
                 # Store static parameter
                 self._default_fixed_params[param_name] = param_value
 
-
     def model_post_init(self, __context: Any) -> None:
         """Initialize the Runnable after Pydantic model creation."""
         log_events = os.getenv("TIMBAL_LOG_EVENTS", "START,OUTPUT").split(",")
@@ -275,88 +285,82 @@ class Runnable(ABC, BaseModel):
         if "type" not in self.metadata:
             self.metadata["type"] = self.__class__.__name__
 
-
     @abstractmethod
     def nest(self, parent_path: str) -> None:
         """Set the nested path for this runnable within a parent context.
-        
+
         This method is called when a runnable is nested inside another runnable
         (e.g., tools within an agent) to establish the hierarchical path.
-        
+
         Args:
             parent_path: The path of the parent runnable
         """
         pass
 
-
     # NOTE: Pydantic's `@computed_field` and functool's `@cached_property` interfere
     # with the abstract method's ability to force an implementation at instantiation time
-    # @computed_field 
-    # @cached_property 
+    # @computed_field
+    # @cached_property
     @abstractmethod
     def params_model(self) -> BaseModel:
         """Return the Pydantic model defining the input parameters for this runnable.
-        
+
         This model is used for:
         - Input validation when the runnable is called
         - Schema generation for LLM tool calling
         - Parameter filtering based on schema_params_mode, schema_include_params, schema_exclude_params
-        
+
         Returns:
             A Pydantic BaseModel class defining the expected input parameters
         """
         pass
 
-    
-    @computed_field 
-    @cached_property 
+    @computed_field
+    @cached_property
     def params_model_schema(self) -> dict[str, Any]:
         """Get the JSON schema for the params model.
-        
+
         Returns:
             The JSON schema representation of the params_model
         """
         params_model_schema = self.params_model.model_json_schema()
         return params_model_schema
 
-
     # NOTE: Pydantic's `@computed_field` and functool's `@cached_property` interfere
     # with the abstract method's ability to force an implementation at instantiation time
-    # @computed_field 
-    # @cached_property 
+    # @computed_field
+    # @cached_property
     @abstractmethod
     def return_model(self) -> Any:
         """Return the type/model defining the expected output of this runnable.
-        
+
         This is used for:
         - Type checking and validation
         - Schema generation for documentation
         - LLM integration where output types matter
-        
+
         Returns:
             A type, Pydantic model, or other type annotation representing the output
         """
         pass
 
-    
-    @computed_field 
-    @cached_property 
+    @computed_field
+    @cached_property
     def return_model_schema(self) -> dict[str, Any]:
         """Get the JSON schema for the return model.
-        
+
         Returns:
             The JSON schema representation of the return_model
         """
         return_model_schema = TypeAdapter(self.return_model).json_schema()
         return return_model_schema
 
-    
     def format_params_model_schema(self) -> dict[str, Any]:
         """Format the parameter schema based on filtering rules.
-        
+
         Applies the schema_params_mode, schema_include_params, and schema_exclude_params settings
         to filter which parameters are included in the final schema.
-        
+
         Returns:
             A filtered JSON schema containing only the selected parameters
         """
@@ -366,7 +370,7 @@ class Runnable(ABC, BaseModel):
             selected_params = set(self.params_model_schema.get("required", []))
         else:
             selected_params = set(self.params_model_schema["properties"].keys())
-        
+
         # Add any explicitly included params
         if self.schema_include_params is not None:
             selected_params.update(self.schema_include_params)
@@ -394,12 +398,11 @@ class Runnable(ABC, BaseModel):
             "properties": properties,
         }
 
-    
     @computed_field
     @cached_property
     def openai_chat_completions_schema(self) -> dict[str, Any]:
         """Generate OpenAI-compatible tool schema for this runnable.
-        
+
         Returns:
             A dictionary conforming to OpenAI's function calling schema format
         """
@@ -410,16 +413,15 @@ class Runnable(ABC, BaseModel):
                 "name": self.name,
                 "description": self.description or "",
                 "parameters": formatted_params_model_schema,
-            }
+            },
         }
         return schema
-    
 
     @computed_field
     @cached_property
     def openai_responses_schema(self) -> dict[str, Any]:
         """Generate OpenAI-compatible tool schema for this runnable.
-        
+
         Returns:
             A dictionary conforming to OpenAI's function calling schema format
         """
@@ -432,12 +434,11 @@ class Runnable(ABC, BaseModel):
         }
         return schema
 
-    
     @computed_field
     @cached_property
     def anthropic_schema(self) -> dict[str, Any]:
         """Generate Anthropic-compatible tool schema for this runnable.
-        
+
         Returns:
             A dictionary conforming to Anthropic's tool calling schema format
         """
@@ -449,12 +450,10 @@ class Runnable(ABC, BaseModel):
         }
         return anthropic_schema
 
-
     @model_serializer
     def serialize(self) -> dict[str, Any]:
         """We use the simpler anthropic schema for serialization."""
         return self.anthropic_schema
-
 
     async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
         """Execute a runtime callable handling async context automatically."""
@@ -463,56 +462,56 @@ class Runnable(ABC, BaseModel):
         else:
             loop = asyncio.get_running_loop()
             ctx = contextvars.copy_context()
+
             def fn_with_ctx():
                 return ctx.run(fn)
-            return await loop.run_in_executor(None, fn_with_ctx)
 
+            return await loop.run_in_executor(None, fn_with_ctx)
 
     async def _resolve_default_params(self) -> dict[str, Any]:
         """Resolve default parameters by executing any callable values.
-        
+
         Merges static default parameters with the results of executing
         runtime callable parameters in parallel.
-        
+
         Returns:
             Dictionary containing resolved default parameters
         """
         resolved_params = dict(self._default_fixed_params)
         if not self._default_runtime_params:
             return resolved_params
-        
+
         tasks = []
         callable_param_names = []
         for param_name, callable_info in self._default_runtime_params.items():
             tasks.append(self._execute_runtime_callable(callable_info["callable"], callable_info["is_coroutine"]))
             callable_param_names.append(param_name)
-        
+
         results = await asyncio.gather(*tasks)
         for param_name, result in zip(callable_param_names, results, strict=False):
             resolved_params[param_name] = result
         return resolved_params
 
-
     @TimbalCollector.wrap
     async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
         """Execute the runnable with the given parameters.
-        
+
         This is the main entry point for executing a runnable. It handles:
         - Parameter validation and merging with default_params
         - Run context management and tracing setup
         - Event streaming (StartEvent, ChunkEvents, OutputEvent)
         - Error handling and cleanup
         - Integration with the collectors system
-        
+
         The @collectable decorator wraps the returned async generator to add
         a .collect() method for easy result collection.
-        
+
         Args:
             **kwargs: Runtime parameters for the runnable execution.
-        
+
         Returns:
             A BaseCollector that yields Events and provides collect() method
-            
+
         Raises:
             ValidationError: If input parameters don't match the params_model
             Exception: Any exception raised during handler execution (captured in OutputEvent)
@@ -537,7 +536,7 @@ class Runnable(ABC, BaseModel):
             call_id=_call_id,
             parent_call_id=_parent_call_id,
             t0=t0,
-            metadata={**self.metadata}, # Shallow copy
+            metadata={**self.metadata},  # Shallow copy
             runnable=self,
         )
         run_context._trace[_call_id] = span
@@ -554,7 +553,7 @@ class Runnable(ABC, BaseModel):
         # We store a preliminary version of the input and output in the span, in case resolution fails
         input, output, error = kwargs, None, None
         span.input = input
-        span._input_dump = None # ? await dump(input)
+        span._input_dump = None  # ? await dump(input)
         span._output_dump = None
         collector = None
         try:
@@ -569,7 +568,7 @@ class Runnable(ABC, BaseModel):
                 logger.info(start_event.type, **start_event.model_dump())
             yield start_event
 
-            # We store the unvalidated input, as sent by the user. 
+            # We store the unvalidated input, as sent by the user.
             # This will ensure full replayability of the run.
             # Resolve default params (executing any callable values)
             resolved_default_params = await self._resolve_default_params()
@@ -579,7 +578,7 @@ class Runnable(ABC, BaseModel):
 
             if self.pre_hook is not None:
                 await self._execute_runtime_callable(self.pre_hook, self._pre_hook_is_coroutine)
-            
+
             # Pydantic model_validate() does not mutate the input dict
             validated_input = dict(self.params_model.model_validate(input))
 
@@ -592,14 +591,16 @@ class Runnable(ABC, BaseModel):
                     gen = self.handler(**validated_input)
                     async_gen = sync_to_async_gen(gen, loop, ctx)
                 else:
+
                     def handler_func():
                         return ctx.run(self.handler, **validated_input)
+
                     output = await loop.run_in_executor(None, handler_func)
             elif self._is_coroutine:
                 output = await self.handler(**validated_input)
             else:
                 async_gen = self.handler(**validated_input)
-            
+
             if async_gen:
                 output = None
                 # Peek at first element to determine collector type
@@ -659,8 +660,8 @@ class Runnable(ABC, BaseModel):
 
             span.status = RunStatus(
                 code="success",
-                reason=None, # TODO
-                message=None # TODO
+                reason=None,  # TODO
+                message=None,  # TODO
             )
             # If the output is an OutputEvent, we extract the output
             # to avoid nesting an output event inside another output event
@@ -669,7 +670,7 @@ class Runnable(ABC, BaseModel):
                     span.status = output.status
                 output = output.output
             span.output = output
-            
+
             # Restore the call context to this runnable before executing post_hook
             # This ensures post_hook modifies the correct span, not any nested ones
             set_call_id(_call_id)
@@ -678,15 +679,11 @@ class Runnable(ABC, BaseModel):
             if self.post_hook is not None:
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
 
-            # Post hook might modify the output, so we dump afterwards 
+            # Post hook might modify the output, so we dump afterwards
             span._output_dump = await dump(span.output)
-            
+
         except EarlyExit as early_exit:
-            span.status = RunStatus(
-                code="cancelled",
-                reason="early_exit",
-                message=str(early_exit)
-            )
+            span.status = RunStatus(code="cancelled", reason="early_exit", message=str(early_exit))
             span.output = None
             span._output_dump = None
 
@@ -696,11 +693,7 @@ class Runnable(ABC, BaseModel):
             if collector is not None:
                 span.output = collector.result()
                 span._output_dump = await dump(span.output)
-            span.status = RunStatus(
-                code="cancelled",
-                reason="interrupted",
-                message=str(e)
-            )
+            span.status = RunStatus(code="cancelled", reason="interrupted", message=str(e))
             yield InterruptError(_call_id)
 
         except Exception as err:
@@ -709,13 +702,13 @@ class Runnable(ABC, BaseModel):
                 "message": str(err),
                 "traceback": traceback.format_exc(),
             }
-            span.error = error # No need to model dump the error. It's already a json compatible dict
+            span.error = error  # No need to model dump the error. It's already a json compatible dict
             span.status = RunStatus(
                 code="error",
-                reason=None, # TODO
-                message=None # TODO
+                reason=None,  # TODO
+                message=None,  # TODO
             )
-        
+
         finally:
             t1 = int(time.time() * 1000)
             span.t1 = t1
