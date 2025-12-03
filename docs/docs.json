@@ -8,10 +8,6 @@
     "dark": "#000000"
   },
   "favicon": "/favicon.png",
-  "banner": {
-    "content": "🚀 Version 1.0 is live! Start with the [quickstart guide](/quickstart) or explore our [examples](/examples).",
-    "dismissible": true
-  },
   "navigation": {
     "tabs": [
       {
@@ -147,9 +143,7 @@
           },
           {
             "group": "Workflows",
-            "pages": [
-              "examples/workflows/sequential-steps"
-            ]
+            "pages": ["examples/workflows/sequential-steps"]
           }
         ]
       },
@@ -167,16 +161,11 @@
           },
           {
             "group": "Runs",
-            "pages": [
-              "api-reference/runs/list",
-              "api-reference/runs/upsert"
-            ]
+            "pages": ["api-reference/runs/list", "api-reference/runs/upsert"]
           },
           {
             "group": "Files",
-            "pages": [
-              "api-reference/files/upload"
-            ]
+            "pages": ["api-reference/files/upload"]
           },
           {
             "group": "Knowledge Bases",
@@ -224,15 +213,15 @@
   },
   "contextual": {
     "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
+      "copy",
+      "view",
+      "chatgpt",
+      "claude",
+      "perplexity",
+      "mcp",
+      "cursor",
+      "vscode"
+    ]
   },
   "footer": {
     "socials": {

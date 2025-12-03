@@ -5,7 +5,7 @@ description: "Monitor execution in real-time and handle streaming results"
 
 ## The Event Stream
 
-In the previous [examples](./runnables.mdx#parameter-handling-and-basic-execution), we used `.collect()` to get the final result. When you call a Runnable, it doesn't just return the answer - it returns a stream of events that tell you what's happening step by step (an async generator). The `.collect()` method waits for all events and gives you just the final answer.
+In the previous [examples](./runnables#parameter-handling-and-basic-execution), we used `.collect()` to get the final result. When you call a Runnable, it doesn't just return the answer - it returns a stream of events that tell you what's happening step by step (an async generator). The `.collect()` method waits for all events and gives you just the final answer.
 
 You can iterate through the async generator to process events in real-time:
 
@@ -97,39 +97,60 @@ export TIMBAL_DELTA_EVENTS=true
 
 #### Delta Event Structure
 
+Each `DeltaEvent` contains an `item` property with a typed delta item. All delta items inherit from `DeltaItem` and have an `id` and `type` field:
+
 ```python
 from timbal.types.events import DeltaEvent
-from timbal.types.events.delta import TextItem, ToolItem, ToolInputItem
+from timbal.types.events.delta import Text, TextDelta, ToolUse
 
-# Text streaming
-text_delta = DeltaEvent(
+# Text block start (complete text content)
+text_event = DeltaEvent(
     run_id="068c4458382e79bb80006dc019ac3039",
     path="agent.llm",
     call_id="068c4458383678be800031537a8df42e",
-    item=TextItem(delta="Hello")  # Typed as text
+    item=Text(id="text_0", text="Hello")
+)
+
+# Text streaming delta
+text_delta_event = DeltaEvent(
+    run_id="068c4458382e79bb80006dc019ac3039",
+    path="agent.llm",
+    call_id="068c4458383678be800031537a8df42e",
+    item=TextDelta(id="text_0", text_delta=" world")
 )
 
 # Tool call start
-tool_delta = DeltaEvent(
+tool_event = DeltaEvent(
     run_id="068c4458382e79bb80006dc019ac3039",
     path="agent.llm",
     call_id="068c4458383678be800031537a8df42e",
-    item=ToolItem(id="call_123", name="search", input="")
+    item=ToolUse(id="call_123", name="search", input="")
 )
 ```
 
 #### Delta Item Types
 
-DeltaEvents contain one of several typed items:
+DeltaEvents use a pattern of paired types: a "start" type for the beginning of a content block, and a "delta" type for streaming incremental updates. All items have an `id` field to correlate deltas with their parent block.
 
-**TextItem** - Streaming text output:
+**Text** - Start of a text content block:
 ```python
-TextItem(delta="Hello world")
+Text(
+    id="text_0",
+    text="Hello"  # Initial text content
+)
 ```
 
-**ToolItem** - Start of a tool call:
+**TextDelta** - Streaming text increments:
 ```python
-ToolItem(
+TextDelta(
+    id="text_0",
+    text_delta=" world"  # Incremental text
+)
+```
+
+**ToolUse** - Start of a tool call:
+```python
+ToolUse(
     id="call_abc123",
     name="search_web",
     input="",  # Initially empty
@@ -137,54 +158,76 @@ ToolItem(
 )
 ```
 
-**ToolInputItem** - Streaming tool parameters:
+**ToolUseDelta** - Streaming tool input parameters:
 ```python
-ToolInputItem(
+ToolUseDelta(
     id="call_abc123",
-    delta='{"query'  # Partial JSON
+    input_delta='{"query'  # Partial JSON
 )
 ```
-LLMs stream tool input parameters incrementally. Multiple `ToolInputItem` events will be emitted for a single tool call. You need to accumulate these deltas and parse the complete JSON afterwards.
+LLMs stream tool input parameters incrementally. Multiple `ToolUseDelta` events will be emitted for a single tool call. You need to accumulate these deltas and parse the complete JSON afterwards.
 
-**ToolResultItem** - Tool execution result:
+**Thinking** - Start of LLM reasoning block:
 ```python
-ToolResultItem(
-    id="call_abc123",
-    result={"temperature": 72}
+Thinking(
+    id="thinking_0",
+    thinking="Let me analyze this problem..."
 )
 ```
-This event is only emitted for **is_server_tool_use tools** (e.g., web search tools run by OpenAI/Anthropic). For local tools that Timbal executes, you'll see the normal runnable event sequence (StartEvent, OutputEvent, etc.) instead.
 
-**ThinkingItem** - LLM reasoning process:
+**ThinkingDelta** - Streaming thinking increments:
 ```python
-ThinkingItem(delta="Let me analyze...")
+ThinkingDelta(
+    id="thinking_0",
+    thinking_delta="First, I'll consider..."
+)
 ```
 
-**CustomItem** - Arbitrary custom content:
+**Custom** - Arbitrary custom content:
 ```python
-CustomItem(
+Custom(
+    id="custom_0",
     data={"type": "image_progress", "percent": 45}
 )
 ```
-Use `CustomItem` for streaming content that doesn't fit standard types (e.g., multimodal content, provider-specific features, experimental data). This allows custom collectors and tools to emit arbitrary typed data while participating in the delta event system.
+Use `Custom` for streaming content that doesn't fit standard types (e.g., multimodal content, provider-specific features, experimental data). This allows custom collectors and tools to emit arbitrary typed data while participating in the delta event system.
+
+**ContentBlockStop** - Signals end of a content block:
+```python
+ContentBlockStop(id="text_0")
+```
+This event signals that a content block (text, tool use, thinking) has finished streaming. Use it to finalize processing of accumulated deltas.
 
 #### Using Delta Events
 
 ```python
 from timbal.types.events import DeltaEvent
-from timbal.types.events.delta import TextItem, ToolItem, ThinkingItem, CustomItem
+from timbal.types.events.delta import (
+    Text, TextDelta, ToolUse, ToolUseDelta,
+    Thinking, ThinkingDelta, Custom, ContentBlockStop
+)
 
 async for event in agent(input="Hello"):
     if isinstance(event, DeltaEvent):
+        item = event.item
         # Type-safe handling of different content types
-        if isinstance(event.item, TextItem):
-            print(event.item.delta, end="", flush=True)
-        elif isinstance(event.item, ToolItem):
-            print(f"\n[Calling {event.item.name}]")
-        elif isinstance(event.item, ThinkingItem):
-            print(f"\n[Thinking: {event.item.delta}]")
-        elif isinstance(event.item, CustomItem):
-            print(f"\n[Custom: {event.item.data}]")
+        if isinstance(item, Text):
+            print(item.text, end="", flush=True)
+        elif isinstance(item, TextDelta):
+            print(item.text_delta, end="", flush=True)
+        elif isinstance(item, ToolUse):
+            print(f"\n[Calling {item.name}]")
+        elif isinstance(item, ToolUseDelta):
+            # Accumulate input_delta for later JSON parsing
+            pass
+        elif isinstance(item, Thinking):
+            print(f"\n[Thinking: {item.thinking}]")
+        elif isinstance(item, ThinkingDelta):
+            print(item.thinking_delta, end="", flush=True)
+        elif isinstance(item, Custom):
+            print(f"\n[Custom: {item.data}]")
+        elif isinstance(item, ContentBlockStop):
+            print(f"\n[Block {item.id} complete]")
 ```
 
 #### Benefits of Delta Events
@@ -192,6 +235,7 @@ async for event in agent(input="Hello"):
 - **Type Safety**: Each delta item has specific fields and types
 - **Semantic Information**: Know exactly what type of content is streaming
 - **Better Observability**: Track tool calls, thinking, and text separately
+- **Block Lifecycle**: Start and stop events for each content block
 - **UI Flexibility**: Render different content types with appropriate components
 - **Structured Logging**: Monitor different content types independently
 
