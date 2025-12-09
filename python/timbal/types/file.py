@@ -5,7 +5,7 @@ import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import urlopen
 
 import requests
@@ -50,8 +50,6 @@ class File(io.IOBase):
         "__content_type__",
     )
 
-
-
     def __init__(
         self,
         source: Any,
@@ -89,17 +87,14 @@ class File(io.IOBase):
                 content_type = "application/octet-stream"
         object.__setattr__(self, "__content_type__", content_type)
 
-    
     def __str__(self) -> str:
         if self.__source_scheme__ == "bytes":
             ext_info = f"{self.__source_extension__}" if self.__source_extension__ else ""
             return f"io.IOBase({ext_info})"
         return self.__source__
 
-
     def __repr__(self) -> str:
         return f"File(source={str(self)})"
-
 
     def __getattr__(self, name: str) -> Any:
         """Proxy attribute access through to the wrapped file object."""
@@ -111,14 +106,12 @@ class File(io.IOBase):
         else:
             return getattr(self.__wrapped__, name)
 
-
     def __setattr__(self, name: str, value: Any) -> None:
         """Proxy attribute assignment through to the wrapped file object."""
         if hasattr(type(self), name):
             object.__setattr__(self, name, value)
         else:
             setattr(self.__wrapped__, name, value)
-
 
     def __delattr__(self, name: str) -> None:
         """Proxy attribute deletion through to the wrapped file object."""
@@ -127,33 +120,29 @@ class File(io.IOBase):
         else:
             delattr(self.__wrapped__, name)
 
-
     def __iter__(self) -> Iterator[bytes]:
         """Iterate over the wrapped file object."""
         return iter(self.__wrapped__)
 
-    
     def __copy__(self) -> "File":
         """Return self for shallow copy - File objects are immutable references."""
         return self
-    
-    
+
     def __deepcopy__(self, memo: dict) -> "File":
         """Return self for deep copy - File objects are immutable references.
-        
+
         File objects represent immutable references to file sources and should not
         be deeply copied. The underlying file content and metadata remain the same,
         so we return the same instance to avoid issues with copying file handles
         and other system resources.
-        
+
         Args:
             memo: Dictionary used by deepcopy to track already copied objects
-            
+
         Returns:
             File: The same File instance
         """
         return self
-    
 
     # TODO Remove the fetching from here. Move to validation
     @property
@@ -175,29 +164,24 @@ class File(io.IOBase):
             object.__setattr__(self, "__fileobj__", fileobj)
         return fileobj
 
-
     # Overwrite some io.IOBase methods to proxy to the wrapped file object (explicitly).
     def readable(self) -> bool:
         return self.__getattr__("readable")()
 
-
     def writable(self) -> bool:
         return self.__getattr__("writable")()
-
 
     def seekable(self) -> bool:
         return self.__getattr__("seekable")()
 
-
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
         return self.__getattr__("seek")(offset, whence)
 
-
     @classmethod
     def validate(
-        cls, 
-        value: ValidatorFunctionWrapHandler, 
-        info: dict | ValidationInfo | None = None, # noqa: ARG003
+        cls,
+        value: ValidatorFunctionWrapHandler,
+        info: dict | ValidationInfo | None = None,  # noqa: ARG003
     ) -> "File":
         """Create a new Field instance validating a local path, an url, an s3 uri, a data url or a file-like object.
         Validation info can be used to pass context information to the file fetcher:
@@ -219,8 +203,8 @@ class File(io.IOBase):
             if source_name is not None:
                 source.name = source_name
             return File(
-                source, 
-                source_scheme="bytes", 
+                source,
+                source_scheme="bytes",
                 source_extension=source_extension,
             )
 
@@ -234,8 +218,8 @@ class File(io.IOBase):
             if source_name is not None:
                 source.name = source_name
             return File(
-                source, 
-                source_scheme="bytes", 
+                source,
+                source_scheme="bytes",
                 source_extension=source_extension,
             )
 
@@ -291,7 +275,6 @@ class File(io.IOBase):
 
         raise ValueError("Invalid file source. Must be a local file path, data URL, or HTTP/HTTPS url.")
 
-    
     def to_disk(self, path: Path) -> None:
         """Save the file to disk."""
         # Ensure the file obj has the pointer at the start of the file.
@@ -300,7 +283,6 @@ class File(io.IOBase):
         with open(path, "wb") as f:
             f.write(content)
 
-    
     def to_data_url(self) -> str:
         """Serialize the file to a data url string."""
         if self.__source_scheme__ == "data_url":
@@ -313,9 +295,8 @@ class File(io.IOBase):
         bs64_content = base64.b64encode(content).decode("utf-8")
         return f"data:{self.__content_type__};base64,{bs64_content}"
 
-    
     async def persist(
-        self, 
+        self,
         org_id: str | None = None,
         # ? Add more resource specifiers
     ) -> str | None:
@@ -361,7 +342,7 @@ class File(io.IOBase):
         content = self.read()
 
         path = f"orgs/{org_id}/files"
-        files = {"file": (self.name, content, self.__content_type__)}
+        files = {"file": (quote(self.name), content, self.__content_type__)}
 
         res = await _request("POST", path, files=files)
         res_json = res.json()
@@ -370,11 +351,10 @@ class File(io.IOBase):
         object.__setattr__(self, "__persisted__", url)
         return url
 
-
     @classmethod
     def serialize(
-        cls, 
-        value: Any, 
+        cls,
+        value: Any,
         *args,  # noqa: ARG003
         **kwargs,  # noqa: ARG003
     ) -> str:
@@ -392,7 +372,6 @@ class File(io.IOBase):
         else:
             return value.to_data_url()
 
-
     @classmethod
     def _fetch_local_file(cls, path: Path) -> io.IOBase:
         """Fetch a local file from a valid path in the system."""
@@ -402,13 +381,11 @@ class File(io.IOBase):
         fileobj.name = path.name
         return fileobj
 
-
     @classmethod
     def _fetch_data_url_file(cls, data_url: str) -> io.IOBase:
         """Parse a data URL and return a file-like object."""
         res = urlopen(data_url)  # noqa: S310
         return io.BytesIO(res.read())
-
 
     # TODO Make async
     @classmethod
@@ -423,7 +400,7 @@ class File(io.IOBase):
         content_disposition = res.headers.get("Content-Disposition")
         if content_disposition and "filename=" in content_disposition:
             try:
-                filename = content_disposition.split("filename=")[1].strip('"\'')
+                filename = content_disposition.split("filename=")[1].strip("\"'")
             except (IndexError, AttributeError):
                 pass
         # Fallback to URL path
@@ -439,7 +416,6 @@ class File(io.IOBase):
         # For generic types, let the File class keep its extension-based detection
         return fileobj
 
-
     @classmethod
     def __get_pydantic_json_schema__(cls, _core_schema: CoreSchema, _handler: GetJsonSchemaHandler) -> dict[str, Any]:
         """Defines what this type should be in openapi.json."""
@@ -450,7 +426,6 @@ class File(io.IOBase):
             "description": "A file reference which can be a local path, a URL, or a data URL.",
         }
         return json_schema
-
 
     @classmethod
     def __get_pydantic_core_schema__(cls, _source: type[Any], _handler: GetCoreSchemaHandler) -> core_schema.CoreSchema:
