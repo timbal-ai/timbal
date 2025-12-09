@@ -383,12 +383,23 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         return system_prompt
 
-    async def _resolve_memory(self) -> list[Message]:
+    async def resolve_memory(self) -> None:
         """Resolve conversation memory from previous agent trace."""
         run_context = get_run_context()
-        if not run_context.parent_id:
-            return []
+        assert run_context is not None, "Run context not found"
+
         current_span = run_context.current_span()
+        # Memory was previously resolved
+        if current_span.memory:
+            return
+        current_span.memory = [Message.validate(current_span.input.get("prompt", ""))]
+
+        # The user can override the entire list of llm input messages
+        input_messages = current_span.input.get("messages", [])
+        if input_messages:
+            current_span.memory = [Message.validate(m) for m in input_messages]
+            return
+
         # Try to get tracing data from parent execution
         parent_trace = await run_context._get_parent_trace()
         if parent_trace is None:
@@ -397,11 +408,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 parent_id=run_context.parent_id,
                 run_id=run_context.id,
             )
-            return []
+            return
 
-        self_spans = parent_trace.get_path(self._path)
+        self_spans = parent_trace.get_path(current_span.path)
         if not len(self_spans):
-            return []
+            return
         if len(self_spans) > 1:
             # TODO Handle multiple call_ids for this agent (we could access step spans)
             raise NotImplementedError("Multiple spans for the same agent are not supported yet.")
@@ -418,7 +429,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             llm_spans = parent_trace.get_path(self._llm._path)
             # In a subagent, this can be empty if the parent agent didn't call the LLM
             if not len(llm_spans):
-                return []
+                return
             # Get the most recent LLM interaction
             llm_input_messages = llm_spans[-1].input.get("messages", [])
             llm_output_message = llm_spans[-1].output
@@ -471,7 +482,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     }
                 )
             )
-        return memory
+        current_span.memory = memory + current_span.memory
 
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
@@ -574,23 +585,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         Yields:
             Events from LLM calls and tool executions
         """
-        current_span = get_run_context().current_span()
+        run_context = get_run_context()
+        assert run_context is not None, "Run context is not initialized"
+        current_span = run_context.current_span()
+
         # ? Do we want to allow the user to pass parameterized system prompts
         system_prompt = kwargs.pop("system_prompt", None)
         if not system_prompt:
             system_prompt = await self._resolve_system_prompt()
 
-        # We allow the user to pass a 'hardcoded' list of messages
-        # Or simply a prompt and we attempt to resolve memory
-        current_span.memory = kwargs.pop("messages", [])
-        if not current_span.memory:
-            current_span.memory = await self._resolve_memory()
-            current_span.memory.append(kwargs.pop("prompt"))
+        await self.resolve_memory()
         # Span memory will also be modified with messages array modification (it's the same object)
         # current_span.memory = messages
         current_span._memory_dump = await dump(
             current_span.memory
         )  # ? Can we optimize the dumping the llm already does next
+        # Remove these so the llm runnable doesn't try to use/validate them again
+        kwargs.pop("prompt", None)
+        kwargs.pop("messages", None)
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
