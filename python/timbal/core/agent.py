@@ -410,7 +410,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             )
             return
 
-        self_spans = parent_trace.get_path(current_span.path)
+        self_spans = parent_trace.get_path(self._path)
         if not len(self_spans):
             return
         if len(self_spans) > 1:

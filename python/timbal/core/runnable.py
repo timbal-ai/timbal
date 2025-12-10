@@ -729,6 +729,8 @@ class Runnable(ABC, BaseModel):
             )
             output_event._input_dump = span._input_dump
             output_event._output_dump = span._output_dump
+            # EXPERIMENTAL
+            await run_context._save_trace()
             if _parent_call_id is None:
                 await run_context._save_trace()
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
