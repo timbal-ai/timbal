@@ -115,6 +115,9 @@ class Runnable(ABC, BaseModel):
     Use get_run_context() to access execution state and output data.
     """
 
+    background_mode: Literal["auto", "always", "never"] = "never"
+    """Background execution mode"""
+
     command: str | None = None
     """Optional command string that triggers automatic invocation of this runnable.
 
@@ -153,6 +156,8 @@ class Runnable(ABC, BaseModel):
     # ? Can we store all post_hook related stuff together?
     _log_events: set[str] = PrivateAttr()
     """Which timbal events to log."""
+    _bg_tasks: dict[str, asyncio.Task] = PrivateAttr(default_factory=dict)
+    """Background tasks running for this runnable."""
 
     @classmethod
     def _inspect_callable(
@@ -393,6 +398,14 @@ class Runnable(ABC, BaseModel):
             else:
                 properties[k] = v
 
+        # When background mode is auto, we'll expose this parameter to the LLM to let it decide
+        if self.background_mode != "never":
+            properties["run_in_background"] = {
+                "type": "boolean",
+                "default": True if self.background_mode == "always" else False,
+                "description": "Run in the background",
+            }
+
         return {
             **self.params_model_schema,
             "properties": properties,
@@ -455,6 +468,34 @@ class Runnable(ABC, BaseModel):
         """We use the simpler anthropic schema for serialization."""
         return self.anthropic_schema
 
+    def get_background_task(self, task_id: str) -> dict[str, Any]:
+        """Get the status and events of a background task."""
+        if task_id not in self._bg_tasks:
+            return {"status": "not_found", "events": []}
+
+        task_info = self._bg_tasks[task_id]
+        task = task_info['task']
+
+        # Get all available events
+        events = []
+        queue = task_info['event_queue']
+        while not queue.empty():
+            try:
+                events.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        # Determine status
+        if task.done():
+            del self._bg_tasks[task_id]
+            if task.exception():
+                return {"status": "error", "error": str(task.exception()), "events": events}
+            else:
+                return {"status": "completed", "result": task.result(), "events": events}
+        else:
+            return {"status": "running", "events": events}
+
+
     async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
         """Execute a runtime callable handling async context automatically."""
         if is_coroutine:
@@ -492,6 +533,101 @@ class Runnable(ABC, BaseModel):
             resolved_params[param_name] = result
         return resolved_params
 
+
+    async def _execute_handler(self, validated_input: dict[str, Any], run_context: Any, span: Any, event_queue: asyncio.Queue | None = None) -> AsyncGenerator[tuple[Event | None, Any, Any], None]:
+        """Execute the handler with optional event streaming.
+        
+        Yields tuples of (event, output, collector) where output is None until the final iteration.
+        Collector is yielded so it can be accessed for partial results on interruption.
+        """
+        handler_start = time.perf_counter()
+        async_gen = None
+        output = None
+        collector = None
+
+        if not self._is_async_gen and not self._is_coroutine:
+            loop = asyncio.get_running_loop()
+            ctx = contextvars.copy_context()
+            if self._is_gen:
+                gen = self.handler(**validated_input)
+                async_gen = sync_to_async_gen(gen, loop, ctx)
+            else:
+
+                def handler_func():
+                    return ctx.run(self.handler, **validated_input)
+
+                output = await loop.run_in_executor(None, handler_func)
+        elif self._is_coroutine:
+            output = await self.handler(**validated_input)
+        else:
+            async_gen = self.handler(**validated_input)
+
+        if async_gen:
+            output = None
+            # Peek at first element to determine collector type
+            first_chunk = await async_gen.__anext__()
+            collector_type = get_collector_registry().get_collector_type(first_chunk)
+            if collector_type:
+                collector = collector_type(async_gen=async_gen, start=handler_start)
+                
+                # Yield collector immediately so it's available for interruption handling
+                yield (None, None, collector)
+
+                def process_event(event):
+                    # If it's already a BaseEvent, it means we have already processed and logged it
+                    if isinstance(event, BaseEvent):
+                        return event
+                    if TIMBAL_DELTA_EVENTS:
+                        # Wrap non-delta events in a CustomItem
+                        if not isinstance(event, DeltaItem):
+                            # We use the runnable call id to aggregate events from the same call
+                            event = Custom(id=span.call_id, data=event)
+                        event = DeltaEvent(
+                            run_id=run_context.id,
+                            parent_run_id=run_context.parent_id,
+                            path=span.path,
+                            call_id=span.call_id,
+                            parent_call_id=span.parent_call_id,
+                            item=event,
+                        )
+                    else:
+                        if isinstance(event, TextDelta):
+                            event = event.text_delta
+                        elif isinstance(event, DeltaItem):
+                            # Filter out all LLM emitted delta events that are not text
+                            return None
+                        event = ChunkEvent(
+                            run_id=run_context.id,
+                            parent_run_id=run_context.parent_id,
+                            path=span.path,
+                            call_id=span.call_id,
+                            parent_call_id=span.parent_call_id,
+                            chunk=event,
+                        )
+                    if event.type in self._log_events:
+                        logger.info(event.type, **event.model_dump())
+                    if event_queue:
+                        event_queue.put_nowait(event)
+                    return event
+
+                # We need to manually process the first chunk, since we removed it from the generator
+                first_event = collector.process(first_chunk)
+                if first_event is not None:
+                    first_event = process_event(first_event)
+                    if first_event is not None:
+                        yield (first_event, None, collector)
+                # Process remaining events
+                async for event in collector:
+                    event = process_event(event)
+                    if event is not None:
+                        yield (event, None, collector)
+                # Keep the final result
+                output = collector.result()
+
+        # Yield a final marker with the output and collector
+        yield (None, output, collector)
+    
+
     @TimbalCollector.wrap
     async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
         """Execute the runnable with the given parameters.
@@ -517,6 +653,13 @@ class Runnable(ABC, BaseModel):
             Exception: Any exception raised during handler execution (captured in OutputEvent)
         """
         t0 = int(time.time() * 1000)
+
+        if self.background_mode == "auto":
+            run_in_background = kwargs.pop("run_in_background", False)
+        elif self.background_mode == "always":
+            run_in_background = True
+        else:
+            run_in_background = False
 
         _parent_call_id = get_parent_call_id()
         _call_id = uuid7(as_type="str").replace("-", "")
@@ -582,81 +725,38 @@ class Runnable(ABC, BaseModel):
             # Pydantic model_validate() does not mutate the input dict
             validated_input = dict(self.params_model.model_validate(input))
 
-            handler_start = time.perf_counter()
-            async_gen = None
-            if not self._is_async_gen and not self._is_coroutine:
-                loop = asyncio.get_running_loop()
-                ctx = contextvars.copy_context()
-                if self._is_gen:
-                    gen = self.handler(**validated_input)
-                    async_gen = sync_to_async_gen(gen, loop, ctx)
-                else:
+            # Background task
+            if run_in_background:
+                parent_span = run_context.parent_span()
+                if not parent_span:
+                    raise ValueError("Parent span not found. Cannot run in background.")
+                task_id = uuid7(as_type="str").replace("-", "")
+                event_queue = asyncio.Queue()
 
-                    def handler_func():
-                        return ctx.run(self.handler, **validated_input)
+                async def _bg_handler_execution():
+                    nonlocal output, collector
+                    async for event, final_output, handler_collector in self._execute_handler(validated_input, run_context, span, event_queue):
+                        if handler_collector is not None:
+                            collector = handler_collector
+                        if final_output is not None:
+                            output = final_output
 
-                    output = await loop.run_in_executor(None, handler_func)
-            elif self._is_coroutine:
-                output = await self.handler(**validated_input)
+                task = asyncio.create_task(_bg_handler_execution())
+
+                # Store task with event queue in parent runnable if available
+                parent_span.runnable._bg_tasks[task_id] = {'task': task, 'event_queue': event_queue}
+                output = {"task_id": task_id, "status": "running"}
             else:
-                async_gen = self.handler(**validated_input)
-
-            if async_gen:
-                output = None
-                # Peek at first element to determine collector type
-                first_chunk = await async_gen.__anext__()
-                collector_type = get_collector_registry().get_collector_type(first_chunk)
-                if collector_type:
-                    collector = collector_type(async_gen=async_gen, start=handler_start)
-
-                    def process_event(event):
-                        # If it's already a BaseEvent, it means we have already processed and logged it
-                        if isinstance(event, BaseEvent):
-                            return event
-                        if TIMBAL_DELTA_EVENTS:
-                            # Wrap non-delta events in a CustomItem
-                            if not isinstance(event, DeltaItem):
-                                # We use the runnable call id to aggregate events from the same call
-                                event = Custom(id=span.call_id, data=event)
-                            event = DeltaEvent(
-                                run_id=run_context.id,
-                                parent_run_id=run_context.parent_id,
-                                path=span.path,
-                                call_id=span.call_id,
-                                parent_call_id=span.parent_call_id,
-                                item=event,
-                            )
-                        else:
-                            if isinstance(event, TextDelta):
-                                event = event.text_delta
-                            elif isinstance(event, DeltaItem):
-                                # Filter out all LLM emitted delta events that are not text
-                                return None
-                            event = ChunkEvent(
-                                run_id=run_context.id,
-                                parent_run_id=run_context.parent_id,
-                                path=span.path,
-                                call_id=span.call_id,
-                                parent_call_id=span.parent_call_id,
-                                chunk=event,
-                            )
-                        if event.type in self._log_events:
-                            logger.info(event.type, **event.model_dump())
-                        return event
-
-                    # We need to manually process the first chunk, since we removed it from the generator
-                    first_event = collector.process(first_chunk)
-                    if first_event is not None:
-                        first_event = process_event(first_event)
-                        if first_event is not None:
-                            yield first_event
-                    # Process remaining events
-                    async for event in collector:
-                        event = process_event(event)
-                        if event is not None:
-                            yield event
-                    # Keep the final result
-                    output = collector.result()
+                # Iterate over events from handler and yield them
+                async for event, final_output, handler_collector in self._execute_handler(validated_input, run_context, span):
+                    # Update collector immediately so it's available for interruption handling
+                    if handler_collector is not None:
+                        collector = handler_collector
+                        span._collector = collector  # Store in span for interruption access
+                    if event is not None:
+                        yield event
+                    if final_output is not None:
+                        output = final_output
 
             span.status = RunStatus(
                 code="success",
