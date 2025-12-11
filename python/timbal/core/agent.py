@@ -484,6 +484,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             )
         current_span.memory = memory + current_span.memory
 
+        
+
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
         if i >= self.max_iter:
@@ -511,7 +513,23 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     tools_names.add(t.name)
                     if t.command:
                         commands[t.command] = t
+
+        if self._bg_tasks:
+            get_background_task_tool = Tool(
+                name="get_background_task", 
+                description="Get the status and events of a background task.", 
+                handler=self.get_background_task,
+                command="tasks"
+            )
+            get_background_task_tool.nest(self._path)
+            tools.append(get_background_task_tool)
+            tools_names.add("get_background_task")
+            # Add to commands dict if the tool has a command attribute
+            if get_background_task_tool.command:
+                commands[get_background_task_tool.command] = get_background_task_tool  
+
         return tools, commands
+
 
     async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events."""
