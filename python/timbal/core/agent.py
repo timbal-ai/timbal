@@ -519,7 +519,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 name="get_background_task", 
                 description="Get the status and events of a background task.", 
                 handler=self.get_background_task,
-                command="tasks"
             )
             get_background_task_tool.nest(self._path)
             tools.append(get_background_task_tool)

@@ -832,7 +832,6 @@ class Runnable(ABC, BaseModel):
             if _parent_call_id is None:
                 await run_context._save_trace()
                 # Reset parent_call_id for the next top-level execution
-                # The orchestrator set it for its children, but we're now done
                 set_parent_call_id(None)
             if output_event.type in self._log_events:
                 logger.info(output_event.type, **output_event.model_dump())
