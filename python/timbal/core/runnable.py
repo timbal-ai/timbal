@@ -831,10 +831,9 @@ class Runnable(ABC, BaseModel):
             output_event._output_dump = span._output_dump
             if _parent_call_id is None:
                 await run_context._save_trace()
-                # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
-                # However, if this runnable is an orchestrator, it set parent_call_id for its children, so don't reset it
-                if not self._is_orchestrator:
-                    set_parent_call_id(None)
+                # Reset parent_call_id for the next top-level execution
+                # The orchestrator set it for its children, but we're now done
+                set_parent_call_id(None)
             if output_event.type in self._log_events:
                 logger.info(output_event.type, **output_event.model_dump())
             yield output_event

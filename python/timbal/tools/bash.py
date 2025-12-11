@@ -159,6 +159,7 @@ class Bash(Tool):
             name="bash",
             description=f"Execute a bash command. Allowed patterns: {allowed_patterns}",
             handler=_execute_command,
+            background_mode="auto",
             **kwargs
         )
 
