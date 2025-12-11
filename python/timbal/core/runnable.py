@@ -474,11 +474,11 @@ class Runnable(ABC, BaseModel):
             return {"status": "not_found", "events": []}
 
         task_info = self._bg_tasks[task_id]
-        task = task_info['task']
+        task = task_info["task"]
 
         # Get all available events
         events = []
-        queue = task_info['event_queue']
+        queue = task_info["event_queue"]
         while not queue.empty():
             try:
                 events.append(queue.get_nowait())
@@ -494,7 +494,6 @@ class Runnable(ABC, BaseModel):
                 return {"status": "completed", "result": task.result(), "events": events}
         else:
             return {"status": "running", "events": events}
-
 
     async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
         """Execute a runtime callable handling async context automatically."""
@@ -533,10 +532,11 @@ class Runnable(ABC, BaseModel):
             resolved_params[param_name] = result
         return resolved_params
 
-
-    async def _execute_handler(self, validated_input: dict[str, Any], run_context: Any, span: Any, event_queue: asyncio.Queue | None = None) -> AsyncGenerator[tuple[Event | None, Any, Any], None]:
+    async def _execute_handler(
+        self, validated_input: dict[str, Any], run_context: Any, span: Any, event_queue: asyncio.Queue | None = None
+    ) -> AsyncGenerator[tuple[Event | None, Any, Any], None]:
         """Execute the handler with optional event streaming.
-        
+
         Yields tuples of (event, output, collector) where output is None until the final iteration.
         Collector is yielded so it can be accessed for partial results on interruption.
         """
@@ -569,7 +569,7 @@ class Runnable(ABC, BaseModel):
             collector_type = get_collector_registry().get_collector_type(first_chunk)
             if collector_type:
                 collector = collector_type(async_gen=async_gen, start=handler_start)
-                
+
                 # Yield collector immediately so it's available for interruption handling
                 yield (None, None, collector)
 
@@ -626,7 +626,6 @@ class Runnable(ABC, BaseModel):
 
         # Yield a final marker with the output and collector
         yield (None, output, collector)
-    
 
     @TimbalCollector.wrap
     async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
@@ -735,7 +734,9 @@ class Runnable(ABC, BaseModel):
 
                 async def _bg_handler_execution():
                     nonlocal output, collector
-                    async for event, final_output, handler_collector in self._execute_handler(validated_input, run_context, span, event_queue):
+                    async for _, final_output, handler_collector in self._execute_handler(
+                        validated_input, run_context, span, event_queue
+                    ):
                         if handler_collector is not None:
                             collector = handler_collector
                         if final_output is not None:
@@ -744,11 +745,13 @@ class Runnable(ABC, BaseModel):
                 task = asyncio.create_task(_bg_handler_execution())
 
                 # Store task with event queue in parent runnable if available
-                parent_span.runnable._bg_tasks[task_id] = {'task': task, 'event_queue': event_queue}
+                parent_span.runnable._bg_tasks[task_id] = {"task": task, "event_queue": event_queue}
                 output = {"task_id": task_id, "status": "running"}
             else:
                 # Iterate over events from handler and yield them
-                async for event, final_output, handler_collector in self._execute_handler(validated_input, run_context, span):
+                async for event, final_output, handler_collector in self._execute_handler(
+                    validated_input, run_context, span
+                ):
                     # Update collector immediately so it's available for interruption handling
                     if handler_collector is not None:
                         collector = handler_collector
@@ -829,7 +832,6 @@ class Runnable(ABC, BaseModel):
             )
             output_event._input_dump = span._input_dump
             output_event._output_dump = span._output_dump
-            # EXPERIMENTAL
             await run_context._save_trace()
             if _parent_call_id is None:
                 # We don't want to propagate this between runs. We use this variable to check if we're at an entry point

@@ -484,8 +484,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             )
         current_span.memory = memory + current_span.memory
 
-        
-
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
         if i >= self.max_iter:
@@ -516,8 +514,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         if self._bg_tasks:
             get_background_task_tool = Tool(
-                name="get_background_task", 
-                description="Get the status and events of a background task.", 
+                name="get_background_task",
+                description="Get the status and events of a background task.",
                 handler=self.get_background_task,
             )
             get_background_task_tool.nest(self._path)
@@ -525,10 +523,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             tools_names.add("get_background_task")
             # Add to commands dict if the tool has a command attribute
             if get_background_task_tool.command:
-                commands[get_background_task_tool.command] = get_background_task_tool  
+                commands[get_background_task_tool.command] = get_background_task_tool
 
         return tools, commands
-
 
     async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events."""
@@ -605,6 +602,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         run_context = get_run_context()
         assert run_context is not None, "Run context is not initialized"
         current_span = run_context.current_span()
+
+        model = kwargs.pop("model", self.model)
 
         # ? Do we want to allow the user to pass parameterized system prompts
         system_prompt = kwargs.pop("system_prompt", None)
@@ -693,7 +692,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
             is_output_model = False
             async for event in self._llm(
-                model=self.model,
+                model=model,
                 messages=current_span.memory,
                 system_prompt=system_prompt,
                 tools=tools,
