@@ -11,6 +11,7 @@ except ImportError:
 import structlog
 from pydantic import field_validator
 
+from ...utils import coerce_to_dict
 from .base import BaseContent
 
 logger = structlog.get_logger("timbal.types.content.tool_use")
@@ -18,34 +19,17 @@ logger = structlog.get_logger("timbal.types.content.tool_use")
 
 class ToolUseContent(BaseContent):
     """Tool use content type for chat messages."""
+
     type: Literal["tool_use"] = "tool_use"
     id: str
     name: str
     input: dict[str, Any]
+    thought_signature: str | None = None
     is_server_tool_use: bool = False
 
     @field_validator("input", mode="before")
     def validate_input(cls, v: Any):
-        """Aux function to parse tool use input (output from LLMs) into python objects."""
-        if isinstance(v, dict):
-            return v
-        elif isinstance(v, str):
-            if v.strip() == "":
-                return {}
-            try:
-                v = json.loads(v)
-            except Exception:
-                try:
-                    v = literal_eval(v)
-                except Exception:
-                    logger.error(
-                        "Both json.loads and literal_eval failed when parsing tool_use input", 
-                        input=v,
-                        exc_info=True
-                    )
-            return v
-        else:
-            raise ValueError(f"Invalid tool_use input: {v}")
+        return coerce_to_dict(v)
 
     @override
     def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any]:
@@ -65,14 +49,13 @@ class ToolUseContent(BaseContent):
         """See base class."""
         if self.is_server_tool_use:
             raise ValueError("is_server_tool_use is not supported for OpenAI chat completions")
-        return {
-            "id": self.id,
-            "type": "function",
-            "function": {
-                "arguments": json.dumps(self.input),
-                "name": self.name
-            }
-        }
+
+        data = {"id": self.id, "type": "function", "function": {"arguments": json.dumps(self.input), "name": self.name}}
+
+        if self.thought_signature:
+            data["extra_content"] = {"google": {"thought_signature": self.thought_signature}}
+
+        return data
 
     @override
     def to_anthropic_input(self, **kwargs: Any) -> dict[str, Any]:

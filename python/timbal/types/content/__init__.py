@@ -40,6 +40,7 @@ def content_factory(value: Any) -> BaseContent:
                 id=value.get("id"), 
                 name=value.get("name"), 
                 input=value.get("input"),
+                thought_signature=value.get("thought_signature"),
                 is_server_tool_use=value.get("is_server_tool_use", False),
             )
         elif content_type == "tool_result":

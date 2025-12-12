@@ -24,14 +24,14 @@ logger = structlog.get_logger("timbal.core.workflow")
 
 class Workflow(Runnable):
     """A Workflow is a Runnable that orchestrates execution of multiple steps in a directed acyclic graph (DAG).
-    
+
     Workflows implement a step-based execution pattern where:
     1. Steps are added as Runnable components with explicit dependencies
     2. Steps can be linked to form execution chains based on data dependencies
     3. All steps execute concurrently while respecting dependency constraints
     4. Failed steps automatically skip their dependent steps to prevent cascading failures
     5. The workflow completes when all executable steps finish
-    
+
     Workflows support:
     - Automatic step linking based on data key dependencies (e.g., step1.output -> step2.input)
     - Concurrent execution of independent steps for optimal performance
@@ -42,7 +42,6 @@ class Workflow(Runnable):
 
     _steps: dict[str, Runnable] = PrivateAttr(default_factory=dict)
     """List of steps to execute in the workflow."""
-
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize workflow as an orchestrator with async generator handler."""
@@ -55,7 +54,6 @@ class Workflow(Runnable):
         self._is_gen = False
         self._is_async_gen = True
 
-
     @override
     def nest(self, parent_path: str) -> None:
         """See base class."""
@@ -63,9 +61,8 @@ class Workflow(Runnable):
         # Update paths for internal LLM and all tools
         for step in self._steps.values():
             step.nest(self._path)
-    
 
-    @override 
+    @override
     @computed_field
     @cached_property
     def params_model(self) -> BaseModel:
@@ -80,8 +77,7 @@ class Workflow(Runnable):
         params_model_name = self.name.title().replace("_", "") + "Params"
         return create_model(params_model_name, __config__=ConfigDict(extra="allow"), **fields)
 
-
-    @override 
+    @override
     @computed_field
     @cached_property
     def return_model(self) -> Any:
@@ -89,11 +85,11 @@ class Workflow(Runnable):
         # TODO Implement
         return Any
 
-
     def _is_dag(self) -> bool:
         """Check if the workflow forms a valid DAG using depth-first search cycle detection."""
         # States: 0 = unvisited, 1 = visiting, 2 = visited
         state = {step_name: 0 for step_name in self._steps.keys()}
+
         def dfs(step_name):
             if state[step_name] == 1:
                 return False
@@ -105,12 +101,12 @@ class Workflow(Runnable):
                     return False
             state[step_name] = 2
             return True
+
         for step_name in self._steps.keys():
             if state[step_name] == 0:
                 if not dfs(step_name):
                     return False
         return True
-    
 
     def _link(self, source: str, target: str) -> "Workflow":
         """Internal method to link workflow steps."""
@@ -124,33 +120,32 @@ class Workflow(Runnable):
             raise ValueError(f"Linking {source} -> {target} would create a cycle in the workflow.")
         return self
 
-
     # TODO Think how we handle agent model_params vs default_params
     def step(
-        self, 
-        runnable: RunnableLike, 
-        depends_on: list[str] | None = None, 
-        when: Callable[[], bool] | None = None, 
+        self,
+        runnable: RunnableLike,
+        depends_on: list[str] | None = None,
+        when: Callable[[], bool] | None = None,
         **kwargs: Any,
     ) -> "Workflow":
         """Add a step to the workflow with automatic dependency linking.
-        
+
         Adds a runnable component as a workflow step and automatically creates
         dependency links based on data key analysis. If step parameters reference
         other steps' outputs (e.g., step1.result), those dependencies are
         automatically linked.
-        
+
         The runnable can be:
         - A Runnable instance
         - A dictionary that will be converted to a Tool
         - A callable that will be wrapped in a Tool
-        
+
         Args:
             runnable: The runnable component to add as a step
             depends_on: Optional list of steps that must complete before this step
             when: Optional callable that returns a boolean to conditionally execute the step
             **kwargs: Default parameters for the step, also used for dependency analysis
-            
+
         Returns:
             Self for method chaining
         """
@@ -158,7 +153,7 @@ class Workflow(Runnable):
             if isinstance(runnable, dict):
                 runnable = Tool(**runnable)
             else:
-                runnable = Tool(handler=runnable)
+                runnable = Tool(handler=runnable)  # type: ignore[call-arg]
 
         if runnable.name in self._steps:
             raise ValueError(f"Step {runnable.name} already exists in the workflow.")
@@ -172,7 +167,7 @@ class Workflow(Runnable):
         # Explicit dependencies
         if depends_on and not isinstance(depends_on, list):
             raise ValueError("depends_on must be a list of step names")
-        depends_on = set(depends_on or []) # Deduplicate here to avoid duplicate _is_dag calls
+        depends_on = set(depends_on or [])  # Deduplicate here to avoid duplicate _is_dag calls
 
         depends_on.update(runnable._dependencies)
         depends_on.update(runnable._pre_hook_dependencies)
@@ -195,19 +190,19 @@ class Workflow(Runnable):
 
         return self
 
-    
     def _skip_next_steps(self, step_name: str, completions: dict[str, asyncio.Event]) -> None:
         """Recursively mark a step and all its dependents as completed (skipped)."""
         completions[step_name].set()
         for next_name in self._steps[step_name].next_steps:
             self._skip_next_steps(next_name, completions)
 
-
-    async def _enqueue_step_events(self, step: Runnable, queue: asyncio.Queue, completions: dict[str, asyncio.Event], **kwargs: Any) -> None:
+    async def _enqueue_step_events(
+        self, step: Runnable, queue: asyncio.Queue, completions: dict[str, asyncio.Event], **kwargs: Any
+    ) -> None:
         """Execute a single workflow step and enqueue its events to the shared queue."""
         # Await for the completion of all ancestors
         await asyncio.gather(*[completions[step_name].wait() for step_name in step.previous_steps])
-        # This serves multiple purposes. 
+        # This serves multiple purposes.
         # - It ensures that the step is not executed multiple times.
         # - It allows the step to be skipped from other steps, e.g. if a previous step failed.
         if completions[step.name].is_set():
@@ -227,7 +222,7 @@ class Workflow(Runnable):
         except Exception as e:
             await queue.put(e)
             return
-        
+
         if not step_started:
             logger.info(f"Skipping step {step.name} and all successors...")
             self._skip_next_steps(step.name, completions)
@@ -235,33 +230,32 @@ class Workflow(Runnable):
         completions[step.name].set()
         await queue.put(None)
 
-
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """Main workflow execution handler implementing concurrent step orchestration.
-        
+
         This is the core workflow logic that implements concurrent step execution:
         1. Creates completion events for all steps to coordinate dependencies
         2. Launches all steps concurrently as async tasks
         3. Each step waits for its prerequisites before executing
         4. Multiplexes events from all steps as they become available
         5. Continues until all steps complete or are skipped
-        
+
         The workflow provides optimal performance by executing independent steps
         in parallel while maintaining dependency order through completion events.
-        
+
         Args:
             **kwargs: Execution parameters distributed to appropriate steps
-                
+
         Yields:
             Events from step executions as they become available
         """
         queue = asyncio.Queue()
         completions = {step_name: asyncio.Event() for step_name in self._steps.keys()}
         tasks = [
-            asyncio.create_task(self._enqueue_step_events(step, queue, completions, **kwargs)) 
+            asyncio.create_task(self._enqueue_step_events(step, queue, completions, **kwargs))
             for step in self._steps.values()
         ]
-        
+
         try:
             remaining = len(tasks)
             while remaining > 0:

@@ -18,6 +18,7 @@ from .. import __version__
 from ..logs import setup_logging
 from ..state import RunContext, set_run_context
 from ..utils import ImportSpec, is_port_in_use
+from .jobs import JOB_DONE_SENTINEL, JobStore
 
 logger = structlog.get_logger("timbal.server.http")
 
@@ -46,14 +47,15 @@ async def lifespan(
 
     logger.info("loading_runnable", import_spec=import_spec)
     app.state.runnable = import_spec.load()
-    
+    app.state.job_store = JobStore()
+
     yield
-    
+
     # ? Any additional cleanup
 
 
 def create_app(
-    import_spec: ImportSpec, 
+    import_spec: ImportSpec,
     shutdown_event: asyncio.Event,
 ) -> FastAPI:
     """Creates a FastAPI application for the Timbal HTTP server.
@@ -71,17 +73,14 @@ def create_app(
     """
     app = FastAPI(lifespan=lambda app: lifespan(app, import_spec))
 
-
     @app.get("/healthcheck")
     async def healthcheck() -> Response:
         return Response(status_code=204)
-
 
     @app.post("/shutdown")
     async def shutdown() -> Response:
         shutdown_event.set()
         return Response(status_code=204)
-
 
     @app.get("/params_model_schema")
     async def params_model_schema() -> Response:
@@ -91,7 +90,6 @@ def create_app(
             content=params_model_schema,
         )
 
-
     @app.get("/return_model_schema")
     async def return_model_schema() -> Response:
         return_model_schema = app.state.runnable.return_model_schema
@@ -99,7 +97,6 @@ def create_app(
             status_code=200,
             content=return_model_schema,
         )
-
 
     @app.post("/run")
     async def run(req: Request) -> Response:
@@ -111,12 +108,19 @@ def create_app(
             run_context = RunContext.model_validate(run_context)
             set_run_context(run_context)
 
-        output_event = await app.state.runnable(**req_data).collect()
+        _, job = app.state.job_store.create_job(app.state.runnable, req_data)
+
+        output_event = None
+        while True:
+            event = await job.queue.get()
+            if event is JOB_DONE_SENTINEL:
+                break
+            output_event = event
+
         return JSONResponse(
             status_code=200,
-            content=output_event.model_dump(),
+            content=output_event.model_dump() if output_event else None,
         )
-
 
     @app.post("/stream")
     async def stream(req: Request) -> Response:
@@ -128,14 +132,16 @@ def create_app(
             run_context = RunContext.model_validate(run_context)
             set_run_context(run_context)
 
-        # TODO Study if we need to filter these. Or if we need to add something to indicate chunks are for the response.
+        _, job = app.state.job_store.create_job(app.state.runnable, req_data)
+
         async def event_streamer() -> AsyncGenerator[str, None]:
-            async for event in app.state.runnable(**req_data):
-                # Format as SSE message: data: <json_string>\n\n
+            while True:
+                event = await job.queue.get()
+                if event is JOB_DONE_SENTINEL:
+                    break
                 yield f"data: {json.dumps(event.model_dump())}\n\n"
 
         return StreamingResponse(event_streamer(), media_type="text/event-stream")
-
 
     return app
 
@@ -168,18 +174,19 @@ async def main(
 
     if os.getenv("TIMBAL_ENABLE_NGROK", "false").lower() == "true":
         from pyngrok import ngrok
-        public_url = ngrok.connect(port, "http")
+
+        public_url = ngrok.connect(str(port), "http")
         logger.info("ngrok_public_url", public_url=public_url)
 
     config = uvicorn.Config(
-        app, 
-        host=host, 
+        app,
+        host=host,
         port=port,
         workers=workers,
         log_level=None,
     )
     server = uvicorn.Server(config)
-    
+
     def signal_handler() -> None:
         logger.info("shutdown_signal_received")
         shutdown_event.set()
@@ -195,12 +202,7 @@ async def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Timbal HTTP server.")
-    parser.add_argument(
-        "-v", 
-        "--version", 
-        action="store_true", 
-        help="Show version and exit."
-    )
+    parser.add_argument("-v", "--version", action="store_true", help="Show version and exit.")
     parser.add_argument(
         "--import_spec",
         dest="import_spec",
@@ -231,7 +233,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.version:
-        print(f"timbal.server.http {__version__}") # noqa: T201
+        print(f"timbal.server.http {__version__}")  # noqa: T201
         sys.exit(0)
 
     load_dotenv()
@@ -242,38 +244,46 @@ if __name__ == "__main__":
     if not import_spec:
         import_spec = os.getenv("TIMBAL_RUNNABLE")
         if not import_spec:
-            import_spec = os.getenv("TIMBAL_FLOW") # Legacy
+            import_spec = os.getenv("TIMBAL_FLOW")  # Legacy
             if import_spec:
-                print("TIMBAL_FLOW environment variable is deprecated. Please use TIMBAL_RUNNABLE instead.", file=sys.stderr) # noqa: T201
+                print(  # noqa: T201
+                    "TIMBAL_FLOW environment variable is deprecated. Please use TIMBAL_RUNNABLE instead.",
+                    file=sys.stderr,
+                )
 
     if not import_spec:
-        print("No import spec provided. Set TIMBAL_RUNNABLE env variable or use --import_spec to specify a module to load.", file=sys.stderr) # noqa: T201
+        print(  # noqa: T201
+            "No import spec provided. Set TIMBAL_RUNNABLE env variable or use --import_spec to specify a module to load.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     import_parts = import_spec.split("::")
     if len(import_parts) != 2:
-        print("Invalid import spec format. Use 'path/to/file.py::object_name' or 'path/to/file.py'", file=sys.stderr) # noqa: T201
+        print("Invalid import spec format. Use 'path/to/file.py::object_name' or 'path/to/file.py'", file=sys.stderr)  # noqa: T201
         sys.exit(1)
     import_path, import_target = import_parts
     import_spec = ImportSpec(
-        path=Path(import_path).expanduser().resolve(), 
+        path=Path(import_path).expanduser().resolve(),
         target=import_target,
     )
 
     if is_port_in_use(args.port):
-        print(f"Port {args.port} is already in use. Please use a different port.") # noqa: T201
+        print(f"Port {args.port} is already in use. Please use a different port.")  # noqa: T201
         sys.exit(1)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     try:
-        loop.run_until_complete(main(
-            host=args.host, 
-            port=args.port,
-            workers=args.workers,
-            import_spec=import_spec,
-        ))
+        loop.run_until_complete(
+            main(
+                host=args.host,
+                port=args.port,
+                workers=args.workers,
+                import_spec=import_spec,
+            )
+        )
     except Exception as e:
         logger.error("server_stopped", error=str(e))
     finally:

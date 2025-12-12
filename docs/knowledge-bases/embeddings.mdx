@@ -15,7 +15,7 @@ Embeddings are numerical vector representations of text that capture semantic me
 ## Creating Embeddings
 
 ```python
-from timbal.platform.embeddings import create_embedding
+from timbal.platform.kbs.embeddings import create_embedding
 
 # Create an embedding on a text column
 await create_embedding(
@@ -42,7 +42,7 @@ You can create multiple embeddings on different columns or even the same column 
 First, check what models are available for your organization:
 
 ```python
-from timbal.platform.embeddings import list_embedding_models
+from timbal.platform.kbs.embeddings import list_embedding_models
 
 # Get available embedding models
 models = await list_embedding_models(org_id="your-org-id")

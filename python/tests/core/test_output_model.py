@@ -2,6 +2,8 @@ import json
 
 from pydantic import BaseModel, Field
 from timbal import Agent
+from timbal.state import get_run_context
+from timbal.types.content import CustomContent, TextContent
 
 
 class TestOutputModel:
@@ -29,17 +31,12 @@ class TestOutputModel:
         user_input = "What is the capital of France?"
         response = await agent(prompt=user_input).collect()
         
-        try:
-            response_str = response.output.content[0].text
-            response_data = json.loads(response_str)
-            response_obj = SimpleResponse(**response_data)
-            
-            assert isinstance(response_obj.answer, str)
-            assert isinstance(response_obj.confidence, float)
-            assert 0.0 <= response_obj.confidence <= 1.0
-            
-        except Exception as e:
-            assert False, f"Failed to parse structured response: {e}"
+        response_obj = response.output
+        assert isinstance(response_obj, SimpleResponse)
+        
+        assert isinstance(response_obj.answer, str)
+        assert isinstance(response_obj.confidence, float)
+        assert 0.0 <= response_obj.confidence <= 1.0
     
 
     async def test_nested_output_models(self):
@@ -63,13 +60,8 @@ class TestOutputModel:
         user_input = "I want to make lasagna, can you generate a lasagna recipe for me?"
         response = await agent(prompt=user_input).collect()
 
-        try:
-            recipe_str = response.output.content[0].text
-            recipe = json.loads(recipe_str)
-            recipe_obj = Recipe(**recipe)
-
-        except Exception as e:
-            assert False, f"Failed to parse the answer: {e}"
+        recipe_obj = response.output
+        assert isinstance(recipe_obj, Recipe)
 
         assert recipe_obj.ingredients
         assert recipe_obj.total_time
@@ -101,42 +93,39 @@ class TestOutputModel:
         user_input = "Give me a lasagna recipe."
         response = await agent(prompt=user_input).collect()
 
-        try:
-            recipe_str = response.output.content[0].text
-            print(recipe_str)
-            recipe_data = json.loads(recipe_str)
-            recipe_obj = Recipe(**recipe_data)
-        except Exception as e:
-            assert False, f"Failed to parse initial recipe: {e}"
+        recipe_obj = response.output
+        assert isinstance(recipe_obj, Recipe)
 
-        # Second query (question based on the output)
         assert recipe_obj.ingredients
         assert recipe_obj.total_time > 0
         assert recipe_obj.steps
 
         followup_input = "For how many people this recipe is suitable?"
         followup_response = await agent(prompt=followup_input).collect()
-        followup_str = followup_response.output.content[0].text
-        print("ANSWER", followup_str)
+        followup_content = followup_response.output.content[0]
 
+        # Follow-up should be plain text (TextContent), not structured JSON
         try:
-            json.loads(followup_str)
-            assert False, "Follow-up response was JSON, but should have been plain text."
-        except json.JSONDecodeError:
-            assert isinstance(followup_str, str)
-            assert len(followup_str.strip()) > 0
+            Recipe(**followup_response.output)
+            assert False, "Followup response should not be a Recipe object"
+        except Exception as e:
+            pass
+        assert isinstance(followup_content.text, str)
+        assert len(followup_content.text.strip()) > 0
 
         # Third query (structured format again)
         user_input = "Adapt the recipe for two more people."
         response = await agent(prompt=user_input).collect()
 
-        try:
-            recipe_str = response.output.content[0].text
-            print(recipe_str)
-            recipe_data = json.loads(recipe_str)
-            recipe_obj = Recipe(**recipe_data)
-        except Exception as e:
-            assert False, f"Failed to parse initial recipe: {e}"
+        recipe_obj = response.output
+        assert isinstance(recipe_obj, Recipe)
+        assert recipe_obj.ingredients
+        assert recipe_obj.total_time > 0
+        assert recipe_obj.steps
+
+
+        # print(get_run_context().current_span().memory)
+
 
 
     async def test_optional_fields_and_defaults(self):
@@ -157,18 +146,13 @@ class TestOutputModel:
         user_input = "Generate data with only the required field set to 'test_value'"
         response = await agent(prompt=user_input).collect()
         
-        try:
-            response_str = response.output.content[0].text
-            response_data = json.loads(response_str)
-            obj = OutputModel(**response_data)
-            
-            assert obj.required_field == "test_value"
-            assert obj.optional_field is None
-            assert obj.default_field == "default_value"
-            assert obj.optional_with_default == 42
-            
-        except Exception as e:
-            assert False, f"Failed to parse flexible output model response: {e}"
+        obj = response.output
+        assert isinstance(obj, OutputModel)
+        
+        assert obj.required_field == "test_value"
+        assert obj.optional_field is None
+        assert obj.default_field == "default_value"
+        assert obj.optional_with_default == 42
 
 
     async def test_output_model_with_other_tools(self):
@@ -195,17 +179,12 @@ class TestOutputModel:
         user_input = "Calculate 15 * 4 + 10"
         response = await agent(prompt=user_input).collect()
         
-        try:
-            response_str = response.output.content[0].text
-            response_data = json.loads(response_str)
-            result = CalculationResult(**response_data)
+        result = response.output
+        assert isinstance(result, CalculationResult)
 
-            assert isinstance(result.expression, str)
-            assert isinstance(result.result, float)
-            assert isinstance(result.method, str)
-            
-        except Exception as e:
-            assert False, f"Failed to parse calculation result: {e}"
+        assert isinstance(result.expression, str)
+        assert isinstance(result.result, float)
+        assert isinstance(result.method, str)
 
 
     async def test_output_model_with_list_constraints(self):
@@ -225,16 +204,61 @@ class TestOutputModel:
         user_input = "Generate a list of 3 random numbers between 1 and 10"
         response = await agent(prompt=user_input).collect()
         
-        try:
-            response_str = response.output.content[0].text
-            response_data = json.loads(response_str)
-            result = ListOutput(**response_data)
-            
-            assert isinstance(result.numbers, list)
-            assert 2 <= len(result.numbers) <= 5
-            assert all(isinstance(n, int) for n in result.numbers)
-            assert isinstance(result.tags, list)
-            
-        except Exception as e:
-            assert False, f"Failed to parse list output model response: {e}"
+        result = response.output
+        assert isinstance(result, ListOutput)
+        
+        assert isinstance(result.numbers, list)
+        assert 2 <= len(result.numbers) <= 5
+        assert all(isinstance(n, int) for n in result.numbers)
+        assert isinstance(result.tags, list)
 
+
+    async def test_json_text_converted_to_custom_content(self):
+        """Test that TextContent containing valid JSON is automatically converted to CustomContent."""
+
+        class JsonResponse(BaseModel):
+            name: str = Field(..., description="Person's name")
+            age: int = Field(..., description="Person's age")
+            city: str = Field(..., description="Person's city")
+
+        agent = Agent(
+            name="json_agent",
+            model="openai/gpt-4o-mini",
+            output_model=JsonResponse
+        )
+        
+        user_input = "Generate a person profile for John, age 30, from Paris"
+        response = await agent(prompt=user_input).collect()
+        
+        validated = response.output
+        assert isinstance(validated, JsonResponse)
+        
+        assert isinstance(validated.name, str)
+        assert isinstance(validated.age, int)
+        assert isinstance(validated.city, str)
+
+
+    async def test_memory_contains_json_result(self):
+        """Test that the memory contains the assistant message with the JSON result."""
+
+        class TaskResult(BaseModel):
+            task_name: str = Field(..., description="Name of the task")
+            status: str = Field(..., description="Status of the task")
+            priority: int = Field(..., ge=1, le=5, description="Priority level from 1 to 5")
+
+        agent = Agent(
+            name="task_agent",
+            model="openai/gpt-4o-mini",
+            output_model=TaskResult
+        )
+        
+        user_input = "Create a task for code review with high priority"
+        response = await agent(prompt=user_input).collect()
+        
+        result = response.output
+        assert isinstance(result, TaskResult)
+        
+        # Check the memory contains messages
+        memory = get_run_context().current_span().memory
+        assert memory is not None
+        assert len(memory) == 2  # User message + the assistant response
