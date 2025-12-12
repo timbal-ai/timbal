@@ -27,11 +27,14 @@
 - name: ecommerce # <- Name of the eval
   description: ... # <- Description of the eval
 
+  # volem una representacio de l'estat en el moment de tirar l'input
   params: # <- kwargs
     messages:
+      - { "role": "system", "content": "you're a helpful assistant" }
       - ...
       - ...
       - ...
+      - <prompt>
 
   seq!:
     - llm
