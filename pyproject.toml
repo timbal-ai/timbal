@@ -31,6 +31,7 @@ requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.45.0",
     "fastapi>=0.115.8",
+    "nanoid>=2.0.0",
     "openai>=1.60.0",
     "openpyxl>=3.1.5",
     "pandas>=2.2.3",

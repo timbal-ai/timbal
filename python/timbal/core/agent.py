@@ -522,8 +522,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             tools.append(get_background_task_tool)
             tools_names.add("get_background_task")
             # Add to commands dict if the tool has a command attribute
-            if get_background_task_tool.command:
-                commands[get_background_task_tool.command] = get_background_task_tool
+            # if get_background_task_tool.command:
+            #     commands[get_background_task_tool.command] = get_background_task_tool
 
         return tools, commands
 
