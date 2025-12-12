@@ -11,6 +11,7 @@ from functools import cached_property
 from typing import Any, Literal
 
 import structlog
+from nanoid import generate
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -62,6 +63,8 @@ if not TIMBAL_DELTA_EVENTS:
     logger.warning(
         "ChunkEvents will be deprecated in a future release. Enable TIMBAL_DELTA_EVENTS=true to use the new structured DeltaEvents system."
     )
+
+ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 
 # TODO Add timeout
@@ -156,7 +159,7 @@ class Runnable(ABC, BaseModel):
     # ? Can we store all post_hook related stuff together?
     _log_events: set[str] = PrivateAttr()
     """Which timbal events to log."""
-    _bg_tasks: dict[str, asyncio.Task] = PrivateAttr(default_factory=dict)
+    _bg_tasks: dict[str, Any] = PrivateAttr(default_factory=dict)
     """Background tasks running for this runnable."""
 
     @classmethod
@@ -487,13 +490,15 @@ class Runnable(ABC, BaseModel):
 
         # Determine status
         if task.done():
-            del self._bg_tasks[task_id]
-            if task.exception():
-                return {"status": "error", "error": str(task.exception()), "events": events}
+            # del self._bg_tasks[task_id] # Do not remove, to keep track of all background tasks
+            if task.cancelled():
+                return {"status": "cancelled", "events": events, "name": task_info["name"], "input": task_info["input"]}
+            elif task.exception():
+                return {"status": "error", "error": str(task.exception()), "events": events, "name": task_info["name"], "input": task_info["input"]}
             else:
-                return {"status": "completed", "result": task.result(), "events": events}
+                return {"status": "completed", "result": task.result(), "events": events, "name": task_info["name"], "input": task_info["input"]}
         else:
-            return {"status": "running", "events": events}
+            return {"status": "running", "events": events, "name": task_info["name"], "input": task_info["input"]}
 
     async def _execute_runtime_callable(self, fn: Callable[..., Any], is_coroutine: bool) -> Any:
         """Execute a runtime callable handling async context automatically."""
@@ -729,23 +734,28 @@ class Runnable(ABC, BaseModel):
                 parent_span = run_context.parent_span()
                 if not parent_span:
                     raise ValueError("Parent span not found. Cannot run in background.")
-                task_id = uuid7(as_type="str").replace("-", "")
+                # task_id = uuid7(as_type="str").replace("-", "")
+                task_id = generate(alphabet=ALPHABET, size=6)
                 event_queue = asyncio.Queue()
 
                 async def _bg_handler_execution():
                     nonlocal output, collector
-                    async for _, final_output, handler_collector in self._execute_handler(
-                        validated_input, run_context, span, event_queue
-                    ):
-                        if handler_collector is not None:
-                            collector = handler_collector
-                        if final_output is not None:
-                            output = final_output
+                    try:
+                        async for _, final_output, handler_collector in self._execute_handler(
+                            validated_input, run_context, span, event_queue
+                        ):
+                            if handler_collector is not None:
+                                collector = handler_collector
+                            if final_output is not None:
+                                output = final_output
+                    except asyncio.CancelledError:
+                        # Re-raise so asyncio marks the task as cancelled
+                        raise
 
                 task = asyncio.create_task(_bg_handler_execution())
 
                 # Store task with event queue in parent runnable if available
-                parent_span.runnable._bg_tasks[task_id] = {"task": task, "event_queue": event_queue}
+                parent_span.runnable._bg_tasks[task_id] = {"task": task, "event_queue": event_queue, "name": self.name, "input": input}
                 output = {"task_id": task_id, "status": "running"}
             else:
                 # Iterate over events from handler and yield them
@@ -755,7 +765,6 @@ class Runnable(ABC, BaseModel):
                     # Update collector immediately so it's available for interruption handling
                     if handler_collector is not None:
                         collector = handler_collector
-                        span._collector = collector  # Store in span for interruption access
                     if event is not None:
                         yield event
                     if final_output is not None:
