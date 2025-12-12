@@ -1,0 +1,15 @@
+- name: "Eval 1"
+  description: "Description for Eval 1"
+  params:
+    prompt: what time is it in madrid
+  seq!:
+    - llm
+    - get_datetime
+    - ...
+    - "1.1"
+    - ..6583
+    - 7..
+    - llm
+# - name: "Eval 2"
+#   params:
+#     prompt: null

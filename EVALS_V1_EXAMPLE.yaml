@@ -1,0 +1,12 @@
+- name: ecommerce # <- Name of the eval
+  description: ... # <- Description of the eval
+
+  given: # <- input kwargs
+    prompt: quiero un porsche
+
+  then: # <- evaluate from Trace
+    eve.search_cars.0: # ! Restricted to identifying a Span
+      idx!: 2 # <- Rust macros like syntax for validators (code expansion underneath)
+      input: # ! If we want to access Span properties we do it like this
+        query:
+          semantic!: available porsche cars

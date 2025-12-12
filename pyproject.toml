@@ -41,6 +41,7 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "pyyaml>=6.0.2",
     "requests>=2.32.3",
+    "rich>=14.2.0",
     "structlog>=25.1.0",
     "typing-extensions>=4.14.1",
     "uuid7>=0.1.0",
