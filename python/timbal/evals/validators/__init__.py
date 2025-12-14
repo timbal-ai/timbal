@@ -5,10 +5,11 @@ from pydantic import Discriminator, TypeAdapter
 from .base import BaseValidator
 from .contains import ContainsValidator
 from .eq import EqValidator
+from .pattern import PatternValidator
 
 # Discriminated union of all validators
 Validator = Annotated[
-    EqValidator | ContainsValidator,
+    EqValidator | ContainsValidator | PatternValidator,
     Discriminator("name"),
 ]
 

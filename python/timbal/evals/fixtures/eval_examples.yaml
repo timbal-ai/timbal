@@ -29,49 +29,49 @@
           type!: "string"
           pattern!: "^\\d{4}-\\d{2}-\\d{2}"
 
-- name: "multi_tool_complex"
-  description: "Complex eval with multiple tools and nested validation"
+# - name: "multi_tool_complex"
+#   description: "Complex eval with multiple tools and nested validation"
 
-  tags: ["complex", "multi-tool"]
-  timeout: 60000
+#   tags: ["complex", "multi-tool"]
+#   timeout: 60000
 
-  params:
-    prompt: search for electric cars under 50000 and book a test drive
+#   params:
+#     prompt: search for electric cars under 50000 and book a test drive
 
-  output:
-    semantic!: "confirmation of test drive booking"
-    not_contains!: "error"
-    language!: "en"
+#   output:
+#     semantic!: "confirmation of test drive booking"
+#     not_contains!: "error"
+#     language!: "en"
 
-  seq!:
-    - llm
-    - search_cars:
-        input:
-          query:
-            contains!: "electric"
-            semantic!: "searching for electric vehicles"
-          max_price:
-            lte!: 50000
-            positive!: true
-        output:
-          type!: "array"
-          min_size!: 1
-          max_size!: 20
-    - llm:
-        output:
-          min_length!: 50
-    - book_test_drive:
-        input:
-          car_id:
-            not_null!: true
-            type!: "string"
-          date:
-            pattern!: "^\\d{4}-\\d{2}-\\d{2}$"
-            after!: "2024-01-01"
-        output:
-          has_keys!: ["confirmation_id", "status"]
-          status:
-            one_of!: ["confirmed", "pending"]
+#   seq!:
+#     - llm
+#     - search_cars:
+#         input:
+#           query:
+#             contains!: "electric"
+#             semantic!: "searching for electric vehicles"
+#           max_price:
+#             lte!: 50000
+#             positive!: true
+#         output:
+#           type!: "array"
+#           min_size!: 1
+#           max_size!: 20
+#     - llm:
+#         output:
+#           min_length!: 50
+#     - book_test_drive:
+#         input:
+#           car_id:
+#             not_null!: true
+#             type!: "string"
+#           date:
+#             pattern!: "^\\d{4}-\\d{2}-\\d{2}$"
+#             after!: "2024-01-01"
+#         output:
+#           has_keys!: ["confirmation_id", "status"]
+#           status:
+#             one_of!: ["confirmed", "pending"]
 
 # - name: "subagent_workflow"
 #   description: "Eval with nested subagent calls"
