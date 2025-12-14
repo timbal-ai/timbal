@@ -30,3 +30,5 @@ sandbox/
 # Docs
 node_modules/
 .docusaurus/
+
+**/ace/
