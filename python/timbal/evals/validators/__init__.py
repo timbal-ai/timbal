@@ -4,13 +4,15 @@ from pydantic import Discriminator, TypeAdapter
 
 from .base import BaseValidator
 from .contains import ContainsValidator
+from .ends_with import EndsWithValidator
 from .eq import EqValidator
 from .pattern import PatternValidator
+from .starts_with import StartsWithValidator
 from .type import TypeValidator
 
 # Discriminated union of all validators
 Validator = Annotated[
-    EqValidator | ContainsValidator | PatternValidator | TypeValidator,
+    EqValidator | ContainsValidator | PatternValidator | TypeValidator | StartsWithValidator | EndsWithValidator,
     Discriminator("name"),
 ]
 
