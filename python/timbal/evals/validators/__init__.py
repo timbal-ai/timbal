@@ -6,10 +6,11 @@ from .base import BaseValidator
 from .contains import ContainsValidator
 from .eq import EqValidator
 from .pattern import PatternValidator
+from .type import TypeValidator
 
 # Discriminated union of all validators
 Validator = Annotated[
-    EqValidator | ContainsValidator | PatternValidator,
+    EqValidator | ContainsValidator | PatternValidator | TypeValidator,
     Discriminator("name"),
 ]
 
