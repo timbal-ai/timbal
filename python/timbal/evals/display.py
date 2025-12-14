@@ -1,11 +1,14 @@
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
+from rich.tree import Tree
 
 from .models import Eval, EvalResult, EvalSummary
+from .validators.base import BaseValidator
 
 console = Console()
 
@@ -94,45 +97,53 @@ def _get_tag_color(tag: str) -> str:
     return TAG_COLORS[tag_hash % len(TAG_COLORS)]
 
 
-def print_eval_line(result: EvalResult) -> None:
-    """Print a single eval result line (pytest-style)."""
-    # Format: path/to/file.yaml::eval_name [tag1] [tag2] PASSED/FAILED [duration]
-    path = result.eval.path
-    name = result.eval.name
-    tags = result.eval.tags
+def print_eval_result(result: EvalResult) -> None:
+    """Print eval result with validator tree."""
+    eval = result.eval
+    path = eval.path
+    name = eval.name
+    tags = eval.tags
     duration_str = f"{result.duration:.2f}s"
 
-    location = Text()
-    location.append(str(path), style="dim")
-    location.append("::", style="dim")
-    location.append(name, style="bold")
-
+    # Build status badge
     if result.passed:
         status = Text(" PASSED ", style="bold white on green")
     else:
         status = Text(" FAILED ", style="bold white on red")
 
-    # Build tag badges
-    tag_text = Text()
-    for i, tag in enumerate(tags):
+    # Build header line
+    header = Text()
+    header.append_text(status)
+    header.append(" ")
+    header.append(str(path), style="dim")
+    header.append("::", style="dim")
+    header.append(name, style="bold")
+
+    # Add tags
+    for tag in tags:
         color = _get_tag_color(tag)
-        if i > 0:
-            tag_text.append(" ")
-        tag_text.append("[", style="dim")
-        tag_text.append(tag, style=color)
-        tag_text.append("]", style="dim")
+        header.append(" ")
+        header.append("[", style="dim")
+        header.append(tag, style=color)
+        header.append("]", style="dim")
 
-    # Build the line
-    line = Text()
-    line.append_text(status)
-    line.append(" ")
-    line.append_text(location)
-    if tags:
-        line.append(" ")
-        line.append_text(tag_text)
-    line.append(f" [{duration_str}]", style="dim")
+    header.append(f" [{duration_str}]", style="dim")
 
-    console.print(line)
+    # Build tree with header as root
+    tree = Tree(header)
+
+    # Add validators
+    validators = eval._validators
+    if validators:
+        _build_validator_tree(tree, validators, eval.runnable._path)
+
+    console.print(tree)
+    console.print()
+
+
+def print_eval_line(result: EvalResult) -> None:
+    """Print a single eval result line (pytest-style). Deprecated - use print_eval_result."""
+    print_eval_result(result)
 
 
 def print_failure_details(result: EvalResult) -> None:
@@ -216,4 +227,138 @@ def print_summary(summary: EvalSummary) -> None:
         style=status_style,
         characters=status_char,
     )
+    console.print()
+
+
+def _format_validator_value(value: Any) -> str:
+    """Format a validator value for display."""
+    if isinstance(value, str):
+        # Truncate long strings
+        if len(value) > 30:
+            return f'"{value[:27]}..."'
+        return f'"{value}"'
+    elif isinstance(value, list):
+        if len(value) > 3:
+            return f"[{len(value)} items]"
+        return str(value)
+    elif isinstance(value, dict):
+        return "{...}"
+    else:
+        return str(value)
+
+
+def _normalize_validator(v: Any) -> tuple[str, str, Any]:
+    """Normalize a validator to (target, name, value) tuple."""
+    if isinstance(v, tuple):
+        return v
+    elif isinstance(v, BaseValidator):
+        return (v.target or "", v.name, v.value)
+    else:
+        return ("", "unknown!", v)
+
+
+def _build_validator_tree(
+    parent: Tree,
+    validators: list,
+    base_path: str = "",
+) -> int:
+    """Build a tree of validators, returning the count."""
+    count = 0
+
+    # Normalize all validators to tuples
+    normalized = [_normalize_validator(v) for v in validators]
+
+    # Group validators by their immediate path segment
+    flow_validators = {}  # seq!, parallel!, any!
+    value_validators = []  # eq!, contains!, etc.
+
+    for target, validator, value in normalized:
+        # Get path relative to base
+        rel_path = target[len(base_path) :].lstrip(".") if target.startswith(base_path) else target
+
+        if validator in ("seq!", "parallel!", "any!"):
+            flow_validators[target] = (validator, value)
+        else:
+            value_validators.append((rel_path, validator, value))
+            count += 1
+
+    # Add flow validators as branches
+    for target, (validator, steps) in flow_validators.items():
+        rel_path = target[len(base_path) :].lstrip(".") if target.startswith(base_path) else target
+        branch_label = f"[bold cyan]{validator}[/bold cyan]"
+        if rel_path:
+            branch_label = f"[dim]{rel_path}[/dim] {branch_label}"
+        branch = parent.add(branch_label)
+
+        # Add steps as sub-branches
+        for step in steps:
+            step_branch = branch.add(f"[yellow]{step}[/yellow]")
+
+            # Find validators for this step
+            step_path = f"{target}.{step}"
+            step_validators = [
+                (t, v, val)
+                for t, v, val in normalized
+                if t.startswith(step_path) and v not in ("seq!", "parallel!", "any!")
+            ]
+
+            for t, v, val in step_validators:
+                # Get path relative to step
+                prop_path = t[len(step_path) :].lstrip(".")
+                formatted_val = _format_validator_value(val)
+                if prop_path:
+                    step_branch.add(f"[dim]{prop_path}.[/dim][green]{v}[/green] [dim]({formatted_val})[/dim]")
+                else:
+                    step_branch.add(f"[green]{v}[/green] [dim]({formatted_val})[/dim]")
+                count += 1
+
+    # Add standalone value validators (not under a flow validator)
+    for rel_path, validator, value in value_validators:
+        # Check if this validator is already under a flow validator
+        is_nested = any(
+            target in rel_path.split(".")[0]
+            for target in [step for _, steps in flow_validators.values() for step in steps]
+        )
+        if not is_nested and rel_path:
+            formatted_val = _format_validator_value(value)
+            parent.add(f"[dim]{rel_path}.[/dim][green]{validator}[/green] [dim]({formatted_val})[/dim]")
+
+    return count
+
+
+def print_eval_tree(evals: list[Eval]) -> None:
+    """Print a tree view of all evals and their validators."""
+    console.print()
+
+    total_validators = 0
+
+    for eval in evals:
+        # Build eval header with tags
+        header = Text()
+        header.append(eval.name, style="bold")
+
+        for tag in eval.tags:
+            color = _get_tag_color(tag)
+            header.append(" ")
+            header.append("[", style="dim")
+            header.append(tag, style=color)
+            header.append("]", style="dim")
+
+        tree = Tree(header)
+
+        # Add validators
+        validators = eval._validators
+        if validators:
+            count = _build_validator_tree(tree, validators, eval.runnable._path)
+            total_validators += count
+        else:
+            tree.add("[dim]no validators[/dim]")
+
+        console.print(tree)
+        console.print()
+
+    # Summary
+    eval_label = "eval" if len(evals) == 1 else "evals"
+    validator_label = "validator" if total_validators == 1 else "validators"
+    console.print(f"[dim]{len(evals)} {eval_label}, {total_validators} {validator_label}[/dim]")
     console.print()

@@ -5,7 +5,7 @@ from ..core.runnable import Runnable
 from ..state import get_or_create_run_context, set_run_context
 from .display import (
     OutputCapture,
-    print_eval_line,
+    print_eval_result,
     print_failures,
     print_header,
     print_summary,
@@ -85,7 +85,7 @@ async def run_evals(
         result = await run_eval(eval, capture=capture)
         summary.results.append(result)
 
-        print_eval_line(result)
+        print_eval_result(result)
 
     # Print failure details at the end (pytest-style)
     print_failures(summary.results)
