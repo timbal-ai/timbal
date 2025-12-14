@@ -13,7 +13,7 @@ from .display import (
 from .models import Eval, EvalError, EvalResult, EvalSummary
 
 
-async def run_eval(runnable: Runnable, eval: Eval, capture: bool = True) -> EvalResult:
+async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
     """Run a single eval and return the result."""
     run_context = get_or_create_run_context()
     set_run_context(run_context)
@@ -29,21 +29,21 @@ async def run_eval(runnable: Runnable, eval: Eval, capture: bool = True) -> Eval
             cap = OutputCapture()
             cap.__enter__()
 
-        output_event = await runnable(**eval.params).collect()  # type: ignore
+        # output_event = await runnable(**eval.params).collect()  # type: ignore
 
-        # TODO Run the validators in here
-        for validator in eval.validators:
-            print(validator)
-            await validator.run(run_context._trace)
+        # # TODO Run the validators in here
+        # for validator in eval.validators:
+        #     print(validator)
+        #     await validator.run(run_context._trace)
 
-        # Check if the output event contains an error
-        if output_event is not None and getattr(output_event, "error", None) is not None:
-            err = output_event.error
-            error = EvalError(
-                type=err.get("type", "UnknownError"),
-                message=err.get("message", str(err)),
-                traceback=err.get("traceback"),
-            )
+        # # Check if the output event contains an error
+        # if output_event is not None and getattr(output_event, "error", None) is not None:
+        #     err = output_event.error
+        #     error = EvalError(
+        #         type=err.get("type", "UnknownError"),
+        #         message=err.get("message", str(err)),
+        #         traceback=err.get("traceback"),
+        #     )
 
     except Exception as e:
         error = EvalError(
@@ -72,7 +72,6 @@ async def run_eval(runnable: Runnable, eval: Eval, capture: bool = True) -> Eval
 
 
 async def run_evals(
-    runnable: Runnable,
     evals: list[Eval],
     capture: bool = True,
 ) -> EvalSummary:
@@ -82,7 +81,8 @@ async def run_evals(
     print_header(evals)
 
     for eval in evals:
-        result = await run_eval(runnable, eval, capture=capture)
+        # TODO Add the optional env variables to eval
+        result = await run_eval(eval, capture=capture)
         summary.results.append(result)
 
         print_eval_line(result)

@@ -5,17 +5,17 @@ import sys
 # Set env vars before any timbal imports to silence deprecation warnings
 os.environ.setdefault("TIMBAL_DELTA_EVENTS", "true")
 
-import asyncio  # noqa: E402
-from pathlib import Path  # noqa: E402
+import asyncio
+from pathlib import Path
 
-from dotenv import load_dotenv  # noqa: E402
-from rich.console import Console  # noqa: E402
+from dotenv import load_dotenv
+from rich.console import Console
 
-from .. import __version__  # noqa: E402
-from ..logs import setup_logging  # noqa: E402
-from ..utils import ImportSpec  # noqa: E402
-from .runner import run_evals  # noqa: E402
-from .utils import discover_config, discover_eval_files, parse_eval_file  # noqa: E402
+from .. import __version__
+from ..logs import setup_logging
+from ..utils import ImportSpec
+from .runner import run_evals
+from .utils import discover_config, discover_eval_files, parse_eval_file
 
 console = Console()
 
@@ -91,7 +91,6 @@ if __name__ == "__main__":
 
     try:
         runnable = runnable_spec.load()
-        root_path = runnable.name
     except Exception as e:
         console.print(f"[red]Error:[/red] Failed to load runnable: {e}")
         sys.exit(1)
@@ -101,14 +100,13 @@ if __name__ == "__main__":
         console.print(f"[yellow]Warning:[/yellow] No eval files found in {args.path}")
         sys.exit(0)
 
-    evals = [eval for eval_file in eval_files for eval in parse_eval_file(eval_file, root_path)]
+    evals = [eval for eval_file in eval_files for eval in parse_eval_file(eval_file, runnable)]
     if not evals:
         console.print(f"[yellow]Warning:[/yellow] No evals found in {len(eval_files)} file(s)")
         sys.exit(0)
 
     summary = asyncio.run(
         run_evals(
-            runnable,
             evals,
             capture=not args.no_capture,
         )

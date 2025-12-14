@@ -55,7 +55,7 @@ def discover_eval_files(path: Path) -> list[Path]:
     return eval_files
 
 
-def parse_eval_file(path: Path, root_path: str) -> list[Eval]:
+def parse_eval_file(path: Path, runnable: Runnable) -> list[Eval]:
     """Parse an eval file and return a list of Eval objects."""
     with open(path) as f:
         evals = yaml.safe_load(f)
@@ -63,6 +63,5 @@ def parse_eval_file(path: Path, root_path: str) -> list[Eval]:
     if not isinstance(evals, list):
         raise ValueError(f"Invalid eval file: {path}")
 
-    evals = [Eval.model_validate({"path": path, "root_path": root_path, **eval}) for eval in evals]
-
+    evals = [Eval.model_validate({"path": path, "runnable": runnable, **eval}) for eval in evals]
     return evals

@@ -1,17 +1,34 @@
 from abc import ABC, abstractmethod
+from typing import Any
 
-from ...state.tracing.trace import Trace
+from pydantic import BaseModel, ConfigDict
 
 
-class BaseValidator(ABC):
-    type: str
-    path: str
+class BaseValidator(ABC, BaseModel):
+    """Base class for all validators.
 
-    def __init__(self, type: str, path: str, **kwargs) -> None:  # noqa: ARG002
-        self.type = type
-        self.path = path
+    Validators are callable Pydantic models that check conditions against a ValidationContext.
+
+    Attributes:
+        target: Dot-separated path specifying what to validate within the context.
+                Examples:
+                    - "input.query" -> look at span.input.query
+                    - "output.items.0" -> look at first item in output
+                    - None -> validate the current context value directly
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    target: str | None = None
 
     @abstractmethod
-    async def run(self, trace: Trace, **kwargs) -> bool:
-        """Validate the trace. Returns True if validation passes."""
+    async def __call__(self, ctx: Any) -> Any:
+        """Execute the validation.
+
+        Args:
+            ctx: ValidationContext containing the trace and current state.
+
+        Returns:
+            ValidationResult indicating pass/fail with optional message.
+        """
         ...

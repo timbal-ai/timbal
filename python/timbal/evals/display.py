@@ -52,15 +52,54 @@ def print_header(evals: list[Eval]) -> None:
 
     # Collect unique files
     files = set(str(e.path) for e in evals)
-    console.print(f"[dim]collected {len(evals)} evals from {len(files)} file(s)[/dim]")
+    file_count = len(files)
+    file_label = "file" if file_count == 1 else "files"
+    console.print(f"[dim]collected {len(evals)} evals from {file_count} {file_label}[/dim]")
     console.print()
+
+
+# Tag color palette - expanded for variety
+TAG_COLORS = [
+    "cyan",
+    "magenta",
+    "yellow",
+    "blue",
+    "green",
+    "red",
+    "bright_cyan",
+    "bright_magenta",
+    "bright_yellow",
+    "bright_blue",
+    "bright_green",
+    "bright_red",
+    "dark_cyan",
+    "dark_magenta",
+    "dark_orange",
+    "purple",
+    "orange1",
+    "deep_pink3",
+    "spring_green3",
+    "dodger_blue2",
+    "gold3",
+    "medium_purple3",
+    "dark_sea_green",
+    "indian_red",
+]
+
+
+def _get_tag_color(tag: str) -> str:
+    """Get a consistent color for a tag based on its name hash."""
+    # Use sum of character codes * position for better distribution
+    tag_hash = sum((i + 1) * ord(c) for i, c in enumerate(tag))
+    return TAG_COLORS[tag_hash % len(TAG_COLORS)]
 
 
 def print_eval_line(result: EvalResult) -> None:
     """Print a single eval result line (pytest-style)."""
-    # Format: path/to/file.yaml::eval_name PASSED/FAILED [duration]
+    # Format: path/to/file.yaml::eval_name [tag1] [tag2] PASSED/FAILED [duration]
     path = result.eval.path
     name = result.eval.name
+    tags = result.eval.tags
     duration_str = f"{result.duration:.2f}s"
 
     location = Text()
@@ -73,11 +112,24 @@ def print_eval_line(result: EvalResult) -> None:
     else:
         status = Text(" FAILED ", style="bold white on red")
 
+    # Build tag badges
+    tag_text = Text()
+    for i, tag in enumerate(tags):
+        color = _get_tag_color(tag)
+        if i > 0:
+            tag_text.append(" ")
+        tag_text.append("[", style="dim")
+        tag_text.append(tag, style=color)
+        tag_text.append("]", style="dim")
+
     # Build the line
     line = Text()
     line.append_text(status)
     line.append(" ")
     line.append_text(location)
+    if tags:
+        line.append(" ")
+        line.append_text(tag_text)
     line.append(f" [{duration_str}]", style="dim")
 
     console.print(line)

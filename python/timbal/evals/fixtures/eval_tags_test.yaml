@@ -1,0 +1,79 @@
+- name: "API Call Test"
+  description: "Tests basic API functionality"
+  tags: ["api", "fast"]
+  timeout: 5000
+  agent:
+    input:
+      prompt: hello
+
+- name: "Auth Login Test"
+  description: "Tests user authentication"
+  tags: ["auth", "security"]
+  timeout: 10000
+  agent:
+    input:
+      prompt: login test
+
+- name: "API Error Handling"
+  description: "Tests API error responses"
+  tags: ["api", "errors"]
+  timeout: 5000
+  agent:
+    input:
+      prompt: trigger error
+
+- name: "Database Query"
+  description: "Tests database queries"
+  tags: ["database", "slow"]
+  timeout: 30000
+  agent:
+    input:
+      prompt: query db
+
+- name: "Cache Performance"
+  description: "Tests caching layer"
+  tags: ["cache", "fast", "performance"]
+  timeout: 5000
+  agent:
+    input:
+      prompt: cache test
+
+- name: "Auth Logout Test"
+  description: "Tests user logout"
+  tags: ["auth", "security"]
+  timeout: 10000
+  agent:
+    input:
+      prompt: logout test
+
+- name: "Integration Test"
+  description: "Full integration test"
+  tags: ["integration", "slow", "api", "database"]
+  timeout: 60000
+  agent:
+    input:
+      prompt: full integration
+
+- name: "Unit Math"
+  description: "Simple math operations"
+  tags: ["unit", "fast"]
+  timeout: 1000
+  agent:
+    input:
+      prompt: 2 + 2
+
+- name: "Validation Test"
+  description: "Input validation"
+  tags: ["validation", "security"]
+  timeout: 5000
+  agent:
+    input:
+      prompt: validate input
+
+- name: "Rate Limiting"
+  description: "Tests rate limiter"
+  tags: ["api", "performance", "security"]
+  timeout: 15000
+  agent:
+    input:
+      prompt: rate limit test

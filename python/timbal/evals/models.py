@@ -1,9 +1,12 @@
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, computed_field, model_validator
+import structlog
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, SkipValidation, computed_field, model_validator
 
-from .validators import BaseValidator, collect_validators
+from ..core.runnable import Runnable
+
+logger = structlog.get_logger("timbal.evals.models")
 
 
 class Eval(BaseModel):
@@ -14,17 +17,31 @@ class Eval(BaseModel):
     path: Path
     name: str
     description: str | None = None
-    params: dict[str, Any] = {}
-    # TODO A lot of stuff
-    validators: list[BaseValidator] = []
+    tags: list[str] = Field(default_factory=list)
 
-    @model_validator(mode="before")
-    @classmethod
-    def collect_validators(cls, data: dict[str, Any]) -> dict[str, Any]:
-        root_path = data.pop("root_path")
-        validators = collect_validators(data, path=root_path)
-        data["validators"] = validators
-        return data
+    timeout: float | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+
+    runnable: Runnable
+
+    # Parsed validators stored privately
+    _validators: list = PrivateAttr(default_factory=list)
+
+    @model_validator(mode="after")
+    def parse_checks(self) -> "Eval":
+        if not isinstance(self.model_extra, dict):
+            return self
+
+        runnable = self.runnable
+        runnable_path = runnable._path
+        for k, v in self.model_extra.items():
+            if k != runnable_path:
+                logger.warning(f"Unexpected key '{k}' for eval {self.path}::{self.name}")
+                continue
+            # TODO
+            print(v)
+
+        return self
 
 
 class EvalError(BaseModel):
@@ -38,10 +55,10 @@ class EvalError(BaseModel):
 class EvalResult(BaseModel):
     """Result of a single eval run."""
 
-    eval: Eval
+    eval: SkipValidation[Eval]
     passed: bool
     duration: float = 0.0
-    error: EvalError | None = None
+    error: SkipValidation[EvalError | None] = None
     captured_stdout: str = ""
     captured_stderr: str = ""
 
