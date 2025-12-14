@@ -3,6 +3,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from .context import ValidationContext
+
 
 class BaseValidator(ABC, BaseModel):
     """Base class for all validators.
@@ -22,11 +24,11 @@ class BaseValidator(ABC, BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str  # Discriminator field - subclasses use Literal["eq!"], etc.
-    target: str | None = None
+    target: str
     value: Any = None  # The value passed to the validator (e.g., "foo" for eq!: "foo")
 
     @abstractmethod
-    async def __call__(self, ctx: Any) -> None:
+    async def __call__(self, ctx: ValidationContext) -> None:
         """Execute the validation.
 
         Args:

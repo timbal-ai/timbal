@@ -1,7 +1,6 @@
 import time
 import traceback
 
-from ..core.runnable import Runnable
 from ..state import get_or_create_run_context, set_run_context
 from .display import (
     OutputCapture,
@@ -10,7 +9,9 @@ from .display import (
     print_header,
     print_summary,
 )
-from .models import Eval, EvalError, EvalResult, EvalSummary
+from .models import Eval, EvalError, EvalResult, EvalSummary, ValidatorResult
+from .validators.base import BaseValidator
+from .validators.context import ValidationContext
 
 
 async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
@@ -19,6 +20,7 @@ async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
     set_run_context(run_context)
 
     error: EvalError | None = None
+    validator_results: list[ValidatorResult] = []
     captured_stdout = ""
     captured_stderr = ""
     cap = None
@@ -29,21 +31,35 @@ async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
             cap = OutputCapture()
             cap.__enter__()
 
-        # output_event = await runnable(**eval.params).collect()  # type: ignore
+        output_event = await eval.runnable(**eval.params).collect()  # type: ignore
 
-        # # TODO Run the validators in here
-        # for validator in eval.validators:
-        #     print(validator)
-        #     await validator.run(run_context._trace)
+        trace = run_context._trace
+        validation_context = ValidationContext(trace=trace)
 
-        # # Check if the output event contains an error
-        # if output_event is not None and getattr(output_event, "error", None) is not None:
-        #     err = output_event.error
-        #     error = EvalError(
-        #         type=err.get("type", "UnknownError"),
-        #         message=err.get("message", str(err)),
-        #         traceback=err.get("traceback"),
-        #     )
+        # Run validators and collect results
+        for validator in eval._validators:
+            if isinstance(validator, BaseValidator):
+                try:
+                    await validator(validation_context)
+                    validator_results.append(
+                        ValidatorResult(
+                            target=validator.target,
+                            name=validator.name,
+                            value=validator.value,
+                            passed=True,
+                        )
+                    )
+                except Exception as e:
+                    validator_results.append(
+                        ValidatorResult(
+                            target=validator.target,
+                            name=validator.name,
+                            value=validator.value,
+                            passed=False,
+                            error=f"{type(e).__name__}: {e}",
+                            traceback=traceback.format_exc(),
+                        )
+                    )
 
     except Exception as e:
         error = EvalError(
@@ -59,13 +75,16 @@ async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
 
     duration = time.perf_counter() - start_time
 
-    passed = error is None
+    # Eval passes if no error and all validators passed
+    all_validators_passed = all(vr.passed for vr in validator_results)
+    passed = error is None and all_validators_passed
 
     return EvalResult(
         eval=eval,
         passed=passed,
         duration=duration,
         error=error,
+        validator_results=validator_results,
         captured_stdout=captured_stdout,
         captured_stderr=captured_stderr,
     )

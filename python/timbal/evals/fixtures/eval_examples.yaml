@@ -73,85 +73,91 @@
           status:
             one_of!: ["confirmed", "pending"]
 
-- name: "subagent_workflow"
-  description: "Eval with nested subagent calls"
+# - name: "subagent_workflow"
+#   description: "Eval with nested subagent calls"
 
-  tags: ["subagent", "nested"]
-  timeout: 120000
+#   tags: ["subagent", "nested"]
+#   timeout: 120000
 
+#   params:
+#     prompt: analyze the market and create a report
+
+#   output:
+#     min_length!: 200
+#     semantic!: "a comprehensive market analysis report"
+#     sentiment!: "neutral"
+
+#   seq!:
+#     - llm
+#     - research_agent:
+#         seq!:
+#           - llm
+#           - web_search:
+#               input:
+#                 query:
+#                   min_length!: 5
+#                   not_contains!: "hack"
+#               output:
+#                 type!: "array"
+#                 min_size!: 3
+#           - llm
+#         output:
+#           type!: "object"
+#           required_keys!: ["findings", "sources"]
+#     - llm
+#     - report_generator:
+#         parallel!:
+#           - create_charts:
+#               output:
+#                 type!: "array"
+#                 min_size!: 1
+#           - format_text:
+#               output:
+#                 min_length!: 100
+#         output:
+#           has_key!: "report_url"
+
+# - name: "validation_edge_cases"
+#   description: "Testing various validator combinations"
+
+#   tags: ["edge-cases", "validation"]
+#   timeout: 30000
+
+#   params:
+#     prompt: validate user registration
+
+#   seq!:
+#     - validate_user:
+#         input:
+#           email:
+#             email!: true
+#             ends_with!: ".com"
+#             not_contains!: "spam"
+#           username:
+#             min_length!: 3
+#             max_length!: 20
+#             alphanumeric!: true
+#             lowercase!: true
+#           age:
+#             gte!: 18
+#             lte!: 120
+#             type!: "number"
+#           tags:
+#             type!: "array"
+#             unique!: true
+#             max_size!: 5
+#             all!:
+#               type!: "string"
+#               min_length!: 2
+#         output:
+#           or!:
+#             - eq!: "success"
+#             - and!:
+#                 - has_key!: "errors"
+#                 - type!: "object"
+
+- name: simple
   params:
-    prompt: analyze the market and create a report
-
+    prompt: 2 + 2
   output:
-    min_length!: 200
-    semantic!: "a comprehensive market analysis report"
-    sentiment!: "neutral"
-
-  seq!:
-    - llm
-    - research_agent:
-        seq!:
-          - llm
-          - web_search:
-              input:
-                query:
-                  min_length!: 5
-                  not_contains!: "hack"
-              output:
-                type!: "array"
-                min_size!: 3
-          - llm
-        output:
-          type!: "object"
-          required_keys!: ["findings", "sources"]
-    - llm
-    - report_generator:
-        parallel!:
-          - create_charts:
-              output:
-                type!: "array"
-                min_size!: 1
-          - format_text:
-              output:
-                min_length!: 100
-        output:
-          has_key!: "report_url"
-
-- name: "validation_edge_cases"
-  description: "Testing various validator combinations"
-
-  tags: ["edge-cases", "validation"]
-  timeout: 30000
-
-  params:
-    prompt: validate user registration
-
-  seq!:
-    - validate_user:
-        input:
-          email:
-            email!: true
-            ends_with!: ".com"
-            not_contains!: "spam"
-          username:
-            min_length!: 3
-            max_length!: 20
-            alphanumeric!: true
-            lowercase!: true
-          age:
-            gte!: 18
-            lte!: 120
-            type!: "number"
-          tags:
-            type!: "array"
-            unique!: true
-            max_size!: 5
-            all!:
-              type!: "string"
-              min_length!: 2
-        output:
-          or!:
-            - eq!: "success"
-            - and!:
-                - has_key!: "errors"
-                - type!: "object"
+    contains!: 4

@@ -7,7 +7,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.tree import Tree
 
-from .models import Eval, EvalResult, EvalSummary
+from .models import Eval, EvalResult, EvalSummary, ValidatorResult
 from .validators.base import BaseValidator
 
 console = Console()
@@ -132,13 +132,18 @@ def print_eval_result(result: EvalResult) -> None:
     # Build tree with header as root
     tree = Tree(header)
 
+    # Build a lookup map for validator results by (target, name)
+    validator_results_map: dict[tuple[str, str], ValidatorResult] = {}
+    for vr in result.validator_results:
+        validator_results_map[(vr.target, vr.name)] = vr
+
     # Add validators
     validators = eval._validators
     if validators:
         # Add root path as first branch
         root_path = eval.runnable._path
         root_branch = tree.add(f"[yellow]{root_path}[/yellow]")
-        _build_validator_tree(root_branch, validators, root_path)
+        _build_validator_tree(root_branch, validators, root_path, validator_results_map)
 
     console.print(tree)
     console.print()
@@ -179,8 +184,32 @@ def print_failure_details(result: EvalResult) -> None:
             )
         )
 
+    # Show failed validators
+    failed_validators = [vr for vr in result.validator_results if not vr.passed]
+    if failed_validators:
+        for vr in failed_validators:
+            header = f"[red bold]✗[/red bold] [yellow]{vr.target}[/yellow].[green]{vr.name}[/green]"
+            if vr.traceback:
+                content = vr.traceback.rstrip()
+            elif vr.error:
+                content = vr.error
+            else:
+                content = "Validation failed"
+            console.print(
+                Panel(
+                    content,
+                    title=header,
+                    title_align="left",
+                    border_style="red",
+                    padding=(0, 1),
+                )
+            )
+
     if result.error:
-        error_text = f"[red bold]{result.error.type}[/red bold]: {result.error.message}"
+        if result.error.traceback:
+            error_text = result.error.traceback.rstrip()
+        else:
+            error_text = f"[red bold]{result.error.type}[/red bold]: {result.error.message}"
         console.print(
             Panel(
                 error_text,
@@ -260,10 +289,39 @@ def _normalize_validator(v: Any) -> tuple[str, str, Any]:
         return ("", "unknown!", v)
 
 
+def _format_validator_status(
+    target: str,
+    validator: str,
+    value: Any,
+    results_map: dict[tuple[str, str], ValidatorResult] | None,
+    rel_path: str = "",
+) -> str:
+    """Format a validator line with pass/fail status indicator."""
+    formatted_val = _format_validator_value(value)
+
+    # Look up result if available
+    result = results_map.get((target, validator)) if results_map else None
+
+    if result is not None:
+        if result.passed:
+            status = "[bold green]✓[/bold green]"
+        else:
+            status = "[bold red]✗[/bold red]"
+    else:
+        # No result yet (e.g., during planning/preview)
+        status = "[dim]○[/dim]"
+
+    if rel_path:
+        return f"{status} [dim]{rel_path}.[/dim][green]{validator}[/green] [dim]({formatted_val})[/dim]"
+    else:
+        return f"{status} [green]{validator}[/green] [dim]({formatted_val})[/dim]"
+
+
 def _build_validator_tree(
     parent: Tree,
     validators: list,
     base_path: str = "",
+    results_map: dict[tuple[str, str], ValidatorResult] | None = None,
 ) -> int:
     """Build a tree of validators, returning the count.
 
@@ -314,7 +372,7 @@ def _build_validator_tree(
 
             if nested_flow:
                 # Recursively build subtree for nested flow - pass only step's validators
-                count += _build_validator_tree(step_branch, step_subtree, step_path)
+                count += _build_validator_tree(step_branch, step_subtree, step_path, results_map)
                 for t, v, val in step_subtree:
                     handled.add((t, v))
             else:
@@ -325,8 +383,8 @@ def _build_validator_tree(
                     if t == step_path:
                         continue  # Skip the step itself
                     prop_path = t[len(step_path) :].lstrip(".")
-                    formatted_val = _format_validator_value(val)
-                    step_branch.add(f"[dim]{prop_path}.[/dim][green]{v}[/green] [dim]({formatted_val})[/dim]")
+                    line = _format_validator_status(t, v, val, results_map, prop_path)
+                    step_branch.add(line)
                     handled.add((t, v))
                     count += 1
 
@@ -342,8 +400,8 @@ def _build_validator_tree(
             rel_path = t[len(base_path) :].lstrip(".")
             first_segment = rel_path.split(".")[0] if "." in rel_path else rel_path
             if first_segment not in steps:
-                formatted_val = _format_validator_value(val)
-                parent.add(f"[dim]{rel_path}.[/dim][green]{v}[/green] [dim]({formatted_val})[/dim]")
+                line = _format_validator_status(t, v, val, results_map, rel_path)
+                parent.add(line)
                 count += 1
 
     else:
@@ -354,8 +412,8 @@ def _build_validator_tree(
             if target == base_path:
                 continue
             rel_path = target[len(base_path) :].lstrip(".") if base_path else target
-            formatted_val = _format_validator_value(value)
-            parent.add(f"[dim]{rel_path}.[/dim][green]{validator}[/green] [dim]({formatted_val})[/dim]")
+            line = _format_validator_status(target, validator, value, results_map, rel_path)
+            parent.add(line)
             count += 1
 
     return count

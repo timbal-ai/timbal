@@ -86,8 +86,6 @@ class Eval(BaseModel):
             return validators
 
         self._validators = dfs(self.runnable._path, self.model_extra)
-        for validator in self._validators:
-            print(validator)
         return self
 
 
@@ -99,6 +97,17 @@ class EvalError(BaseModel):
     traceback: str | None = None
 
 
+class ValidatorResult(BaseModel):
+    """Result of a single validator execution."""
+
+    target: str
+    name: str
+    value: Any = None
+    passed: bool
+    error: str | None = None
+    traceback: str | None = None
+
+
 class EvalResult(BaseModel):
     """Result of a single eval run."""
 
@@ -106,6 +115,7 @@ class EvalResult(BaseModel):
     passed: bool
     duration: float = 0.0
     error: SkipValidation[EvalError | None] = None
+    validator_results: list[ValidatorResult] = Field(default_factory=list)
     captured_stdout: str = ""
     captured_stderr: str = ""
 

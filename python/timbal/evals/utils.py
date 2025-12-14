@@ -4,9 +4,79 @@ from typing import Any
 import yaml
 
 from ..core.runnable import Runnable
+from ..state.tracing.span import Span
+from ..state.tracing.trace import Trace
 from .models import Eval
 
 CONFIG_FILENAME = "evalconf.yaml"
+
+
+def resolve_target(trace: Trace, target: str) -> tuple[Span | None, Any]:
+    """Resolve a target path to a span and value.
+
+    Target format: "span.path.property.nested.path"
+
+    Examples:
+        - "agent.validate_user.input.age" -> (Span, age_value)
+        - "agent.llm.output" -> (Span, output_value)
+        - "agent.search.input.query.text" -> (Span, nested text value)
+
+    Args:
+        trace: The trace to search in.
+        target: Dot-separated path like "agent.validate_user.input.age".
+
+    Returns:
+        Tuple of (span, value). Span is None if not found.
+        Value is None if span found but property path doesn't exist.
+    """
+    if not target:
+        return None, None
+
+    parts = target.split(".")
+
+    # Try progressively longer paths to find the span
+    # e.g., for "agent.validate_user.input.age", try:
+    #   - "agent.validate_user.input.age" (no match)
+    #   - "agent.validate_user.input" (no match)
+    #   - "agent.validate_user" (match!)
+    span: Span | None = None
+    prop_parts: list[str] = []
+
+    for i in range(len(parts), 0, -1):
+        span_path = ".".join(parts[:i])
+        spans = trace.get_path(span_path)
+        if spans:
+            # TODO Multiple matching spans (e.g. multiple iteration same tool uses)
+            span = spans[0]
+            prop_parts = parts[i:]
+            break
+
+    if span is None:
+        return None, None
+
+    if not prop_parts:
+        return span, None
+
+    # Resolve property path on the span
+    value: Any = span
+    for part in prop_parts:
+        if value is None:
+            return span, None
+
+        if isinstance(value, dict):
+            value = value.get(part)
+        elif isinstance(value, list):
+            if part.isdigit():
+                idx = int(part)
+                value = value[idx] if idx < len(value) else None
+            else:
+                value = None
+        elif hasattr(value, part):
+            value = getattr(value, part)
+        else:
+            value = None
+
+    return span, value
 
 
 def discover_config(path: Path) -> dict[str, Any]:
