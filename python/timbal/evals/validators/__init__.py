@@ -12,6 +12,7 @@ from .lt import LtValidator
 from .lte import LteValidator
 from .max_length import MaxLengthValidator
 from .min_length import MinLengthValidator
+from .not_contains import NotContainsValidator
 from .not_null import NotNullValidator
 from .pattern import PatternValidator
 from .starts_with import StartsWithValidator
@@ -21,6 +22,7 @@ from .type import TypeValidator
 Validator = Annotated[
     EqValidator
     | ContainsValidator
+    | NotContainsValidator
     | PatternValidator
     | TypeValidator
     | StartsWithValidator

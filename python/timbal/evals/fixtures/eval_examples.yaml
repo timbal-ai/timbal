@@ -164,3 +164,4 @@
     prompt: 2 + 2
   output:
     contains!: 4
+    not_contains!: 5
