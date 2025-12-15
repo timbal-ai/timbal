@@ -4,6 +4,7 @@ from pydantic import Discriminator, TypeAdapter
 
 from .base import BaseValidator
 from .contains import ContainsValidator
+from .email import EmailValidator
 from .ends_with import EndsWithValidator
 from .eq import EqValidator
 from .gt import GtValidator
@@ -41,7 +42,8 @@ Validator = Annotated[
     | GteValidator
     | SemanticValidator
     | LanguageValidator
-    | JsonValidator,
+    | JsonValidator
+    | EmailValidator,
     Discriminator("name"),
 ]
 
