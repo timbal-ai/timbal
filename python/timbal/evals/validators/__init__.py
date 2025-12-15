@@ -8,6 +8,7 @@ from .ends_with import EndsWithValidator
 from .eq import EqValidator
 from .gt import GtValidator
 from .gte import GteValidator
+from .json import JsonValidator
 from .language import LanguageValidator
 from .length import LengthValidator
 from .lt import LtValidator
@@ -39,7 +40,8 @@ Validator = Annotated[
     | GtValidator
     | GteValidator
     | SemanticValidator
-    | LanguageValidator,
+    | LanguageValidator
+    | JsonValidator,
     Discriminator("name"),
 ]
 

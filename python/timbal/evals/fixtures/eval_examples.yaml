@@ -167,3 +167,9 @@
     not_contains!: 5
     language!: "en"
     length!: 15
+
+- name: json
+  params:
+    prompt: please output a json object with the key "name" and value "John"
+  output:
+    json!: true
