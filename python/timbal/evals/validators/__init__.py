@@ -8,6 +8,7 @@ from .ends_with import EndsWithValidator
 from .eq import EqValidator
 from .max_length import MaxLengthValidator
 from .min_length import MinLengthValidator
+from .not_null import NotNullValidator
 from .pattern import PatternValidator
 from .starts_with import StartsWithValidator
 from .type import TypeValidator
@@ -21,7 +22,8 @@ Validator = Annotated[
     | StartsWithValidator
     | EndsWithValidator
     | MinLengthValidator
-    | MaxLengthValidator,
+    | MaxLengthValidator
+    | NotNullValidator,
     Discriminator("name"),
 ]
 
