@@ -8,6 +8,7 @@ from .ends_with import EndsWithValidator
 from .eq import EqValidator
 from .gt import GtValidator
 from .gte import GteValidator
+from .language import LanguageValidator
 from .lt import LtValidator
 from .lte import LteValidator
 from .max_length import MaxLengthValidator
@@ -15,6 +16,7 @@ from .min_length import MinLengthValidator
 from .not_contains import NotContainsValidator
 from .not_null import NotNullValidator
 from .pattern import PatternValidator
+from .semantic import SemanticValidator
 from .starts_with import StartsWithValidator
 from .type import TypeValidator
 
@@ -33,7 +35,9 @@ Validator = Annotated[
     | LtValidator
     | LteValidator
     | GtValidator
-    | GteValidator,
+    | GteValidator
+    | SemanticValidator
+    | LanguageValidator,
     Discriminator("name"),
 ]
 
