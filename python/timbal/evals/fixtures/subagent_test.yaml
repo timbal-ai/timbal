@@ -1,0 +1,82 @@
+# Test cases for subagent (nested agent) scenarios
+
+# =============================================================================
+# TEST 1: Simple subagent call
+# =============================================================================
+- name: "simple_subagent"
+  description: "Main agent calls a subagent for text analysis"
+  runnable: "agent.py::main_agent_with_subagent"
+  tags: ["subagent", "basic"]
+  timeout: 60000
+
+  params:
+    prompt: "Please analyze the sentiment of this text: 'I had a great day today!'"
+
+  seq!:
+    - llm
+    - research_subagent
+    - llm
+
+  output:
+    contains!: "positive"
+
+# =============================================================================
+# TEST 2: Subagent with nested tool calls
+# =============================================================================
+- name: "subagent_with_tools"
+  description: "Subagent internally calls its own tools"
+  runnable: "agent.py::main_agent_with_subagent"
+  tags: ["subagent", "nested"]
+  timeout: 60000
+
+  params:
+    prompt: "Analyze this: 'The weather is terrible and I'm feeling sad'"
+
+  seq!:
+    - llm
+    - research_subagent:
+        seq!:
+          - llm
+          - 1.. # at least 1 tool call (could be analyze_sentiment, summarize_text, or both)
+          - llm
+    - llm
+
+  output:
+    contains!: "negative"
+
+# =============================================================================
+# TEST 3: Multiple tool calls including subagent
+# =============================================================================
+- name: "mixed_tools_and_subagent"
+  description: "Agent uses both regular tools and subagent"
+  runnable: "agent.py::main_agent_with_subagent"
+  tags: ["subagent", "mixed"]
+  timeout: 60000
+
+  params:
+    prompt: "What time is it in London? Also analyze this text: 'Everything is going great!'"
+
+  seq!:
+    - llm
+    - ... # Any tools in any order
+    - llm
+
+# =============================================================================
+# TEST 4: Subagent output validation
+# =============================================================================
+- name: "subagent_output"
+  description: "Validate the output from subagent"
+  runnable: "agent.py::main_agent_with_subagent"
+  tags: ["subagent", "output"]
+  timeout: 60000
+
+  params:
+    prompt: "Summarize this: 'This is a very long text that contains many words and should be summarized into a shorter version that captures the main points'"
+
+  seq!:
+    - llm
+    - research_subagent:
+        output:
+          type!: "string"
+          min_length!: 1
+    - llm

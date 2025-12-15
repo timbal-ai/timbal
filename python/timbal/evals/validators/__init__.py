@@ -18,6 +18,7 @@ from .max_length import MaxLengthValidator
 from .min_length import MinLengthValidator
 from .not_contains import NotContainsValidator
 from .not_null import NotNullValidator
+from .parallel import ParallelValidator
 from .pattern import PatternValidator
 from .semantic import SemanticValidator
 from .seq import SeqValidator
@@ -45,7 +46,8 @@ Validator = Annotated[
     | LanguageValidator
     | JsonValidator
     | EmailValidator
-    | SeqValidator,
+    | SeqValidator
+    | ParallelValidator,
     Discriminator("name"),
 ]
 

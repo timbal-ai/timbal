@@ -31,7 +31,8 @@ async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
             cap = OutputCapture()
             cap.__enter__()
 
-        output_event = await eval.runnable(**eval.params).collect()  # type: ignore
+        # TODO We should handle the cases where output_event.error is not None
+        _ = await eval.runnable(**eval.params).collect()  # type: ignore
 
         trace = run_context._trace
         validation_context = ValidationContext(trace=trace)

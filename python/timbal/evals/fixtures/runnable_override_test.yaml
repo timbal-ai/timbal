@@ -1,0 +1,50 @@
+# Test file demonstrating per-eval runnable overrides
+#
+# This file shows how to specify different runnables for different evals.
+# If 'runnable' is specified in an eval, it overrides the default runnable.
+# Paths can be relative (resolved from this file's directory) or absolute.
+
+# This eval uses the default runnable (agent from agent.py)
+- name: "default_runnable"
+  description: "Uses the default runnable specified in CLI or evalconf.yaml"
+  params:
+    prompt: "What time is it in Tokyo?"
+  seq!:
+    - llm
+    - get_datetime
+    - llm
+
+# This eval overrides with multi_tool_agent
+- name: "override_with_multi_tool_agent"
+  description: "Uses multi_tool_agent which has get_datetime, get_weather, get_stock_price"
+  runnable: "agent.py::multi_tool_agent"
+  params:
+    prompt: "What's the weather in Paris?"
+  seq!:
+    - llm
+    - get_weather
+    - llm
+
+# This eval overrides with search_agent
+- name: "override_with_search_agent"
+  description: "Uses search_agent which has search_products and get_stock_price"
+  runnable: "agent.py::search_agent"
+  params:
+    prompt: "Search for laptops, I want 3 results"
+  seq!:
+    - llm
+    - search_products
+    - llm
+
+# This eval overrides with parallel_agent
+- name: "override_with_parallel_agent"
+  description: "Uses parallel_agent with async tools"
+  runnable: "agent.py::parallel_agent"
+  params:
+    prompt: "Get user data and orders for user 123"
+  seq!:
+    - llm
+    - parallel!:
+        - fetch_user_data
+        - fetch_user_orders
+    - llm

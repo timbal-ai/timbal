@@ -1,0 +1,83 @@
+# Test cases for parallel! validator
+
+# =============================================================================
+# TEST 1: Multi-tool parallel execution
+# =============================================================================
+- name: "multi_tool_parallel"
+  description: "Agent should call multiple tools - check if they run in parallel"
+  runnable: "agent.py::multi_tool_agent"
+  tags: ["parallel", "multi-tool"]
+  timeout: 30000
+
+  params:
+    prompt: "What's the time in Madrid, the weather in Barcelona, and AAPL stock price? Get all info at once."
+
+  seq!:
+    - llm
+    - parallel!:
+        - get_datetime
+        - get_weather
+        - get_stock_price
+    - llm
+
+# =============================================================================
+# TEST 2: Two tools in parallel
+# =============================================================================
+- name: "two_tools_parallel"
+  description: "Agent calls two tools in parallel"
+  runnable: "agent.py::multi_tool_agent"
+  tags: ["parallel", "basic"]
+  timeout: 30000
+
+  params:
+    prompt: "Tell me the time in Tokyo and the weather in Tokyo at the same time"
+
+  seq!:
+    - 1..1
+    - parallel!:
+        - get_datetime
+        - get_weather
+    - ..
+
+# =============================================================================
+# TEST 3: Parallel with nested validators
+# =============================================================================
+- name: "parallel_with_validators"
+  description: "Parallel execution with input/output validation"
+  runnable: "agent.py::multi_tool_agent"
+  tags: ["parallel", "validators"]
+  timeout: 30000
+
+  params:
+    prompt: "Tell me the time in New York and the weather in Miami"
+
+  seq!:
+    - 1..1
+    - parallel!:
+        - get_datetime:
+            input:
+              timezone:
+                contains!: "America"
+        - get_weather:
+            input:
+              city:
+                eq!: "Miami"
+            output:
+              contains!: "Miami"
+    - ..
+
+# =============================================================================
+# TEST 4: Standalone parallel! (not nested in seq!)
+# =============================================================================
+- name: "standalone_parallel"
+  description: "parallel! as top-level validator"
+  runnable: "agent.py::multi_tool_agent"
+  tags: ["parallel", "standalone"]
+  timeout: 30000
+
+  params:
+    prompt: "What's the AAPL and GOOGL stock price right now? Get both at once."
+
+  parallel!:
+    - get_stock_price
+    - get_stock_price

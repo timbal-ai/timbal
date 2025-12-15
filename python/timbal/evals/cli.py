@@ -75,26 +75,25 @@ if __name__ == "__main__":
 
     # CLI --runnable overrides config file
     runnable_fqn = args.runnable or config.get("runnable")
-    if not runnable_fqn:
-        console.print("[red]Error:[/red] No runnable specified. Use --runnable or add 'runnable' to evalconf.yaml.")
-        sys.exit(1)
+    runnable = None
 
-    runnable_fqn_parts = runnable_fqn.split("::")
-    if len(runnable_fqn_parts) != 2:
-        console.print("[red]Error:[/red] Invalid import spec format. Use 'path/to/file.py::object_name'")
-        sys.exit(1)
+    if runnable_fqn:
+        runnable_fqn_parts = runnable_fqn.split("::")
+        if len(runnable_fqn_parts) != 2:
+            console.print("[red]Error:[/red] Invalid import spec format. Use 'path/to/file.py::object_name'")
+            sys.exit(1)
 
-    runnable_path, runnable_target = runnable_fqn_parts
-    runnable_spec = ImportSpec(
-        path=Path(runnable_path).expanduser().resolve(),
-        target=runnable_target,
-    )
+        runnable_path, runnable_target = runnable_fqn_parts
+        runnable_spec = ImportSpec(
+            path=Path(runnable_path).expanduser().resolve(),
+            target=runnable_target,
+        )
 
-    try:
-        runnable = runnable_spec.load()
-    except Exception as e:
-        console.print(f"[red]Error:[/red] Failed to load runnable: {e}")
-        sys.exit(1)
+        try:
+            runnable = runnable_spec.load()
+        except Exception as e:
+            console.print(f"[red]Error:[/red] Failed to load runnable: {e}")
+            sys.exit(1)
 
     eval_files = discover_eval_files(args.path)
     if not eval_files:

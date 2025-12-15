@@ -1,12 +1,16 @@
 from pathlib import Path
 from typing import Any
 
+import structlog
 import yaml
 
 from ..core.runnable import Runnable
 from ..state.tracing.span import Span
 from ..state.tracing.trace import Trace
+from ..utils import ImportSpec
 from .models import Eval
+
+logger = structlog.get_logger("timbal.evals.utils")
 
 CONFIG_FILENAME = "evalconf.yaml"
 
@@ -125,13 +129,76 @@ def discover_eval_files(path: Path) -> list[Path]:
     return eval_files
 
 
-def parse_eval_file(path: Path, runnable: Runnable) -> list[Eval]:
-    """Parse an eval file and return a list of Eval objects."""
+def _load_runnable(runnable_fqn: str, eval_file_path: Path) -> Runnable:
+    """Load a runnable from a fully qualified name.
+
+    Args:
+        runnable_fqn: Fully qualified name like "path/to/file.py::object_name"
+        eval_file_path: Path to the eval file (used for resolving relative paths)
+
+    Returns:
+        The loaded Runnable instance.
+    """
+    parts = runnable_fqn.split("::")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid runnable format: '{runnable_fqn}'. Use 'path/to/file.py::object_name'")
+
+    runnable_path, runnable_target = parts
+
+    # Resolve relative paths from the eval file's directory
+    runnable_path_obj = Path(runnable_path)
+    if not runnable_path_obj.is_absolute():
+        runnable_path_obj = (eval_file_path.parent / runnable_path_obj).resolve()
+    else:
+        runnable_path_obj = runnable_path_obj.expanduser().resolve()
+
+    runnable_spec = ImportSpec(
+        path=runnable_path_obj,
+        target=runnable_target,
+    )
+    return runnable_spec.load()
+
+
+def parse_eval_file(path: Path, runnable: Runnable | None = None) -> list[Eval]:
+    """Parse an eval file and return a list of Eval objects.
+
+    Each eval can optionally specify its own 'runnable' key to override the default.
+    The runnable should be a fully qualified name like "path/to/file.py::object_name".
+    Relative paths are resolved from the eval file's directory.
+
+    If no default runnable is provided, each eval must specify its own 'runnable' key.
+    """
     with open(path) as f:
         evals = yaml.safe_load(f)
 
     if not isinstance(evals, list):
         raise ValueError(f"Invalid eval file: {path}")
 
-    evals = [Eval.model_validate({"path": path, "runnable": runnable, **eval}) for eval in evals]
-    return evals
+    parsed_evals = []
+    for eval_dict in evals:
+        # Check if this eval has its own runnable override
+        eval_runnable = runnable
+        if "runnable" in eval_dict:
+            runnable_fqn = eval_dict.pop("runnable")
+            try:
+                eval_runnable = _load_runnable(runnable_fqn, path)
+                logger.debug("Loaded per-eval runnable", eval_name=eval_dict.get("name"), runnable=runnable_fqn)
+            except Exception as e:
+                logger.error(
+                    "Failed to load per-eval runnable",
+                    eval_name=eval_dict.get("name"),
+                    runnable=runnable_fqn,
+                    error=str(e),
+                )
+                raise ValueError(f"Failed to load runnable '{runnable_fqn}' for eval '{eval_dict.get('name')}': {e}")
+
+        if eval_runnable is None:
+            raise ValueError(
+                f"No runnable specified for eval '{eval_dict.get('name')}' in {path}. "
+                "Either add 'runnable' key to the eval or use --runnable flag."
+            )
+
+        parsed_eval = Eval.model_validate({"path": path, "runnable": eval_runnable, **eval_dict})
+        parsed_evals.append(parsed_eval)
+
+    return parsed_evals

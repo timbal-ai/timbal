@@ -49,27 +49,41 @@ class Eval(BaseModel):
                             "Invalid flow validator step. Value should be a list of steps", target=target, step=v
                         )
                         continue
-                    span_names = []
+                    steps_for_flow = []
                     nested_validators = []
                     for step in v:
                         if isinstance(step, str):
-                            span_names.append(step)
+                            steps_for_flow.append(step)
                         elif isinstance(step, dict):
                             if len(step) != 1:
                                 logger.warning("Invalid flow validator step", target=target, step=step)
                                 continue
-                            span_name, nested_spec = next(iter(step.items()))
-                            span_names.append(span_name)
-                            if isinstance(nested_spec, dict):
-                                nested = dfs(f"{target}.{span_name}", nested_spec)
-                                nested_validators.extend(nested)
+                            step_key, step_spec = next(iter(step.items()))
+                            if step_key in FLOW_VALIDATORS:
+                                # Nested flow validator (e.g., parallel! inside seq!)
+                                # Pass the entire step dict to preserve structure
+                                steps_for_flow.append(step)
+                                # Also extract validators from inside the nested flow
+                                if isinstance(step_spec, list):
+                                    for nested_step in step_spec:
+                                        if isinstance(nested_step, dict) and len(nested_step) == 1:
+                                            nested_step_name, nested_step_spec = next(iter(nested_step.items()))
+                                            if nested_step_name not in FLOW_VALIDATORS and isinstance(
+                                                nested_step_spec, dict
+                                            ):
+                                                nested = dfs(f"{target}.{nested_step_name}", nested_step_spec)
+                                                nested_validators.extend(nested)
                             else:
-                                logger.warning("Invalid flow validator step", target=target, step=step)
+                                # Span name with nested validators
+                                steps_for_flow.append(step)
+                                if isinstance(step_spec, dict):
+                                    nested = dfs(f"{target}.{step_key}", step_spec)
+                                    nested_validators.extend(nested)
                         else:
                             logger.warning("Invalid flow validator step", target=target, step=step)
                     # Add the flow validator first, then its nested validators
                     try:
-                        flow_validator = parse_validator({"name": k, "target": target, "value": span_names})
+                        flow_validator = parse_validator({"name": k, "target": target, "value": steps_for_flow})
                         validators.append(flow_validator)
                     except Exception:
                         logger.warning("Unknown flow validator", target=target, name=k)
