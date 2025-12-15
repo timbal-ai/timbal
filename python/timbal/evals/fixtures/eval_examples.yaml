@@ -16,12 +16,16 @@
     pattern!: "\\d{1,2}:\\d{2}"
     semantic!: "a time response mentioning Madrid"
 
+  elapsed:
+    lt!: 1000
+
   seq!:
-    # - llm:
-    #     output:
-    #       not_null!: true
-    #       min_length!: 1
-    - 1..1
+    - llm:
+        elapsed:
+          lte!: 40000
+        usage:
+          "claude-haiku-4-5-20251001:input_tokens":
+            lte!: 123456789
     - parallel!:
         - get_datetime:
             input:
@@ -35,27 +39,26 @@
               lte!: "2026-01-01"
               gt!: "2025-12-15T00:45:12"
         - get_datetime
-    - ..
+    - ...
+# - name: "parallel-datetime"
+#   runnable: "agent.py::agent"
 
-- name: "parallel-datetime"
-  runnable: "agent.py::agent"
+#   tags: ["dev", "datetime"]
+#   timeout: 30000
 
-  tags: ["dev", "datetime"]
-  timeout: 30000
+#   params:
+#     prompt: what time is it in madrid and in new york
 
-  params:
-    prompt: what time is it in madrid and in new york
-
-  seq!:
-    # - llm:
-    #     output:
-    #       not_null!: true
-    #       min_length!: 1
-    - 1..1
-    - parallel!:
-        - get_datetime
-        - get_datetime
-    - ..
+#   seq!:
+#     # - llm:
+#     #     output:
+#     #       not_null!: true
+#     #       min_length!: 1
+#     - 1..1
+#     - parallel!:
+#         - get_datetime
+#         - get_datetime
+#     - ..
 # # - name: "multi_tool_complex"
 # #   description: "Complex eval with multiple tools and nested validation"
 
