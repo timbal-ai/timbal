@@ -9,6 +9,7 @@ from .eq import EqValidator
 from .gt import GtValidator
 from .gte import GteValidator
 from .language import LanguageValidator
+from .length import LengthValidator
 from .lt import LtValidator
 from .lte import LteValidator
 from .max_length import MaxLengthValidator
@@ -29,6 +30,7 @@ Validator = Annotated[
     | TypeValidator
     | StartsWithValidator
     | EndsWithValidator
+    | LengthValidator
     | MinLengthValidator
     | MaxLengthValidator
     | NotNullValidator

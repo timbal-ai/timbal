@@ -161,8 +161,9 @@
 
 - name: simple
   params:
-    prompt: 2 + 2
+    prompt: "2 + 2. You must respond with: 'The answer is X'"
   output:
     contains!: 4
     not_contains!: 5
     language!: "en"
+    length!: 15

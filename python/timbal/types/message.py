@@ -15,19 +15,20 @@ from .content import TextContent, ToolResultContent, ToolUseContent, content_fac
 
 class Message:
     """A class representing a message in a conversation with an LLM.
-    
+
     This class handles messages for both OpenAI and Anthropic formats, providing
     conversion methods between different message formats and validation logic.
-    
+
     Attributes:
         role: The role of the message sender
         content: The content of the message, which can include text and tool interactions
     """
+
     __slots__ = ("role", "content")
 
     def __init__(self, role: Any, content: Any) -> None:
         """Initialize a Message instance.
-        
+
         Args:
             role: The role of the message sender
             content: The content of the message
@@ -69,19 +70,21 @@ class Message:
             elif isinstance(content_item, ToolResultContent):
                 return content_item.to_openai_chat_completions_input()
             else:
-                openai_input = content_item.to_openai_chat_completions_input() 
+                openai_input = content_item.to_openai_chat_completions_input()
                 # Enabling splitting files into multiple pages or chunks.
                 if isinstance(openai_input, list):
                     content.extend(openai_input)
                 else:
                     content.append(openai_input)
-        openai_input = {"role": role,}
+        openai_input = {
+            "role": role,
+        }
         if len(content):
-            openai_input["content"] = content 
-        if len(tool_calls): 
+            openai_input["content"] = content
+        if len(tool_calls):
             openai_input["tool_calls"] = tool_calls
         return openai_input
-    
+
     def to_anthropic_input(self) -> dict[str, Any]:
         """Convert the message to Anthropic's expected input format."""
         content = []
@@ -107,7 +110,7 @@ class Message:
         for content in self.content:
             if isinstance(content, TextContent):
                 message_text += content.text + "\n\n"
-        return message_text
+        return message_text.strip()
 
     @classmethod
     def validate(cls, value: ValidatorFunctionWrapHandler, _info: dict | ValidationInfo | None = None) -> "Message":
@@ -122,10 +125,12 @@ class Message:
                 content = [content]
             content = [content_factory(item) for item in content]
             return cls(role=role, content=content)
-        return cls.validate({
-            "role": "user",
-            "content": value,
-        })
+        return cls.validate(
+            {
+                "role": "user",
+                "content": value,
+            }
+        )
 
     @classmethod
     def serialize(cls, value: Any, _info: dict | SerializationInfo | None = None) -> str:
@@ -155,8 +160,8 @@ class Message:
                 },
                 "content": {
                     "type": "array",
-                    "items": {}, # Keep it open/generic for now.
-                }
+                    "items": {},  # Keep it open/generic for now.
+                },
             },
         }
         return json_schema
