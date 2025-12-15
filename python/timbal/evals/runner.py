@@ -1,7 +1,7 @@
 import time
 import traceback
 
-from ..state import get_or_create_run_context, set_run_context
+from ..state import RunContext, set_run_context
 from .display import (
     OutputCapture,
     print_eval_result,
@@ -16,7 +16,7 @@ from .validators.context import ValidationContext
 
 async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
     """Run a single eval and return the result."""
-    run_context = get_or_create_run_context()
+    run_context = RunContext()  # type: ignore[call-arg]
     set_run_context(run_context)
 
     error: EvalError | None = None

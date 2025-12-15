@@ -6,13 +6,22 @@ from .base import BaseValidator
 from .contains import ContainsValidator
 from .ends_with import EndsWithValidator
 from .eq import EqValidator
+from .max_length import MaxLengthValidator
+from .min_length import MinLengthValidator
 from .pattern import PatternValidator
 from .starts_with import StartsWithValidator
 from .type import TypeValidator
 
 # Discriminated union of all validators
 Validator = Annotated[
-    EqValidator | ContainsValidator | PatternValidator | TypeValidator | StartsWithValidator | EndsWithValidator,
+    EqValidator
+    | ContainsValidator
+    | PatternValidator
+    | TypeValidator
+    | StartsWithValidator
+    | EndsWithValidator
+    | MinLengthValidator
+    | MaxLengthValidator,
     Discriminator("name"),
 ]
 
