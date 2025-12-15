@@ -24,7 +24,7 @@
         elapsed:
           lte!: 40000
         usage:
-          "claude-haiku-4-5-20251001:input_tokens":
+          input_tokens:
             lte!: 123456789
     - parallel!:
         - get_datetime:

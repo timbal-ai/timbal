@@ -24,6 +24,15 @@ def resolve_target(trace: Trace, target: str) -> tuple[Span | None, Any]:
         - "agent.validate_user.input.age" -> (Span, age_value)
         - "agent.llm.output" -> (Span, output_value)
         - "agent.search.input.query.text" -> (Span, nested text value)
+        - "agent.llm.usage.input_tokens" -> (Span, sum of input_tokens across all models)
+        - "agent.llm.usage.claude-haiku-4-5-20251001:input_tokens" -> (Span, specific model's input_tokens)
+
+    Smart usage resolution:
+        When accessing span.usage with a key like "input_tokens", the resolver will:
+        1. First try exact match in usage dict (e.g., if there's a "input_tokens" key)
+        2. If not found and there's only one model in usage, return that model's metric
+        3. If multiple models exist, sum the metric across all models
+        4. You can still use full keys like "claude-haiku-4-5-20251001:input_tokens" for specific models
 
     Args:
         trace: The trace to search in.
@@ -63,16 +72,27 @@ def resolve_target(trace: Trace, target: str) -> tuple[Span | None, Any]:
 
     # Resolve property path on the span
     value: Any = span
-    for part in prop_parts:
+    for idx, part in enumerate(prop_parts):
         if value is None:
             return span, None
 
         if isinstance(value, dict):
-            value = value.get(part)
+            # Check if this dict is a usage dict (previous part was "usage")
+            is_usage_dict = idx > 0 and prop_parts[idx - 1] == "usage"
+
+            # Smart usage resolution: handle model-prefixed keys
+            if part not in value and is_usage_dict:
+                resolved = _resolve_usage_key(value, part)
+                if resolved is not None:
+                    value = resolved
+                else:
+                    value = None
+            else:
+                value = value.get(part)
         elif isinstance(value, list):
             if part.isdigit():
-                idx = int(part)
-                value = value[idx] if idx < len(value) else None
+                list_idx = int(part)
+                value = value[list_idx] if list_idx < len(value) else None
             else:
                 value = None
         elif hasattr(value, part):
@@ -81,6 +101,61 @@ def resolve_target(trace: Trace, target: str) -> tuple[Span | None, Any]:
             value = None
 
     return span, value
+
+
+def _resolve_usage_key(usage: dict[str, int], key: str) -> int | None:
+    """Resolve a usage key smartly.
+
+    Examples:
+        usage = {"claude-haiku-4-5-20251001:input_tokens": 100, "claude-haiku-4-5-20251001:output_tokens": 50}
+        _resolve_usage_key(usage, "input_tokens") -> 100 (single model, returns its value)
+
+        usage = {"model1:input_tokens": 100, "model2:input_tokens": 200}
+        _resolve_usage_key(usage, "input_tokens") -> 300 (multiple models, returns sum)
+
+        usage = {"claude-haiku-4-5-20251001:input_tokens": 100, "claude-haiku-4-5-20241120:input_tokens": 50}
+        _resolve_usage_key(usage, "claude-haiku-4-5:input_tokens") -> 150 (partial model match, returns sum)
+
+    Args:
+        usage: The usage dictionary with model:metric keys
+        key: The metric key to resolve. Can be:
+             - Just metric: "input_tokens" (matches all models)
+             - Partial model: "claude-haiku-4-5:input_tokens" (matches all claude-haiku-4-5* models)
+             - Full model: "claude-haiku-4-5-20251001:input_tokens" (exact match)
+
+    Returns:
+        The resolved value, or None if not found
+    """
+    # If exact key exists, return it
+    if key in usage:
+        return usage[key]
+
+    # Check if the key contains a model prefix (model:metric or just metric)
+    if ":" in key:
+        # User specified a model prefix (e.g., "claude-haiku-4-5:input_tokens")
+        model_prefix, metric = key.split(":", 1)
+        matching_values = []
+        for usage_key, usage_value in usage.items():
+            if ":" in usage_key:
+                usage_model, usage_metric = usage_key.split(":", 1)
+                # Match if model starts with prefix and metric matches
+                if usage_model.startswith(model_prefix) and usage_metric == metric:
+                    matching_values.append(usage_value)
+    else:
+        # No model specified, just a metric (e.g., "input_tokens")
+        # Find all matching model:metric keys
+        matching_values = []
+        for usage_key, usage_value in usage.items():
+            if ":" in usage_key:
+                _, metric = usage_key.split(":", 1)
+                if metric == key:
+                    matching_values.append(usage_value)
+
+    # If we found matches, sum them
+    if matching_values:
+        return sum(matching_values)
+
+    return None
 
 
 def discover_config(path: Path) -> dict[str, Any]:
@@ -190,7 +265,9 @@ def parse_eval_file(path: Path, runnable: Runnable | None = None) -> list[Eval]:
                     runnable=runnable_fqn,
                     error=str(e),
                 )
-                raise ValueError(f"Failed to load runnable '{runnable_fqn}' for eval '{eval_dict.get('name')}': {e}")
+                raise ValueError(
+                    f"Failed to load runnable '{runnable_fqn}' for eval '{eval_dict.get('name')}': {e}"
+                ) from e
 
         if eval_runnable is None:
             raise ValueError(
