@@ -29,6 +29,8 @@
         output:
           type!: "string"
           pattern!: "^\\d{4}-\\d{2}-\\d{2}"
+          lte!: "2026-01-01"
+          gt!: "2025-12-15T00:45:12"
 
 # - name: "multi_tool_complex"
 #   description: "Complex eval with multiple tools and nested validation"

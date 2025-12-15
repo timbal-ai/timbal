@@ -6,6 +6,10 @@ from .base import BaseValidator
 from .contains import ContainsValidator
 from .ends_with import EndsWithValidator
 from .eq import EqValidator
+from .gt import GtValidator
+from .gte import GteValidator
+from .lt import LtValidator
+from .lte import LteValidator
 from .max_length import MaxLengthValidator
 from .min_length import MinLengthValidator
 from .not_null import NotNullValidator
@@ -23,7 +27,11 @@ Validator = Annotated[
     | EndsWithValidator
     | MinLengthValidator
     | MaxLengthValidator
-    | NotNullValidator,
+    | NotNullValidator
+    | LtValidator
+    | LteValidator
+    | GtValidator
+    | GteValidator,
     Discriminator("name"),
 ]
 
