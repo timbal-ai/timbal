@@ -20,6 +20,7 @@ from .not_contains import NotContainsValidator
 from .not_null import NotNullValidator
 from .pattern import PatternValidator
 from .semantic import SemanticValidator
+from .seq import SeqValidator
 from .starts_with import StartsWithValidator
 from .type import TypeValidator
 
@@ -43,7 +44,8 @@ Validator = Annotated[
     | SemanticValidator
     | LanguageValidator
     | JsonValidator
-    | EmailValidator,
+    | EmailValidator
+    | SeqValidator,
     Discriminator("name"),
 ]
 

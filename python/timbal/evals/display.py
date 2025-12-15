@@ -350,7 +350,8 @@ def _build_validator_tree(
 
     if root_flow:
         target, validator, steps = root_flow
-        branch = parent.add(f"[bold cyan]{validator}[/bold cyan]")
+        flow_line = _format_validator_status(target, validator, steps, results_map, "")
+        branch = parent.add(flow_line)
 
         # Track which validators we've handled
         handled = set()

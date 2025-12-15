@@ -68,7 +68,12 @@ class Eval(BaseModel):
                         else:
                             logger.warning("Invalid flow validator step", target=target, step=step)
                     # Add the flow validator first, then its nested validators
-                    validators.append((target, k, span_names))
+                    try:
+                        flow_validator = parse_validator({"name": k, "target": target, "value": span_names})
+                        validators.append(flow_validator)
+                    except Exception:
+                        logger.warning("Unknown flow validator", target=target, name=k)
+                        continue
                     validators.extend(nested_validators)
                 elif k.endswith("!"):
                     # Try to create validator instance, fallback to tuple
@@ -76,8 +81,7 @@ class Eval(BaseModel):
                         validator = parse_validator({"name": k, "target": target, "value": v})
                         validators.append(validator)
                     except Exception:
-                        # Unknown validator, keep as tuple
-                        validators.append((target, k, v))
+                        logger.warning("Unknown validator", target=target, name=k)
                 elif isinstance(v, dict):
                     nested = dfs(f"{target}.{k}", v)
                     validators.extend(nested)
