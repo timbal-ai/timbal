@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field
 
 
 class Span(BaseModel):
@@ -26,14 +26,23 @@ class Span(BaseModel):
         description="The start time of the runnable.",
     )
     t1: int | None = Field(
-        None, 
+        None,
         description="The end time of the runnable. Will be None if the runnable has not yet completed.",
     )
+
+    @computed_field
+    @property
+    def elapsed(self) -> int | None:
+        """The elapsed time in milliseconds (t1 - t0). None if span is not yet completed."""
+        if self.t1 is None:
+            return None
+        return self.t1 - self.t0
+
     input: Any = Field(
         None,
         description="The input of the runnable. Will be None if the runnable has not yet started or if there was an error gathering the input.",
     )
-    status: Any | None = Field( # Any to prevent circular import
+    status: Any | None = Field(  # Any to prevent circular import
         None,
         description="The status of the runnable.",
     )
@@ -81,7 +90,7 @@ class Span(BaseModel):
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
         """Override model_dump to use dumped versions of input and output during serialization."""
-        data = super().model_dump(**kwargs) # Pydantic ignores private attributes by default
+        data = super().model_dump(**kwargs)  # Pydantic ignores private attributes by default
         # Use dumped versions if available, otherwise fall back to originals
         if hasattr(self, "_input_dump"):
             data["input"] = self._input_dump

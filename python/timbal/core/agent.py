@@ -401,6 +401,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return
 
         # Try to get tracing data from parent execution
+        if not run_context.parent_id:
+            return
         parent_trace = await run_context._get_parent_trace()
         if parent_trace is None:
             logger.error(

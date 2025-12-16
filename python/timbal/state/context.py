@@ -99,17 +99,23 @@ class RunContext(BaseModel):
                 logger.warning(
                     "Platform configuration found but no subject. "
                     "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID environment variables to enable platform tracing.",
+                    event_name="tracing_setup",
                     run_id=self.id,
                 )
             else:
                 logger.info(
                     f"Platform configuration found (subject: {self.platform_config.subject}). "
                     "Using platform tracing provider.",
+                    event_name="tracing_setup",
                     run_id=self.id,
                 )
                 self._tracing_provider = PlatformTracingProvider
                 return
-        logger.info("Using in-memory tracing provider.", run_id=self.id)
+        logger.info(
+            "Using in-memory tracing provider.",
+            event_name="tracing_setup",
+            run_id=self.id,
+        )
         self._tracing_provider = InMemoryTracingProvider
 
     async def _get_parent_trace(self) -> Trace | None:

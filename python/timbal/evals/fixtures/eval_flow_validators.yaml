@@ -1,0 +1,96 @@
+# Test cases for seq! and parallel! validators
+
+# =============================================================================
+# TEST 1: Simple sequence - llm -> tool -> llm
+# =============================================================================
+- name: "simple_seq"
+  description: "Basic sequence: LLM calls a tool then responds"
+  runnable: "agent.py::agent"
+  tags: ["seq", "basic"]
+  timeout: 30000
+
+  params:
+    prompt: what time is it in Tokyo?
+
+  seq!:
+    - llm
+    - get_datetime
+    - llm
+
+  output:
+    type!: "string"
+    contains!: ":"
+
+# =============================================================================
+# TEST 2: Sequence with wildcards
+# =============================================================================
+- name: "seq_with_wildcards"
+  description: "Sequence with flexible matching using wildcards"
+  runnable: "agent.py::agent"
+  tags: ["seq", "wildcards"]
+  timeout: 30000
+
+  params:
+    prompt: what time is it in London?
+
+  # 1..1 = exactly 1 span, .. = exactly 1, ... = any number (0+)
+  seq!:
+    - 1..1 # exactly 1 span (llm)
+    - get_datetime # exact match
+    - .. # exactly 1 span (llm)
+
+# =============================================================================
+# TEST 3: Sequence with any! pattern
+# =============================================================================
+- name: "seq_with_any"
+  description: "Sequence using any! for flexible span counts"
+  runnable: "agent.py::agent"
+  tags: ["seq", "any"]
+  timeout: 30000
+
+  params:
+    prompt: what time is it in Paris?
+
+  seq!:
+    - any!:
+        min: 1
+        max: 2
+    - get_datetime
+    - any!:
+        min: 1
+        max: 3
+
+# =============================================================================
+# TEST 4: Wildcard range patterns
+# =============================================================================
+- name: "wildcard_ranges"
+  description: "Test various wildcard range syntaxes"
+  runnable: "agent.py::agent"
+  tags: ["seq", "wildcards", "ranges"]
+  timeout: 30000
+
+  params:
+    prompt: what time is it in Sydney?
+
+  seq!:
+    - 1..1 # exactly 1 (min=1, max=1)
+    - .. # exactly 1 (shortcut for 1..1)
+    - 0..2 # between 0 and 2
+
+# =============================================================================
+# TEST 5: Empty sequence (only LLM, no tools)
+# =============================================================================
+- name: "no_tools"
+  description: "Agent responds without calling any tools"
+  runnable: "agent.py::agent"
+  tags: ["seq", "no-tools"]
+  timeout: 30000
+
+  params:
+    prompt: "What is 2 + 2?"
+
+  seq!:
+    - llm
+
+  output:
+    contains!: "4"
