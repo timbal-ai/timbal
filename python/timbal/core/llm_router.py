@@ -45,7 +45,7 @@ from openai import (
 from pydantic import Field, SecretStr
 
 from ..errors import APIKeyNotFoundError
-from ..state import get_or_create_run_context
+from ..state import get_call_id, get_or_create_run_context
 from ..types.message import Message
 from ..utils import resolve_default
 from .runnable import Runnable
@@ -316,14 +316,17 @@ async def _llm_router(
 
     provider, model_name = model.split("/", 1)
 
+    run_context = get_or_create_run_context()
+    call_id = get_call_id()
+    default_headers = {
+        "x-run-id": run_context.id,
+        "x-call-id": call_id,
+    }
     if provider == "openai":
-        default_headers = {
-            "x-provider": "openai",
-        }
+        default_headers["x-provider"] = "openai"
         if not api_key:
             api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            run_context = get_or_create_run_context()
             if run_context.platform_config is not None and run_context.platform_config.subject is not None:
                 api_key = run_context.platform_config.auth.header_value
                 proxy_api = "openai-responses"
@@ -338,15 +341,12 @@ async def _llm_router(
             client = AsyncOpenAI(api_key=api_key, default_headers=default_headers)
 
     elif provider == "anthropic":
-        default_headers = {
-            "x-provider": "anthropic",
-        }
+        default_headers["x-provider"] = "anthropic"
         if not max_tokens:
             raise ValueError("'max_tokens' is required for claude models.")
         if not api_key:
             api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
-            run_context = get_or_create_run_context()
             if run_context.platform_config is not None and run_context.platform_config.subject is not None:
                 api_key = run_context.platform_config.auth.header_value
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/anthropic"
@@ -358,13 +358,10 @@ async def _llm_router(
             client = AsyncAnthropic(api_key=api_key, default_headers=default_headers)
 
     elif provider == "google":
-        default_headers = {
-            "x-provider": "google",
-        }
+        default_headers["x-provider"] = "google"
         if not api_key:
             api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            run_context = get_or_create_run_context()
             if run_context.platform_config is not None and run_context.platform_config.subject is not None:
                 api_key = run_context.platform_config.auth.header_value
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
@@ -380,13 +377,10 @@ async def _llm_router(
             )
 
     elif provider == "togetherai":
-        default_headers = {
-            "x-provider": "togetherai",
-        }
+        default_headers["x-provider"] = "togetherai"
         if not api_key:
             api_key = os.getenv("TOGETHER_API_KEY")
         if not api_key:
-            run_context = get_or_create_run_context()
             if run_context.platform_config is not None and run_context.platform_config.subject is not None:
                 api_key = run_context.platform_config.auth.header_value
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
@@ -400,13 +394,10 @@ async def _llm_router(
             )
 
     elif provider == "xai":
-        default_headers = {
-            "x-provider": "xai",
-        }
+        default_headers["x-provider"] = "xai"
         if not api_key:
             api_key = os.getenv("XAI_API_KEY")
         if not api_key:
-            run_context = get_or_create_run_context()
             if run_context.platform_config is not None and run_context.platform_config.subject is not None:
                 api_key = run_context.platform_config.auth.header_value
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"

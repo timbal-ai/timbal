@@ -340,6 +340,7 @@ class File(io.IOBase):
 
         self.seek(0)
         content = self.read()
+        self.seek(0)  # Return the pointer to the beginning of the file
 
         path = f"orgs/{org_id}/files"
         files = {"file": (quote(self.name), content, self.__content_type__)}

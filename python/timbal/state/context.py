@@ -90,26 +90,30 @@ class RunContext(BaseModel):
                         org_id=org_id,
                         project_id=project_id,
                     )
+                else:
+                    self.platform_config.subject = PlatformSubject(
+                        org_id=org_id,
+                    )
 
         self._trace = Trace()
         # TODO Enable custom tracing providers
         if self.platform_config:
-            if not self.platform_config.subject:
-                logger.warning(
-                    "Platform configuration found but no subject. "
-                    "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID environment variables to enable platform tracing.",
-                    event_name="tracing_setup",
-                    run_id=self.id,
-                )
-            else:
-                logger.info(
-                    f"Platform configuration found (subject: {self.platform_config.subject}). "
-                    "Using platform tracing provider.",
-                    event_name="tracing_setup",
-                    run_id=self.id,
-                )
-                self._tracing_provider = PlatformTracingProvider
-                return
+            if self.platform_config.subject:
+                if self.platform_config.subject.app_id or self.platform_config.subject.project_id:
+                    logger.info(
+                        f"Platform configuration found (subject: {self.platform_config.subject}). "
+                        "Using platform tracing provider.",
+                        event_name="tracing_setup",
+                        run_id=self.id,
+                    )
+                    self._tracing_provider = PlatformTracingProvider
+                    return
+            logger.warning(
+                "Platform configuration found but no valid subject. "
+                "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID or TIMBAL_PROJECT_ID environment variables to enable platform tracing.",
+                event_name="tracing_setup",
+                run_id=self.id,
+            )
         logger.info(
             "Using in-memory tracing provider.",
             event_name="tracing_setup",
