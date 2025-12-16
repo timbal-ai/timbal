@@ -69,29 +69,31 @@ from ..base import BaseCollector
 # Create type aliases for OpenAI events
 ChatCompletionEvent = ChatCompletionChunk
 ResponseEvent = (
-    ResponseCreatedEvent |
-    ResponseInProgressEvent |
-    ResponseOutputItemAddedEvent |
-    ResponseWebSearchCallInProgressEvent |
-    ResponseWebSearchCallSearchingEvent |
-    ResponseWebSearchCallCompletedEvent |
-    ResponseOutputItemDoneEvent |
-    ResponseContentPartAddedEvent |
-    ResponseOutputTextAnnotationAddedEvent |
-    ResponseTextDeltaEvent |
-    ResponseTextDoneEvent |
-    ResponseContentPartDoneEvent |
-    ResponseCompletedEvent
+    ResponseCreatedEvent
+    | ResponseInProgressEvent
+    | ResponseOutputItemAddedEvent
+    | ResponseWebSearchCallInProgressEvent
+    | ResponseWebSearchCallSearchingEvent
+    | ResponseWebSearchCallCompletedEvent
+    | ResponseOutputItemDoneEvent
+    | ResponseContentPartAddedEvent
+    | ResponseOutputTextAnnotationAddedEvent
+    | ResponseTextDeltaEvent
+    | ResponseTextDoneEvent
+    | ResponseContentPartDoneEvent
+    | ResponseCompletedEvent
 )
 
 logger = structlog.get_logger("timbal.collectors.impl.openai")
 
 
-# TODO Change to delta events
 @register_collector
 class ChatCompletionCollector(BaseCollector):
     """Collector for OpenAI chat completions streaming events."""
-    
+
+    # Content block ID for text content (chat completions only have one text block)
+    TEXT_BLOCK_ID = "text_0"
+
     def __init__(self, start: float, **kwargs: Any):
         super().__init__(**kwargs)
         self._start = start
@@ -100,12 +102,14 @@ class ChatCompletionCollector(BaseCollector):
         self._current_tool_call: dict[str, Any] | None = None
         self._first_token: float | None = None
         self._output_tokens: int = 0
-    
+        self._text_block_started: bool = False
+        self._content_blocks: set[str] = set()
+
     @classmethod
     @override
     def can_handle(cls, event: Any) -> bool:
         return isinstance(event, ChatCompletionEvent)
-    
+
     @override
     def process(self, event: ChatCompletionEvent) -> Any:
         """Processes OpenAI streaming events."""
@@ -123,7 +127,7 @@ class ChatCompletionCollector(BaseCollector):
         # Handle text content
         if event.choices[0].delta.content:
             return self._handle_text_content(event)
-    
+
     def _handle_usage(self, event: ChatCompletionEvent) -> None:
         """Handle usage statistics from OpenAI events."""
         run_context = get_run_context()
@@ -151,8 +155,8 @@ class ChatCompletionCollector(BaseCollector):
                 output_tokens -= output_audio_tokens
                 run_context.update_usage(f"{openai_model}:output_audio_tokens", output_audio_tokens)
         run_context.update_usage(f"{openai_model}:output_text_tokens", output_tokens)
-    
-    def _handle_tool_calls(self, event: ChatCompletionEvent) -> None:
+
+    def _handle_tool_calls(self, event: ChatCompletionEvent) -> TimbalToolUse | TimbalToolUseDelta | None:
         """Handle tool call events from OpenAI."""
         tool_call = event.choices[0].delta.tool_calls[0]
         # TODO Review this for parallel tool calls
@@ -162,9 +166,9 @@ class ChatCompletionCollector(BaseCollector):
                 "type": "tool_use",
                 "id": tool_call.id,
                 "name": tool_call.function.name,
-                "input": tool_call.function.arguments
+                "input": tool_call.function.arguments,
             }
-            
+
             # Check for extra_content (Google Gemini thought signature)
             extra_content = getattr(tool_call, "extra_content", None)
             if extra_content:
@@ -173,18 +177,41 @@ class ChatCompletionCollector(BaseCollector):
                     self._current_tool_call["thought_signature"] = google_extra.get("thought_signature")
 
             self._tool_calls.append(self._current_tool_call)
+            self._content_blocks.add(tool_call.id)
+            return TimbalToolUse(
+                id=tool_call.id,
+                name=tool_call.function.name,
+                input=tool_call.function.arguments,
+                is_server_tool_use=False,
+            )
         else:
             self._current_tool_call["input"] += tool_call.function.arguments
-    
-    def _handle_text_content(self, event: ChatCompletionEvent) -> str:
+            return TimbalToolUseDelta(
+                id=self._current_tool_call["id"],
+                input_delta=tool_call.function.arguments,
+            )
+
+    def _handle_text_content(self, event: ChatCompletionEvent) -> TimbalText | TimbalTextDelta:
         """Handle text content from OpenAI events."""
         text_chunk = event.choices[0].delta.content
         # Handle citations if present
         if hasattr(event, "citations"):
             self.citations = event.citations
         self._content += text_chunk
-        return text_chunk
-    
+
+        if not self._text_block_started:
+            self._text_block_started = True
+            self._content_blocks.add(self.TEXT_BLOCK_ID)
+            return TimbalText(
+                id=self.TEXT_BLOCK_ID,
+                text=text_chunk,
+            )
+        else:
+            return TimbalTextDelta(
+                id=self.TEXT_BLOCK_ID,
+                text_delta=text_chunk,
+            )
+
     @override
     def result(self) -> Message:
         """Returns structured OpenAI response."""
@@ -203,32 +230,22 @@ class ChatCompletionCollector(BaseCollector):
             for tool_call in self._tool_calls:
                 if tool_call.get("name") == "output_model_tool":
                     # Convert to text message instead of tool call
-                    return Message.validate({
-                        "role": "assistant",
-                        "content": [{
-                            "type": "text",
-                            "text": tool_call.get("input", "{}")
-                        }]
-                    })
-            # Openai allows the use of custom IDs for tool calls. 
+                    return Message.validate(
+                        {"role": "assistant", "content": [{"type": "text", "text": tool_call.get("input", "{}")}]}
+                    )
+            # Openai allows the use of custom IDs for tool calls.
             # We choose to generate our own random IDs for consistency and to make sure they don't collide
             # (they are not transparent with the algs being used)
-            tool_calls = [
-                {**tc, "id": uuid7(as_type="str").replace("-", "")}
-                for tc in self._tool_calls
-            ]
+            tool_calls = [{**tc, "id": uuid7(as_type="str").replace("-", "")} for tc in self._tool_calls]
             content.extend(tool_calls)
 
-        return Message.validate({
-            "role": "assistant",
-            "content": content
-        })
+        return Message.validate({"role": "assistant", "content": content})
 
 
 @register_collector
 class ResponseCollector(BaseCollector):
     """Collector for OpenAI responses streaming events."""
-    
+
     def __init__(self, start: float, **kwargs: Any):
         super().__init__(**kwargs)
         self._start = start
@@ -236,12 +253,12 @@ class ResponseCollector(BaseCollector):
         self._output_tokens: int = 0
         self.content_blocks: set[str] = set()
         self.content: dict[str, dict[str, Any]] = {}
-    
+
     @classmethod
     @override
     def can_handle(cls, event: Any) -> bool:
         return isinstance(event, ResponseEvent)
-    
+
     @override
     def process(self, event: ResponseEvent) -> Any:
         """Processes OpenAI responses streaming events."""
@@ -291,7 +308,7 @@ class ResponseCollector(BaseCollector):
     def _handle_created(self, event: ResponseCreatedEvent) -> None:
         """Handle created events from OpenAI."""
         self.model = event.response.model
-    
+
     def _handle_output_item_added(self, event: ResponseOutputItemAddedEvent) -> None:
         """Handle output item added events from OpenAI."""
         if isinstance(event.item, ResponseFunctionToolCall):
@@ -299,7 +316,7 @@ class ResponseCollector(BaseCollector):
                 "type": "tool_use",
                 "id": event.item.call_id,
                 "name": event.item.name,
-                "input": event.item.arguments, # openai sends an empty string here
+                "input": event.item.arguments,  # openai sends an empty string here
             }
             content_block_id = event.item.id
             self.content_blocks.add(content_block_id)
@@ -318,7 +335,7 @@ class ResponseCollector(BaseCollector):
             return TimbalToolUse(
                 id=content_block_id,
                 name="web_search",
-                input="", # openai gives the query param at the response
+                input="",  # openai gives the query param at the response
                 is_server_tool_use=True,
             )
         elif isinstance(event.item, ResponseReasoningItem):
@@ -326,11 +343,11 @@ class ResponseCollector(BaseCollector):
             self.content_blocks.add(content_block_id)
             return TimbalThinking(
                 id=content_block_id,
-                thinking="", # TODO Review this
+                thinking="",  # TODO Review this
             )
         else:
             logger.warning("Unhandled output item added event", response_output_item_added_event=event)
-    
+
     def _handle_content_part_added(self, event: ResponseContentPartAddedEvent) -> None:
         """Handle content part added events from OpenAI."""
         if isinstance(event.part, ResponseOutputText):
@@ -361,22 +378,24 @@ class ResponseCollector(BaseCollector):
     def _handle_output_text_annotation_added(self, event: ResponseOutputTextAnnotationAddedEvent) -> None:
         """Handle output text annotation added events from OpenAI."""
         self.content[event.item_id]["citations"].append(event.annotation)
-    
+
     def _handle_function_call_arguments_delta(self, event: ResponseFunctionCallArgumentsDeltaEvent) -> None:
         """Handle function call arguments delta events from OpenAI."""
         self.content[event.item_id]["input"] += event.delta
         content_block_id = event.item_id
-        assert content_block_id in self.content_blocks, "Function call arguments delta event without content block start event"
+        assert content_block_id in self.content_blocks, (
+            "Function call arguments delta event without content block start event"
+        )
         return TimbalToolUseDelta(
             id=content_block_id,
             input_delta=event.delta,
         )
-    
+
     def _handle_reasoning_summary_part_added(self, event: ResponseReasoningSummaryPartAddedEvent) -> None:
         """Handle reasoning summary part added events from OpenAI."""
         self.content[event.item_id] = {
             "type": "thinking",
-            "thinking": event.part.text, # Usually empty string from the beginning
+            "thinking": event.part.text,  # Usually empty string from the beginning
         }
         content_block_id = event.item_id
         self.content_blocks.add(content_block_id)
@@ -389,7 +408,9 @@ class ResponseCollector(BaseCollector):
         """Handle reasoning summary text delta events from OpenAI."""
         self.content[event.item_id]["thinking"] += event.delta
         content_block_id = event.item_id
-        assert content_block_id in self.content_blocks, "Reasoning summary text delta event without content block start event"
+        assert content_block_id in self.content_blocks, (
+            "Reasoning summary text delta event without content block start event"
+        )
         return TimbalThinkingDelta(
             id=content_block_id,
             thinking_delta=event.delta,
@@ -398,7 +419,9 @@ class ResponseCollector(BaseCollector):
     def _handle_output_item_done(self, event: ResponseOutputItemDoneEvent) -> None:
         """Handle output item done events from OpenAI."""
         if isinstance(event.item, ResponseFunctionWebSearch):
-            get_run_context().update_usage(f"{self.model}:web_search_requests", 1) # TODO Review. Do they only perform one query?
+            get_run_context().update_usage(
+                f"{self.model}:web_search_requests", 1
+            )  # TODO Review. Do they only perform one query?
             # TODO Grab the query and return the result
             content_block_id = event.item.id
             if content_block_id in self.content_blocks:
@@ -440,7 +463,7 @@ class ResponseCollector(BaseCollector):
                 output_tokens -= output_audio_tokens
                 run_context.update_usage(f"{self.model}:output_audio_tokens", output_audio_tokens)
         run_context.update_usage(f"{self.model}:output_text_tokens", output_tokens)
-    
+
     @override
     def result(self) -> Message:
         """Returns structured OpenAI response."""
@@ -451,16 +474,14 @@ class ResponseCollector(BaseCollector):
         span.metadata["tps"] = tps
 
         content = []
-        for content_block in self.content.values(): # Python dicts are ordered
+        for content_block in self.content.values():  # Python dicts are ordered
             if content_block["type"] == "tool_use":
                 # Convert to text message and early return instead of tool call
                 if content_block["name"] == "output_model_tool":
                     return Message(role="assistant", content=[TextContent(text=content_block.get("input", "{}"))])
-                content.append(ToolUseContent(
-                    id=content_block["id"],
-                    name=content_block["name"],
-                    input=content_block["input"]
-                ))
+                content.append(
+                    ToolUseContent(id=content_block["id"], name=content_block["name"], input=content_block["input"])
+                )
             elif content_block["type"] == "server_tool_use":
                 continue
             elif content_block["type"] == "server_tool_result":

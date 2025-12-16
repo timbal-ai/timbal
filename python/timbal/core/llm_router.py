@@ -8,6 +8,7 @@ evolve to match provider changes.
 
 Do not rely on this module's interface in external code.
 """
+
 import asyncio
 import os
 from typing import Any, Literal
@@ -51,7 +52,12 @@ from .runnable import Runnable
 
 logger = structlog.get_logger("timbal.core.llm_router")
 
-OPENAI_API = os.getenv("TIMBAL_OPENAI_API", "responses")
+TIMBAL_OPENAI_API = os.getenv("TIMBAL_OPENAI_API", "responses")
+if TIMBAL_OPENAI_API != "responses":
+    logger.warning(
+        "Using legacy Chat Completions API. OpenAI is transitioning to the new Responses API, "
+        "which should be preferred for all new development. Set TIMBAL_OPENAI_API=responses to switch."
+    )
 
 # Model type with provider prefixes
 Model = Literal[
@@ -121,7 +127,7 @@ Model = Literal[
 
 async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, context: str):
     """Helper to retry an async generator function on transient failures.
-    
+
     Retryable errors (using SDK exception types):
     - Empty streams (StopAsyncIteration)
     - Rate limiting (RateLimitError from OpenAI/Anthropic SDKs)
@@ -129,26 +135,26 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
     - Connection errors (APIConnectionError from OpenAI/Anthropic SDKs)
     - Server errors (APIStatusError with 500, 502, 503, 504 status codes)
     - Overloaded/capacity errors (APIError with "overload" or "capacity" in message)
-    
+
     Non-retryable errors (fail immediately):
     - Authentication errors (401, 403)
     - Invalid requests (400, 404)
     - Other 4xx client errors
-    
+
     Args:
         async_gen_func: Async callable that returns an async generator
         max_retries: Maximum number of retry attempts
         retry_delay: Base delay for exponential backoff
         context: Description for logging (e.g., "Anthropic API")
-    
+
     Yields:
         Items from the async generator
-        
+
     Raises:
         Exception: Original exception if not retryable or max retries exceeded
     """
     last_error = None
-    
+
     for attempt in range(max_retries + 1):
         try:
             async_gen = async_gen_func()
@@ -159,38 +165,38 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
             async for item in async_gen:
                 yield item
             return  # Successfully completed
-            
+
         except StopAsyncIteration as e:
             # Empty stream detected
             last_error = e
             error_type = "empty_stream"
             error_msg = "Empty stream"
-            
+
         except Exception as e:
             # Check if it's a retryable error
             last_error = e
             error_type = type(e).__name__
             error_msg = str(e)
-            
+
             # Determine if error is retryable based on SDK exception types
             is_retryable = False
-            
+
             # OpenAI SDK exceptions
             if isinstance(e, (OpenAIRateLimitError, AnthropicRateLimitError)):
                 is_retryable = True
                 error_type = "rate_limit"
-                
+
             elif isinstance(e, (OpenAIAPITimeoutError, AnthropicAPITimeoutError)):
                 is_retryable = True
                 error_type = "timeout"
-                
+
             elif isinstance(e, (OpenAIAPIConnectionError, AnthropicAPIConnectionError)):
                 is_retryable = True
                 error_type = "connection_error"
-                
+
             elif isinstance(e, (OpenAIAPIStatusError, AnthropicAPIStatusError)):
                 # Check status code for retryable HTTP errors
-                status_code = getattr(e, 'status_code', None)
+                status_code = getattr(e, "status_code", None)
                 if status_code in [500, 502, 503, 504]:
                     is_retryable = True
                     if status_code == 503:
@@ -198,20 +204,17 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
                     else:
                         error_type = f"server_error_{status_code}"
                 # Don't retry on 4xx errors (client errors like 400, 401, 403, 404)
-                
+
             # If not retryable, re-raise immediately
             if not is_retryable:
                 logger.error(
-                    "Non-retryable error from LLM provider",
-                    context=context,
-                    error_type=error_type,
-                    error=error_msg
+                    "Non-retryable error from LLM provider", context=context, error_type=error_type, error=error_msg
                 )
                 raise
-        
+
         # Retry logic for retryable errors
         if attempt < max_retries:
-            delay = retry_delay * (2 ** attempt)
+            delay = retry_delay * (2**attempt)
             logger.warning(
                 "Retryable error from LLM provider, retrying...",
                 context=context,
@@ -219,22 +222,18 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
                 error=error_msg,
                 attempt=attempt + 1,
                 max_retries=max_retries,
-                delay=delay
+                delay=delay,
             )
             await asyncio.sleep(delay)
         else:
             # Max retries exceeded
             logger.error(
-                "Max retries exceeded for LLM provider",
-                context=context,
-                error_type=error_type,
-                max_retries=max_retries
+                "Max retries exceeded for LLM provider", context=context, error_type=error_type, max_retries=max_retries
             )
             # Re-raise the last error
             raise last_error
 
 
-# TODO Add more parameters
 async def _llm_router(
     model: Model | str = Field(
         ...,
@@ -288,7 +287,7 @@ async def _llm_router(
             "For Anthropic models, this should be a dictionary with 'type' and 'ttl' keys."
         ),
     ),
-) -> Message: # type: ignore
+) -> Message:  # type: ignore
     """
     Internal LLM router function.
 
@@ -314,11 +313,13 @@ async def _llm_router(
 
     if "/" not in model:
         raise ValueError("Model must be in format 'provider/model_name'")
-    
+
     provider, model_name = model.split("/", 1)
-    
+
     if provider == "openai":
-        default_headers = {"x-provider": "openai",}
+        default_headers = {
+            "x-provider": "openai",
+        }
         if not api_key:
             api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -326,7 +327,7 @@ async def _llm_router(
             if run_context.platform_config is not None and run_context.platform_config.subject is not None:
                 api_key = run_context.platform_config.auth.header_value
                 proxy_api = "openai-responses"
-                if OPENAI_API != "responses":
+                if TIMBAL_OPENAI_API != "responses":
                     proxy_api = "openai-completions"
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/{proxy_api}/v1"
         if not api_key:
@@ -337,7 +338,9 @@ async def _llm_router(
             client = AsyncOpenAI(api_key=api_key, default_headers=default_headers)
 
     elif provider == "anthropic":
-        default_headers = {"x-provider": "anthropic",}
+        default_headers = {
+            "x-provider": "anthropic",
+        }
         if not max_tokens:
             raise ValueError("'max_tokens' is required for claude models.")
         if not api_key:
@@ -355,7 +358,9 @@ async def _llm_router(
             client = AsyncAnthropic(api_key=api_key, default_headers=default_headers)
 
     elif provider == "google":
-        default_headers = {"x-provider": "google",}
+        default_headers = {
+            "x-provider": "google",
+        }
         if not api_key:
             api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
@@ -368,10 +373,16 @@ async def _llm_router(
         if base_url is not None:
             client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
         else:
-            client = AsyncOpenAI(api_key=api_key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/", default_headers=default_headers)
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                default_headers=default_headers,
+            )
 
     elif provider == "togetherai":
-        default_headers = {"x-provider": "togetherai",}
+        default_headers = {
+            "x-provider": "togetherai",
+        }
         if not api_key:
             api_key = os.getenv("TOGETHER_API_KEY")
         if not api_key:
@@ -384,10 +395,14 @@ async def _llm_router(
         if base_url is not None:
             client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
         else:
-            client = AsyncOpenAI(api_key=api_key, base_url="https://api.together.xyz/v1/", default_headers=default_headers)
-    
+            client = AsyncOpenAI(
+                api_key=api_key, base_url="https://api.together.xyz/v1/", default_headers=default_headers
+            )
+
     elif provider == "xai":
-        default_headers = {"x-provider": "xai",}
+        default_headers = {
+            "x-provider": "xai",
+        }
         if not api_key:
             api_key = os.getenv("XAI_API_KEY")
         if not api_key:
@@ -404,7 +419,7 @@ async def _llm_router(
 
     else:
         raise ValueError(f"Unsupported provider: {provider}")
-    
+
     if provider == "anthropic":
         anthropic_messages = []
         for message in messages:
@@ -420,11 +435,7 @@ async def _llm_router(
 
         if system_prompt:
             if cache_control:
-                anthropic_kwargs["system"] = [{
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": cache_control
-                }]
+                anthropic_kwargs["system"] = [{"type": "text", "text": system_prompt, "cache_control": cache_control}]
             else:
                 anthropic_kwargs["system"] = system_prompt
 
@@ -444,16 +455,16 @@ async def _llm_router(
             res = await client.messages.create(**anthropic_kwargs)
             async for chunk in res:
                 yield chunk
-        
+
         async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, "Anthropic"):
             yield res_chunk
 
-    elif provider == "openai" and OPENAI_API == "responses":
+    elif provider == "openai" and TIMBAL_OPENAI_API == "responses":
         responses_kwargs = {
             "model": model_name,
             "stream": True,
             "store": False,
-            "include": ["web_search_call.action.sources"]
+            "include": ["web_search_call.action.sources"],
         }
 
         if system_prompt:
@@ -478,7 +489,7 @@ async def _llm_router(
             res = await client.responses.create(**responses_kwargs)
             async for chunk in res:
                 yield chunk
-        
+
         async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, "OpenAI Responses"):
             yield res_chunk
 
@@ -512,6 +523,8 @@ async def _llm_router(
             res = await client.chat.completions.create(**chat_completions_kwargs)
             async for chunk in res:
                 yield chunk
-        
-        async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, f"{provider} Chat Completions"):
+
+        async for res_chunk in _retry_on_error(
+            _create_stream, max_retries, retry_delay, f"{provider} Chat Completions"
+        ):
             yield res_chunk

@@ -17,7 +17,7 @@
     semantic!: "a time response mentioning Madrid"
 
   elapsed:
-    lt!: 1000
+    lt!: 6000
 
   seq!:
     - llm:

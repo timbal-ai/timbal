@@ -94,7 +94,6 @@ class RunContext(BaseModel):
         self._trace = Trace()
         # TODO Enable custom tracing providers
         if self.platform_config:
-            # TODO This logs should only appear once (at first execution)
             if not self.platform_config.subject:
                 logger.warning(
                     "Platform configuration found but no subject. "

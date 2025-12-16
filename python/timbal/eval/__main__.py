@@ -16,6 +16,9 @@ from .types.result import EvalTestSuiteResult
 from .utils import discover_files
 
 logger = structlog.get_logger("timbal.eval")
+logger.warning(
+    "The 'timbal.eval' module is deprecated and will be removed in a future version. Use 'timbal.evals' instead."
+)
 
 
 async def run_evals(files, agent, test_results, test_name=None):
@@ -23,14 +26,10 @@ async def run_evals(files, agent, test_results, test_name=None):
         await eval_file(file, agent, test_results, test_name=test_name)
     return await dump(test_results)
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Timbal evals.")
-    parser.add_argument(
-        "-v", 
-        "--version", 
-        action="store_true", 
-        help="Show version and exit."
-    )
+    parser.add_argument("-v", "--version", action="store_true", help="Show version and exit.")
     parser.add_argument(
         "--fqn",
         dest="fqn",
@@ -46,20 +45,22 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.version:
-        print(f"timbal.eval {__version__}") # noqa: T201
+        print(f"timbal.eval {__version__}")  # noqa: T201
         sys.exit(0)
 
     if not args.fqn:
-        print("No timbal app Fully Qualified Name (FQN) provided.") # noqa: T201
+        print("No timbal app Fully Qualified Name (FQN) provided.")  # noqa: T201
         sys.exit(1)
 
     fqn_parts = args.fqn.split("::")
     if len(fqn_parts) != 2:
-        print("Invalid timbal app Fully Qualified Name (FQN) format. Use 'path/to/file.py::object_name' or 'path/to/file.py'") # noqa: T201
+        print(
+            "Invalid timbal app Fully Qualified Name (FQN) format. Use 'path/to/file.py::object_name' or 'path/to/file.py'"
+        )  # noqa: T201
         sys.exit(1)
     import_path, import_target = fqn_parts
     import_spec = ImportSpec(
-        path=Path(import_path).expanduser().resolve(), 
+        path=Path(import_path).expanduser().resolve(),
         target=import_target,
     )
 
@@ -70,18 +71,18 @@ if __name__ == "__main__":
 
     tests_path = args.tests
     if not tests_path:
-        print("No tests path provided.") # noqa: T201
+        print("No tests path provided.")  # noqa: T201
         sys.exit(1)
-    
+
     if "::" in tests_path:
         tests_path, test_name = tests_path.split("::", 1)
     else:
         test_name = None
-    
+
     tests_path = Path(tests_path).expanduser().resolve()
 
     if not tests_path.exists():
-        print(f"Tests path {tests_path} does not exist.") # noqa: T201
+        print(f"Tests path {tests_path} does not exist.")  # noqa: T201
         sys.exit(1)
 
     logger.info("loading_dotenv", path=find_dotenv())
