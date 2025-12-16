@@ -52,6 +52,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "lancedb>=0.25.3",
     "pyngrok>=7.2.3",
     "pytest>=8.3.4",
     "pytest-asyncio>=0.25.2",
