@@ -69,3 +69,37 @@ The response will be in Catalan.
 - Automatic execution: Functions run on each conversation
 - Performance: Template resolution is fast and cached
 - Sync/Async: Handles both sync and async functions automatically
+
+
+## Dynamic Tools via ToolSets
+Timbal supports dynamic tool resolution through ToolSets.
+Instead of providing a static list of tools, you can define a ToolSet that determines which tools are available based on runtime conditions.
+
+Tool availability must be implemented in the `resolve()` method, which returns a list of `Runnable` tools.
+
+```python highlight={23}
+from timbal import Agent, Tool, ToolSet
+
+class RoleBasedToolSet(ToolSet):
+    """ToolSet that provides different tools based on user role."""    
+    role: str
+
+    async def resolve(self) -> list[Tool]:
+        """Dynamically resolve tools based on the user's role."""
+        
+        if self.role == "admin":
+            return [
+                Tool(handler=view_profile),
+                Tool(handler=delete_user),
+                Tool(handler=modify_permissions)
+            ]
+        else:
+            return [Tool(handler=view_profile)]
+
+
+admin_agent = Agent(
+    name="admin_agent",
+    model="openai/gpt-4o-mini",
+    tools=[RoleBasedToolSet(role="admin")]  # ToolSet resolved at runtime
+)
+```

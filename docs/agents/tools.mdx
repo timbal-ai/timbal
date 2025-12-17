@@ -121,65 +121,12 @@ travel_agent = Agent(
 )
 ```
 
-## ToolSets
-Timbal supports dynamic tool resolution through ToolSets.
-Instead of providing a static list of tools, you can define a ToolSet that determines which tools are available based on runtime conditions.
+## Dynamic Tools via ToolSets
 
-Tool availability must be implemented in the `resolve()` method, which returns a list of `Runnable` tools.
+Instead of providing a static list of tools, you can use a `ToolSet` to dynamically determine which tools are available based on runtime conditions. 
 
-```python highlight={23}
-from timbal import Agent, Tool, ToolSet
+Refer to [Dynamic Agents](/agents/dynamic#dynamic-tools-via-toolsets) for a more detailed explanation.
 
-class RoleBasedToolSet(ToolSet):
-    """ToolSet that provides different tools based on user role."""    
-    role: str
-
-    async def resolve(self) -> list[Tool]:
-        """Dynamically resolve tools based on the user's role."""
-        
-        if self.role == "admin":
-            return [
-                Tool(handler=view_profile),
-                Tool(handler=delete_user),
-                Tool(handler=modify_permissions)
-            ]
-        else:
-            return [Tool(handler=view_profile)]
-
-
-admin_agent = Agent(
-    name="admin_agent",
-    model="openai/gpt-4o-mini",
-    tools=[RoleBasedToolSet(role="admin")]  # ToolSet resolved at runtime
-)
-```
-
-## Commands
-Slash Commands are shortcuts to invoke tool calls directly.
-When a user message begins with `/` followed by a command name, the Agent runs the tool directly without relying on the LLM to interpret and call the tool.
-
-You can assign the command keyword to a tool via the `command` parameter.
-
-```python highlight={9,17-18}
-from timbal import Agent, Tool
-
-def get_weather(location: str) -> str:
-    """Get current weather for a location."""
-    # Logic implementation here
-
-weather_tool = Tool(
-    handler=get_weather,
-    command="weather"  # This enables /weather command
-)
-
-agent = Agent(
-    name="weather_agent",
-    model="openai/gpt-4o-mini",
-    tools=[weather_tool]
-)
-await agent(prompt="/weather Paris").collect()
-# "/weather Paris"  ->  get_weather(location="Paris")
-```
 
 
 ## Summary
