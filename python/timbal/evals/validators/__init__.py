@@ -3,6 +3,7 @@ from typing import Annotated
 from pydantic import Discriminator, TypeAdapter
 
 from .base import BaseValidator
+from .comparison import ComparisonValidator
 from .contains import ContainsValidator
 from .email import EmailValidator
 from .ends_with import EndsWithValidator
@@ -28,6 +29,7 @@ from .type import TypeValidator
 # Discriminated union of all validators
 Validator = Annotated[
     EqValidator
+    | ComparisonValidator
     | ContainsValidator
     | NotContainsValidator
     | PatternValidator
