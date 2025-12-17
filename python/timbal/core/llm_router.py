@@ -319,9 +319,17 @@ async def _llm_router(
     run_context = get_or_create_run_context()
     call_id = get_call_id()
     default_headers = {
-        "x-run-id": run_context.id,
-        "x-call-id": call_id,
+        "x-timbal-run-id": run_context.id,
+        "x-timbal-call-id": call_id,
     }
+    if run_context.platform_config and run_context.platform_config.subject:
+        if run_context.platform_config.subject.app_id:
+            default_headers["x-timbal-app-id"] = run_context.platform_config.subject.app_id
+        if run_context.platform_config.subject.version_id:
+            default_headers["x-timbal-version-id"] = run_context.platform_config.subject.version_id
+        if run_context.platform_config.subject.project_id:
+            default_headers["x-timbal-project-id"] = run_context.platform_config.subject.project_id
+
     if provider == "openai":
         default_headers["x-provider"] = "openai"
         if not api_key:
