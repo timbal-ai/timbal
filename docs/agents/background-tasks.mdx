@@ -1,0 +1,43 @@
+---
+title: "Background Tasks"
+description: "Execute long-running operations asynchronously"
+---
+
+Background tasks enable runnables to execute asynchronously, allowing your agent to continue working on other tasks while long-running operations complete in the background. 
+A unique task ID is assigned to each background task, which can be used to check status and retrieve results.
+
+
+## Configuring Background Mode
+The `background_mode` parameter controls when a runnable (tool) executes asynchronously. It has three values:
+- `"never"` (default)
+- `"always"`
+- `"auto"`: The LLM decides whether to run it in the background or not.
+
+
+```python
+from timbal import Tool
+
+long_running_tool = Tool(
+    handler=slow_operation,
+    background_mode="always"
+)
+```
+
+The built-in `Bash` tool is an example of a background task. When configured with `background_mode="auto"`, the Agent determines whether to run the shell command in the background or synchronously.
+
+```python
+from timbal import Agent
+from timbal.tools import Bash
+
+agent = Agent(
+    name="task_manager",
+    model="openai/gpt-4o-mini",
+    tools=[Bash("*")]
+)
+
+# Start a background task
+result = await agent(prompt="Install project dependencies in the background").collect()
+
+# Check status later
+status_result = await agent(prompt="What is the status of the task?").collect()
+```
