@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from .comparison import ComparisonValidator
+from .comparison_base import ComparisonValidator
 
 
 class GteValidator(ComparisonValidator):
