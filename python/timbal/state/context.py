@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from uuid_extensions import uuid7
 
 from .config import PlatformConfig, PlatformSubject
@@ -33,7 +33,7 @@ class RunContext(BaseModel):
     )
 
     id: str = Field(
-        default_factory=lambda: uuid7(as_type="str").replace("-", ""),
+        default_factory=lambda: uuid7(as_type="str").replace("-", ""),  # type: ignore
         description="Unique identifier for the run.",
     )
     parent_id: str | None = Field(
@@ -41,12 +41,22 @@ class RunContext(BaseModel):
         description="Whether this run is a direct child of another run.",
     )
 
-    # TODO We should also be able to deserialize from "platform_config"
     platform_config: PlatformConfig | None = Field(
         None,
         description="Platform configuration for the run.",
-        validation_alias="timbal_platform_config",  # Legacy
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_platform_config(cls, data: Any) -> Any:
+        """Normalize platform_config from legacy 'timbal_platform_config' key."""
+        if isinstance(data, dict):
+            # Only use legacy key if platform_config is not present
+            if "timbal_platform_config" in data and "platform_config" not in data:
+                data["platform_config"] = data.pop("timbal_platform_config")
+            elif "timbal_platform_config" in data:
+                del data["timbal_platform_config"]
+        return data
 
     _base_path: Path | None = PrivateAttr(default=None)
     _trace: Trace = PrivateAttr()
@@ -69,7 +79,7 @@ class RunContext(BaseModel):
                     auth = {"type": "bearer", "token": token}
                     self.platform_config = PlatformConfig(
                         host=host,
-                        auth=auth,
+                        auth=auth,  # type: ignore
                     )
 
         # We validate this afterwards. We might want to send a platform config from the platform, and rely on the subject to be set locally with the env
@@ -96,7 +106,6 @@ class RunContext(BaseModel):
                     )
 
         self._trace = Trace()
-        # TODO Enable custom tracing providers
         if self.platform_config:
             if self.platform_config.subject:
                 if self.platform_config.subject.app_id or self.platform_config.subject.project_id:
@@ -247,7 +256,7 @@ class RunContext(BaseModel):
                 raise ValueError(
                     f"Access denied: path '{path}' resolves to '{resolved_path}' "
                     f"which is outside the allowed base path '{base_path}'"
-                )
+                ) from None
 
             return resolved_path
         else:
