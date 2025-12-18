@@ -1,0 +1,581 @@
+---
+title: "Comparison Validators"
+description: "Validators for equality, containment, patterns, and numeric comparisons"
+---
+
+Comparison validators check values against expected content using various matching strategies.
+
+<Note>
+All string comparison validators support [transforms](/evals/validators#transforms) and [negation](/evals/validators#negation).
+</Note>
+
+## Equality
+
+### eq!
+
+Checks for exact equality between the actual and expected values.
+
+```yaml
+output:
+  eq!: "Hello, world!"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | any | The exact value to match |
+
+<Accordion title="Examples">
+```yaml
+# String equality
+output:
+  eq!: "Success"
+
+# Case-insensitive equality with transform
+output:
+  eq!:
+    value: "success"
+    transform: lowercase
+
+# Numeric equality
+get_calculate:
+  output:
+    eq!: 42
+
+# Boolean equality
+validate_input:
+  output:
+    eq!: true
+
+# In span input
+get_datetime:
+  input:
+    timezone:
+      eq!: "Europe/Madrid"
+```
+</Accordion>
+
+### ne!
+
+Checks that the actual value does NOT equal the expected value. This is the negated form of `eq!`.
+
+```yaml
+output:
+  ne!: "error"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | any | The value that must NOT match |
+
+<Accordion title="Examples">
+```yaml
+# Ensure response is not empty
+output:
+  ne!: ""
+
+# Case-insensitive not-equal
+output:
+  ne!:
+    value: "error"
+    transform: lowercase
+```
+</Accordion>
+
+## String Matching
+
+### contains!
+
+Checks if the actual value contains the expected substring or item.
+
+```yaml
+output:
+  contains!: "success"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | any | Substring or item to find |
+
+<Accordion title="Examples">
+```yaml
+# Substring check
+output:
+  contains!: "order confirmed"
+
+# Case-insensitive contains with transform
+output:
+  contains!:
+    value: "success"
+    transform: lowercase
+
+# Check output contains time format
+output:
+  contains!: ":"
+```
+</Accordion>
+
+### not_contains!
+
+Checks that the actual value does NOT contain the expected substring or item.
+
+```yaml
+output:
+  not_contains!: "error"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | any | Substring or item that must be absent |
+
+<Accordion title="Examples">
+```yaml
+# Ensure no error messages
+output:
+  not_contains!: "error"
+
+# Case-insensitive with transform
+output:
+  not_contains!:
+    value: "error"
+    transform: lowercase
+
+# Ensure no sensitive data in tool input
+log_message:
+  input:
+    message:
+      not_contains!: "password"
+```
+</Accordion>
+
+### contains_all!
+
+Checks if the actual value contains ALL of the expected substrings or items.
+
+```yaml
+output:
+  contains_all!: ["time", "date", "timezone"]
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | list | List of substrings/items that must ALL be present |
+
+<Accordion title="Examples">
+```yaml
+# Check all required fields mentioned
+output:
+  contains_all!: ["name", "email", "phone"]
+
+# Case-insensitive with transform
+output:
+  contains_all!:
+    value: ["madrid", "time"]
+    transform: lowercase
+```
+</Accordion>
+
+### not_contains_all!
+
+Checks that the actual value does NOT contain all of the specified items (at least one must be missing). This is the negated form of `contains_all!`.
+
+```yaml
+output:
+  not_contains_all!: ["Paris", "London", "Tokyo"]
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | list | List of items where at least one must be absent |
+
+<Accordion title="Examples">
+```yaml
+# Ensure not all competitor names are mentioned
+output:
+  not_contains_all!: ["CompetitorA", "CompetitorB", "CompetitorC"]
+
+# With transform
+output:
+  not_contains_all!:
+    value: ["error", "warning", "critical"]
+    transform: lowercase
+```
+</Accordion>
+
+### contains_any!
+
+Checks if the actual value contains AT LEAST ONE of the expected substrings or items.
+
+```yaml
+output:
+  contains_any!: ["success", "completed", "done"]
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | list | List of substrings/items where at least one must be present |
+
+<Accordion title="Examples">
+```yaml
+# Check for any success indicator
+output:
+  contains_any!: ["success", "ok", "completed"]
+
+# Case-insensitive with transform
+output:
+  contains_any!:
+    value: ["yes", "confirmed", "approved"]
+    transform: lowercase
+```
+</Accordion>
+
+### not_contains_any!
+
+Checks that the actual value contains NONE of the specified items. This is the negated form of `contains_any!`.
+
+```yaml
+output:
+  not_contains_any!: ["error", "failed", "exception"]
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | list | List of items that must ALL be absent |
+
+<Accordion title="Examples">
+```yaml
+# Ensure no error-related words
+output:
+  not_contains_any!: ["error", "failed", "exception", "invalid"]
+
+# With transform
+output:
+  not_contains_any!:
+    value: ["ERROR", "FAILED"]
+    transform: uppercase
+```
+</Accordion>
+
+### pattern!
+
+Checks if the actual value matches a regular expression pattern.
+
+```yaml
+output:
+  pattern!: "Order #\\d{6}"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Regular expression pattern |
+
+<Accordion title="Examples">
+```yaml
+# Match time format
+output:
+  pattern!: "\\d{1,2}:\\d{2}"
+
+# Match ISO date format
+get_datetime:
+  output:
+    pattern!: "^\\d{4}-\\d{2}-\\d{2}"
+
+# Match price format
+output:
+  pattern!: "\\$\\d+\\.\\d{2}"
+```
+</Accordion>
+
+<Note>
+Regular expressions use Python's `re` module syntax. Remember to escape special characters in YAML (use `\\d` instead of `\d`).
+</Note>
+
+### not_pattern!
+
+Checks that the actual value does NOT match the regular expression pattern. This is the negated form of `pattern!`.
+
+```yaml
+output:
+  not_pattern!: "^Error:"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Regular expression pattern that must NOT match |
+
+<Accordion title="Examples">
+```yaml
+# Ensure no error prefix
+output:
+  not_pattern!: "^Error:"
+
+# Ensure no failed status
+output:
+  not_pattern!: "\\bfailed\\b"
+
+# Case-insensitive with transform
+output:
+  not_pattern!:
+    value: "^error"
+    transform: lowercase
+```
+</Accordion>
+
+### starts_with!
+
+Checks if the actual value starts with the expected prefix.
+
+```yaml
+output:
+  starts_with!: "Hello"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Expected prefix |
+
+<Accordion title="Examples">
+```yaml
+# Check timezone prefix
+get_datetime:
+  input:
+    timezone:
+      starts_with!: "Europe/"
+
+# Check response starts correctly
+output:
+  starts_with!: "The current time"
+
+# Case-insensitive with transform
+output:
+  starts_with!:
+    value: "the current"
+    transform: lowercase
+```
+</Accordion>
+
+### not_starts_with!
+
+Checks that the actual value does NOT start with the expected prefix. This is the negated form of `starts_with!`.
+
+```yaml
+output:
+  not_starts_with!: "Error"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Prefix that must NOT be present |
+
+<Accordion title="Examples">
+```yaml
+# Ensure no error prefix
+output:
+  not_starts_with!: "Error:"
+
+# Ensure no apology
+output:
+  not_starts_with!: "Sorry"
+
+# Case-insensitive with transform
+output:
+  not_starts_with!:
+    value: "error"
+    transform: lowercase
+```
+</Accordion>
+
+### ends_with!
+
+Checks if the actual value ends with the expected suffix.
+
+```yaml
+output:
+  ends_with!: "."
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Expected suffix |
+
+<Accordion title="Examples">
+```yaml
+# Check timezone suffix
+get_datetime:
+  input:
+    timezone:
+      ends_with!: "rid"  # Matches "Madrid"
+
+# Check file extension
+extract_file:
+  output:
+    filename:
+      ends_with!: ".pdf"
+
+# Case-insensitive with transform
+output:
+  ends_with!:
+    value: "completed."
+    transform: lowercase
+```
+</Accordion>
+
+### not_ends_with!
+
+Checks that the actual value does NOT end with the expected suffix. This is the negated form of `ends_with!`.
+
+```yaml
+output:
+  not_ends_with!: "error"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Suffix that must NOT be present |
+
+<Accordion title="Examples">
+```yaml
+# Ensure no error suffix
+output:
+  not_ends_with!: "failed"
+
+# Case-insensitive with transform
+output:
+  not_ends_with!:
+    value: "error"
+    transform: lowercase
+```
+</Accordion>
+
+## Numeric Comparisons
+
+Numeric validators support integers, floats, and date strings.
+
+### lt!
+
+Checks if the actual value is less than the expected value.
+
+```yaml
+elapsed:
+  lt!: 5000
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | number or date string | Upper bound (exclusive) |
+
+### lte!
+
+Checks if the actual value is less than or equal to the expected value.
+
+```yaml
+llm:
+  usage:
+    input_tokens:
+      lte!: 500
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | number or date string | Upper bound (inclusive) |
+
+### gt!
+
+Checks if the actual value is greater than the expected value.
+
+```yaml
+get_datetime:
+  output:
+    gt!: "2025-12-15T00:45:12"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | number or date string | Lower bound (exclusive) |
+
+### gte!
+
+Checks if the actual value is greater than or equal to the expected value.
+
+```yaml
+search_results:
+  output:
+    count:
+      gte!: 1
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | number or date string | Lower bound (inclusive) |
+
+<Accordion title="Numeric comparison examples">
+```yaml
+# Execution time limits
+elapsed:
+  lt!: 6000
+
+# Token usage limits
+llm:
+  usage:
+    input_tokens:
+      lte!: 500
+    output_tokens:
+      lte!: 1000
+
+# Per-span timing
+get_datetime:
+  elapsed:
+    lt!: 1000
+    gte!: 10
+
+# Date comparison
+get_datetime:
+  output:
+    gt!: "2025-12-15T00:45:12"
+    lte!: "2026-01-01"
+```
+</Accordion>
+
+## Combining Comparison Validators
+
+Combine validators for comprehensive checks:
+
+```yaml
+output:
+  not_null!: true
+  type!: "string"
+  min_length!: 50
+  contains!: "order"
+  not_contains!: "error"
+  pattern!: "#\\d{6}"
+  ends_with!: "."
+```
+
+### Range Checks
+
+```yaml
+elapsed:
+  gte!: 100
+  lt!: 5000
+
+llm:
+  usage:
+    input_tokens:
+      gt!: 0
+      lte!: 500
+```
+
+### Span Input/Output Validation
+
+```yaml
+get_datetime:
+  input:
+    timezone:
+      eq!: "Europe/Madrid"
+      starts_with!: "Europe/"
+      ends_with!: "rid"
+  output:
+    type!: "string"
+    pattern!: "^\\d{4}-\\d{2}-\\d{2}"
+    gt!: "2025-01-01"
+    lte!: "2026-01-01"
+```

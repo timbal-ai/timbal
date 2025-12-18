@@ -24,7 +24,10 @@ TYPE_MAP = {
 
 
 class TypeValidator(BaseValidator):
-    """Type validator - checks if value is of the expected type."""
+    """Type validator - checks if value is of the expected type.
+
+    With negate=True, checks that value is NOT of the expected type.
+    """
 
     name: Literal["type!"] = "type!"  # type: ignore
 
@@ -32,7 +35,7 @@ class TypeValidator(BaseValidator):
         """Check if resolved value is of the expected type.
 
         Raises:
-            AssertionError: If value is not of the expected type.
+            AssertionError: If value is not of the expected type (or is when negated).
         """
         from ..utils import resolve_target
 
@@ -51,6 +54,12 @@ class TypeValidator(BaseValidator):
             raise AssertionError(f"unknown type {self.value!r}, valid types: {', '.join(TYPE_MAP.keys())}")
 
         expected_type = TYPE_MAP[expected_type_name]
-        if not isinstance(actual_value, expected_type):
-            actual_type_name = type(actual_value).__name__
-            raise AssertionError(f"expected type {self.value!r}, got {actual_type_name!r}")
+        is_expected_type = isinstance(actual_value, expected_type)
+        actual_type_name = type(actual_value).__name__
+
+        if self.negate:
+            if is_expected_type:
+                raise AssertionError(f"expected type to not be {self.value!r}, got {actual_type_name!r}")
+        else:
+            if not is_expected_type:
+                raise AssertionError(f"expected type {self.value!r}, got {actual_type_name!r}")

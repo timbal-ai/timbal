@@ -6,7 +6,10 @@ from .context import ValidationContext
 
 
 class EqValidator(BaseValidator):
-    """Equality validator - checks if value equals expected."""
+    """Equality validator - checks if value equals expected.
+
+    With negate=True, checks that value does NOT equal expected.
+    """
 
     name: Literal["eq!"] = "eq!"  # type: ignore
 
@@ -14,7 +17,7 @@ class EqValidator(BaseValidator):
         """Check if resolved value equals expected.
 
         Raises:
-            AssertionError: If values don't match.
+            AssertionError: If values don't match (or match when negated).
         """
         from ..utils import resolve_target
 
@@ -25,7 +28,14 @@ class EqValidator(BaseValidator):
         if isinstance(actual_value, Message):
             actual_value = actual_value.collect_text()
         if isinstance(actual_value, str):
-            ref_value = str(self.value)
+            actual_value = self.apply_transform(actual_value)
+            ref_value = self.apply_transform(str(self.value))
 
-        if ref_value != actual_value:
-            raise AssertionError(f"expected {ref_value!r}, got {actual_value!r}")
+        equals = ref_value == actual_value
+
+        if self.negate:
+            if equals:
+                raise AssertionError(f"expected value to not equal {ref_value!r}, got {actual_value!r}")
+        else:
+            if not equals:
+                raise AssertionError(f"expected {ref_value!r}, got {actual_value!r}")

@@ -279,17 +279,34 @@ def _format_validator_value(value: Any) -> str:
         return str(value)
 
 
-def _normalize_validator(v: Any) -> tuple[str, str, Any]:
-    """Normalize a validator to (target, name, value) tuple."""
+def _normalize_validator(v: Any) -> tuple[str, str, Any, bool, list[str]]:
+    """Normalize a validator to (target, name, value, negate, transform) tuple."""
     if isinstance(v, tuple):
+        # Legacy tuple format - assume no negate/transform
+        if len(v) == 3:
+            return (*v, False, [])
         return v
     elif isinstance(v, BaseValidator):
-        return (v.target or "", v.name, v.value)
+        return (v.target or "", v.name, v.value, v.negate, v.transform)
     else:
-        return ("", "unknown!", v)
+        return ("", "unknown!", v, False, [])
 
 
 FLOW_VALIDATORS_SET = {"seq!", "parallel!", "any!"}
+
+# Mapping from base validator to negated display name
+NEGATED_VALIDATOR_NAMES: dict[str, str] = {
+    "eq!": "ne!",
+    "contains!": "not_contains!",
+    "contains_all!": "not_contains_all!",
+    "contains_any!": "not_contains_any!",
+    "starts_with!": "not_starts_with!",
+    "ends_with!": "not_ends_with!",
+    "pattern!": "not_pattern!",
+    "type!": "not_type!",
+    "semantic!": "not_semantic!",
+    "language!": "not_language!",
+}
 
 
 def _format_validator_status(
@@ -298,6 +315,8 @@ def _format_validator_status(
     value: Any,
     results_map: dict[tuple[str, str], ValidatorResult] | None,
     rel_path: str = "",
+    negate: bool = False,
+    transform: list[str] | None = None,
 ) -> str:
     """Format a validator line with pass/fail status indicator."""
     # Look up result if available
@@ -316,18 +335,27 @@ def _format_validator_status(
     is_flow = validator in FLOW_VALIDATORS_SET
     color = "bold cyan" if is_flow else "green"
 
+    # Get display name - use negated name if negate=True
+    display_name = NEGATED_VALIDATOR_NAMES.get(validator, validator) if negate else validator
+
+    # Format transform suffix
+    transform_suffix = ""
+    if transform:
+        transform_str = " → ".join(transform)
+        transform_suffix = f" [magenta]⤳ {transform_str}[/magenta]"
+
     # Don't show value for flow validators (too verbose)
     if is_flow:
         if rel_path:
-            return f"{status} [dim]{rel_path}.[/dim][{color}]{validator}[/{color}]"
+            return f"{status} [dim]{rel_path}.[/dim][{color}]{display_name}[/{color}]{transform_suffix}"
         else:
-            return f"{status} [{color}]{validator}[/{color}]"
+            return f"{status} [{color}]{display_name}[/{color}]{transform_suffix}"
     else:
         formatted_val = _format_validator_value(value)
         if rel_path:
-            return f"{status} [dim]{rel_path}.[/dim][{color}]{validator}[/{color}] [dim]({formatted_val})[/dim]"
+            return f"{status} [dim]{rel_path}.[/dim][{color}]{display_name}[/{color}] [dim]({formatted_val})[/dim]{transform_suffix}"
         else:
-            return f"{status} [{color}]{validator}[/{color}] [dim]({formatted_val})[/dim]"
+            return f"{status} [{color}]{display_name}[/{color}] [dim]({formatted_val})[/dim]{transform_suffix}"
 
 
 def _build_validator_tree(
@@ -352,18 +380,18 @@ def _build_validator_tree(
             return True
         return target == path or target.startswith(path + ".")
 
-    subtree = [(t, v, val) for t, v, val in normalized if belongs_to_path(t, base_path)]
+    subtree = [(t, v, val, neg, trans) for t, v, val, neg, trans in normalized if belongs_to_path(t, base_path)]
 
     # Find the root flow validator for this level (matching base_path exactly)
     root_flow = None
-    for target, validator, value in subtree:
+    for target, validator, value, neg, trans in subtree:
         if target == base_path and validator in ("seq!", "parallel!", "any!"):
-            root_flow = (target, validator, value)
+            root_flow = (target, validator, value, neg, trans)
             break
 
     if root_flow:
-        target, validator, steps = root_flow
-        flow_line = _format_validator_status(target, validator, steps, results_map, "")
+        target, validator, steps, neg, trans = root_flow
+        flow_line = _format_validator_status(target, validator, steps, results_map, "", neg, trans)
         branch = parent.add(flow_line)
 
         # Track which validators we've handled
@@ -416,13 +444,15 @@ def _build_validator_tree(
                                 # Add validators for this nested step
                                 nested_step_path = f"{base_path}.{nested_step_name}"
                                 nested_step_subtree = [
-                                    (t, v, val) for t, v, val in subtree if belongs_to_path(t, nested_step_path)
+                                    (t, v, val, neg, trans)
+                                    for t, v, val, neg, trans in subtree
+                                    if belongs_to_path(t, nested_step_path)
                                 ]
 
                                 # Check if this nested step has a flow validator
                                 has_flow = any(
                                     t == nested_step_path and v in ("seq!", "parallel!", "any!")
-                                    for t, v, val in nested_step_subtree
+                                    for t, v, val, neg, trans in nested_step_subtree
                                 )
 
                                 if has_flow:
@@ -430,14 +460,16 @@ def _build_validator_tree(
                                     count += _build_validator_tree(
                                         nested_step_branch, validators, nested_step_path, results_map
                                     )
-                                    for t, v, val in nested_step_subtree:
+                                    for t, v, val, neg, trans in nested_step_subtree:
                                         handled.add((t, v))
                                 else:
                                     # Add non-flow validators only
-                                    for t, v, val in nested_step_subtree:
+                                    for t, v, val, neg, trans in nested_step_subtree:
                                         if t != nested_step_path and v not in ("seq!", "parallel!", "any!"):
                                             prop_path = t[len(nested_step_path) :].lstrip(".")
-                                            line = _format_validator_status(t, v, val, results_map, prop_path)
+                                            line = _format_validator_status(
+                                                t, v, val, results_map, prop_path, neg, trans
+                                            )
                                             nested_step_branch.add(line)
                                             handled.add((t, v))
                                             count += 1
@@ -456,35 +488,37 @@ def _build_validator_tree(
             # Only show nested validators if this step was defined with nested spec
             if has_nested_spec:
                 # Get validators that belong to this step only
-                step_subtree = [(t, v, val) for t, v, val in subtree if belongs_to_path(t, step_path)]
+                step_subtree = [
+                    (t, v, val, neg, trans) for t, v, val, neg, trans in subtree if belongs_to_path(t, step_path)
+                ]
 
                 # Check if this step has a nested flow validator
                 nested_flow = None
-                for t, v, val in step_subtree:
+                for t, v, val, neg, trans in step_subtree:
                     if t == step_path and v in ("seq!", "parallel!", "any!"):
-                        nested_flow = (t, v, val)
+                        nested_flow = (t, v, val, neg, trans)
                         break
 
                 if nested_flow:
                     # Recursively build subtree for nested flow
                     count += _build_validator_tree(step_branch, validators, step_path, results_map)
-                    for t, v, val in step_subtree:
+                    for t, v, val, neg, trans in step_subtree:
                         handled.add((t, v))
                 else:
                     # Add value validators for this step
-                    for t, v, val in step_subtree:
+                    for t, v, val, neg, trans in step_subtree:
                         if v in ("seq!", "parallel!", "any!"):
                             continue
                         if t == step_path:
                             continue  # Skip the step itself
                         prop_path = t[len(step_path) :].lstrip(".")
-                        line = _format_validator_status(t, v, val, results_map, prop_path)
+                        line = _format_validator_status(t, v, val, results_map, prop_path, neg, trans)
                         step_branch.add(line)
                         handled.add((t, v))
                         count += 1
 
         # Add validators at base level that aren't under any step
-        for t, v, val in subtree:
+        for t, v, val, neg, trans in subtree:
             if (t, v) in handled:
                 continue
             if v in ("seq!", "parallel!", "any!"):
@@ -495,19 +529,19 @@ def _build_validator_tree(
             rel_path = t[len(base_path) :].lstrip(".")
             first_segment = rel_path.split(".")[0] if "." in rel_path else rel_path
             if first_segment not in step_names:
-                line = _format_validator_status(t, v, val, results_map, rel_path)
+                line = _format_validator_status(t, v, val, results_map, rel_path, neg, trans)
                 parent.add(line)
                 count += 1
 
     else:
         # No flow validator at this level, just add value validators
-        for target, validator, value in subtree:
+        for target, validator, value, neg, trans in subtree:
             if validator in ("seq!", "parallel!", "any!"):
                 continue
             if target == base_path:
                 continue
             rel_path = target[len(base_path) :].lstrip(".") if base_path else target
-            line = _format_validator_status(target, validator, value, results_map, rel_path)
+            line = _format_validator_status(target, validator, value, results_map, rel_path, neg, trans)
             parent.add(line)
             count += 1
 

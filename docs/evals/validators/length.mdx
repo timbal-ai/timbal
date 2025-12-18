@@ -1,0 +1,186 @@
+---
+title: "Length Validators"
+description: "Validators for checking length constraints on strings, lists, and collections"
+---
+
+Length validators check the size of strings, lists, and other collections.
+
+## length!
+
+Checks that the value has exactly the specified length.
+
+```yaml
+generate_code:
+  output:
+    length!: 6
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | integer | Exact required length |
+
+<Accordion title="Examples">
+```yaml
+# Exact code length
+generate_pin:
+  output:
+    length!: 4
+
+# Fixed-length ID
+create_id:
+  output:
+    length!: 36  # UUID length
+
+# Specific list size
+get_top_results:
+  output:
+    length!: 5
+```
+</Accordion>
+
+## min_length!
+
+Checks that the value has at least the specified length.
+
+```yaml
+output:
+  min_length!: 10
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | integer | Minimum required length |
+
+<Accordion title="Examples">
+```yaml
+# Ensure substantive response
+output:
+  min_length!: 50
+
+# Require at least one result
+search_products:
+  output:
+    min_length!: 1
+
+# Validate input length
+validate_password:
+  input:
+    password:
+      min_length!: 8
+```
+</Accordion>
+
+## max_length!
+
+Checks that the value has at most the specified length.
+
+```yaml
+output:
+  max_length!: 1000
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | integer | Maximum allowed length |
+
+<Accordion title="Examples">
+```yaml
+# Limit response length
+output:
+  max_length!: 500
+
+# Limit results returned
+search_products:
+  output:
+    max_length!: 10
+
+# Username length limit
+validate_username:
+  input:
+    username:
+      max_length!: 32
+```
+</Accordion>
+
+## Combining Length Validators
+
+### Length Range
+
+```yaml
+output:
+  min_length!: 50
+  max_length!: 500
+```
+
+### With Other Validators
+
+```yaml
+output:
+  not_null!: true
+  type!: "string"
+  min_length!: 10
+  max_length!: 1000
+  contains!: "result"
+```
+
+## Common Patterns
+
+### Response Quality Checks
+
+```yaml
+output:
+  not_null!: true
+  type!: "string"
+  min_length!: 20   # Not too short
+  max_length!: 2000 # Not too long
+```
+
+### Array Size Validation
+
+```yaml
+search_products:
+  output:
+    type!: "array"
+    min_length!: 1
+    max_length!: 50
+
+recommend:
+  output:
+    length!: 3  # Exactly 3 recommendations
+```
+
+### Code Generation
+
+```yaml
+generate_pin:
+  output:
+    type!: "string"
+    length!: 4
+    pattern!: "\\d{4}"
+
+generate_code:
+  output:
+    type!: "string"
+    length!: 6
+    pattern!: "[A-Z0-9]{6}"
+```
+
+## Notes on Length Calculation
+
+- **Strings**: Length is the number of characters
+- **Arrays**: Length is the number of items
+- **Objects**: Length is the number of keys
+
+```yaml
+# String length (characters)
+output:  # "Hello" has length 5
+  length!: 5
+
+# Array length (items)
+items:  # [1, 2, 3] has length 3
+  length!: 3
+
+# Object length (keys)
+config:  # {"a": 1, "b": 2} has length 2
+  length!: 2
+```

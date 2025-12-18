@@ -1,0 +1,241 @@
+---
+title: "Overview"
+description: "Complete reference for all Timbal eval validators"
+---
+
+Validators are the core of Timbal's eval system. They check specific properties of your agent's execution and determine whether an eval passes or fails.
+
+## Validator Syntax
+
+All validators use the `name!` suffix convention:
+
+```yaml
+output:
+  type!: "string"
+  contains!: "hello"
+  min_length!: 10
+```
+
+The `!` suffix distinguishes validators from regular YAML keys.
+
+## Transforms
+
+Transforms allow you to normalize values before validation. This is useful for case-insensitive matching or handling whitespace.
+
+```yaml
+output:
+  contains!:
+    value: "success"
+    transform: lowercase
+```
+
+### Available Transforms
+
+| Transform | Description | Example |
+|-----------|-------------|---------|
+| `lowercase` | Convert to lowercase | `"Hello" → "hello"` |
+| `uppercase` | Convert to uppercase | `"Hello" → "HELLO"` |
+| `trim` | Remove leading/trailing whitespace | `"  hi  " → "hi"` |
+| `collapse_whitespace` | Replace multiple spaces with single | `"a    b" → "a b"` |
+
+### Chaining Transforms
+
+Apply multiple transforms in order:
+
+```yaml
+output:
+  contains!:
+    value: "hello world"
+    transform: [trim, lowercase, collapse_whitespace]
+```
+
+Transforms are applied left-to-right: first `trim`, then `lowercase`, then `collapse_whitespace`.
+
+## Negation
+
+Most validators support negation using the `not_` prefix or the `negate` field.
+
+### Using Aliases
+
+```yaml
+output:
+  not_contains!: "error"
+  not_starts_with!: "Error:"
+  ne!: "failed"
+```
+
+### Using the negate Field
+
+```yaml
+output:
+  contains!:
+    value: "error"
+    negate: true
+```
+
+### Combining Negation with Transforms
+
+```yaml
+output:
+  not_contains!:
+    value: "ERROR"
+    transform: uppercase
+```
+
+## Validator Categories
+
+<CardGroup cols={2}>
+  <Card title="Comparison" icon="equals" href="/evals/validators/comparison">
+    String matching, patterns, and equality checks
+  </Card>
+  <Card title="Type" icon="code" href="/evals/validators/type">
+    Type checking, JSON, and format validation
+  </Card>
+  <Card title="Length" icon="ruler" href="/evals/validators/length">
+    Length constraints and bounds
+  </Card>
+  <Card title="LLM" icon="brain" href="/evals/validators/llm">
+    AI-powered semantic validation
+  </Card>
+  <Card title="Flow" icon="diagram-project" href="/evals/validators/flow">
+    Execution sequence and parallelism
+  </Card>
+</CardGroup>
+
+## Quick Reference
+
+| Validator | Category | Description | Example |
+|-----------|----------|-------------|---------|
+| `eq!` | Comparison | Exact equality | `eq!: "hello"` |
+| `ne!` | Comparison | Not equal | `ne!: "error"` |
+| `contains!` | Comparison | Substring/item check | `contains!: "world"` |
+| `not_contains!` | Comparison | Absence check | `not_contains!: "error"` |
+| `contains_all!` | Comparison | Contains all items | `contains_all!: ["a", "b"]` |
+| `not_contains_all!` | Comparison | Missing at least one | `not_contains_all!: ["x", "y"]` |
+| `contains_any!` | Comparison | Contains at least one | `contains_any!: ["a", "b"]` |
+| `not_contains_any!` | Comparison | Contains none | `not_contains_any!: ["x", "y"]` |
+| `pattern!` | Comparison | Regex match | `pattern!: "\\d+"` |
+| `not_pattern!` | Comparison | Regex non-match | `not_pattern!: "^Error"` |
+| `starts_with!` | Comparison | Prefix check | `starts_with!: "Hello"` |
+| `not_starts_with!` | Comparison | No prefix match | `not_starts_with!: "Error"` |
+| `ends_with!` | Comparison | Suffix check | `ends_with!: "."` |
+| `not_ends_with!` | Comparison | No suffix match | `not_ends_with!: "error"` |
+| `lt!` | Comparison | Less than | `lt!: 100` |
+| `lte!` | Comparison | Less than or equal | `lte!: 100` |
+| `gt!` | Comparison | Greater than | `gt!: 0` |
+| `gte!` | Comparison | Greater than or equal | `gte!: 1` |
+| `type!` | Type | Type checking | `type!: "string"` |
+| `not_type!` | Type | Type exclusion | `not_type!: "null"` |
+| `json!` | Type | Valid JSON | `json!: true` |
+| `email!` | Type | Email format | `email!: true` |
+| `not_null!` | Type | Non-null check | `not_null!: true` |
+| `length!` | Length | Exact length | `length!: 10` |
+| `min_length!` | Length | Minimum length | `min_length!: 5` |
+| `max_length!` | Length | Maximum length | `max_length!: 100` |
+| `semantic!` | LLM | Semantic match | `semantic!: "greeting"` |
+| `not_semantic!` | LLM | Semantic non-match | `not_semantic!: "rude"` |
+| `language!` | LLM | Language detection | `language!: "en"` |
+| `not_language!` | LLM | Language exclusion | `not_language!: "fr"` |
+| `seq!` | Flow | Execution sequence | See [Flow](/evals/validators/flow) |
+| `parallel!` | Flow | Parallel execution | See [Flow](/evals/validators/flow) |
+
+## Where Validators Apply
+
+### Output Validation
+
+```yaml
+output:
+  type!: "string"
+  not_null!: true
+  contains!: "success"
+```
+
+### Timing Validation
+
+```yaml
+elapsed:
+  lt!: 5000
+  gte!: 100
+```
+
+### Span Validation
+
+```yaml
+get_weather:
+  input:
+    city:
+      eq!: "Madrid"
+  output:
+    type!: "object"
+  elapsed:
+    lt!: 2000
+```
+
+### Usage Validation
+
+```yaml
+llm:
+  usage:
+    input_tokens:
+      lte!: 500
+    output_tokens:
+      lte!: 1000
+```
+
+## Combining Validators
+
+### Multiple Validators on One Target
+
+Apply multiple validators to the same target:
+
+```yaml
+output:
+  not_null!: true
+  type!: "string"
+  min_length!: 10
+  contains!: "success"
+  not_contains!: "error"
+```
+
+All validators must pass for the eval to succeed.
+
+### Nested Validation
+
+Validate nested properties in span inputs/outputs:
+
+```yaml
+search_products:
+  input:
+    query:
+      contains!: "laptop"
+    options:
+      limit:
+        lte!: 100
+      category:
+        eq!: "electronics"
+  output:
+    results:
+      min_length!: 1
+```
+
+## Error Messages
+
+When a validator fails, it provides detailed error information:
+
+```
+FAILED: output
+  Validator: contains!
+  Expected: "success"
+  Actual: "The operation failed due to network error"
+  Error: Value does not contain expected substring
+```
+
+For semantic validators:
+
+```
+FAILED: output
+  Validator: semantic!
+  Expected: "A polite greeting"
+  Actual: "What do you want?"
+  Reason: The response is curt and lacks politeness
+```

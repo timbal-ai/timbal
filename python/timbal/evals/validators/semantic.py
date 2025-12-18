@@ -4,7 +4,10 @@ from .llm_base import LLMValidator
 
 
 class SemanticValidator(LLMValidator):
-    """Semantic validator - checks if text semantically matches expected meaning using LLM."""
+    """Semantic validator - checks if text semantically matches expected meaning using LLM.
+
+    With negate=True, checks that text does NOT semantically match the expected meaning.
+    """
 
     name: Literal["semantic!"] = "semantic!"  # type: ignore
 

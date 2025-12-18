@@ -81,7 +81,7 @@ class LLMValidator(BaseValidator):
         """Execute the LLM-based validation.
 
         Raises:
-            AssertionError: If validation fails.
+            AssertionError: If validation fails (or passes when negated).
         """
         from ..utils import resolve_target
 
@@ -90,7 +90,14 @@ class LLMValidator(BaseValidator):
         if isinstance(actual_value, Message):
             actual_value = actual_value.collect_text()
 
+        if isinstance(actual_value, str):
+            actual_value = self.apply_transform(actual_value)
+
         result = await self._evaluate_with_llm(actual_value)
 
-        if not result.passes:
-            raise AssertionError(f"{self.name} validation failed: {result.reason}")
+        if self.negate:
+            if result.passes:
+                raise AssertionError(f"{self.name} validation should have failed but passed: {result.reason}")
+        else:
+            if not result.passes:
+                raise AssertionError(f"{self.name} validation failed: {result.reason}")

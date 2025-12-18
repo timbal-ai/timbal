@@ -9,7 +9,10 @@ from .context import ValidationContext
 
 
 class PatternValidator(BaseValidator):
-    """Pattern validator - checks if value matches a regex pattern."""
+    """Pattern validator - checks if value matches a regex pattern.
+
+    With negate=True, checks that value does NOT match the pattern.
+    """
 
     name: Literal["pattern!"] = "pattern!"  # type: ignore
 
@@ -26,7 +29,7 @@ class PatternValidator(BaseValidator):
         """Check if resolved value matches the regex pattern.
 
         Raises:
-            AssertionError: If value doesn't match the pattern.
+            AssertionError: If value doesn't match the pattern (or matches when negated).
         """
         from ..utils import resolve_target
 
@@ -38,5 +41,13 @@ class PatternValidator(BaseValidator):
         if not isinstance(actual_value, str):
             raise AssertionError(f"expected string value, got {type(actual_value).__name__}")
 
-        if not self._compiled.search(actual_value):
-            raise AssertionError(f"expected {actual_value!r} to match pattern {self.value!r}")
+        actual_value = self.apply_transform(actual_value)
+
+        matches = self._compiled.search(actual_value) is not None
+
+        if self.negate:
+            if matches:
+                raise AssertionError(f"expected {actual_value!r} to not match pattern {self.value!r}")
+        else:
+            if not matches:
+                raise AssertionError(f"expected {actual_value!r} to match pattern {self.value!r}")

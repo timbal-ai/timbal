@@ -1,0 +1,206 @@
+---
+title: "Type Validators"
+description: "Validators for type checking, JSON, email, and null validation"
+---
+
+Type validators check the type and format of values, ensuring data conforms to expected structures.
+
+## not_null!
+
+Checks that a value exists and is not null/None.
+
+```yaml
+output:
+  not_null!: true
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | boolean | `true` to require non-null, `false` to require null |
+
+<Accordion title="Examples">
+```yaml
+# Ensure output exists
+output:
+  not_null!: true
+
+# Ensure tool output exists
+get_weather:
+  output:
+    not_null!: true
+
+# Ensure specific field exists
+search_results:
+  output:
+    items:
+      not_null!: true
+```
+</Accordion>
+
+<Tip>
+Use `not_null!: true` as a first validator to ensure the target exists before applying other validators.
+</Tip>
+
+## type!
+
+Checks that a value is of a specific type.
+
+```yaml
+output:
+  type!: "string"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Type name |
+
+### Supported Types
+
+| Type | Matches |
+|------|---------|
+| `string` | Strings |
+| `int` | Integers |
+| `float` | Floating-point numbers |
+| `number` | Any numeric type |
+| `bool` | Boolean values |
+| `array` | Lists/arrays |
+| `object` | Dictionaries/objects |
+| `null` | None/null values |
+
+<Accordion title="Examples">
+```yaml
+# String output
+output:
+  type!: "string"
+
+# Numeric result
+calculate:
+  output:
+    type!: "number"
+
+# Array of results
+search_products:
+  output:
+    type!: "array"
+
+# Object response
+get_user:
+  output:
+    type!: "object"
+
+# Boolean flag
+validate:
+  output:
+    type!: "bool"
+```
+</Accordion>
+
+## json!
+
+Checks that a string value is valid JSON.
+
+```yaml
+output:
+  json!: true
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | boolean | `true` to require valid JSON |
+
+<Accordion title="Examples">
+```yaml
+# Ensure output is valid JSON
+output:
+  json!: true
+
+# Combine with content checks
+output:
+  json!: true
+  contains!: '"status"'
+  contains!: '"success"'
+```
+</Accordion>
+
+<Note>
+The `json!` validator only checks that the string is valid JSON. It does not validate the JSON structure. Use `contains!` or `pattern!` for content checks.
+</Note>
+
+## email!
+
+Checks that a string value is a valid email format.
+
+```yaml
+extract_email:
+  output:
+    email!: true
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | boolean | `true` to require valid email format |
+
+<Accordion title="Examples">
+```yaml
+# Validate extracted email
+extract_contact:
+  output:
+    email:
+      email!: true
+```
+</Accordion>
+
+## Common Patterns
+
+### Structured Output Validation
+
+```yaml
+output:
+  not_null!: true
+  type!: "string"
+  json!: true
+  contains!: '"id"'
+  contains!: '"status"'
+```
+
+### Type-Safe Numeric Results
+
+```yaml
+calculate:
+  output:
+    type!: "number"
+    gte!: 0
+    lte!: 100
+```
+
+### Span Output Type Checking
+
+```yaml
+get_datetime:
+  output:
+    type!: "string"
+    pattern!: "^\\d{4}-\\d{2}-\\d{2}"
+
+search_products:
+  output:
+    type!: "array"
+    min_length!: 1
+```
+
+### Validating Nested Fields
+
+```yaml
+get_user:
+  output:
+    type!: "object"
+    
+# Or validate specific nested fields
+get_user:
+  output:
+    profile:
+      name:
+        type!: "string"
+        not_null!: true
+      email:
+        email!: true
+```

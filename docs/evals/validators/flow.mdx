@@ -1,0 +1,385 @@
+---
+title: "Flow Validators"
+description: "Validators for checking execution sequences and parallel execution"
+---
+
+Flow validators check the execution patterns of your agent - the order in which tools are called and whether operations run in parallel.
+
+## seq!
+
+Validates that execution spans match a sequence pattern. This is a top-level validator that checks the order of tool calls.
+
+```yaml
+seq!:
+  - llm
+  - search_products
+  - llm
+```
+
+The `seq!` validator checks that the specified spans appear in order in the execution trace.
+
+### Basic Sequence
+
+```yaml
+seq!:
+  - llm                    # First: LLM call
+  - get_datetime           # Then: datetime tool
+  - llm                    # Then: another LLM call
+```
+
+### Wildcard Patterns
+
+Use wildcards to match flexible sequences:
+
+| Pattern | Description |
+|---------|-------------|
+| `..` | Exactly 1 span |
+| `...` | Any number of spans (0 or more) |
+| `n..m` | Between n and m spans |
+| `n..` | At least n spans |
+| `..m` | At most m spans |
+
+```yaml
+seq!:
+  - llm
+  - ...              # Any spans in between
+  - send_email
+```
+
+<Accordion title="Wildcard examples">
+```yaml
+# Exactly one span between
+seq!:
+  - validate_input
+  - ..               # Exactly 1 span
+  - process_result
+
+# Any number of spans between
+seq!:
+  - llm
+  - ...              # 0 or more spans
+  - llm
+
+# Between 1 and 3 spans
+seq!:
+  - llm
+  - 1..3             # 1 to 3 spans
+  - complete
+
+# At least 1 span between
+seq!:
+  - initialize
+  - 1..              # 1 or more spans
+  - finalize
+
+# At most 2 spans between
+seq!:
+  - fetch_data
+  - ..2              # 0 to 2 spans
+  - transform_data
+```
+</Accordion>
+
+### Span Validation Within Sequence
+
+Validate span inputs, outputs, and timing within the sequence:
+
+```yaml
+seq!:
+  - llm:
+      elapsed:
+        lte!: 40000
+      usage:
+        input_tokens:
+          lte!: 1000
+
+  - get_datetime:
+      input:
+        timezone:
+          eq!: "Europe/Madrid"
+          starts_with!: "Europe/"
+          ends_with!: "rid"
+      output:
+        type!: "string"
+        pattern!: "^\\d{4}-\\d{2}-\\d{2}"
+        gt!: "2025-12-15T00:45:12"
+
+  - llm
+```
+
+### any! Pattern
+
+Match any span meeting certain criteria:
+
+```yaml
+seq!:
+  - llm
+  - any!:
+      min: 1            # At least 1 match
+      max: 3            # At most 3 matches
+      contains:         # Must match one of these
+        - validate_input
+        - check_format
+      not_contains:     # Must not match these
+        - delete_user
+  - process_result
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `min` | integer | Minimum number of matching spans |
+| `max` | integer | Maximum number of matching spans |
+| `contains` | list | Span names that can match |
+| `not_contains` | list | Span names that must not match |
+
+<Accordion title="any! examples">
+```yaml
+# At least one validation step
+seq!:
+  - receive_input
+  - any!:
+      min: 1
+      contains:
+        - validate_email
+        - validate_phone
+        - validate_address
+  - save_record
+
+# Any number of retry attempts (0-3)
+seq!:
+  - initial_request
+  - any!:
+      min: 0
+      max: 3
+      contains:
+        - retry_request
+  - final_response
+
+# Exclude certain operations
+seq!:
+  - process_data
+  - any!:
+      min: 1
+      not_contains:
+        - delete_data
+        - drop_table
+  - complete
+```
+</Accordion>
+
+### Nested parallel! in Sequences
+
+Check for parallel execution within a sequence:
+
+```yaml
+seq!:
+  - llm
+  - parallel!:
+      - get_datetime
+      - get_weather
+      - get_stock_price
+  - llm
+```
+
+With span validation inside parallel:
+
+```yaml
+seq!:
+  - 1..1
+  - parallel!:
+      - get_datetime:
+          input:
+            timezone:
+              eq!: "Europe/Madrid"
+      - get_weather
+  - ...
+```
+
+## parallel!
+
+Validates that specified spans executed in parallel (overlapping time ranges). This can be used as a top-level validator or nested within `seq!`.
+
+```yaml
+parallel!:
+  - get_datetime
+  - get_weather
+  - get_stock_price
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| (list) | list | Span names that must execute in parallel |
+| `tolerance` | integer | Timing tolerance in milliseconds (default: 0) |
+| `spans` | list | Span names (when using tolerance) |
+
+### Basic Parallel Check
+
+```yaml
+parallel!:
+  - fetch_user
+  - fetch_orders
+  - fetch_preferences
+```
+
+This validates that all three spans had overlapping execution times.
+
+### With Tolerance
+
+Network latency and scheduling can cause slight timing variations. Use tolerance to account for this:
+
+```yaml
+parallel!:
+  tolerance: 100    # 100ms tolerance
+  spans:
+    - fetch_user
+    - fetch_orders
+    - fetch_preferences
+```
+
+### With Span Validation
+
+Validate inputs/outputs of parallel spans:
+
+```yaml
+parallel!:
+  - get_datetime:
+      input:
+        timezone:
+          eq!: "Europe/Madrid"
+      output:
+        type!: "string"
+  - get_weather:
+      input:
+        city:
+          eq!: "Madrid"
+  - get_stock_price
+```
+
+## Complete Examples
+
+### Basic Flow Validation
+
+```yaml
+- name: datetime_query
+  runnable: agent.py::agent
+  params:
+    prompt: "what time is it in madrid"
+  
+  output:
+    contains!: ":"
+    pattern!: "\\d{1,2}:\\d{2}"
+  
+  seq!:
+    - llm
+    - get_datetime
+    - llm
+```
+
+### Comprehensive Flow Validation
+
+```yaml
+- name: full_datetime_flow
+  runnable: agent.py::agent
+  params:
+    prompt: "what time is it in madrid"
+  
+  output:
+    type!: "string"
+    min_length!: 10
+    contains!: ":"
+    pattern!: "\\d{1,2}:\\d{2}"
+    semantic!: "a time response mentioning Madrid"
+  
+  elapsed:
+    lt!: 6000
+  
+  seq!:
+    - llm:
+        elapsed:
+          lte!: 40000
+        usage:
+          input_tokens:
+            lte!: 1000
+    
+    - get_datetime:
+        input:
+          timezone:
+            eq!: "Europe/Madrid"
+            starts_with!: "Europe/"
+        output:
+          type!: "string"
+          pattern!: "^\\d{4}-\\d{2}-\\d{2}"
+    
+    - llm
+```
+
+### Parallel Tool Execution
+
+```yaml
+- name: parallel_data_fetch
+  runnable: agent.py::agent
+  params:
+    prompt: "Get my dashboard data"
+  
+  parallel!:
+    - fetch_user
+    - fetch_orders
+    - fetch_recommendations
+```
+
+### Mixed Sequential and Parallel
+
+```yaml
+- name: complex_flow
+  runnable: agent.py::agent
+  params:
+    prompt: "Process my order"
+  
+  seq!:
+    - llm
+    - validate_order
+    - parallel!:
+        - check_inventory
+        - calculate_shipping
+        - apply_discounts
+    - ...
+    - llm
+```
+
+## How Parallel Detection Works
+
+Two spans are considered parallel if their execution times overlap:
+
+```
+Span A: |-------|
+Span B:     |-------|
+                      → Parallel (overlapping)
+
+Span A: |-------|
+Span B:          |-------|
+                      → Sequential (no overlap)
+```
+
+With tolerance, spans starting within the tolerance window are still considered parallel:
+
+```
+Tolerance: 100ms
+
+Span A: |-------|
+Span B:           |-------|   (started 50ms after A ended)
+                      → Parallel (within tolerance)
+```
+
+## Tips
+
+<Tip>
+Use `seq!` with wildcards (`...`) for flexible matching when you care about the order of key operations but not every intermediate step.
+</Tip>
+
+<Note>
+Flow validators require execution tracing to be enabled. See [Tracing](/evals/tracing) for details.
+</Note>
+
+<Warning>
+Be careful with strict timing requirements in `parallel!`. Network conditions and system load can affect timing. Use appropriate tolerance values.
+</Warning>

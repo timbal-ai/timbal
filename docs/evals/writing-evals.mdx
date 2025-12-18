@@ -1,0 +1,445 @@
+---
+title: "Writing Evals"
+description: "Learn how to write effective evals for your Timbal agents"
+---
+
+This guide covers the complete syntax for writing evals, from basic tests to complex multi-validator scenarios.
+
+## File Structure
+
+Evals are defined in YAML files. Each file can contain multiple eval definitions:
+
+```yaml
+# eval_search.yaml
+- name: basic_search
+  description: Test basic product search
+  runnable: agents/search.py::search_agent
+  
+  params:
+    prompt: "Find me a laptop"
+  
+  output:
+    contains!: "laptop"
+    type!: "string"
+
+- name: search_with_filters
+  description: Test search with price filters
+  runnable: agents/search.py::search_agent
+  
+  params:
+    prompt: "Find laptops under $1000"
+  
+  output:
+    pattern!: "\\$\\d+"
+```
+
+## Eval Definition
+
+### Required Fields
+
+```yaml
+- name: my_eval_name
+  runnable: path/to/agent.py::agent_name
+```
+
+### Optional Fields
+
+```yaml
+- name: complete_example
+  description: "A thorough test of greeting behavior"
+  runnable: agent.py::agent
+  tags:
+    - greeting
+    - smoke-test
+  timeout: 30000            # Milliseconds
+  env:
+    API_KEY: "test-key"
+  
+  params:
+    prompt: "Hello"
+  
+  output:
+    semantic!: "Friendly greeting"
+  
+  elapsed:
+    lt!: 5000
+```
+
+## Params Structure
+
+The `params` field contains input parameters passed to your runnable:
+
+### Simple Prompt
+
+```yaml
+params:
+  prompt: "What's the weather like?"
+```
+
+### With Messages
+
+```yaml
+params:
+  messages:
+    - role: user
+      content: "What's the weather like?"
+```
+
+### Additional Parameters
+
+Pass any additional parameters your agent accepts:
+
+```yaml
+params:
+  prompt: "Search for products"
+  max_results: 10
+  include_reviews: true
+  category: "electronics"
+```
+
+## Validating Output
+
+The `output` section validates the final response from your agent:
+
+```yaml
+output:
+  not_null!: true
+  type!: "string"
+  min_length!: 10
+  contains!: "success"
+  not_contains!: "error"
+  pattern!: "Order #\\d{6}"
+  semantic!: "A confirmation message with order details"
+```
+
+Multiple validators can be combined - all must pass.
+
+## Validating Timing
+
+The `elapsed` section validates total execution time in milliseconds:
+
+```yaml
+elapsed:
+  lt!: 5000       # Less than 5 seconds
+  gte!: 100       # At least 100ms (not instant)
+```
+
+## Validating Tool Spans
+
+Validate specific tools by their name:
+
+```yaml
+get_datetime:
+  input:
+    timezone:
+      eq!: "Europe/Madrid"
+      starts_with!: "Europe/"
+  output:
+    type!: "string"
+    pattern!: "^\\d{4}-\\d{2}-\\d{2}"
+  elapsed:
+    lt!: 1000
+
+search_products:
+  input:
+    query:
+      contains!: "laptop"
+    limit:
+      lte!: 100
+  output:
+    type!: "array"
+    min_length!: 1
+```
+
+## Validating Token Usage
+
+Access usage metrics on LLM spans:
+
+```yaml
+llm:
+  usage:
+    input_tokens:
+      lte!: 500
+    output_tokens:
+      lte!: 1000
+```
+
+For multi-model scenarios, tokens are automatically summed across models.
+
+## Flow Validators
+
+### Sequence Validation
+
+Use `seq!` to validate the order of tool execution:
+
+```yaml
+seq!:
+  - llm
+  - search_products
+  - llm
+```
+
+With wildcards for flexible matching:
+
+```yaml
+seq!:
+  - llm
+  - ...              # Any number of spans
+  - send_email
+```
+
+### Parallel Validation
+
+Use `parallel!` to validate concurrent execution:
+
+```yaml
+parallel!:
+  - get_weather
+  - get_datetime
+  - get_stock_price
+```
+
+### Nested Flow Validation
+
+Combine sequence and parallel:
+
+```yaml
+seq!:
+  - llm
+  - parallel!:
+      - fetch_user
+      - fetch_orders
+  - llm
+```
+
+### Span Validation Within Sequence
+
+Validate span inputs/outputs within the sequence:
+
+```yaml
+seq!:
+  - llm:
+      elapsed:
+        lt!: 3000
+      usage:
+        input_tokens:
+          lte!: 500
+  
+  - get_datetime:
+      input:
+        timezone:
+          eq!: "Europe/Madrid"
+      output:
+        type!: "string"
+  
+  - llm
+```
+
+## Complete Example
+
+```yaml
+- name: time_query
+  description: "Test time query with validation"
+  runnable: "agent.py::agent"
+  tags: ["datetime", "smoke"]
+  timeout: 30000
+  
+  params:
+    prompt: "what time is it in madrid"
+  
+  # Validate final output
+  output:
+    type!: "string"
+    min_length!: 10
+    contains!: ":"
+    pattern!: "\\d{1,2}:\\d{2}"
+    semantic!: "a time response mentioning Madrid"
+  
+  # Validate timing
+  elapsed:
+    lt!: 6000
+  
+  # Validate execution sequence
+  seq!:
+    - llm:
+        elapsed:
+          lte!: 40000
+        usage:
+          input_tokens:
+            lte!: 1000
+    
+    - get_datetime:
+        input:
+          timezone:
+            eq!: "Europe/Madrid"
+            starts_with!: "Europe/"
+        output:
+          type!: "string"
+          pattern!: "^\\d{4}-\\d{2}-\\d{2}"
+    
+    - llm
+```
+
+## Wildcard Patterns in Sequences
+
+| Pattern | Description |
+|---------|-------------|
+| `..` | Exactly 1 span |
+| `...` | Any number of spans (0 or more) |
+| `n..m` | Between n and m spans |
+| `n..` | At least n spans |
+| `..m` | At most m spans |
+
+```yaml
+seq!:
+  - llm
+  - 1..3              # 1 to 3 spans
+  - validate_input
+  - ...               # Any number
+  - send_response
+```
+
+## The `any!` Pattern
+
+Match flexible patterns within sequences:
+
+```yaml
+seq!:
+  - llm
+  - any!:
+      min: 1
+      max: 3
+      contains:
+        - validate_email
+        - validate_phone
+      not_contains:
+        - delete_user
+  - process_request
+```
+
+## Tags and Filtering
+
+Use tags to organize and filter evals:
+
+```yaml
+- name: smoke_test_greeting
+  tags:
+    - smoke
+    - greeting
+    - quick
+  runnable: agent.py::agent
+  params:
+    prompt: "Hi"
+  output:
+    not_null!: true
+```
+
+## Environment Variables
+
+Set environment variables for specific evals:
+
+```yaml
+- name: test_with_api_key
+  runnable: agent.py::agent
+  env:
+    API_KEY: "test-key-123"
+    DEBUG: "true"
+  params:
+    prompt: "Fetch data"
+  output:
+    not_null!: true
+```
+
+## Best Practices
+
+<Accordion title="Use descriptive names">
+Names should clearly indicate what's being tested:
+
+```yaml
+# Good
+- name: search_returns_relevant_products
+- name: handles_empty_search_results
+- name: validates_timezone_input
+
+# Avoid
+- name: test1
+- name: search_test
+```
+</Accordion>
+
+<Accordion title="Combine validators effectively">
+Use multiple validators to thoroughly test behavior:
+
+```yaml
+output:
+  not_null!: true
+  type!: "string"
+  min_length!: 50
+  contains!: "product"
+  not_contains!: "error"
+  semantic!: "Product recommendations with prices"
+```
+</Accordion>
+
+<Accordion title="Validate both output and execution">
+Don't just check the output - validate how the agent got there:
+
+```yaml
+output:
+  semantic!: "Weather information for Madrid"
+
+seq!:
+  - llm
+  - get_weather:
+      input:
+        city:
+          eq!: "Madrid"
+  - llm
+```
+</Accordion>
+
+<Accordion title="Use semantic validators for natural language">
+For outputs that can vary in wording but should convey the same meaning:
+
+```yaml
+# Instead of exact matching
+output:
+  eq!: "The current time in Madrid is 14:30."
+
+# Use semantic validation
+output:
+  semantic!: "Indicates the current time in Madrid"
+```
+</Accordion>
+
+<Accordion title="Test edge cases">
+Create specific evals for error conditions:
+
+```yaml
+- name: handles_invalid_timezone
+  runnable: agent.py::agent
+  params:
+    prompt: "what time is it in xyzland"
+  output:
+    semantic!: "Indicates the timezone or location is not recognized"
+```
+</Accordion>
+
+## File Naming Conventions
+
+Timbal discovers eval files matching these patterns:
+
+- `eval*.yaml` - e.g., `eval_search.yaml`, `evals.yaml`
+- `*eval.yaml` - e.g., `search_eval.yaml`, `my_eval.yaml`
+
+Organize evals by feature or agent:
+
+```
+evals/
+├── eval_search.yaml
+├── eval_support.yaml
+├── eval_checkout.yaml
+└── regression/
+    ├── eval_smoke.yaml
+    └── eval_full.yaml
+```

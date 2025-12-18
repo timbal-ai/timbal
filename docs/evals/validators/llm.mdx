@@ -1,0 +1,241 @@
+---
+title: "LLM Validators"
+description: "AI-powered validators for semantic matching and language detection"
+---
+
+LLM validators use AI models to evaluate content that can't be easily checked with exact matching. They're ideal for validating natural language outputs where wording may vary but meaning should be consistent.
+
+## semantic!
+
+Uses an LLM to check if the actual value semantically matches the expected description.
+
+```yaml
+output:
+  semantic!: "A polite greeting that welcomes the user"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Natural language description of expected content |
+
+The semantic validator sends the actual value and your description to an LLM, which determines if they match semantically.
+
+<Accordion title="Examples">
+```yaml
+# Time response validation
+output:
+  semantic!: "a time response mentioning Madrid"
+
+# Error handling
+output:
+  semantic!: "An apologetic message explaining the service is unavailable"
+
+# Product description
+output:
+  semantic!: "A detailed product description including price and availability"
+
+# Professional tone
+output:
+  semantic!: "A professional response suitable for a business context"
+```
+</Accordion>
+
+### Writing Effective Semantic Prompts
+
+<Tip>
+Be specific about what you expect. Vague descriptions lead to inconsistent results.
+</Tip>
+
+**Good prompts:**
+```yaml
+# Specific and measurable
+semantic!: "A response that includes at least 3 product recommendations with prices"
+semantic!: "An error message that mentions the specific field that failed validation"
+semantic!: "A summary that covers the main points: budget, timeline, and deliverables"
+```
+
+**Avoid:**
+```yaml
+# Too vague
+semantic!: "A good response"
+semantic!: "Something helpful"
+semantic!: "The right answer"
+```
+
+### Semantic vs Exact Matching
+
+Use semantic validation when:
+- Output wording can vary but meaning must be consistent
+- Testing for tone, style, or completeness
+- Validating summaries or explanations
+
+Use exact matching (`eq!`, `contains!`) when:
+- Specific words or phrases must appear
+- Validating structured data
+- Checking for exact values
+
+```yaml
+# Use semantic for flexible content
+output:
+  semantic!: "Confirms the order was placed successfully"
+
+# Use contains for required terms
+output:
+  contains!: "Order #"
+
+# Combine both approaches
+output:
+  contains!: "confirmed"
+  semantic!: "A professional confirmation with order details"
+```
+
+## language!
+
+Checks that the content is written in a specific language.
+
+```yaml
+output:
+  language!: "en"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Expected language code |
+
+<Accordion title="Examples">
+```yaml
+# Verify language output
+output:
+  language!: "en"
+
+output:
+  language!: "es"
+
+output:
+  language!: "fr"
+
+output:
+  language!: "ja"
+```
+</Accordion>
+
+### Common Language Codes
+
+| Language | Code |
+|----------|------|
+| English | `"en"` |
+| Spanish | `"es"` |
+| French | `"fr"` |
+| German | `"de"` |
+| Italian | `"it"` |
+| Portuguese | `"pt"` |
+| Chinese | `"zh"` |
+| Japanese | `"ja"` |
+| Korean | `"ko"` |
+| Arabic | `"ar"` |
+
+## Common Patterns
+
+### Multi-Language Support Testing
+
+```yaml
+- name: responds_in_spanish
+  runnable: agent.py::agent
+  params:
+    prompt: "Hola, necesito ayuda"
+  output:
+    language!: "es"
+    semantic!: "A helpful response offering assistance"
+
+- name: responds_in_french
+  runnable: agent.py::agent
+  params:
+    prompt: "Bonjour, j'ai besoin d'aide"
+  output:
+    language!: "fr"
+    semantic!: "A helpful response offering assistance"
+```
+
+### Tone and Style Validation
+
+```yaml
+- name: professional_tone
+  runnable: agent.py::agent
+  params:
+    prompt: "I want a refund"
+  output:
+    semantic!: "A professional, empathetic response that acknowledges the request and explains the refund process"
+
+- name: casual_tone
+  runnable: agent.py::agent
+  params:
+    prompt: "Hey what's up"
+  output:
+    semantic!: "A casual, friendly greeting that matches the user's informal tone"
+```
+
+### Completeness Checks
+
+```yaml
+output:
+  semantic!: |
+    A comprehensive response that includes:
+    - Acknowledgment of the user's question
+    - Direct answer to the question
+    - Additional context or helpful information
+    - Offer for follow-up assistance
+```
+
+### Error Message Quality
+
+```yaml
+- name: helpful_error_message
+  runnable: agent.py::agent
+  params:
+    prompt: "Buy product XYZ123"
+  output:
+    semantic!: |
+      An error message that:
+      - Clearly states the product was not found
+      - Suggests possible alternatives or corrections
+      - Offers help finding the right product
+```
+
+## Combining with Other Validators
+
+```yaml
+output:
+  # Structure checks
+  not_null!: true
+  type!: "string"
+  min_length!: 50
+
+  # Content checks
+  contains!: "order"
+  not_contains!: "error"
+
+  # Semantic validation
+  semantic!: "A confirmation message with order details and estimated delivery"
+
+  # Language check
+  language!: "en"
+```
+
+## Cost Considerations
+
+LLM validators make API calls to language models, which incur costs. To optimize:
+
+1. **Use structural validators first**: Check `not_null!`, `contains!`, etc. before semantic validation
+2. **Be specific in prompts**: Reduces need for retries
+3. **Group semantic checks**: One detailed semantic check vs. multiple simple ones
+4. **Use for critical paths**: Reserve LLM validation for important behavioral checks
+
+```yaml
+# Efficient: structural checks catch obvious failures quickly
+output:
+  not_null!: true        # Fast, free
+  type!: "string"        # Fast, free
+  min_length!: 20        # Fast, free
+  contains!: "order"     # Fast, free
+  semantic!: "Complete order confirmation"  # LLM call only if above pass
+```

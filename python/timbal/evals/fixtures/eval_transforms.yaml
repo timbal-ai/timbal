@@ -1,0 +1,110 @@
+# Test cases for transform functionality
+- name: "transform_lowercase"
+  description: "Test lowercase transform for case-insensitive matching"
+  runnable: "agent.py::agent"
+  tags: ["transforms", "lowercase"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid? Please start your response with 'THE TIME IN MADRID IS'"
+
+  output:
+    # Without transform this would fail if LLM uses different casing
+    contains!:
+      value: "the time in madrid"
+      transform: lowercase
+
+    starts_with!:
+      value: "the time"
+      transform: lowercase
+
+- name: "transform_uppercase"
+  description: "Test uppercase transform"
+  runnable: "agent.py::agent"
+  tags: ["transforms", "uppercase"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    contains!:
+      value: "MADRID"
+      transform: uppercase
+
+- name: "transform_trim"
+  description: "Test trim transform for whitespace handling"
+  runnable: "agent.py::agent"
+  tags: ["transforms", "trim"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    # Trim handles any leading/trailing whitespace
+    pattern!:
+      value: "\\d{1,2}:\\d{2}"
+      transform: trim
+
+- name: "transform_collapse_whitespace"
+  description: "Test collapse_whitespace transform"
+  runnable: "agent.py::agent"
+  tags: ["transforms", "whitespace"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    # Collapse multiple spaces into single space
+    contains!:
+      value: "time in madrid"
+      transform: [lowercase, collapse_whitespace]
+
+- name: "transform_combined"
+  description: "Test multiple transforms applied in order"
+  runnable: "agent.py::agent"
+  tags: ["transforms", "combined"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid? Start with 'THE TIME IS'"
+
+  output:
+    # Multiple transforms: trim first, then lowercase, then collapse whitespace
+    starts_with!:
+      value: "the time"
+      transform: [trim, lowercase, collapse_whitespace]
+
+    contains!:
+      value: "madrid"
+      transform: [trim, lowercase]
+
+- name: "transform_eq_case_insensitive"
+  description: "Test eq! with lowercase transform for case-insensitive equality"
+  runnable: "agent.py::agent"
+  tags: ["transforms", "eq"]
+  timeout: 30000
+
+  params:
+    prompt: "Reply with exactly one word: 'HELLO'"
+
+  output:
+    eq!:
+      value: "hello"
+      transform: [trim, lowercase]
+
+- name: "transform_with_contains_any"
+  description: "Test transforms with contains_any!"
+  runnable: "agent.py::agent"
+  tags: ["transforms", "contains_any"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    contains_any!:
+      value: ["madrid", "time", "spain"]
+      transform: lowercase

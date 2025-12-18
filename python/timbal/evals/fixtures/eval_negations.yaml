@@ -1,0 +1,287 @@
+# Test cases for negation validators
+# These use the not_* aliases and ne! for negated validation logic
+
+- name: "ne_basic"
+  description: "Test ne! (not equal) validator"
+  runnable: "agent.py::agent"
+  tags: ["negation", "ne"]
+  timeout: 30000
+
+  params:
+    prompt: "What is 2 + 2? Reply with just the number."
+
+  output:
+    ne!: "5"
+
+- name: "not_contains_basic"
+  description: "Test not_contains! validator"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_contains"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid? Do not mention Paris."
+
+  output:
+    contains!: "Madrid"
+    not_contains!: "Paris"
+
+- name: "not_contains_with_transform"
+  description: "Test not_contains! with transforms"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_contains", "transforms"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    not_contains!:
+      value: "ERROR"
+      transform: uppercase
+
+- name: "not_contains_any_basic"
+  description: "Test not_contains_any! validator"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_contains_any"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid? Only mention Madrid."
+
+  output:
+    not_contains_any!: ["Paris", "London", "Tokyo"]
+
+- name: "not_contains_any_with_transform"
+  description: "Test not_contains_any! with transforms"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_contains_any", "transforms"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    not_contains_any!:
+      value: ["error", "invalid", "failed"]
+      transform: lowercase
+
+- name: "contains_all_basic"
+  description: "Test contains_all! validator"
+  runnable: "agent.py::agent"
+  tags: ["negation", "contains_all"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid? Include the date."
+
+  output:
+    contains_all!:
+      value: ["madrid", "time"]
+      transform: lowercase
+
+- name: "not_contains_all_basic"
+  description: "Test not_contains_all! validator"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_contains_all"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    not_contains_all!: ["Paris", "London", "Tokyo"]
+
+- name: "not_contains_all_with_transform"
+  description: "Test not_contains_all! with transforms"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_contains_all", "transforms"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    not_contains_all!:
+      value: ["error", "invalid", "failed"]
+      transform: lowercase
+
+- name: "not_starts_with_basic"
+  description: "Test not_starts_with! validator"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_starts_with"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid? Start with 'The current time'"
+
+  output:
+    starts_with!:
+      value: "the current"
+      transform: lowercase
+    not_starts_with!: "Error"
+
+- name: "not_starts_with_with_transform"
+  description: "Test not_starts_with! with transforms"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_starts_with", "transforms"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    not_starts_with!:
+      value: "error"
+      transform: lowercase
+
+- name: "not_ends_with_basic"
+  description: "Test not_ends_with! validator"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_ends_with"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    not_ends_with!: "error"
+
+- name: "not_ends_with_with_transform"
+  description: "Test not_ends_with! with transforms"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_ends_with", "transforms"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    not_ends_with!:
+      value: "error"
+      transform: lowercase
+
+- name: "not_pattern_basic"
+  description: "Test not_pattern! validator"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_pattern"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    # Should match a time pattern
+    pattern!: "\\d{1,2}:\\d{2}"
+    # Should NOT match an error pattern
+    not_pattern!: "^Error:"
+
+- name: "not_pattern_with_transform"
+  description: "Test not_pattern! with transforms"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_pattern", "transforms"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    not_pattern!:
+      value: "^error"
+      transform: lowercase
+
+- name: "not_type_basic"
+  description: "Test not_type! validator"
+  runnable: "agent.py::agent"
+  tags: ["negation", "not_type"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    type!: "string"
+    not_type!: "number"
+
+- name: "negation_via_negate_field"
+  description: "Test negation via the negate field directly"
+  runnable: "agent.py::agent"
+  tags: ["negation", "negate_field"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    # Using negate field directly instead of not_* alias
+    contains!:
+      value: "Paris"
+      negate: true
+
+- name: "negation_via_negate_field_with_transform"
+  description: "Test negation via the negate field with transform"
+  runnable: "agent.py::agent"
+  tags: ["negation", "negate_field", "transforms"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    eq!:
+      value: "error"
+      negate: true
+      transform: lowercase
+
+- name: "combined_negations"
+  description: "Test multiple negation validators together"
+  runnable: "agent.py::agent"
+  tags: ["negation", "combined"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid? Be concise and accurate."
+
+  output:
+    # Positive assertions
+    type!: "string"
+    min_length!: 5
+    contains!:
+      value: "madrid"
+      transform: lowercase
+    pattern!: "\\d{1,2}:\\d{2}"
+    # Negative assertions
+    ne!: ""
+    not_contains!: "error"
+    not_contains_any!: ["invalid", "failed", "unknown"]
+    not_starts_with!: "Sorry"
+    not_ends_with!: "failed"
+    not_pattern!: "^Error:"
+    not_type!: "null"
+
+- name: "negation_with_seq"
+  description: "Test negation validators within seq! flow validation"
+  runnable: "agent.py::agent"
+  tags: ["negation", "seq"]
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    not_contains!: "error"
+
+  seq!:
+    - llm:
+        output:
+          not_null!: true
+          not_type!: "null"
+    - get_datetime:
+        input:
+          timezone:
+            eq!: "Europe/Madrid"
+            not_contains!: "America"
+        output:
+          type!: "string"
+          not_pattern!: "^error"
+    - ...

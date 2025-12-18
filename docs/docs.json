@@ -41,8 +41,7 @@
               "agents/skills",
               "agents/structured-output",
               "agents/voice",
-              "agents/dynamic",
-              "agents/evals"
+              "agents/dynamic"
             ]
           },
           {
@@ -51,6 +50,26 @@
               "workflows/index",
               "workflows/control-flow",
               "workflows/branching"
+            ]
+          },
+          {
+            "group": "Evals",
+            "pages": [
+              "evals/index",
+              "evals/writing-evals",
+              {
+                "group": "Validators",
+                "pages": [
+                  "evals/validators/index",
+                  "evals/validators/comparison",
+                  "evals/validators/type",
+                  "evals/validators/length",
+                  "evals/validators/llm",
+                  "evals/validators/flow"
+                ]
+              },
+              "evals/running-evals",
+              "evals/tracing"
             ]
           },
           {
@@ -68,14 +87,6 @@
               "deployment/index",
               "deployment/platform",
               "deployment/self-hosted"
-            ]
-          },
-          {
-            "group": "AI Tools",
-            "pages": [
-              "ai-tools/claude-code",
-              "ai-tools/cursor",
-              "ai-tools/windsurf"
             ]
           }
         ]

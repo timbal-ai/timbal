@@ -4,7 +4,10 @@ from .llm_base import LLMValidator
 
 
 class LanguageValidator(LLMValidator):
-    """Language validator - checks if text is in the expected language using LLM."""
+    """Language validator - checks if text is in the expected language using LLM.
+
+    With negate=True, checks that text is NOT in the expected language.
+    """
 
     name: Literal["language!"] = "language!"  # type: ignore
 

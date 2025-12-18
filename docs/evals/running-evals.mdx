@@ -1,0 +1,359 @@
+---
+title: "Running Evals"
+description: "CLI usage, file discovery, and CI/CD integration"
+---
+
+Timbal provides a command-line interface for discovering and running evals. This guide covers all CLI options and integration patterns.
+
+## Basic Usage
+
+Run evals from the command line:
+
+```bash
+# Run all evals in a directory
+python -m timbal.evals path/to/evals/
+
+# Run a specific eval file
+python -m timbal.evals path/to/eval_search.yaml
+
+# Run with a specific runnable
+python -m timbal.evals --runnable agent.py::my_agent path/to/evals/
+```
+
+## CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `path` | Path to eval file or directory (positional) |
+| `--runnable` | Fully qualified name of the runnable (`file.py::name`) |
+| `--log-level` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+| `-s`, `--no-capture` | Disable stdout/stderr capture (show output live) |
+| `-V`, `--version` | Show version information |
+
+### Runnable Specification
+
+The runnable can be specified in two ways:
+
+**1. Via CLI flag:**
+```bash
+python -m timbal.evals --runnable agents/search.py::search_agent evals/
+```
+
+**2. Per-eval in YAML:**
+```yaml
+- name: test_search
+  runnable: agents/search.py::search_agent
+  params:
+    prompt: "Find products"
+  output:
+    not_null!: true
+```
+
+Per-eval runnable overrides the CLI flag.
+
+### Output Capture
+
+By default, stdout/stderr from your agent is captured and only shown on failure. Use `-s` to see output live:
+
+```bash
+# Captured (default) - cleaner output
+python -m timbal.evals evals/
+
+# Live output - useful for debugging
+python -m timbal.evals -s evals/
+```
+
+## File Discovery
+
+### Naming Patterns
+
+Timbal discovers eval files matching these patterns:
+
+- `eval*.yaml` - e.g., `eval_search.yaml`, `evals.yaml`
+- `*eval.yaml` - e.g., `search_eval.yaml`, `my_eval.yaml`
+
+### Directory Structure
+
+```
+project/
+├── agents/
+│   ├── search.py
+│   └── support.py
+└── evals/
+    ├── eval_search.yaml
+    ├── eval_support.yaml
+    └── regression/
+        ├── eval_smoke.yaml
+        └── eval_full.yaml
+```
+
+Run all evals:
+```bash
+python -m timbal.evals evals/
+```
+
+Run specific subset:
+```bash
+python -m timbal.evals evals/regression/
+```
+
+### Configuration File
+
+Create an `evalconf.yaml` in your project root for shared configuration:
+
+```yaml
+# evalconf.yaml
+runnable: agents/main.py::agent
+log_level: INFO
+```
+
+Timbal walks up the directory tree looking for `evalconf.yaml`.
+
+## Output Format
+
+### Successful Run
+
+```
+========================= timbal evals =========================
+collected 5 evals
+
+eval_search.yaml
+  basic_search .......................................... PASSED (0.45s)
+    tags: search, smoke
+    ├── output
+    │   ├── not_null! ✓
+    │   └── contains! ✓
+    └── elapsed
+        └── lt! ✓
+
+  advanced_search ....................................... PASSED (0.82s)
+    tags: search, regression
+    ├── output
+    │   ├── semantic! ✓
+    │   └── min_length! ✓
+    └── seq!
+        ├── llm ✓
+        ├── search_products ✓
+        └── llm ✓
+
+========================= 5 passed in 2.34s =========================
+```
+
+### Failed Run
+
+```
+========================= timbal evals =========================
+collected 3 evals
+
+eval_validation.yaml
+  input_validation ...................................... FAILED (0.23s)
+    tags: validation
+    ├── output
+    │   ├── not_null! ✓
+    │   └── contains! ✗
+
+========================= FAILURES =========================
+
+eval_validation.yaml::input_validation
+-----------------------------------------
+Captured stdout:
+  Processing input...
+  
+Captured stderr:
+  Warning: deprecated function used
+
+Failed validators:
+  - output -> contains!
+    Expected: "validated"
+    Actual: "The input was processed successfully"
+    Error: Value does not contain expected substring
+
+========================= 1 failed, 2 passed in 1.56s =========================
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | All evals passed |
+| 1 | One or more evals failed |
+| 2 | Configuration or setup error |
+
+## CI/CD Integration
+
+### GitHub Actions
+
+```yaml
+# .github/workflows/evals.yaml
+name: Run Evals
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install timbal
+      
+      - name: Run evals
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python -m timbal.evals --runnable agent.py::agent evals/
+```
+
+### GitLab CI
+
+```yaml
+# .gitlab-ci.yml
+evals:
+  stage: test
+  image: python:3.11
+  script:
+    - pip install -e .
+    - pip install timbal
+    - python -m timbal.evals --runnable agent.py::agent evals/
+  variables:
+    OPENAI_API_KEY: $OPENAI_API_KEY
+```
+
+### Pre-commit Hook
+
+```bash
+#!/bin/bash
+# .git/hooks/pre-commit
+
+echo "Running evals..."
+python -m timbal.evals evals/smoke/
+
+if [ $? -ne 0 ]; then
+    echo "Evals failed. Commit aborted."
+    exit 1
+fi
+```
+
+## Debugging
+
+### Verbose Output
+
+```bash
+# Show debug logging
+python -m timbal.evals --log-level DEBUG evals/
+
+# Show live output
+python -m timbal.evals -s evals/
+```
+
+### Run Single Eval
+
+Test a specific eval during development:
+
+```bash
+# Run one file
+python -m timbal.evals evals/eval_search.yaml
+```
+
+### Environment Variables
+
+Set environment variables for testing:
+
+```bash
+# Via shell
+export API_KEY="test-key"
+python -m timbal.evals evals/
+
+# Or in eval file
+- name: test_with_key
+  runnable: agent.py::agent
+  env:
+    API_KEY: "test-key"
+  params:
+    prompt: "Fetch data"
+  output:
+    not_null!: true
+```
+
+## Best Practices
+
+<Accordion title="Organize evals by speed">
+Separate fast smoke tests from slow regression tests:
+
+```
+evals/
+├── smoke/           # Fast tests, run on every commit
+│   └── eval_basic.yaml
+└── regression/      # Comprehensive tests, run nightly
+    └── eval_full.yaml
+```
+
+```bash
+# Quick check
+python -m timbal.evals evals/smoke/
+
+# Full suite
+python -m timbal.evals evals/
+```
+</Accordion>
+
+<Accordion title="Use meaningful exit codes">
+Check exit codes in scripts:
+
+```bash
+python -m timbal.evals evals/
+status=$?
+
+if [ $status -eq 0 ]; then
+    echo "All evals passed!"
+elif [ $status -eq 1 ]; then
+    echo "Some evals failed"
+    exit 1
+else
+    echo "Configuration error"
+    exit 2
+fi
+```
+</Accordion>
+
+<Accordion title="Set timeouts">
+Prevent hanging tests with timeouts (in milliseconds):
+
+```yaml
+- name: slow_test
+  runnable: agent.py::agent
+  timeout: 60000  # 60 second timeout
+  params:
+    prompt: "Complex query"
+  output:
+    not_null!: true
+```
+</Accordion>
+
+<Accordion title="Use tags for filtering">
+Organize evals with tags:
+
+```yaml
+- name: smoke_test
+  runnable: agent.py::agent
+  tags:
+    - smoke
+    - quick
+  params:
+    prompt: "Hi"
+  output:
+    not_null!: true
+```
+</Accordion>
