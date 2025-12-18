@@ -68,8 +68,7 @@
                   "evals/validators/flow"
                 ]
               },
-              "evals/running-evals",
-              "evals/tracing"
+              "evals/running-evals"
             ]
           },
           {
