@@ -68,6 +68,7 @@ class BaseValidator(ABC, BaseModel):
     value: Any = None  # The value passed to the validator (e.g., "foo" for eq!: "foo")
     transform: list[str] = []  # Transforms to apply before validation
     negate: bool = False  # If True, the validation logic is negated
+    occurrence: int = 0  # Which occurrence of the target step this validator belongs to
 
     @model_validator(mode="before")
     @classmethod
