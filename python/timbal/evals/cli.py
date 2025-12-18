@@ -21,6 +21,21 @@ from .utils import discover_config, discover_eval_files, parse_eval_file
 console = Console()
 
 
+def parse_path_and_filter(path_arg: str) -> tuple[Path, str | None]:
+    """Parse path argument, extracting optional ::eval_name filter.
+
+    Args:
+        path_arg: Path string, optionally with ::eval_name suffix
+
+    Returns:
+        Tuple of (path, eval_name_filter or None)
+    """
+    if "::" in path_arg:
+        path_str, eval_name = path_arg.rsplit("::", 1)
+        return Path(path_str), eval_name
+    return Path(path_arg), None
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Timbal Evals CLI",
@@ -28,9 +43,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "path",
         nargs="?",
-        type=Path,
-        default=Path.cwd(),
-        help="Path to eval file or directory containing evals. Defaults to current directory.",
+        type=str,
+        default=str(Path.cwd()),
+        help="Path to eval file or directory. Use ::eval_name to run a specific eval (e.g., evals/test.yaml::my_eval).",
     )
     parser.add_argument(
         "--runnable",
@@ -53,6 +68,14 @@ if __name__ == "__main__":
         help="Disable output capture. Show stdout/stderr in real-time (like pytest -s).",
     )
     parser.add_argument(
+        "-t",
+        "--tags",
+        type=str,
+        default=None,
+        help="Filter evals by tags. Comma-separated list (e.g., 'smoke,fast'). "
+        "Evals matching ANY of the tags will run.",
+    )
+    parser.add_argument(
         "-V",
         "--version",
         action="store_true",
@@ -70,8 +93,11 @@ if __name__ == "__main__":
     os.environ["TIMBAL_LOG_LEVEL"] = args.log_level
     setup_logging()
 
+    # Parse path and optional eval name filter
+    path, eval_name_filter = parse_path_and_filter(args.path)
+
     # Discover config file (evalconf.yaml)
-    config = discover_config(args.path)
+    config = discover_config(path)
 
     # CLI --runnable overrides config file
     runnable_fqn = args.runnable or config.get("runnable")
@@ -95,15 +121,40 @@ if __name__ == "__main__":
             console.print(f"[red]Error:[/red] Failed to load runnable: {e}")
             sys.exit(1)
 
-    eval_files = discover_eval_files(args.path)
+    eval_files = discover_eval_files(path)
     if not eval_files:
-        console.print(f"[yellow]Warning:[/yellow] No eval files found in {args.path}")
+        console.print(f"[yellow]Warning:[/yellow] No eval files found in {path}")
         sys.exit(0)
 
     evals = [eval for eval_file in eval_files for eval in parse_eval_file(eval_file, runnable)]
     if not evals:
         console.print(f"[yellow]Warning:[/yellow] No evals found in {len(eval_files)} file(s)")
         sys.exit(0)
+
+    # Check for duplicate eval names
+    seen_names: dict[str, Path] = {}
+    for e in evals:
+        if e.name in seen_names:
+            console.print(
+                f"[red]Error:[/red] Duplicate eval name '{e.name}' found in:\n  - {seen_names[e.name]}\n  - {e.path}"
+            )
+            sys.exit(1)
+        seen_names[e.name] = e.path
+
+    # Filter by eval name if specified
+    if eval_name_filter:
+        evals = [e for e in evals if e.name == eval_name_filter]
+        if not evals:
+            console.print(f"[red]Error:[/red] No eval found with name '{eval_name_filter}'")
+            sys.exit(1)
+
+    # Filter by tags if specified
+    if args.tags:
+        tag_filters = {t.strip() for t in args.tags.split(",")}
+        evals = [e for e in evals if tag_filters & set(e.tags)]
+        if not evals:
+            console.print(f"[yellow]Warning:[/yellow] No evals found matching tags: {', '.join(sorted(tag_filters))}")
+            sys.exit(0)
 
     summary = asyncio.run(
         run_evals(

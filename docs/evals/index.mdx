@@ -86,7 +86,7 @@ Create a file named `eval_greeting.yaml`:
 ### 2. Run your evals
 
 ```bash
-python -m timbal.evals path/to/eval_greeting.yaml
+python -m timbal.evals.cli path/to/eval_greeting.yaml
 ```
 
 ### 3. View results
@@ -122,75 +122,15 @@ Each eval consists of:
 | `description` | Human-readable description | No |
 | `tags` | List of tags for filtering | No |
 | `timeout` | Maximum execution time in milliseconds | No |
-| `env` | Environment variables dict | No |
 | `output` | Validators for the final output | No |
 | `elapsed` | Validators for total execution time | No |
 | `seq!` | Sequence flow validator | No |
-| `parallel!` | Parallel execution validator | No |
-| `<span_name>` | Validators for specific tool spans | No |
 
-## Validators Overview
+<Note>
+Eval names must be unique across all eval files. The CLI will error if duplicate names are found.
+</Note>
 
-Validators check specific properties and use the `name!` suffix convention:
-
-```yaml
-output:
-  type!: "string"
-  min_length!: 10
-  contains!: "success"
-  not_contains!: "error"
-
-get_datetime:
-  input:
-    timezone:
-      eq!: "Europe/Madrid"
-  output:
-    type!: "string"
-    pattern!: "^\\d{4}-\\d{2}-\\d{2}"
-```
-
-### Validator Categories
-
-| Category | Validators | Purpose |
-|----------|------------|---------|
-| **Comparison** | `eq!`, `contains!`, `not_contains!`, `pattern!`, `starts_with!`, `ends_with!` | String and value matching |
-| **Numeric** | `lt!`, `lte!`, `gt!`, `gte!` | Numeric and date comparisons |
-| **Type** | `type!`, `json!`, `email!`, `not_null!` | Type and format validation |
-| **Length** | `length!`, `min_length!`, `max_length!` | Length constraints |
-| **LLM** | `semantic!`, `language!` | AI-powered validation |
-| **Flow** | `seq!`, `parallel!` | Execution pattern validation |
-
-## Target Resolution
-
-Validators can target different parts of the execution:
-
-```yaml
-# Final output
-output:
-  contains!: "result"
-
-# Overall timing (milliseconds)
-elapsed:
-  lt!: 5000
-
-# Specific tool span
-get_weather:
-  input:
-    city:
-      eq!: "Madrid"
-  output:
-    type!: "object"
-  elapsed:
-    lt!: 2000
-
-# Token usage
-llm:
-  usage:
-    input_tokens:
-      lte!: 500
-```
-
-See [Tracing](/evals/tracing) for details on available targets.
+See [Writing Evals](/evals/writing-evals) for the complete syntax reference.
 
 ## Next Steps
 
@@ -203,8 +143,5 @@ See [Tracing](/evals/tracing) for details on available targets.
   </Card>
   <Card title="Running Evals" icon="play" href="/evals/running-evals">
     CLI options and CI/CD integration
-  </Card>
-  <Card title="Tracing" icon="magnifying-glass" href="/evals/tracing">
-    Understanding execution traces and targets
   </Card>
 </CardGroup>

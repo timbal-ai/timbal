@@ -5,6 +5,10 @@ description: "AI-powered validators for semantic matching and language detection
 
 LLM validators use AI models to evaluate content that can't be easily checked with exact matching. They're ideal for validating natural language outputs where wording may vary but meaning should be consistent.
 
+<Note>
+LLM validators support [transforms](/evals/validators#transforms). Transforms are applied to the content before sending to the LLM for evaluation.
+</Note>
+
 ## semantic!
 
 Uses an LLM to check if the actual value semantically matches the expected description.
@@ -89,6 +93,35 @@ output:
   semantic!: "A professional confirmation with order details"
 ```
 
+## not_semantic!
+
+Checks that the content does NOT semantically match the description. This is the negated form of `semantic!`.
+
+```yaml
+output:
+  not_semantic!: "An error message or apology"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Natural language description that must NOT match |
+
+<Accordion title="Examples">
+```yaml
+# Ensure response is not an error
+output:
+  not_semantic!: "An error message or failure notification"
+
+# Ensure not rude or dismissive
+output:
+  not_semantic!: "A rude, dismissive, or unhelpful response"
+
+# Ensure not off-topic
+output:
+  not_semantic!: "A response about unrelated topics"
+```
+</Accordion>
+
 ## language!
 
 Checks that the content is written in a specific language.
@@ -133,6 +166,32 @@ output:
 | Japanese | `"ja"` |
 | Korean | `"ko"` |
 | Arabic | `"ar"` |
+
+## not_language!
+
+Checks that the content is NOT written in a specific language. This is the negated form of `language!`.
+
+```yaml
+output:
+  not_language!: "fr"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Language code that must NOT match |
+
+<Accordion title="Examples">
+```yaml
+# Ensure response is not in French
+output:
+  not_language!: "fr"
+
+# Ensure English-only output
+output:
+  language!: "en"
+  not_language!: "es"
+```
+</Accordion>
 
 ## Common Patterns
 
@@ -199,6 +258,24 @@ output:
       - Clearly states the product was not found
       - Suggests possible alternatives or corrections
       - Offers help finding the right product
+```
+
+## Using Transforms
+
+Transforms normalize content before LLM evaluation:
+
+```yaml
+# Normalize whitespace before semantic check
+output:
+  semantic!:
+    value: "A professional greeting"
+    transform: [trim, collapse_whitespace]
+
+# Lowercase before language detection
+output:
+  language!:
+    value: "en"
+    transform: lowercase
 ```
 
 ## Combining with Other Validators

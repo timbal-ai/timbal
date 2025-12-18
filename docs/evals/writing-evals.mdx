@@ -42,6 +42,10 @@ Evals are defined in YAML files. Each file can contain multiple eval definitions
   runnable: path/to/agent.py::agent_name
 ```
 
+<Warning>
+Eval names must be unique across all eval files in your project. The CLI will error if duplicate names are found.
+</Warning>
+
 ### Optional Fields
 
 ```yaml
@@ -297,24 +301,6 @@ seq!:
   - validate_input
   - ...               # Any number
   - send_response
-```
-
-## The `any!` Pattern
-
-Match flexible patterns within sequences:
-
-```yaml
-seq!:
-  - llm
-  - any!:
-      min: 1
-      max: 3
-      contains:
-        - validate_email
-        - validate_phone
-      not_contains:
-        - delete_user
-  - process_request
 ```
 
 ## Tags and Filtering

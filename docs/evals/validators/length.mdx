@@ -5,6 +5,10 @@ description: "Validators for checking length constraints on strings, lists, and 
 
 Length validators check the size of strings, lists, and other collections.
 
+<Note>
+Length validators support [transforms](/evals/validators#transforms) when validating strings. Transforms are applied before measuring length.
+</Note>
+
 ## length!
 
 Checks that the value has exactly the specified length.
@@ -163,6 +167,24 @@ generate_code:
     type!: "string"
     length!: 6
     pattern!: "[A-Z0-9]{6}"
+```
+
+## Using Transforms
+
+Transforms are applied before measuring length:
+
+```yaml
+# Trim whitespace before checking length
+output:
+  min_length!:
+    value: 10
+    transform: trim
+
+# Collapse whitespace then check length
+output:
+  max_length!:
+    value: 100
+    transform: [trim, collapse_whitespace]
 ```
 
 ## Notes on Length Calculation

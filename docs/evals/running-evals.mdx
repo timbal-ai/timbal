@@ -11,13 +11,16 @@ Run evals from the command line:
 
 ```bash
 # Run all evals in a directory
-python -m timbal.evals path/to/evals/
+python -m timbal.evals.cli path/to/evals/
 
 # Run a specific eval file
-python -m timbal.evals path/to/eval_search.yaml
+python -m timbal.evals.cli path/to/eval_search.yaml
+
+# Run a single eval by name (pytest-style)
+python -m timbal.evals.cli path/to/eval_search.yaml::my_eval_name
 
 # Run with a specific runnable
-python -m timbal.evals --runnable agent.py::my_agent path/to/evals/
+python -m timbal.evals.cli --runnable agent.py::my_agent path/to/evals/
 ```
 
 ## CLI Options
@@ -28,6 +31,7 @@ python -m timbal.evals --runnable agent.py::my_agent path/to/evals/
 | `--runnable` | Fully qualified name of the runnable (`file.py::name`) |
 | `--log-level` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 | `-s`, `--no-capture` | Disable stdout/stderr capture (show output live) |
+| `-t`, `--tags` | Filter evals by tags (comma-separated) |
 | `-V`, `--version` | Show version information |
 
 ### Runnable Specification
@@ -36,7 +40,7 @@ The runnable can be specified in two ways:
 
 **1. Via CLI flag:**
 ```bash
-python -m timbal.evals --runnable agents/search.py::search_agent evals/
+python -m timbal.evals.cli --runnable agents/search.py::search_agent evals/
 ```
 
 **2. Per-eval in YAML:**
@@ -51,16 +55,33 @@ python -m timbal.evals --runnable agents/search.py::search_agent evals/
 
 Per-eval runnable overrides the CLI flag.
 
+### Tag Filtering
+
+Filter evals by tags using `-t` or `--tags`:
+
+```bash
+# Run only evals with 'smoke' tag
+python -m timbal.evals.cli -t smoke evals/
+
+# Run evals matching ANY of the specified tags
+python -m timbal.evals.cli -t smoke,fast evals/
+
+# Combine with other options
+python -m timbal.evals.cli --tags regression -s evals/
+```
+
+Evals matching **any** of the specified tags will run.
+
 ### Output Capture
 
 By default, stdout/stderr from your agent is captured and only shown on failure. Use `-s` to see output live:
 
 ```bash
 # Captured (default) - cleaner output
-python -m timbal.evals evals/
+python -m timbal.evals.cli evals/
 
 # Live output - useful for debugging
-python -m timbal.evals -s evals/
+python -m timbal.evals.cli -s evals/
 ```
 
 ## File Discovery
@@ -89,12 +110,12 @@ project/
 
 Run all evals:
 ```bash
-python -m timbal.evals evals/
+python -m timbal.evals.cli evals/
 ```
 
 Run specific subset:
 ```bash
-python -m timbal.evals evals/regression/
+python -m timbal.evals.cli evals/regression/
 ```
 
 ### Configuration File
@@ -213,7 +234,7 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python -m timbal.evals --runnable agent.py::agent evals/
+          python -m timbal.evals.cli --runnable agent.py::agent evals/
 ```
 
 ### GitLab CI
@@ -226,7 +247,7 @@ evals:
   script:
     - pip install -e .
     - pip install timbal
-    - python -m timbal.evals --runnable agent.py::agent evals/
+    - python -m timbal.evals.cli --runnable agent.py::agent evals/
   variables:
     OPENAI_API_KEY: $OPENAI_API_KEY
 ```
@@ -238,7 +259,7 @@ evals:
 # .git/hooks/pre-commit
 
 echo "Running evals..."
-python -m timbal.evals evals/smoke/
+python -m timbal.evals.cli evals/smoke/
 
 if [ $? -ne 0 ]; then
     echo "Evals failed. Commit aborted."
@@ -252,10 +273,10 @@ fi
 
 ```bash
 # Show debug logging
-python -m timbal.evals --log-level DEBUG evals/
+python -m timbal.evals.cli --log-level DEBUG evals/
 
 # Show live output
-python -m timbal.evals -s evals/
+python -m timbal.evals.cli -s evals/
 ```
 
 ### Run Single Eval
@@ -264,7 +285,10 @@ Test a specific eval during development:
 
 ```bash
 # Run one file
-python -m timbal.evals evals/eval_search.yaml
+python -m timbal.evals.cli evals/eval_search.yaml
+
+# Run a specific eval by name (pytest-style syntax)
+python -m timbal.evals.cli evals/eval_search.yaml::basic_search
 ```
 
 ### Environment Variables
@@ -274,7 +298,7 @@ Set environment variables for testing:
 ```bash
 # Via shell
 export API_KEY="test-key"
-python -m timbal.evals evals/
+python -m timbal.evals.cli evals/
 
 # Or in eval file
 - name: test_with_key
@@ -302,10 +326,10 @@ evals/
 
 ```bash
 # Quick check
-python -m timbal.evals evals/smoke/
+python -m timbal.evals.cli evals/smoke/
 
 # Full suite
-python -m timbal.evals evals/
+python -m timbal.evals.cli evals/
 ```
 </Accordion>
 
@@ -313,7 +337,7 @@ python -m timbal.evals evals/
 Check exit codes in scripts:
 
 ```bash
-python -m timbal.evals evals/
+python -m timbal.evals.cli evals/
 status=$?
 
 if [ $status -eq 0 ]; then

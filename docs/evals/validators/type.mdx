@@ -5,6 +5,10 @@ description: "Validators for type checking, JSON, email, and null validation"
 
 Type validators check the type and format of values, ensuring data conforms to expected structures.
 
+<Note>
+Type validators generally don't use transforms since they check data types rather than string content. See [Validators Overview](/evals/validators#transforms) for transform documentation.
+</Note>
+
 ## not_null!
 
 Checks that a value exists and is not null/None.
@@ -92,6 +96,37 @@ get_user:
 validate:
   output:
     type!: "bool"
+```
+</Accordion>
+
+## not_type!
+
+Checks that a value is NOT of a specific type. This is the negated form of `type!`.
+
+```yaml
+output:
+  not_type!: "null"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | Type name that must NOT match |
+
+<Accordion title="Examples">
+```yaml
+# Ensure output is not null
+output:
+  not_type!: "null"
+
+# Ensure result is not a string (expect structured data)
+process_data:
+  output:
+    not_type!: "string"
+
+# Ensure not returning an error object
+validate:
+  output:
+    not_type!: "object"
 ```
 </Accordion>
 
