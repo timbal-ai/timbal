@@ -725,6 +725,10 @@ class Runnable(ABC, BaseModel):
 
             if self.pre_hook is not None:
                 await self._execute_runtime_callable(self.pre_hook, self._pre_hook_is_coroutine)
+                # restore
+                set_call_id(_call_id)
+                if self._is_orchestrator:
+                    set_parent_call_id(_call_id)
 
             # Pydantic model_validate() does not mutate the input dict
             validated_input = dict(self.params_model.model_validate(input))
@@ -748,6 +752,16 @@ class Runnable(ABC, BaseModel):
                                 collector = handler_collector
                             if final_output is not None:
                                 output = final_output
+
+                        set_call_id(_call_id)
+                        if self._is_orchestrator:
+                            set_parent_call_id(_call_id)
+                        if self.post_hook is not None:
+                            await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+
+                        # Post hook might modify the output, so we dump afterwards
+                        span._output_dump = await dump(span.output)
+
                     except asyncio.CancelledError:
                         # Re-raise so asyncio marks the task as cancelled
                         raise
@@ -788,7 +802,7 @@ class Runnable(ABC, BaseModel):
             set_call_id(_call_id)
             if self._is_orchestrator:
                 set_parent_call_id(_call_id)
-            if self.post_hook is not None:
+            if self.post_hook is not None and not run_in_background:
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
 
             # Post hook might modify the output, so we dump afterwards

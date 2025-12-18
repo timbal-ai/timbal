@@ -689,6 +689,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             # Run the tool
                             async for event in tool(**tool_input):
                                 await _process_tool_event(event, tool_use_id, append_to_messages=False)
+                                if isinstance(event, OutputEvent) and event.output is not None:
+                                    current_span.memory.append(Message.validate({
+                                        "role": "assistant",
+                                        "content": [TextContent(type="text", text=str(event.output))]
+                                    }))
                                 yield event
                             return
 
