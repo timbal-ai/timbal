@@ -40,18 +40,24 @@ class Eval(BaseModel):
         if not isinstance(self.model_extra, dict):
             return self
 
-        # Track occurrence counts for each step target path
-        # This allows us to distinguish validators for different occurrences of the same step
-        # e.g., two "get_datetime" steps in a parallel block
-        occurrence_counts: dict[str, int] = {}
+        def dfs(
+            target: str,
+            path_key: str,
+            spec: dict[str, Any],
+            step_counters: dict[str, int] | None = None,
+        ):
+            """
+            Parse validators from a spec dict.
 
-        def get_next_occurrence(step_target: str) -> int:
-            """Get the next occurrence index for a step target and increment the counter."""
-            count = occurrence_counts.get(step_target, 0)
-            occurrence_counts[step_target] = count + 1
-            return count
+            Args:
+                target: The current target path (e.g., "agent.get_datetime")
+                path_key: The unique path key with indices (e.g., "agent.seq#0.get_datetime#0")
+                spec: The spec dict containing validators and nested structures
+                step_counters: Counter dict for tracking step occurrences at current level
+            """
+            if step_counters is None:
+                step_counters = {}
 
-        def dfs(target: str, spec: dict[str, Any], occurrence: int = 0):
             validators = []
             for k, v in spec.items():
                 if k in FLOW_VALIDATORS:
@@ -60,14 +66,21 @@ class Eval(BaseModel):
                             "Invalid flow validator step. Value should be a list of steps", target=target, step=v
                         )
                         continue
+
+                    # Create flow validator with current path_key
                     steps_for_flow = []
                     nested_validators = []
+
+                    # Track step occurrences within this flow
+                    flow_step_counters: dict[str, int] = {}
+
                     for step in v:
                         if isinstance(step, str):
+                            # Plain step name (no validators)
                             steps_for_flow.append(step)
-                            # Track occurrence even for plain step names (no validators)
-                            step_target = f"{target}.{step}"
-                            get_next_occurrence(step_target)
+                            # Track occurrence
+                            step_count = flow_step_counters.get(step, 0)
+                            flow_step_counters[step] = step_count + 1
                         elif isinstance(step, dict):
                             if len(step) != 1:
                                 logger.warning("Invalid flow validator step", target=target, step=step)
@@ -75,59 +88,87 @@ class Eval(BaseModel):
                             step_key, step_spec = next(iter(step.items()))
                             if step_key in FLOW_VALIDATORS:
                                 # Nested flow validator (e.g., parallel! inside seq!)
-                                # Pass the entire step dict to preserve structure
                                 steps_for_flow.append(step)
-                                # Also extract validators from inside the nested flow
+                                # Process nested flow recursively
                                 if isinstance(step_spec, list):
+                                    nested_flow_step_counters: dict[str, int] = {}
                                     for nested_step in step_spec:
                                         if isinstance(nested_step, str):
                                             # Plain step name inside nested flow
-                                            nested_step_target = f"{target}.{nested_step}"
-                                            get_next_occurrence(nested_step_target)
+                                            ns_count = nested_flow_step_counters.get(nested_step, 0)
+                                            nested_flow_step_counters[nested_step] = ns_count + 1
                                         elif isinstance(nested_step, dict) and len(nested_step) == 1:
                                             nested_step_name, nested_step_spec = next(iter(nested_step.items()))
-                                            nested_step_target = f"{target}.{nested_step_name}"
-                                            step_occurrence = get_next_occurrence(nested_step_target)
-                                            if nested_step_name not in FLOW_VALIDATORS and isinstance(
-                                                nested_step_spec, dict
-                                            ):
+                                            if nested_step_name in FLOW_VALIDATORS:
+                                                # Skip nested flow validators for now
+                                                continue
+                                            # Get occurrence for this nested step
+                                            ns_count = nested_flow_step_counters.get(nested_step_name, 0)
+                                            nested_flow_step_counters[nested_step_name] = ns_count + 1
+                                            if isinstance(nested_step_spec, dict):
+                                                nested_target = f"{target}.{nested_step_name}"
+                                                nested_path_key = f"{path_key}.{nested_step_name}#{ns_count}"
                                                 nested = dfs(
-                                                    nested_step_target, nested_step_spec, occurrence=step_occurrence
+                                                    nested_target,
+                                                    nested_path_key,
+                                                    nested_step_spec,
+                                                    {},
                                                 )
                                                 nested_validators.extend(nested)
                             else:
                                 # Span name with nested validators
                                 steps_for_flow.append(step)
+                                step_count = flow_step_counters.get(step_key, 0)
+                                flow_step_counters[step_key] = step_count + 1
                                 step_target = f"{target}.{step_key}"
-                                step_occurrence = get_next_occurrence(step_target)
+                                step_path_key = f"{path_key}.{step_key}#{step_count}"
                                 if isinstance(step_spec, dict):
-                                    nested = dfs(step_target, step_spec, occurrence=step_occurrence)
+                                    nested = dfs(step_target, step_path_key, step_spec, {})
                                     nested_validators.extend(nested)
                         else:
                             logger.warning("Invalid flow validator step", target=target, step=step)
-                    # Add the flow validator first, then its nested validators
+
+                    # Add the flow validator
                     try:
-                        flow_validator = parse_validator({"name": k, "target": target, "value": steps_for_flow})
+                        flow_validator = parse_validator(
+                            {
+                                "name": k,
+                                "target": target,
+                                "value": steps_for_flow,
+                                "path_key": path_key,
+                            }
+                        )
                         validators.append(flow_validator)
                     except Exception:
                         logger.warning("Unknown flow validator", target=target, name=k)
                         continue
                     validators.extend(nested_validators)
                 elif k.endswith("!"):
-                    # Try to create validator instance, fallback to tuple
+                    # Value validator
                     try:
-                        validator = parse_validator({"name": k, "target": target, "value": v, "occurrence": occurrence})
+                        validator = parse_validator(
+                            {
+                                "name": k,
+                                "target": target,
+                                "value": v,
+                                "path_key": path_key,
+                            }
+                        )
                         validators.append(validator)
                     except Exception:
                         logger.warning("Unknown validator", target=target, name=k)
                 elif isinstance(v, dict):
-                    nested = dfs(f"{target}.{k}", v, occurrence=occurrence)
+                    # Nested property path (e.g., input.timezone)
+                    nested_target = f"{target}.{k}"
+                    nested_path_key = f"{path_key}.{k}"
+                    nested = dfs(nested_target, nested_path_key, v, step_counters)
                     validators.extend(nested)
                 else:
                     logger.warning("Invalid eval property", target=target, key=k, value=v)
             return validators
 
-        self._validators = dfs(self.runnable._path, self.model_extra)
+        root_path = self.runnable._path
+        self._validators = dfs(root_path, root_path, self.model_extra, {})
         return self
 
 
@@ -146,6 +187,7 @@ class ValidatorResult(BaseModel):
     name: str
     value: Any = None
     passed: bool
+    path_key: str = ""  # Unique path key with indices
     error: str | None = None
     traceback: str | None = None
 

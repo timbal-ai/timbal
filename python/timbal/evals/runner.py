@@ -47,6 +47,7 @@ async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
                             target=validator.target,
                             name=validator.name,
                             value=validator.value,
+                            path_key=validator.path_key,
                             passed=True,
                         )
                     )
@@ -56,6 +57,7 @@ async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
                             target=validator.target,
                             name=validator.name,
                             value=validator.value,
+                            path_key=validator.path_key,
                             passed=False,
                             error=f"{type(e).__name__}: {e}",
                             traceback=traceback.format_exc(),
