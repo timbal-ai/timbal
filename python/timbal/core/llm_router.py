@@ -105,7 +105,6 @@ Model = Literal[
     "togetherai/deepseek-ai/DeepSeek-R1",
     # Gemini models
     "google/gemini-3-pro-preview",
-    "google/gemini-3-pro-image-preview",
     "google/gemini-3-flash-preview",
     "google/gemini-2.5-pro",
     "google/gemini-2.5-flash",
