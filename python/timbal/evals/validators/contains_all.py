@@ -23,7 +23,7 @@ class ContainsAllValidator(BaseValidator):
         """
         from ..utils import resolve_target
 
-        _, actual_value = resolve_target(ctx.trace, self.target)
+        _, actual_value = resolve_target(ctx.trace, self.target, self.path_key)
 
         if isinstance(actual_value, Message):
             actual_value = actual_value.collect_text()

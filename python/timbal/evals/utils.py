@@ -15,7 +15,54 @@ logger = structlog.get_logger("timbal.evals.utils")
 CONFIG_FILENAME = "evalconf.yaml"
 
 
-def resolve_target(trace: Trace, target: str) -> tuple[Span | None, Any]:
+def _parse_path_key_indices(path_key: str, target: str) -> dict[str, int]:
+    """Parse a path_key to extract span occurrence indices, filtering to only spans in target.
+
+    The path_key contains flow validators (seq#0, parallel#0) that don't exist as spans.
+    This function extracts only the indices for span names that appear in the target path.
+
+    Args:
+        path_key: Path key with occurrence indices, e.g., "agent.seq#0.parallel#0.get_datetime#1.input.timezone"
+        target: The actual span path, e.g., "agent.get_datetime.input.timezone"
+
+    Returns:
+        Dictionary mapping actual span paths to their occurrence indices.
+        e.g., {"agent.get_datetime": 1} (skipping seq and parallel which aren't real spans)
+    """
+    import re
+
+    # Extract all indexed parts from path_key: [(name, index), ...]
+    indexed_parts: list[tuple[str, int]] = []
+    for part in path_key.split("."):
+        match = re.match(r"^(.+)#(\d+)$", part)
+        if match:
+            name, idx = match.groups()
+            indexed_parts.append((name, int(idx)))
+
+    # Extract the span path from target (parts before property paths like input, output)
+    # We need to find which parts of target are span names vs property paths
+    target_parts = target.split(".")
+
+    # Build indices dict by matching indexed parts to target path segments
+    indices: dict[str, int] = {}
+    target_path_parts: list[str] = []
+    indexed_idx = 0
+
+    for target_part in target_parts:
+        target_path_parts.append(target_part)
+        current_path = ".".join(target_path_parts)
+
+        # Check if this target part matches the next indexed part
+        if indexed_idx < len(indexed_parts):
+            indexed_name, indexed_occurrence = indexed_parts[indexed_idx]
+            if target_part == indexed_name:
+                indices[current_path] = indexed_occurrence
+                indexed_idx += 1
+
+    return indices
+
+
+def resolve_target(trace: Trace, target: str, path_key: str = "") -> tuple[Span | None, Any]:
     """Resolve a target path to a span and value.
 
     Target format: "span.path.property.nested.path"
@@ -37,6 +84,8 @@ def resolve_target(trace: Trace, target: str) -> tuple[Span | None, Any]:
     Args:
         trace: The trace to search in.
         target: Dot-separated path like "agent.validate_user.input.age".
+        path_key: Optional path key with occurrence indices, e.g., "agent.seq#0.get_datetime#1.input.timezone".
+                  When provided, uses the indices to select the correct span occurrence.
 
     Returns:
         Tuple of (span, value). Span is None if not found.
@@ -44,6 +93,9 @@ def resolve_target(trace: Trace, target: str) -> tuple[Span | None, Any]:
     """
     if not target:
         return None, None
+
+    # Parse path_key to get occurrence indices for each span
+    path_indices = _parse_path_key_indices(path_key, target) if path_key else {}
 
     parts = target.split(".")
 
@@ -59,8 +111,13 @@ def resolve_target(trace: Trace, target: str) -> tuple[Span | None, Any]:
         span_path = ".".join(parts[:i])
         spans = trace.get_path(span_path)
         if spans:
-            # TODO Multiple matching spans (e.g. multiple iteration same tool uses)
-            span = spans[0]
+            # Use path_key index if available, otherwise default to first span
+            occurrence_idx = path_indices.get(span_path, 0)
+            if occurrence_idx < len(spans):
+                span = spans[occurrence_idx]
+            else:
+                # Fall back to first span if index is out of range
+                span = spans[0]
             prop_parts = parts[i:]
             break
 

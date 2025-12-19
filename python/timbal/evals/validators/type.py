@@ -39,7 +39,7 @@ class TypeValidator(BaseValidator):
         """
         from ..utils import resolve_target
 
-        _, actual_value = resolve_target(ctx.trace, self.target)
+        _, actual_value = resolve_target(ctx.trace, self.target, self.path_key)
 
         # Treat Message as string
         if isinstance(actual_value, Message):
