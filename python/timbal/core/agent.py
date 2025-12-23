@@ -423,7 +423,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span.in_context_skills = previous_span.in_context_skills
 
         # >= 1.1.0 memory is stored in the agent span. This enables us to modify the memory directly without passing it to the LLM.
-        if hasattr(previous_span, "memory"):
+        if isinstance(previous_span.memory, list):
             memory = [Message.validate(m) for m in previous_span.memory]
         else:
             # < 1.1.0 Extract conversation history from parent's LLM calls
@@ -690,10 +690,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             async for event in tool(**tool_input):
                                 await _process_tool_event(event, tool_use_id, append_to_messages=False)
                                 if isinstance(event, OutputEvent) and event.output is not None:
-                                    current_span.memory.append(Message.validate({
-                                        "role": "assistant",
-                                        "content": [TextContent(type="text", text=str(event.output))]
-                                    }))
+                                    current_span.memory.append(
+                                        Message.validate(
+                                            {
+                                                "role": "assistant",
+                                                "content": [TextContent(type="text", text=str(event.output))],
+                                            }
+                                        )
+                                    )
                                 yield event
                             return
 
