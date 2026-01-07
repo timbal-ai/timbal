@@ -394,6 +394,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return
         current_span.memory = [Message.validate(current_span.input.get("prompt", ""))]
 
+        # Skip memory resolution for subagents (isolated context)
+        if current_span.parent_call_id is not None:
+            return
+
         # The user can override the entire list of llm input messages
         input_messages = current_span.input.get("messages", [])
         if input_messages:
@@ -427,7 +431,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             memory = [Message.validate(m) for m in previous_span.memory]
         else:
             # < 1.1.0 Extract conversation history from parent's LLM calls
-            # TODO Handle multiple call_ids for this agent (we could access step spans)
             llm_spans = parent_trace.get_path(self._llm._path)
             # In a subagent, this can be empty if the parent agent didn't call the LLM
             if not len(llm_spans):
