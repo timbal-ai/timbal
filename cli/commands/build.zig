@@ -111,6 +111,7 @@ fn parseArgs(args: []const []const u8) !TimbalBuildArgs {
 
 const TimbalYaml = struct {
     system_packages: []const []const u8,
+    run_commands: []const []const u8,
     fqn: []const u8,
 
     pub fn deinit(self: *TimbalYaml, allocator: std.mem.Allocator) void {
@@ -118,6 +119,10 @@ const TimbalYaml = struct {
             allocator.free(pkg);
         }
         allocator.free(self.system_packages);
+        for (self.run_commands) |cmd| {
+            allocator.free(cmd);
+        }
+        allocator.free(self.run_commands);
         allocator.free(self.fqn);
     }
 };
@@ -136,12 +141,14 @@ fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !Tim
     var buf: [4096]u8 = undefined;
 
     var timbal_yaml_system_packages: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(allocator);
+    var timbal_yaml_run_commands: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(allocator);
     var timbal_yaml_fqn: ?[]const u8 = null;
 
     // Track the current section of the file we're parsing.
     var current_section: enum {
         None,
         SystemPackages,
+        RunCommands,
     } = .None;
 
     while (try in_stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
@@ -159,8 +166,17 @@ fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !Tim
             continue;
         }
 
+        if (current_section == .RunCommands and std.mem.startsWith(u8, trimmed, "-")) {
+            var run_command = std.mem.trim(u8, trimmed[1..], &std.ascii.whitespace);
+            run_command = std.mem.trim(u8, run_command, "\"");
+            try timbal_yaml_run_commands.append(try allocator.dupe(u8, run_command));
+            continue;
+        }
+
         if (std.mem.startsWith(u8, trimmed, "system_packages:")) {
             current_section = .SystemPackages;
+        } else if (std.mem.startsWith(u8, trimmed, "run:")) {
+            current_section = .RunCommands;
         } else if (std.mem.startsWith(u8, trimmed, "fqn:") or
             std.mem.startsWith(u8, trimmed, "agent: ") or
             std.mem.startsWith(u8, trimmed, "flow: "))
@@ -184,6 +200,7 @@ fn parseTimbalYaml(allocator: std.mem.Allocator, timbal_yaml_file: fs.File) !Tim
 
     return TimbalYaml{
         .system_packages = try timbal_yaml_system_packages.toOwnedSlice(),
+        .run_commands = try timbal_yaml_run_commands.toOwnedSlice(),
         .fqn = try allocator.dupe(u8, timbal_yaml_fqn.?),
     };
 }
@@ -216,7 +233,7 @@ fn writeDockerfile(
         \\
         \\RUN uv sync --python 3.12 --python-preference managed && \
         \\    rm -rf $HOME/.cache/uv
-        \\
+        \\{s}
         \\ENV PATH=".venv/bin:$PATH"
         \\
         \\ENV TIMBAL_RUNNABLE={s}
@@ -239,7 +256,21 @@ fn writeDockerfile(
         try system_packages_buffer.appendSlice(pkg);
     }
 
-    try dockerfile.writer().print(dockerfile_template, .{ system_packages_buffer.items, timbal_yaml.fqn });
+    // Format the run commands for the Dockerfile.
+    var run_commands_buffer = std.ArrayList(u8).init(allocator);
+    defer run_commands_buffer.deinit();
+
+    for (timbal_yaml.run_commands) |cmd| {
+        try run_commands_buffer.appendSlice("\nRUN ");
+        try run_commands_buffer.appendSlice(cmd);
+        try run_commands_buffer.appendSlice("\n");
+    }
+
+    try dockerfile.writer().print(dockerfile_template, .{
+        system_packages_buffer.items,
+        run_commands_buffer.items,
+        timbal_yaml.fqn,
+    });
 }
 
 fn buildContainer(

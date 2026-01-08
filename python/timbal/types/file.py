@@ -19,6 +19,7 @@ from pydantic import (
 from pydantic_core import CoreSchema, core_schema
 from uuid_extensions import uuid7
 
+from ..platform.types import UploadFileResponse
 from ..platform.utils import _request
 from ..state import get_or_create_run_context
 
@@ -343,12 +344,13 @@ class File(io.IOBase):
         self.seek(0)  # Return the pointer to the beginning of the file
 
         path = f"orgs/{org_id}/files"
-        files = {"file": (quote(self.name), content, self.__content_type__)}
+        files = {"file": (self.name, content, self.__content_type__)}
 
         res = await _request("POST", path, files=files)
-        res_json = res.json()
-        # ? We could use an UploadFileResponse pydantic model
-        url = res_json["url"]
+        upload_response = UploadFileResponse.model_validate(res.json())
+        # Encode simply the name of the url (the remaining is will be always safe
+        url = upload_response.url.rstrip(upload_response.name)
+        url = f"{url}{quote(upload_response.name)}"
         object.__setattr__(self, "__persisted__", url)
         return url
 
