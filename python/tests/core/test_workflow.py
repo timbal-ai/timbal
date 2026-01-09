@@ -59,6 +59,26 @@ async def async_gen_step_handler(count: int) -> AsyncGenerator[int, None]:
         yield i
 
 
+def select_branch_handler() -> str:
+    """Select branch handler."""
+    return "a"
+
+
+def process_branch_a_handler() -> str:
+    """Process branch A handler."""
+    return "result_a"
+
+
+def process_branch_b_handler() -> str:
+    """Process branch B handler."""
+    return "result_b"
+
+
+def aggregate_results_handler() -> str:
+    """Aggregate results handler."""
+    return "aggregated"
+
+
 # ==============================================================================
 # Test Fixtures
 # ==============================================================================
@@ -414,6 +434,16 @@ class TestControlFlow:
         assert len(output_events) == 2
         assert output_events[-1].error is None
         assert "step1:override_input" in str(output_events[-1].output)
+
+    async def test_conditional_branching_with_aggregate(self, simple_workflow):
+        """Test that aggregate step runs even when some conditional branches are skipped."""
+        simple_workflow.step(select_branch_handler)
+        simple_workflow.step(process_branch_a_handler, when=lambda: get_run_context().step_span("select_branch_handler").output == 'a')
+        simple_workflow.step(process_branch_b_handler, when=lambda: get_run_context().step_span("select_branch_handler").output == 'b')
+        simple_workflow.step(aggregate_results_handler, depends_on=["process_branch_a_handler", "process_branch_b_handler"])
+        
+        result = await simple_workflow().collect()
+        assert result.output == "aggregated"
 
 
 class TestParameterAndNesting:

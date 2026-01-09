@@ -190,11 +190,21 @@ class Workflow(Runnable):
 
         return self
 
-    def _skip_next_steps(self, step_name: str, completions: dict[str, asyncio.Event]) -> None:
-        """Recursively mark a step and all its dependents as completed (skipped)."""
+    def _skip_next_steps(self, step_name: str, completions: dict[str, asyncio.Event], force: bool = False) -> None:
+        """Recursively mark a step and all its dependents as completed (skipped).
+        
+        Args:
+            step_name: The step to mark as completed
+            completions: Dictionary mapping step names to completion events
+            force: If True (error case), skip all dependents immediately.
+                   If False (conditional skip), only skip dependents if ALL their dependencies are completed.
+        """
         completions[step_name].set()
         for next_name in self._steps[step_name].next_steps:
-            self._skip_next_steps(next_name, completions)
+            next_step = self._steps[next_name]
+            # Error case: skip immediately. Conditional skip: only if all dependencies completed.
+            if force or all(completions[dep].is_set() for dep in next_step.previous_steps):
+                self._skip_next_steps(next_name, completions, force=force)
 
     async def _enqueue_step_events(
         self, step: Runnable, queue: asyncio.Queue, completions: dict[str, asyncio.Event], **kwargs: Any
@@ -218,7 +228,7 @@ class Workflow(Runnable):
                     step_started = True
                 if isinstance(event, OutputEvent) and event.error is not None:
                     logger.info(f"Skipping step {step.name} successors...")
-                    self._skip_next_steps(step.name, completions)
+                    self._skip_next_steps(step.name, completions, force=True)
         except Exception as e:
             await queue.put(e)
             return
