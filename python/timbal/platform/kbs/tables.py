@@ -419,6 +419,10 @@ async def query(
         ...,
         description="The SQL query to execute."
     ),
+    params: list[Any] | None = Field(
+        None,
+        description="Parameters for parameterized SQL queries."
+    ),
 ) -> list[dict[str, Any]]:
     """
     Execute a SQL query against a knowledge base table (PostgreSQL dialect).
@@ -427,6 +431,7 @@ async def query(
         org_id (str): The organization ID.
         kb_id (str): The knowledge base ID.
         sql (str): The SQL query to execute. This must be valid PostgreSQL SQL.
+        params (list[Any] | None): Optional parameters for parameterized queries.
 
     Returns:
         list[dict[str, Any]]: The query results as a list of dictionaries, where each dictionary represents a row.
@@ -443,9 +448,23 @@ async def query(
             kb_id="48",
             sql='SELECT COUNT(*) FROM "Documents"'
         )
+        
+        # Insert with parameters
+        await query(
+            org_id="10",
+            kb_id="48",
+            sql='INSERT INTO "Documents" (id::uuid, name) VALUES ($1, $2) RETURNING *',
+            params=[1, "example.txt"]
+        )
     """
+    params = resolve_default("params", params)
+    
     path = f"orgs/{org_id}/kbs/{kb_id}/query"
-    payload = {"sql": sql}
+
+    payload = {
+        "sql": sql,
+        "params": params if params is not None else []
+    }
 
     res = await _request("POST", path, json=payload)
     return res.json()
