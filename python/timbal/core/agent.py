@@ -4,7 +4,7 @@ import inspect
 import json
 import re
 import sys
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -47,25 +47,17 @@ SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA
 
 
 class AgentParams(BaseModel):
-    """Parameter model for Agent execution.
-
-    Defines the input parameters that agents accept when called.
-    Use either 'prompt' or 'messages', not both:
-    - 'prompt': Single message input. The framework will automatically resolve
-      and include memory from previous runs.
-    - 'messages': Explicit list of messages. No automatic memory resolution occurs;
-      you have full control over the message history.
-    """
+    """Input parameters for Agent execution. Use either 'prompt' or 'messages', not both."""
 
     model_config = ConfigDict(extra="allow")
 
     prompt: Message | None = Field(
         None,
-        description="Single input message. Framework automatically resolves memory from previous runs.",
+        description="Single input message. Memory is automatically resolved from previous runs.",
     )
     messages: list[Message] | None = Field(
         None,
-        description="Explicit list of messages. No automatic memory resolution; full manual control.",
+        description="Explicit list of messages. No automatic memory resolution.",
     )
 
     @model_validator(mode="after")
@@ -79,7 +71,7 @@ class AgentParams(BaseModel):
 
     @classmethod
     def model_json_schema(cls, **kwargs: Any) -> dict[str, Any]:
-        """Override model_json_schema to return a custom schema so that agents can be used as tools more easily."""
+        """Custom schema for using agents as tools."""
         return {
             "type": "object",
             "properties": {
@@ -103,25 +95,12 @@ class AgentParams(BaseModel):
 
 
 class Agent(Runnable):
-    """An Agent is a Runnable that orchestrates LLM interactions with tool calling.
-
-    Agents implement an autonomous execution pattern where an LLM can:
-    1. Receive a prompt and generate a response
-    2. Decide to call available tools based on the context
-    3. Process tool results and continue the conversation
-    4. Repeat until no more tool calls are needed or max_iter is reached
-
-    Agents support:
-    - Multi-turn conversations with memory across iterations
-    - Concurrent tool execution for efficiency
-    - Flexible tool definition (functions, dicts, or Runnable objects)
-    - Integration with multiple LLM providers via _llm_router
-    """
+    """Orchestrates LLM interactions with autonomous tool calling."""
 
     model: Model | str
-    """The LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5')."""
-    system_prompt: str | None = None
-    """System prompt to provide context for the agent."""
+    """LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5')."""
+    system_prompt: str | Callable[[], str] | Callable[[], Coroutine[Any, Any, str]] | None = None
+    """System prompt. Can be a string, sync callable, or async callable returning a string."""
     tools: list[SkipValidation[RunnableLike]] = []
     """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
     skills_path: str | Path | None = None
@@ -134,26 +113,24 @@ class Agent(Runnable):
     """BaseModel to generate a structured output."""
 
     _llm: Tool = PrivateAttr()
-    """Internal LLM tool instance for making model calls."""
-    _system_prompt_callables: dict[str, Any] = PrivateAttr(default_factory=dict)
-    """Dictionary mapping template patterns to their callable functions and metadata."""
+    """Internal LLM tool instance."""
+    _system_prompt_templates: dict[str, Any] = PrivateAttr(default_factory=dict)
+    """Template patterns {module::func} mapped to their callables."""
+    _system_prompt_fn: Callable | None = PrivateAttr(default=None)
+    """Callable passed as system_prompt."""
+    _system_prompt_fn_is_async: bool = PrivateAttr(default=False)
+    """Whether _system_prompt_fn is async."""
 
     def model_post_init(self, __context: Any) -> None:
-        """Initialize agent-specific attributes after Pydantic model creation.
-
-        This method sets up the agent's internal tools and execution characteristics:
-        1. Parses and loads system prompt template functions if present
-        2. Creates an internal LLM tool for model interactions
-        3. Normalizes user-provided tools into Tool instances
-        4. Sets up tool name mapping for fast lookup during execution
-        5. Configures execution characteristics as an orchestrator
-
-        System prompt template functions are discovered by parsing the system_prompt
-        for patterns like {namespace::function} and dynamically importing the callable
-        from either packages or files relative to the Agent constructor's caller.
-        """
+        """Initialize agent after Pydantic model creation."""
         super().model_post_init(__context)
         self._path = self.name
+
+        # Handle callable system_prompt
+        if callable(self.system_prompt):
+            self._system_prompt_fn = self.system_prompt
+            self._system_prompt_fn_is_async = self._inspect_callable(self.system_prompt)["is_coroutine"]
+            self.system_prompt = None
 
         if self.system_prompt:
             for match in SYSTEM_PROMPT_FN_PATTERN.finditer(self.system_prompt):
@@ -228,7 +205,7 @@ class Agent(Runnable):
                             fn = getattr(fn, j)
 
                     inspect_result = self._inspect_callable(fn)
-                    self._system_prompt_callables[text] = {
+                    self._system_prompt_templates[text] = {
                         "start": match.start(),
                         "end": match.end(),
                         "callable": fn,
@@ -248,7 +225,7 @@ class Agent(Runnable):
                     for j in path_parts[-fn_i:]:
                         fn = getattr(fn, j)
                     inspect_result = self._inspect_callable(fn)
-                    self._system_prompt_callables[text] = {
+                    self._system_prompt_templates[text] = {
                         "start": match.start(),
                         "end": match.end(),
                         "callable": fn,
@@ -260,7 +237,6 @@ class Agent(Runnable):
             if not self.model_params.get("max_tokens"):
                 raise ValueError("'max_tokens' is required for claude models.")
 
-        # Create internal LLM tool for model interactions
         self._llm = Tool(
             name="llm",
             handler=_llm_router,
@@ -273,7 +249,6 @@ class Agent(Runnable):
         )
         self._llm.nest(self._path)
 
-        # Load skills directory if provided
         if self.skills_path is not None:
             self.skills_path = Path(self.skills_path).expanduser().resolve()
             if not self.skills_path.exists() or not self.skills_path.is_dir():
@@ -284,7 +259,6 @@ class Agent(Runnable):
                 skill = Skill(path=skill_path)
                 self.tools.append(skill)
 
-        # Add structured output tool if output_model is provided
         if self.output_model:
             output_model_tool = Tool(
                 name="output_model_tool",
@@ -294,12 +268,11 @@ class Agent(Runnable):
             output_model_tool.params_model = self.output_model
             self.tools.append(output_model_tool)
 
-        # Normalize the rest of the tools and prevent duplicate names
+        # Normalize tools and prevent duplicate names
         names = set()
         skills_metadata = []
         for i, tool in enumerate(self.tools):
-            # ToolSet instances are kept as-is and resolved later in _resolve_tools()
-            # _resolve_tools() nests the tools with the orchestrator path - no need to do anything here
+            # ToolSet resolved later in _resolve_tools()
             if isinstance(tool, ToolSet):
                 if isinstance(tool, Skill):
                     if tool.name in names:
@@ -307,7 +280,6 @@ class Agent(Runnable):
                     names.add(tool.name)
                     skills_metadata.append(f"- **{tool.name}**: {tool.description}")
                 continue
-            # Otherwise make sure they are runnable instances
             if not isinstance(tool, Runnable):
                 if isinstance(tool, dict):
                     tool = Tool(**tool)
@@ -319,7 +291,6 @@ class Agent(Runnable):
             tool.nest(self._path)
             self.tools[i] = tool
 
-        # If there are skills, we need to add the read_skill tool and indicate the agent about the skills in the system prompt
         if skills_metadata:
             read_skill_tool = ReadSkill()
             read_skill_tool.nest(self._path)
@@ -334,7 +305,6 @@ In skills documentation, you will encounter references to additional files.
 If the file is relevant for the user query, USE the `read_skill` tool to get its content.
 </skills>"""
 
-        # Agents are always orchestrators with async generator handlers
         self._is_orchestrator = True
         self._is_coroutine = False
         self._is_gen = False
@@ -344,7 +314,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     def nest(self, parent_path: str) -> None:
         """See base class."""
         self._path = f"{parent_path}.{self.name}"
-        # Update paths for internal LLM and all tools
         self._llm.nest(self._path)
         for tool in self.tools:
             tool.nest(self._path)
@@ -364,21 +333,25 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         return Message
 
     async def _resolve_system_prompt(self) -> str | None:
-        """Resolve system prompt by executing embedded template functions."""
+        """Resolve system prompt by executing callable or embedded template functions."""
+        if self._system_prompt_fn is not None:
+            return await self._execute_runtime_callable(self._system_prompt_fn, self._system_prompt_fn_is_async)
+
         if not self.system_prompt:
             return None
-        if not self._system_prompt_callables:
+        if not self._system_prompt_templates:
             return self.system_prompt
 
+        # Execute template functions in parallel
         system_prompt_tasks = []
-        for _, v in self._system_prompt_callables.items():
+        for _, v in self._system_prompt_templates.items():
             callable_fn = v["callable"]
             system_prompt_tasks.append(self._execute_runtime_callable(callable_fn, v["is_coroutine"]))
         results = await asyncio.gather(*system_prompt_tasks)
 
-        # TODO: Optimize with single-pass substitution using stored positions
+        # Substitute results into template
         system_prompt = self.system_prompt
-        for (k, _), result in zip(self._system_prompt_callables.items(), results, strict=False):
+        for (k, _), result in zip(self._system_prompt_templates.items(), results, strict=False):
             system_prompt = system_prompt.replace(k, str(result) if result is not None else "")
 
         return system_prompt
@@ -389,22 +362,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         assert run_context is not None, "Run context not found"
 
         current_span = run_context.current_span()
-        # Memory was previously resolved
         if current_span.memory:
             return
         current_span.memory = [Message.validate(current_span.input.get("prompt", ""))]
 
-        # Skip memory resolution for subagents (isolated context)
+        # Subagents have isolated context
         if current_span.parent_call_id is not None:
             return
 
-        # The user can override the entire list of llm input messages
+        # User can override the message list
         input_messages = current_span.input.get("messages", [])
         if input_messages:
             current_span.memory = [Message.validate(m) for m in input_messages]
             return
 
-        # Try to get tracing data from parent execution
         if not run_context.parent_id:
             return
         parent_trace = await run_context._get_parent_trace()
@@ -426,23 +397,19 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if hasattr(previous_span, "in_context_skills"):
             current_span.in_context_skills = previous_span.in_context_skills
 
-        # >= 1.1.0 memory is stored in the agent span. This enables us to modify the memory directly without passing it to the LLM.
+        # >= 1.1.0: memory stored in agent span
         if isinstance(previous_span.memory, list):
             memory = [Message.validate(m) for m in previous_span.memory]
         else:
-            # < 1.1.0 Extract conversation history from parent's LLM calls
+            # < 1.1.0: extract from LLM calls
             llm_spans = parent_trace.get_path(self._llm._path)
-            # In a subagent, this can be empty if the parent agent didn't call the LLM
             if not len(llm_spans):
                 return
-            # Get the most recent LLM interaction
             llm_input_messages = llm_spans[-1].input.get("messages", [])
             llm_output_message = llm_spans[-1].output
-            # Reconstruct conversation: input messages + LLM response
             memory = [*[Message.validate(m) for m in llm_input_messages], Message.validate(llm_output_message)]
 
-        # Make sure interrupted tool calls have a corresponding tool result
-        # We assume all previous messages but the last one have matching tool uses and tool results
+        # Ensure interrupted tool calls have corresponding results
         for content in memory[-1].content:
             if content.type != "tool_use" or content.is_server_tool_use:
                 continue
@@ -470,7 +437,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         tool_result_content = (
                             "INTERRUPTED: Tool call was cancelled or interrupted by the user / system."
                         )
-            # If there's no matching tool result, we create an empty one indicating there was an error
             if tool_result_content is None:
                 tool_result_content = "ERROR: There was an unexpected error executing the tool."
             memory.append(
@@ -538,27 +504,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         tasks = []
 
         async def consume_tool(tool_call: ToolUseContent):
-            """Consume events from a single tool and put them in the queue."""
             tool = next((t for t in tools if t.name == tool_call.name), None)
             assert tool is not None, f"Tool {tool_call.name} not found"
             try:
                 async for event in tool(**tool_call.input):
-                    # We need to link the tool call id to the span so that we can later match when resolving memory
+                    # Link tool call id to span for memory resolution
                     if event.type == "START":
                         tool_call_id = event.call_id
                         tool_call_span = get_run_context()._trace[tool_call_id]
                         tool_call_span.metadata["tool_call_id"] = tool_call.id
                     await queue.put((tool_call, event))
             finally:
-                await queue.put((tool_call, None))  # Sentinel
+                await queue.put((tool_call, None))
 
         try:
-            # Start all tool tasks
             for tc in tool_calls:
                 task = asyncio.create_task(consume_tool(tc))
                 tasks.append(task)
 
-            # Consume events as they arrive
             remaining = len(tool_calls)
             while remaining > 0:
                 tool_call, event = await queue.get()
@@ -567,43 +530,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 else:
                     yield tool_call, event
         except (asyncio.CancelledError, GeneratorExit, InterruptError):
-            # Cancellation or generator closed - clean up gracefully
             raise
         finally:
-            # Cancel all pending tasks
             for task in tasks:
                 if not task.done():
                     task.cancel()
-
-            # Wait for all cancellations to complete, suppressing errors
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
-        """Main agent execution handler implementing the autonomous agent loop.
-
-        This is the core agent logic that implements the autonomous execution pattern:
-        1. Load conversation memory from parent context (if nested)
-        2. Add the user prompt to the conversation
-        3. Check for slash commands (e.g., /command args):
-           a. If command found, execute the corresponding tool directly
-           b. Add tool use and result to memory, then return early
-        4. Loop until no more tool calls or max_iter reached:
-           a. Call LLM with current conversation and available tools
-           b. Add LLM response to conversation
-           c. If LLM made tool calls, execute them concurrently
-           d. Add tool results to conversation and continue
-
-        Args:
-            **kwargs: Execution parameters including:
-                - prompt: The input Message to process (or messages list)
-                - messages: Optional explicit list of messages (bypasses memory resolution)
-                - system_prompt: Optional system prompt override
-                - Other parameters passed through to LLM
-
-        Yields:
-            Events from LLM calls and tool executions
-        """
+        """Execute the autonomous agent loop."""
         run_context = get_run_context()
         assert run_context is not None, "Run context is not initialized"
         current_span = run_context.current_span()
