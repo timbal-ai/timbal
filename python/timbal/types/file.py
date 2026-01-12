@@ -19,6 +19,7 @@ from pydantic import (
 from pydantic_core import CoreSchema, core_schema
 from uuid_extensions import uuid7
 
+from .. import __version__
 from ..platform.types import UploadFileResponse
 from ..platform.utils import _request
 from ..state import get_or_create_run_context
@@ -394,7 +395,8 @@ class File(io.IOBase):
     @classmethod
     def _fetch_http_file(cls, url: str) -> io.IOBase:
         """Fetch a file from a HTTP/HTTPS URL."""
-        res = requests.get(url, stream=True)
+        headers = {"User-Agent": f"Timbal/{__version__}"}
+        res = requests.get(url, stream=True, headers=headers)
         res.raise_for_status()
         fileobj = io.BytesIO(res.content)
         # Try to get a meaningful filename from URL or Content-Disposition header
