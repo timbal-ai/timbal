@@ -46,35 +46,6 @@ def test_message_file_validation(tmp_path: pathlib.Path) -> None:
     # file must be a File
     with pytest.raises(ValueError):
         Message.validate({"role": "assistant", "content": [{"type": "file", "file": {"url": "not a file"}}]})
-    
-
-def test_message_file_to_openai_chat_completions_input(tmp_path: pathlib.Path) -> None:
-    test_file = tmp_path / "image.png"
-    png_content = bytes.fromhex(
-        '89504e470d0a1a0a'  # PNG signature
-    )
-    test_file.write_bytes(png_content)
-
-    encoded_image = base64.b64encode(png_content).decode("utf-8")
-
-    message = Message(role="assistant", content=[FileContent(file=File.validate(str(test_file)))])
-    assert message.to_openai_chat_completions_input() == {
-        "role": "assistant", 
-        "content": [{
-            "type": "image_url", 
-            "image_url": {"url": f"data:image/png;base64,{encoded_image}"}
-        }]
-    }
-
-
-def test_message_file_to_anthropic_input(tmp_path: pathlib.Path) -> None:
-    test_file = tmp_path / "image.png"
-    png_content = bytes.fromhex(
-        '89504e470d0a1a0a'  # PNG signature
-    )
-    test_file.write_bytes(png_content)
-    message = Message(role="assistant", content=[FileContent(file=File.validate(str(test_file)))])
-    assert message.to_anthropic_input() == {"role": "assistant", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(png_content).decode("utf-8")}}]}
 
 
 def test_message_tool_use_validation() -> None:

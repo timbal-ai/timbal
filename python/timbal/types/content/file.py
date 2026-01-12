@@ -32,7 +32,7 @@ AVAILABLE_ENCODINGS = [
 
 def validate_pdf(pdf: File) -> None:
     """Validate that a PDF file can be opened.
-    
+
     Raises:
         PDFProcessingError: If the PDF file is corrupted or cannot be opened.
     """
@@ -49,7 +49,7 @@ def validate_pdf(pdf: File) -> None:
 
 def validate_image(image: File) -> None:
     """Validate that an image file can be opened and is not corrupted.
-    
+
     Raises:
         ImageProcessingError: If the image file is corrupted or cannot be opened.
     """
@@ -66,7 +66,7 @@ def validate_image(image: File) -> None:
 
 def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
     """Convert a PDF file to a list of images files.
-    
+
     Raises:
         PDFProcessingError: If the PDF file is corrupted or cannot be opened.
     """
@@ -117,10 +117,10 @@ def _extract_docx_content(docx: File) -> str:
 def _extract_email_body(raw_email_content: str) -> str:
     """Extract only the body content from an EML email, excluding headers and metadata."""
     msg = email.message_from_string(raw_email_content)
-    
+
     # Extract body text, preferring plain text over HTML
     body = ""
-    
+
     if msg.is_multipart():
         for part in msg.walk():
             content_type = part.get_content_type()
@@ -163,7 +163,7 @@ def _extract_email_body(raw_email_content: str) -> str:
                         break
                     except UnicodeDecodeError:
                         continue
-    
+
     return body.strip() if body else ""
 
 
@@ -171,20 +171,20 @@ def _extract_email_attachments(raw_email_content: str) -> list[dict[str, Any]]:
     """Extract attachments from an EML email."""
     msg = email.message_from_string(raw_email_content)
     attachments = []
-    
+
     if msg.is_multipart():
         for part in msg.walk():
             # Skip the main message part
             if part.get_content_maintype() == 'multipart':
                 continue
-                
+
             # Check if this part has a filename (attachment)
             filename = part.get_filename()
             if filename:
                 content_type = part.get_content_type()
                 payload = part.get_payload(decode=True)
                 content_id = part.get('Content-ID')
-                
+
                 if payload:
                     # Create a temporary file-like object for the attachment
                     attachment_data = {
@@ -197,7 +197,7 @@ def _extract_email_attachments(raw_email_content: str) -> list[dict[str, Any]]:
                         # Remove angle brackets from Content-ID
                         attachment_data['content_id'] = content_id.strip('<>')
                     attachments.append(attachment_data)
-    
+
     return attachments
 
 
@@ -218,7 +218,7 @@ class FileContent(BaseContent):
             return self._cached_openai_responses_input
 
         mime = self.file.__content_type__
-        
+
         # Ensure the file pointer is at the start of the file if we need to read it.
         current_position = self.file.tell()
         if current_position != 0:
@@ -264,7 +264,7 @@ class FileContent(BaseContent):
                 return error_input
             url = self.file.to_data_url()
             openai_responses_input = {
-                "type": "input_image", 
+                "type": "input_image",
                 "image_url": url,
             }
             self._cached_openai_responses_input = openai_responses_input
@@ -289,7 +289,7 @@ class FileContent(BaseContent):
                 return error_input
             url = self.file.to_data_url()
             openai_responses_input = {
-                "type": "input_file", 
+                "type": "input_file",
                 "filename": self.file.name,
                 "file_data": url,
             }
@@ -307,11 +307,11 @@ class FileContent(BaseContent):
             return {
                 "type": "input_audio",
                 "input_audio": {
-                    "data": base64_data, 
+                    "data": base64_data,
                     "format": "wav" if "wav" in mime else "mp3",
                 },
             }
-        
+
         # Attempt to decode the binary content into a string guessing the encoding.
         raw_bytes = self.file.read()
         content = None
@@ -338,7 +338,7 @@ class FileContent(BaseContent):
             return self._cached_openai_chat_completions_input
 
         mime = self.file.__content_type__
-        
+
         # Ensure the file pointer is at the start of the file if we need to read it.
         current_position = self.file.tell()
         if current_position != 0:
@@ -381,7 +381,7 @@ class FileContent(BaseContent):
                 return error_input
             url = self.file.to_data_url()
             return {
-                "type": "image_url", 
+                "type": "image_url",
                 "image_url": {"url": url},
             }
 
@@ -406,15 +406,15 @@ class FileContent(BaseContent):
                 self._cached_openai_chat_completions_input = error_input
                 return error_input
             logger.info(
-                "pdf_to_images", 
-                n_pages=len(pages), 
+                "pdf_to_images",
+                n_pages=len(pages),
                 description=".to_openai_chat_completions_input() implicitly converting input pdf to images...",
             )
             pages_input = []
             for page in pages:
                 url = page.to_data_url()
                 pages_input.append({
-                    "type": "image_url", 
+                    "type": "image_url",
                     "image_url": {"url": url},
                 })
             self._cached_openai_chat_completions_input = pages_input
@@ -501,7 +501,7 @@ class FileContent(BaseContent):
             return {
                 "type": "input_audio",
                 "input_audio": {
-                    "data": base64_data, 
+                    "data": base64_data,
                     "format": "wav" if "wav" in mime else "mp3",
                 },
             }
@@ -577,7 +577,7 @@ class FileContent(BaseContent):
             if url.startswith("data:"):
                 base64_data = url.split(",", 1)[1]
                 return {
-                    "type": "image", 
+                    "type": "image",
                     "source": {
                         "type": "base64",
                         "media_type": mime,
@@ -586,7 +586,7 @@ class FileContent(BaseContent):
                 }
             else:
                 return {
-                    "type": "image", 
+                    "type": "image",
                     "source": {
                         "type": "url",
                         "url": url,
@@ -599,7 +599,7 @@ class FileContent(BaseContent):
             if url.startswith("data:"):
                 base64_data = url.split(",", 1)[1]
                 return {
-                    "type": "document", 
+                    "type": "document",
                     "source": {
                         "type": "base64",
                         "media_type": mime,
@@ -608,7 +608,7 @@ class FileContent(BaseContent):
                 }
             else:
                 return {
-                    "type": "document", 
+                    "type": "document",
                     "source": {
                         "type": "url",
                         "url": url,
@@ -662,7 +662,7 @@ class FileContent(BaseContent):
                                     anthropic_input.extend(converted)
                                 else:
                                     anthropic_input.append(converted)
-                                
+
                                 processed_attachments.add(i)
                                 attachment_counter += 1
                                 break
