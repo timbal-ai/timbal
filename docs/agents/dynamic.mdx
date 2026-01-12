@@ -5,9 +5,76 @@ description: "Learn how to create agents with dynamic system prompts that update
 
 ## Dynamic System Prompts
 
-Agents support dynamic system prompts that can include live data through template functions. These functions are executed each time the agent runs, providing fresh context.
+Agents support dynamic system prompts through callable functions that are executed each time the agent runs, providing fresh context.
 
-Use `{module::function}` syntax to embed dynamic values:
+### Using Callable Functions
+
+The preferred way to create dynamic system prompts is to pass a callable directly to `system_prompt`. This gives you full control over the system prompt construction and access to all runtime inputs:
+
+```python
+from datetime import datetime
+from timbal import Agent
+from timbal.state import get_run_context
+
+def get_system_prompt() -> str:
+    run_context = get_run_context()
+    current_span = run_context.current_span()
+    
+    now = datetime.now()
+    date_str = now.strftime("%A, %B %d, %Y")
+    time_str = now.strftime("%H:%M")
+
+    system_prompt = f"You're a helpful assistant. Current date: {date_str}. Current time: {time_str}."
+
+    # Access runtime inputs
+    instructions = current_span.input.get("instructions", None)
+    if instructions:
+        system_prompt += f"\n\n## Instructions\n{instructions}"
+
+    user = current_span.input.get("user", None)
+    if isinstance(user, dict):
+        system_prompt += "\n\n## About the User\n"
+        for k, v in user.items():
+            if isinstance(v, list):
+                system_prompt += f"\n- {k}:"
+                for item in v:
+                    system_prompt += f"\n  - {item}"
+            else:
+                system_prompt += f"\n- {k}: {v}"
+
+    return system_prompt
+
+agent = Agent(
+    name="dynamic_agent",
+    model="openai/gpt-4o-mini",
+    system_prompt=get_system_prompt,  # Pass the function directly
+)
+```
+
+Then call the agent with runtime data:
+
+```python
+response = await agent(
+    prompt="Who am I?",
+    instructions="Be concise and friendly.",
+    user={
+        "name": "Alice",
+        "role": "Developer",
+        "memories": [
+            "Prefers Python over JavaScript",
+            "Working on a new project",
+        ],
+    },
+).collect()
+```
+
+### Using Template Syntax
+
+<Warning>
+Template syntax will be deprecated in a future release. We recommend using callable functions instead.
+</Warning>
+
+For simpler cases, you can use `{module::function}` syntax to embed dynamic values:
 
 ```python
 agent = Agent(
