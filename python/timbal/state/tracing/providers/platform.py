@@ -15,13 +15,17 @@ if TYPE_CHECKING:
 
 class PlatformTracingProvider(TracingProvider):
     """Platform tracing provider using platform-wide storage."""
-    
+
     @classmethod
     @override
     async def get(cls, run_context: "RunContext") -> Trace | None:
         """See base class."""
         from ....platform.utils import _request
+
+        assert run_context.platform_config is not None, "PlatformTracingProvider.get called without platform config"
         subject = run_context.platform_config.subject
+        assert subject is not None, "PlatformTracingProvider.get called without a subject"
+
         if subject.app_id:
             subject_path = f"apps/{subject.app_id}"
         elif subject.project_id:
@@ -32,22 +36,24 @@ class PlatformTracingProvider(TracingProvider):
             method="GET",
             path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.parent_id}",
         )
+        res.raise_for_status()
         res_json = res.json()
         trace = res_json.get("trace")
         if not trace:
             return None
         return Trace(trace)
-    
+
     @classmethod
     @override
     async def put(cls, run_context: "RunContext") -> None:
         """See base class."""
         from ....platform.utils import _request
+
+        assert run_context.platform_config is not None, "PlatformTracingProvider.put called without platform config"
         subject = run_context.platform_config.subject
-        payload = {
-            "parent_id": run_context.parent_id,
-            "trace": run_context._trace.model_dump()
-        }
+        assert subject is not None, "PlatformTracingProvider.put called without a subject"
+
+        payload = {"parent_id": run_context.parent_id, "trace": run_context._trace.model_dump()}
         if subject.app_id:
             subject_path = f"apps/{subject.app_id}"
             payload["version_id"] = subject.version_id
@@ -58,10 +64,7 @@ class PlatformTracingProvider(TracingProvider):
         res = await _request(
             method="PATCH",
             path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
+            headers={"Prefer": "return=minimal"},  # RFC 7240
             json=payload,
         )
-        res_json = res.json()
-        # We'll need to update the run_context id with the one returned by the platform,
-        # so we can link run ids with parent ids in subsequent runs
-        # ? We'll have the logs with the auto-generated ids, but they will be persisted with different ones
-        run_context.id = res_json.get("id", run_context.id)
+        res.raise_for_status()
