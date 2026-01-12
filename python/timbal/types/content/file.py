@@ -12,7 +12,9 @@ except ImportError:
 import pandas as pd
 import structlog
 from docx import Document
+from PIL import Image
 
+from ...errors import ImageProcessingError, PDFProcessingError
 from ..file import File
 from .base import BaseContent
 from .text import TextContent
@@ -28,14 +30,56 @@ AVAILABLE_ENCODINGS = [
 ]
 
 
+def validate_pdf(pdf: File) -> None:
+    """Validate that a PDF file can be opened.
+    
+    Raises:
+        PDFProcessingError: If the PDF file is corrupted or cannot be opened.
+    """
+    import fitz
+    pdf.seek(0)
+    try:
+        doc = fitz.Document(stream=pdf.read())
+        doc.close()
+    except Exception as e:
+        raise PDFProcessingError(f"Invalid or corrupted PDF file: {e}") from e
+    finally:
+        pdf.seek(0)  # Reset pointer for subsequent reads
+
+
+def validate_image(image: File) -> None:
+    """Validate that an image file can be opened and is not corrupted.
+    
+    Raises:
+        ImageProcessingError: If the image file is corrupted or cannot be opened.
+    """
+    image.seek(0)
+    try:
+        image_bytes = image.read()
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img.verify()
+    except Exception as e:
+        raise ImageProcessingError(f"Invalid or corrupted image file: {e}") from e
+    finally:
+        image.seek(0)
+
+
 def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
-    """Convert a PDF file to a list of images files."""
+    """Convert a PDF file to a list of images files.
+    
+    Raises:
+        PDFProcessingError: If the PDF file is corrupted or cannot be opened.
+    """
     import tempfile
     from pathlib import Path
 
     import fitz
     pdf.seek(0) # Ensure the pointer is at the start of the file
-    doc = fitz.Document(stream=pdf.read())
+    try:
+        doc = fitz.Document(stream=pdf.read())
+    except Exception as e:
+        # Catch all fitz/pymupdf errors (FileDataError, FzErrorFormat, etc.)
+        raise PDFProcessingError(f"Failed to open PDF file: {e}") from e
     pages = []
     for page_num in range(len(doc)):
         page = doc[page_num]
@@ -202,6 +246,22 @@ class FileContent(BaseContent):
             return openai_responses_input
 
         elif mime and mime.startswith("image/"):
+            # Validate image before sending to OpenAI to avoid API errors
+            try:
+                validate_image(self.file)
+            except ImageProcessingError as e:
+                logger.warning(
+                    "image_validation_error",
+                    error=str(e),
+                    file=str(self.file),
+                    description="Image file validation failed, returning error message to LLM",
+                )
+                error_input = {
+                    "type": "input_text",
+                    "text": f"[FILE ERROR: The image file could not be processed. The file may be corrupted, empty, or in an unsupported format. Original error: {e}]",
+                }
+                self._cached_openai_responses_input = error_input
+                return error_input
             url = self.file.to_data_url()
             openai_responses_input = {
                 "type": "input_image", 
@@ -211,7 +271,22 @@ class FileContent(BaseContent):
             return openai_responses_input
 
         elif mime == "application/pdf":
-            # TODO Review this one
+            # Validate PDF before sending to OpenAI to avoid API errors
+            try:
+                validate_pdf(self.file)
+            except PDFProcessingError as e:
+                logger.warning(
+                    "pdf_validation_error",
+                    error=str(e),
+                    file=str(self.file),
+                    description="PDF file validation failed, returning error message to LLM",
+                )
+                error_input = {
+                    "type": "input_text",
+                    "text": f"[FILE ERROR: The PDF file could not be processed. The file may be corrupted, empty, or in an unsupported format. Original error: {e}]",
+                }
+                self._cached_openai_responses_input = error_input
+                return error_input
             url = self.file.to_data_url()
             openai_responses_input = {
                 "type": "input_file", 
@@ -288,6 +363,22 @@ class FileContent(BaseContent):
             return openai_input
 
         elif mime and mime.startswith("image/"):
+            # Validate image before sending to OpenAI to avoid API errors
+            try:
+                validate_image(self.file)
+            except ImageProcessingError as e:
+                logger.warning(
+                    "image_validation_error",
+                    error=str(e),
+                    file=str(self.file),
+                    description="Image file validation failed, returning error message to LLM",
+                )
+                error_input = {
+                    "type": "text",
+                    "text": f"[FILE ERROR: The image file could not be processed. The file may be corrupted, empty, or in an unsupported format. Original error: {e}]",
+                }
+                self._cached_openai_chat_completions_input = error_input
+                return error_input
             url = self.file.to_data_url()
             return {
                 "type": "image_url", 
@@ -298,7 +389,22 @@ class FileContent(BaseContent):
             # TODO Review openai sdk "file" type
             # OpenAI internally gets an image of each page and complements it with the extracted text.
             # ? For all the use cases we've used, extracting just the images has worked well.
-            pages = pdf_to_images(self.file)
+            try:
+                pages = pdf_to_images(self.file)
+            except PDFProcessingError as e:
+                # Handle corrupted or invalid PDF files gracefully
+                logger.warning(
+                    "pdf_processing_error",
+                    error=str(e),
+                    file=str(self.file),
+                    description="PDF file could not be processed, returning error message to LLM",
+                )
+                error_input = {
+                    "type": "text",
+                    "text": f"[FILE ERROR: The PDF file could not be processed. The file may be corrupted, empty, or in an unsupported format. Original error: {e}]",
+                }
+                self._cached_openai_chat_completions_input = error_input
+                return error_input
             logger.info(
                 "pdf_to_images", 
                 n_pages=len(pages), 
@@ -451,7 +557,22 @@ class FileContent(BaseContent):
             return anthropic_input
 
         elif mime and mime.startswith("image/"):
-            # TODO Review this one
+            # Validate image before sending to Anthropic to avoid API errors
+            try:
+                validate_image(self.file)
+            except ImageProcessingError as e:
+                logger.warning(
+                    "image_validation_error",
+                    error=str(e),
+                    file=str(self.file),
+                    description="Image file validation failed, returning error message to LLM",
+                )
+                error_input = {
+                    "type": "text",
+                    "text": f"[FILE ERROR: The image file could not be processed. The file may be corrupted, empty, or in an unsupported format. Original error: {e}]",
+                }
+                self._cached_anthropic_input = error_input
+                return error_input
             url = self.file.to_data_url()
             if url.startswith("data:"):
                 base64_data = url.split(",", 1)[1]
