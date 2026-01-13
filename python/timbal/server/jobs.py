@@ -27,6 +27,17 @@ class JobStore:
     def get_job(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
+    def cancel_job(self, job_id: str) -> bool:
+        """Cancel a running job by its ID.
+
+        Returns True if the job was found and cancelled, False otherwise.
+        """
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        job.task.cancel()
+        return True
+
     async def _run(self, runnable, params, queue):
         try:
             async for event in runnable(**params):

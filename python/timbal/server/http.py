@@ -104,11 +104,14 @@ def create_app(
         run_context = req_data.pop("context", None)
         if run_context is None:
             run_context = req_data.pop("run_context", None)
+
+        run_id = None
         if run_context is not None:
             run_context = RunContext.model_validate(run_context)
             set_run_context(run_context)
+            run_id = run_context.id
 
-        _, job = app.state.job_store.create_job(app.state.runnable, req_data)
+        _, job = app.state.job_store.create_job(app.state.runnable, req_data, job_id=run_id)
 
         output_event = None
         while True:
@@ -128,11 +131,14 @@ def create_app(
         run_context = req_data.pop("context", None)
         if run_context is None:
             run_context = req_data.pop("run_context", None)
+
+        run_id = None
         if run_context is not None:
             run_context = RunContext.model_validate(run_context)
             set_run_context(run_context)
+            run_id = run_context.id
 
-        _, job = app.state.job_store.create_job(app.state.runnable, req_data)
+        _, job = app.state.job_store.create_job(app.state.runnable, req_data, job_id=run_id)
 
         async def event_streamer() -> AsyncGenerator[str, None]:
             while True:
@@ -142,6 +148,16 @@ def create_app(
                 yield f"data: {json.dumps(event.model_dump())}\n\n"
 
         return StreamingResponse(event_streamer(), media_type="text/event-stream")
+
+    @app.post("/cancel/{run_id}")
+    async def cancel(run_id: str) -> Response:
+        cancelled = app.state.job_store.cancel_job(run_id)
+        if cancelled:
+            return Response(status_code=204)
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Job not found or already completed"},
+        )
 
     return app
 

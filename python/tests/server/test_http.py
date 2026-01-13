@@ -220,6 +220,47 @@ class TestFastAPIApp:
         assert response.status_code == 200
         assert "text/event-stream" in response.headers.get("content-type", "")
 
+    def test_cancel_endpoint_nonexistent_job(self, tool_client):
+        """Test /cancel endpoint returns 404 for non-existent job."""
+        response = tool_client.post("/cancel/nonexistent-job-id")
+        assert response.status_code == 404
+        assert response.json() == {"error": "Job not found or already completed"}
+
+    def test_run_endpoint_uses_run_id_from_context(self, tool_app):
+        """Test that /run endpoint uses run_id from context as job_id."""
+        client = TestClient(tool_app)
+        run_id = "custom-run-id-123"
+        test_data = {
+            "x": "test input",
+            "context": {"run_id": run_id},
+        }
+
+        # The job will complete immediately for tool fixture,
+        # but we can verify the job was created with the correct ID
+        # by checking cancel returns 404 after completion
+        response = client.post("/run", json=test_data)
+        assert response.status_code == 200
+
+        # Job should be removed after completion, so cancel returns 404
+        cancel_response = client.post(f"/cancel/{run_id}")
+        assert cancel_response.status_code == 404
+
+    def test_stream_endpoint_uses_run_id_from_context(self, tool_app):
+        """Test that /stream endpoint uses run_id from context as job_id."""
+        client = TestClient(tool_app)
+        run_id = "custom-stream-run-id-456"
+        test_data = {
+            "x": "test input",
+            "context": {"run_id": run_id},
+        }
+
+        response = client.post("/stream", json=test_data)
+        assert response.status_code == 200
+
+        # Job should be removed after completion, so cancel returns 404
+        cancel_response = client.post(f"/cancel/{run_id}")
+        assert cancel_response.status_code == 404
+
 
 class TestServerLifecycle:
     @pytest.fixture

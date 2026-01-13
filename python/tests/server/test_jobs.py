@@ -326,3 +326,111 @@ class TestJobStore:
             received.append(event)
 
         assert received == events
+
+    @pytest.mark.asyncio
+    async def test_cancel_job_returns_true_for_running_job(self):
+        """Test that cancel_job returns True for a running job."""
+        store = JobStore()
+        runnable = MockRunnable(events=["event1", "event2", "event3"], delay=0.1)
+
+        job_id, job = store.create_job(runnable, {})
+
+        # Job should be running
+        assert store.get_job(job_id) is not None
+
+        # Cancel should return True
+        result = store.cancel_job(job_id)
+        assert result is True
+
+        # Wait for the task to be cancelled
+        with pytest.raises(asyncio.CancelledError):
+            await job.task
+
+    @pytest.mark.asyncio
+    async def test_cancel_job_returns_false_for_unknown_id(self):
+        """Test that cancel_job returns False for unknown job ID."""
+        store = JobStore()
+
+        result = store.cancel_job("unknown-id")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_job_stops_event_emission(self):
+        """Test that cancelling a job stops further event emission."""
+        store = JobStore()
+        events = ["event1", "event2", "event3", "event4", "event5"]
+        runnable = MockRunnable(events=events, delay=0.05)
+
+        job_id, job = store.create_job(runnable, {})
+
+        # Wait for first event to be emitted
+        await asyncio.sleep(0.02)
+
+        # Cancel the job
+        store.cancel_job(job_id)
+
+        # Wait for cancellation to take effect
+        try:
+            await job.task
+        except asyncio.CancelledError:
+            pass
+
+        # Not all events should have been emitted
+        assert len(runnable.events_emitted) < len(events)
+
+    @pytest.mark.asyncio
+    async def test_cancel_job_removes_job_from_store(self):
+        """Test that cancelled job is eventually removed from store."""
+        store = JobStore()
+        runnable = MockRunnable(events=["event1", "event2"], delay=0.1)
+
+        job_id, job = store.create_job(runnable, {})
+
+        # Job should be in store
+        assert store.get_job(job_id) is not None
+
+        # Cancel the job
+        store.cancel_job(job_id)
+
+        # Wait for the task to complete
+        try:
+            await job.task
+        except asyncio.CancelledError:
+            pass
+
+        # Give the event loop a chance to process the done callback
+        await asyncio.sleep(0)
+
+        # Job should be removed from store
+        assert store.get_job(job_id) is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_job_emits_sentinel(self):
+        """Test that cancelled job still emits JOB_DONE_SENTINEL."""
+        store = JobStore()
+        runnable = MockRunnable(events=["event1", "event2", "event3"], delay=0.1)
+
+        _, job = store.create_job(runnable, {})
+
+        # Wait a bit then cancel
+        await asyncio.sleep(0.05)
+        job.task.cancel()
+
+        # Wait for task to be cancelled
+        try:
+            await job.task
+        except asyncio.CancelledError:
+            pass
+
+        # Drain the queue - should eventually get sentinel
+        events = []
+        while True:
+            try:
+                event = job.queue.get_nowait()
+                events.append(event)
+                if event is JOB_DONE_SENTINEL:
+                    break
+            except asyncio.QueueEmpty:
+                break
+
+        assert JOB_DONE_SENTINEL in events
