@@ -568,7 +568,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if event.status.code == "cancelled" and event.status.reason == "early_exit":
                 bail(event.status.message)
             content = None
-            if event.error is not None:
+            if event.status.code == "cancelled" and event.status.reason == "early_exit_local":
+                msg = event.status.message or "The tool exited early."
+                content = f"[Cancelled] {msg}"
+            elif event.error is not None:
                 content = event.error
             elif isinstance(event.output, Message):
                 content = event.output.content

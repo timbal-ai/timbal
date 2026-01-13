@@ -494,9 +494,21 @@ class Runnable(ABC, BaseModel):
             if task.cancelled():
                 return {"status": "cancelled", "events": events, "name": task_info["name"], "input": task_info["input"]}
             elif task.exception():
-                return {"status": "error", "error": str(task.exception()), "events": events, "name": task_info["name"], "input": task_info["input"]}
+                return {
+                    "status": "error",
+                    "error": str(task.exception()),
+                    "events": events,
+                    "name": task_info["name"],
+                    "input": task_info["input"],
+                }
             else:
-                return {"status": "completed", "result": task.result(), "events": events, "name": task_info["name"], "input": task_info["input"]}
+                return {
+                    "status": "completed",
+                    "result": task.result(),
+                    "events": events,
+                    "name": task_info["name"],
+                    "input": task_info["input"],
+                }
         else:
             return {"status": "running", "events": events, "name": task_info["name"], "input": task_info["input"]}
 
@@ -763,7 +775,6 @@ class Runnable(ABC, BaseModel):
                         if self.post_hook is not None:
                             await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
 
-
                     except asyncio.CancelledError:
                         # Re-raise so asyncio marks the task as cancelled
                         raise
@@ -771,7 +782,12 @@ class Runnable(ABC, BaseModel):
                 task = asyncio.create_task(_bg_handler_execution())
 
                 # Store task with event queue in parent runnable if available
-                parent_span.runnable._bg_tasks[task_id] = {"task": task, "event_queue": event_queue, "name": self.name, "input": input}
+                parent_span.runnable._bg_tasks[task_id] = {
+                    "task": task,
+                    "event_queue": event_queue,
+                    "name": self.name,
+                    "input": input,
+                }
                 output = {"task_id": task_id, "status": "running"}
             else:
                 # Iterate over events from handler and yield them
@@ -811,7 +827,8 @@ class Runnable(ABC, BaseModel):
             span._output_dump = await dump(span.output)
 
         except EarlyExit as early_exit:
-            span.status = RunStatus(code="cancelled", reason="early_exit", message=str(early_exit))
+            reason = "early_exit" if early_exit.propagate else "early_exit_local"
+            span.status = RunStatus(code="cancelled", reason=reason, message=early_exit.message)
             span.output = None
             span._output_dump = None
 
