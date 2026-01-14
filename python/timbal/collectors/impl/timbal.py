@@ -8,7 +8,6 @@ except ImportError:
 
 import structlog
 
-from ...errors import InterruptError
 from ...types.events.base import BaseEvent as TimbalBaseEvent
 from ...types.events.chunk import ChunkEvent as TimbalChunkEvent
 from ...types.events.delta import DeltaEvent as TimbalDeltaEvent
@@ -23,11 +22,11 @@ logger = structlog.get_logger("timbal.collectors.impl.timbal")
 @register_collector
 class TimbalCollector(BaseCollector):
     """Collector for Timbal events."""
-    
+
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
         self._output_event = None
-    
+
     @classmethod
     @override
     def can_handle(cls, event: Any) -> bool:
@@ -45,8 +44,6 @@ class TimbalCollector(BaseCollector):
         elif isinstance(event, TimbalOutputEvent):
             self._output_event = event
             return event
-        elif isinstance(event, InterruptError):
-            pass
         else:
             logger.warning("Unknown Timbal event type", event_type=type(event), event=event)
 

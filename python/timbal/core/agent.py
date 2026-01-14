@@ -30,7 +30,7 @@ from uuid_extensions import uuid7
 
 from ..errors import InterruptError, bail
 from ..state import get_run_context
-from ..types.content import TextContent, ToolUseContent
+from ..types.content import CustomContent, TextContent, ToolUseContent
 from ..types.events import BaseEvent, OutputEvent
 from ..types.message import Message
 from ..utils import coerce_to_dict, dump
@@ -409,50 +409,54 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             llm_output_message = llm_spans[-1].output
             memory = [*[Message.validate(m) for m in llm_input_messages], Message.validate(llm_output_message)]
 
-        # Ensure interrupted tool calls have corresponding results
-        for content in memory[-1].content:
-            if content.type != "tool_use" or content.is_server_tool_use:
+        # Ensure interrupted tool calls have corresponding results.
+        # When resuming from memory, the last assistant message may contain tool_use blocks
+        # that were interrupted before their results could be recorded. The LLM expects every
+        # tool_use to have a corresponding tool_result, so we need to synthesize error results
+        # for any missing ones.
+        #
+        # We iterate in reverse to detect if there's any non-tool_use content (text, etc.)
+        # after a server_tool_use block. If there is, the server tool completed and the LLM
+        # already continued, so no synthetic result is needed.
+        #
+        # For regular tool_use: append a tool_result message with an error.
+        # For server_tool_use (e.g., web_search): append an inline error result in the same
+        # message, using the provider's expected error format (currently Anthropic only).
+        # TODO OpenAI & other server tool use providers
+        has_followup_after_server_tool_use = False
+        for content in memory[-1].content[::-1]:
+            if content.type != "tool_use":
+                has_followup_after_server_tool_use = True
                 continue
-            tool_result_path = f"{self._path}.{content.name}"
-            tool_result_spans = parent_trace.get_path(tool_result_path)
-            tool_result_content = None
-            for tool_result_span in tool_result_spans:
-                if tool_result_span.metadata.get("tool_call_id") == content.id:
-                    tool_result_content = (
-                        tool_result_span.output.content
-                        if isinstance(tool_result_span.output, Message)
-                        else tool_result_span.output
+            if content.is_server_tool_use:
+                if has_followup_after_server_tool_use:
+                    continue
+                # Server tool use was interrupted before completion. Synthesize an error result.
+                memory[-1].content.append(
+                    CustomContent(
+                        value={
+                            "type": "web_search_tool_result",
+                            "tool_use_id": content.id,
+                            "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
+                        },
                     )
-                    tool_result_status_code = (
-                        tool_result_span.status.code
-                        if hasattr(tool_result_span.status, "code")
-                        else tool_result_span.status.get("code")
-                    )
-                    tool_result_status_reason = (
-                        tool_result_span.status.reason
-                        if hasattr(tool_result_span.status, "reason")
-                        else tool_result_span.status.get("reason")
-                    )
-                    if tool_result_status_code == "cancelled" and tool_result_status_reason == "interrupted":
-                        tool_result_content = (
-                            "INTERRUPTED: Tool call was cancelled or interrupted by the user / system."
-                        )
-            if tool_result_content is None:
-                tool_result_content = "ERROR: There was an unexpected error executing the tool."
-            memory.append(
-                Message.validate(
-                    {
-                        "role": "tool",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "id": content.id,
-                                "content": tool_result_content,
-                            }
-                        ],
-                    }
                 )
-            )
+            else:
+                # Regular tool use was interrupted. Append a tool_result message with error.
+                memory.append(
+                    Message.validate(
+                        {
+                            "role": "tool",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "id": content.id,
+                                    "content": "ERROR: There was an unexpected error executing the tool.",
+                                }
+                            ],
+                        }
+                    )
+                )
         current_span.memory = memory + current_span.memory
 
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
@@ -636,7 +640,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         Message.validate(
                                             {
                                                 "role": "assistant",
-                                                "content": [TextContent(type="text", text=str(event.output))],
+                                                "content": [TextContent(text=str(event.output))],
                                             }
                                         )
                                     )
@@ -655,15 +659,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     # If the LLM call fails, we want to propagate the error upwards
                     if event.error is not None:
                         raise RuntimeError(event.error)
-                    # If the LLM was interrupted, propagate the interruption
-                    if event.status.code == "cancelled" and event.status.reason == "interrupted":
-                        raise InterruptError(event.call_id)
+                    # TODO Test what happens when the LLM is in the middle of thinking, tool use or other than text generation
                     assert isinstance(event.output, Message), (
                         f"Expected event.output to be a Message, got {type(event.output)}"
                     )
+                    interrupted = event.status.code == "cancelled" and event.status.reason == "interrupted"
+                    # # If the response was interrupted amid
+                    # if interrupted:
+                    #     for content in event.output.content[::-1]:
+
                     # Add LLM response to conversation for next iteration
                     current_span.memory.append(event.output)
-                    # This breaks the reference to the original messages object. We need to manually append the output to the span memory.
                     current_span._memory_dump.append(event._output_dump)
 
                     if self.output_model is not None:
@@ -671,13 +677,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             if isinstance(content, TextContent):
                                 try:
                                     output = coerce_to_dict(content.text)
-                                    event.output = self.output_model(**output)
+                                    validated_output = self.output_model(**output)
+                                    event.output = validated_output
                                     is_output_model = True
                                     break
                                 except (json.JSONDecodeError, ValueError, ValidationError):
                                     logger.error(f"Failed to parse JSON from LLM output: {content.text}")
                                     continue
-
+                    # Propagate the interruption with the processed output
+                    if interrupted:
+                        raise InterruptError(event.call_id, output=event.output)
                 yield event
 
             if is_output_model:

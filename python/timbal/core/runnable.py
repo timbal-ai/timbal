@@ -833,13 +833,31 @@ class Runnable(ABC, BaseModel):
             span._output_dump = None
 
         except (asyncio.CancelledError, InterruptError) as e:
-            logger.warning("Interrupted", run_id=run_context.id, call_id=span.call_id)
-            # Create a message with collected chunks or cancellation info
-            if collector is not None:
-                span.output = collector.result()
-                span._output_dump = await dump(span.output)
+            if isinstance(e, InterruptError):
+                logger.warning(
+                    "Interrupted",
+                    run_id=run_context.id,
+                    call_id=span.call_id,
+                    type="timbal.InterruptError",
+                    from_call_id=e.call_id,
+                )
+                span.output = e.output
+                span._output_dump = await dump(e.output)
+            else:
+                logger.warning(
+                    "Interrupted",
+                    run_id=run_context.id,
+                    call_id=span.call_id,
+                    type="asyncio.CancelledError",
+                )
+                if collector is not None:
+                    output = collector.result()
+                    # When a tool is cancelled, the CancelledError is raised by the Agent._multiplex_tools
+                    if isinstance(output, OutputEvent):
+                        output = output.output
+                    span.output = output
+                    span._output_dump = await dump(output)
             span.status = RunStatus(code="cancelled", reason="interrupted", message=str(e))
-            yield InterruptError(_call_id)
 
         except Exception as err:
             error = {

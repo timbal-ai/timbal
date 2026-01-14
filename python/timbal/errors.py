@@ -1,3 +1,6 @@
+from typing import Any
+
+
 class TimbalError(Exception):
     """Base class for all Timbal errors."""
 
@@ -38,7 +41,19 @@ class FileNotReadError(FileStateError):
 
 
 class InterruptError(TimbalError):
-    """Error raised when an interrupt is requested."""
+    """Error raised when an interrupt is requested.
+
+    Args:
+        call_id: The ID of the call that was interrupted.
+        output: Optional partial output collected before interruption.
+        message: Optional message describing the interruption reason.
+    """
+
+    def __init__(self, call_id: str, output: Any = None, message: str = "") -> None:
+        super().__init__(message)
+        self.call_id = call_id
+        self.output = output
+        self.message = message
 
 
 class ImageProcessingError(TimbalError):

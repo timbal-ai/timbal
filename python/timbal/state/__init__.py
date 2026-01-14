@@ -11,6 +11,7 @@ The context is typically managed automatically by the framework. Advanced users
 may need to set the context manually when creating custom execution flows.
 See the function docstrings for usage details and warnings.
 """
+
 from contextvars import ContextVar
 
 from .context import RunContext
@@ -58,7 +59,7 @@ def get_parent_call_id() -> str | None:
     return _parent_call_id.get()
 
 
-def set_call_id(call_id: str) -> None:
+def set_call_id(call_id: str | None) -> None:
     """Sets the current call ID.
 
     WARNING: This function is for advanced use cases, such as creating
@@ -68,7 +69,7 @@ def set_call_id(call_id: str) -> None:
     _call_id.set(call_id)
 
 
-def set_parent_call_id(parent_call_id: str) -> None:
+def set_parent_call_id(parent_call_id: str | None) -> None:
     """Sets the current parent call ID.
 
     WARNING: This function is for advanced use cases, such as creating
