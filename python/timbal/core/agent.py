@@ -659,11 +659,20 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     # If the LLM call fails, we want to propagate the error upwards
                     if event.error is not None:
                         raise RuntimeError(event.error)
+
+                    interrupted = event.status.code == "cancelled" and event.status.reason == "interrupted"
+
+                    # Handle case where LLM was interrupted before any output was received
+                    if event.output is None:
+                        if interrupted:
+                            raise InterruptError(event.call_id, output=None)
+                        # If not interrupted but no output, something unexpected happened
+                        raise RuntimeError("LLM returned no output")
+
                     # TODO Test what happens when the LLM is in the middle of thinking, tool use or other than text generation
                     assert isinstance(event.output, Message), (
                         f"Expected event.output to be a Message, got {type(event.output)}"
                     )
-                    interrupted = event.status.code == "cancelled" and event.status.reason == "interrupted"
                     # # If the response was interrupted amid
                     # if interrupted:
                     #     for content in event.output.content[::-1]:

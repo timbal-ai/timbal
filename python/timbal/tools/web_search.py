@@ -1,5 +1,5 @@
 """
-WebSearch is a specification-only tool. 
+WebSearch is a specification-only tool.
 
 Specification-only tools are tools that exist purely to define parameter
 schemas and return types for LLM interaction, without containing any
@@ -7,6 +7,7 @@ executable logic. They serve as "interface contracts" that tell the LLM what
 parameters are expected and what the tool conceptually returns, but the
 actual execution happens elsewhere (or not at all).
 """
+
 from functools import cached_property
 from typing import Any
 
@@ -25,24 +26,18 @@ logger = structlog.get_logger("timbal.tools.web_search")
 
 
 class WebSearch(Tool):
-
     def __init__(
-        self, 
+        self,
         allowed_domains: list[str] | None = None,
         blocked_domains: list[str] | None = None,
         user_location: dict[str, Any] | None = None,
         # ? anthropic's max_uses
         **kwargs: Any,
     ) -> None:
-
         def _unreachable_handler():
             raise NotImplementedError("This is a specification-only tool")
 
-        super().__init__(
-            name="web_search",
-            handler=_unreachable_handler,
-            **kwargs
-        )
+        super().__init__(name="web_search", handler=_unreachable_handler, **kwargs)
 
         self.allowed_domains = allowed_domains
         self.blocked_domains = blocked_domains
@@ -55,13 +50,14 @@ class WebSearch(Tool):
         # }
         self.user_location = user_location
 
-    
     @override
     @computed_field
     @cached_property
     def openai_responses_schema(self) -> dict[str, Any]:
         """See base class."""
-        schema = {"type": "web_search",}
+        schema = {
+            "type": "web_search",
+        }
 
         if self.allowed_domains:
             schema["filters"] = {"allowed_domains": self.allowed_domains}
@@ -71,7 +67,6 @@ class WebSearch(Tool):
             schema["user_location"] = self.user_location
 
         return schema
-    
 
     @override
     @computed_field(repr=False)
@@ -80,14 +75,13 @@ class WebSearch(Tool):
         """See base class."""
         raise ValueError("WebSearch is not compatible with OpenAI's chat completions API.")
 
-
     @override
     @computed_field
     @cached_property
     def anthropic_schema(self) -> dict[str, Any]:
         """See base class."""
         anthropic_schema = {
-            "type": "web_search_20250305", # TODO Review
+            "type": "web_search_20250305",
             "name": "web_search",
         }
 
@@ -99,4 +93,3 @@ class WebSearch(Tool):
             anthropic_schema["user_location"] = self.user_location
 
         return anthropic_schema
-    
