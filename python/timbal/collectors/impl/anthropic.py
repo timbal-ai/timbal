@@ -29,6 +29,24 @@ from anthropic.types import (
     ToolUseBlock,
     WebSearchToolResultBlock,
 )
+from anthropic.types.beta import (
+    BetaCitationsDelta,
+    BetaInputJSONDelta,
+    BetaRawContentBlockDeltaEvent,
+    BetaRawContentBlockStartEvent,
+    BetaRawContentBlockStopEvent,
+    BetaRawMessageDeltaEvent,
+    BetaRawMessageStartEvent,
+    BetaRawMessageStopEvent,
+    BetaServerToolUseBlock,
+    BetaSignatureDelta,
+    BetaTextBlock,
+    BetaTextDelta,
+    BetaThinkingBlock,
+    BetaThinkingDelta,
+    BetaToolUseBlock,
+    BetaWebSearchToolResultBlock,
+)
 
 from ...state import get_run_context
 from ...types.content.custom import CustomContent
@@ -51,7 +69,13 @@ from ..base import BaseCollector
 
 # Create a type alias for Anthropic events
 AnthropicEvent = (
-    RawContentBlockStartEvent
+    BetaRawContentBlockStartEvent
+    | BetaRawContentBlockDeltaEvent
+    | BetaRawContentBlockStopEvent
+    | BetaRawMessageStartEvent
+    | BetaRawMessageDeltaEvent
+    | BetaRawMessageStopEvent
+    | RawContentBlockStartEvent
     | RawContentBlockDeltaEvent
     | RawContentBlockStopEvent
     | RawMessageStartEvent
@@ -84,17 +108,17 @@ class AnthropicCollector(BaseCollector):
         """Processes Anthropic streaming events."""
         if self._first_token is None:
             self._first_token = time.perf_counter()
-        if isinstance(event, RawMessageStartEvent):
+        if isinstance(event, RawMessageStartEvent | BetaRawMessageStartEvent):
             return self._handle_message_start(event)
-        elif isinstance(event, RawContentBlockStartEvent):
+        elif isinstance(event, RawContentBlockStartEvent | BetaRawContentBlockStartEvent):
             return self._handle_content_block_start(event)
-        elif isinstance(event, RawContentBlockDeltaEvent):
+        elif isinstance(event, RawContentBlockDeltaEvent | BetaRawContentBlockDeltaEvent):
             return self._handle_content_block_delta(event)
-        elif isinstance(event, RawContentBlockStopEvent):
+        elif isinstance(event, RawContentBlockStopEvent | BetaRawContentBlockStopEvent):
             return self._handle_content_block_stop(event)
-        elif isinstance(event, RawMessageDeltaEvent):
+        elif isinstance(event, RawMessageDeltaEvent | BetaRawMessageDeltaEvent):
             return self._handle_message_delta(event)
-        elif isinstance(event, RawMessageStopEvent):
+        elif isinstance(event, RawMessageStopEvent | BetaRawMessageStopEvent):
             return None
         else:
             logger.warning("Unknown event type", anthropic_event=event)
@@ -108,7 +132,9 @@ class AnthropicCollector(BaseCollector):
     def _handle_content_block_start(self, event: RawContentBlockStartEvent) -> TimbalDeltaItem | None:
         """Handle content block start events."""
         content_block_id = f"{self.id}-{event.index}"
-        if isinstance(event.content_block, ToolUseBlock | ServerToolUseBlock):
+        if isinstance(
+            event.content_block, ToolUseBlock | ServerToolUseBlock | BetaToolUseBlock | BetaServerToolUseBlock
+        ):
             self.content.append(
                 {
                     "type": event.content_block.type,
@@ -125,7 +151,7 @@ class AnthropicCollector(BaseCollector):
                 input="",  # claude sends an empty object here {}
                 is_server_tool_use=event.content_block.type == "server_tool_use",
             )
-        elif isinstance(event.content_block, ThinkingBlock):
+        elif isinstance(event.content_block, ThinkingBlock | BetaThinkingBlock):
             self.content.append(
                 {
                     "type": "thinking",
@@ -138,7 +164,7 @@ class AnthropicCollector(BaseCollector):
                 id=content_block_id,
                 thinking=event.content_block.thinking,
             )
-        elif isinstance(event.content_block, WebSearchToolResultBlock):
+        elif isinstance(event.content_block, WebSearchToolResultBlock | BetaWebSearchToolResultBlock):
             if isinstance(event.content_block.content, list):
                 content = [item.model_dump() for item in event.content_block.content]
             else:
@@ -159,7 +185,7 @@ class AnthropicCollector(BaseCollector):
             #     id=event.content_block.tool_use_id,
             #     result=content,
             # )
-        elif isinstance(event.content_block, TextBlock):
+        elif isinstance(event.content_block, TextBlock | BetaTextBlock):
             self.content.append(
                 {
                     "type": "text",
@@ -178,7 +204,7 @@ class AnthropicCollector(BaseCollector):
 
     def _handle_content_block_delta(self, event: RawContentBlockDeltaEvent) -> TimbalDeltaItem | None:
         """Handle content block delta events."""
-        if isinstance(event.delta, InputJSONDelta):
+        if isinstance(event.delta, InputJSONDelta | BetaInputJSONDelta):
             tool_delta = event.delta.partial_json
             content_block = self.content[-1]
             content_block["input"] += tool_delta
@@ -186,7 +212,7 @@ class AnthropicCollector(BaseCollector):
                 id=content_block["block_id"],
                 input_delta=tool_delta,
             )
-        elif isinstance(event.delta, TextDelta):
+        elif isinstance(event.delta, TextDelta | BetaTextDelta):
             text_delta = event.delta.text
             content_block = self.content[-1]
             content_block["text"] += text_delta
@@ -194,7 +220,7 @@ class AnthropicCollector(BaseCollector):
                 id=content_block["block_id"],
                 text_delta=text_delta,
             )
-        elif isinstance(event.delta, ThinkingDelta):
+        elif isinstance(event.delta, ThinkingDelta | BetaThinkingDelta):
             thinking_delta = event.delta.thinking
             content_block = self.content[-1]
             content_block["thinking"] += thinking_delta
@@ -202,12 +228,12 @@ class AnthropicCollector(BaseCollector):
                 id=content_block["block_id"],
                 thinking_delta=thinking_delta,
             )
-        elif isinstance(event.delta, CitationsDelta):
+        elif isinstance(event.delta, CitationsDelta | BetaCitationsDelta):
             if isinstance(event.delta.citation, CitationsWebSearchResultLocation):
                 self.content[-1]["citations"].append(event.delta.citation)  # ? Parse this
             else:
                 logger.warning("Unhandled citation delta event", citation_delta_event=event.delta.citation)
-        elif isinstance(event.delta, SignatureDelta):
+        elif isinstance(event.delta, SignatureDelta | BetaSignatureDelta):
             self.content[-1]["signature"] = event.delta.signature
             return None
         else:
@@ -249,15 +275,15 @@ class AnthropicCollector(BaseCollector):
                 tps = self._output_tokens / (time.perf_counter() - self._first_token)
                 span.metadata["tps"] = tps
 
-        # Check if this is an output_model_tool call and intercept it
         content = []
         for content_block in self.content:
             if content_block["type"] == "tool_use":
-                # Convert to text message and early return instead of tool call
-                if content_block["name"] == "output_model_tool":
-                    return Message(role="assistant", content=[TextContent(text=content_block.get("input", "{}"))])
                 content.append(
-                    ToolUseContent(id=content_block["id"], name=content_block["name"], input=content_block["input"])
+                    ToolUseContent(
+                        id=content_block["id"],
+                        name=content_block["name"],
+                        input=content_block["input"],
+                    )
                 )
             elif content_block["type"] == "server_tool_use":
                 content.append(

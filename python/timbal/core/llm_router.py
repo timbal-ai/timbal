@@ -14,40 +14,22 @@ import os
 from typing import Any, Literal
 
 import structlog
-from anthropic import (
-    APIConnectionError as AnthropicAPIConnectionError,
-)
-from anthropic import (
-    APIStatusError as AnthropicAPIStatusError,
-)
-from anthropic import (
-    APITimeoutError as AnthropicAPITimeoutError,
-)
+from anthropic import APIConnectionError as AnthropicAPIConnectionError
+from anthropic import APIStatusError as AnthropicAPIStatusError
+from anthropic import APITimeoutError as AnthropicAPITimeoutError
 from anthropic import AsyncAnthropic
-from anthropic import (
-    # APIError as AnthropicAPIError,
-    RateLimitError as AnthropicRateLimitError,
-)
-from openai import (
-    APIConnectionError as OpenAIAPIConnectionError,
-)
-from openai import (
-    APIStatusError as OpenAIAPIStatusError,
-)
-from openai import (
-    APITimeoutError as OpenAIAPITimeoutError,
-)
+from anthropic import RateLimitError as AnthropicRateLimitError  # APIError as AnthropicAPIError,
+from openai import APIConnectionError as OpenAIAPIConnectionError
+from openai import APIStatusError as OpenAIAPIStatusError
+from openai import APITimeoutError as OpenAIAPITimeoutError
 from openai import AsyncOpenAI
-from openai import (
-    # APIError as OpenAIAPIError,
-    RateLimitError as OpenAIRateLimitError,
-)
-from pydantic import Field, SecretStr
+from openai import RateLimitError as OpenAIRateLimitError  # APIError as OpenAIAPIError,
+from pydantic import BaseModel, Field, SecretStr
 
 from ..errors import APIKeyNotFoundError
 from ..state import get_call_id, get_or_create_run_context
 from ..types.message import Message
-from ..utils import resolve_default
+from ..utils import resolve_default, transform_schema
 from .runnable import Runnable
 
 logger = structlog.get_logger("timbal.core.llm_router")
@@ -288,6 +270,9 @@ async def _llm_router(
             "For Anthropic models, this should be a dictionary with 'type' and 'ttl' keys."
         ),
     ),
+    output_model: type[BaseModel] | None = Field(
+        None, description="Output model for the LLM. If provided, the output will be validated against this model."
+    ),
 ) -> Message:  # type: ignore
     """
     Internal LLM router function.
@@ -305,6 +290,7 @@ async def _llm_router(
     max_retries = resolve_default("max_retries", max_retries)
     retry_delay = resolve_default("retry_delay", retry_delay)
     cache_control = resolve_default("anthropic_cache_system", cache_control)
+    output_model = resolve_default("output_model", output_model)
 
     # Convert SecretStr to str if needed
     if isinstance(base_url, SecretStr):
@@ -350,7 +336,6 @@ async def _llm_router(
             client = AsyncOpenAI(api_key=api_key, default_headers=default_headers)
 
     elif provider == "anthropic":
-        default_headers["x-provider"] = "anthropic"
         if not max_tokens:
             raise ValueError("'max_tokens' is required for claude models.")
         if not api_key:
@@ -452,7 +437,18 @@ async def _llm_router(
             anthropic_kwargs["thinking"] = thinking
 
         async def _create_stream():
-            res = await client.messages.create(**anthropic_kwargs)
+            if output_model is not None:
+                # TODO: Review when Anthropic promotes structured outputs to stable API.
+                # Currently using beta endpoint because structured outputs (output_format with json_schema)
+                # is only available via the beta API with the "structured-outputs-2025-11-13" feature flag.
+                # See: https://docs.anthropic.com/en/docs/build-with-claude/structured-output
+                anthropic_kwargs["output_format"] = {
+                    "type": "json_schema",
+                    "schema": transform_schema(output_model),
+                }
+                res = await client.beta.messages.create(betas=["structured-outputs-2025-11-13"], **anthropic_kwargs)
+            else:
+                res = await client.messages.create(**anthropic_kwargs)
             async for chunk in res:
                 yield chunk
 
@@ -484,6 +480,16 @@ async def _llm_router(
         if thinking:
             # {"effort": enum["minimal", "low", "medium", "high"], "summary": enum["auto", "concise", "detailed"]}
             responses_kwargs["reasoning"] = thinking
+
+        if output_model is not None:
+            responses_kwargs["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": output_model.__name__,
+                    "schema": transform_schema(output_model),
+                    "strict": True,
+                }
+            }
 
         async def _create_stream():
             res = await client.responses.create(**responses_kwargs)
@@ -518,6 +524,16 @@ async def _llm_router(
 
         if max_tokens:
             chat_completions_kwargs["max_completion_tokens"] = max_tokens
+
+        if output_model is not None:
+            chat_completions_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": output_model.__name__,
+                    "schema": transform_schema(output_model),
+                    "strict": True,
+                },
+            }
 
         async def _create_stream():
             res = await client.chat.completions.create(**chat_completions_kwargs)

@@ -226,13 +226,6 @@ class ChatCompletionCollector(BaseCollector):
             content.append(self._content)
 
         if self._tool_calls:
-            # Check if this is an output_model_tool call and intercept it
-            for tool_call in self._tool_calls:
-                if tool_call.get("name") == "output_model_tool":
-                    # Convert to text message instead of tool call
-                    return Message.validate(
-                        {"role": "assistant", "content": [{"type": "text", "text": tool_call.get("input", "{}")}]}
-                    )
             # Openai allows the use of custom IDs for tool calls.
             # We choose to generate our own random IDs for consistency and to make sure they don't collide
             # (they are not transparent with the algs being used)
@@ -476,11 +469,12 @@ class ResponseCollector(BaseCollector):
         content = []
         for content_block in self.content.values():  # Python dicts are ordered
             if content_block["type"] == "tool_use":
-                # Convert to text message and early return instead of tool call
-                if content_block["name"] == "output_model_tool":
-                    return Message(role="assistant", content=[TextContent(text=content_block.get("input", "{}"))])
                 content.append(
-                    ToolUseContent(id=content_block["id"], name=content_block["name"], input=content_block["input"])
+                    ToolUseContent(
+                        id=content_block["id"],
+                        name=content_block["name"],
+                        input=content_block["input"],
+                    )
                 )
             elif content_block["type"] == "server_tool_use":
                 continue

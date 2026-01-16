@@ -236,6 +236,18 @@ class Agent(Runnable):
         if model_provider == "anthropic":
             if not self.model_params.get("max_tokens"):
                 raise ValueError("'max_tokens' is required for claude models.")
+            if self.output_model is not None:
+                logger.warning(
+                    "Anthropic's structured output (output_model) is currently in beta. "
+                    "The API may change in future releases. "
+                    "See: https://docs.anthropic.com/en/docs/build-with-claude/structured-output"
+                )
+
+        if self.tools and self.output_model is not None:
+            logger.warning(
+                "Using both 'tools' and 'output_model' together may cause unexpected behavior. "
+                "Consider using one or the other."
+            )
 
         self._llm = Tool(
             name="llm",
@@ -258,15 +270,6 @@ class Agent(Runnable):
             for skill_path in self.skills_path.iterdir():
                 skill = Skill(path=skill_path)
                 self.tools.append(skill)
-
-        if self.output_model:
-            output_model_tool = Tool(
-                name="output_model_tool",
-                description="Use it always before providing the final answer to give the structured output.",
-                handler=lambda x: x,
-            )
-            output_model_tool.params_model = self.output_model
-            self.tools.append(output_model_tool)
 
         # Normalize tools and prevent duplicate names
         names = set()
@@ -647,12 +650,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 yield event
                             return
 
-            is_output_model = False
             async for event in self._llm(
                 model=model,
                 messages=current_span.memory,
                 system_prompt=system_prompt,
                 tools=tools,
+                output_model=self.output_model,
                 **kwargs,
             ):
                 if isinstance(event, OutputEvent):
@@ -663,19 +666,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     interrupted = event.status.code == "cancelled" and event.status.reason == "interrupted"
 
                     # Handle case where LLM was interrupted before any output was received
-                    if event.output is None:
-                        if interrupted:
-                            raise InterruptError(event.call_id, output=None)
-                        # If not interrupted but no output, something unexpected happened
-                        raise RuntimeError("LLM returned no output")
+                    if event.output is None and interrupted:
+                        raise InterruptError(event.call_id, output=None)
 
-                    # TODO Test what happens when the LLM is in the middle of thinking, tool use or other than text generation
                     assert isinstance(event.output, Message), (
                         f"Expected event.output to be a Message, got {type(event.output)}"
                     )
-                    # # If the response was interrupted amid
-                    # if interrupted:
-                    #     for content in event.output.content[::-1]:
 
                     # Add LLM response to conversation for next iteration
                     current_span.memory.append(event.output)
@@ -683,12 +679,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
                     if self.output_model is not None:
                         for content in event.output.content:
+                            # TODO Refactor this. If the llm should return a fixed output model, we should error if it doesn't return it
                             if isinstance(content, TextContent):
                                 try:
                                     output = coerce_to_dict(content.text)
                                     validated_output = self.output_model(**output)
                                     event.output = validated_output
-                                    is_output_model = True
                                     break
                                 except (json.JSONDecodeError, ValueError, ValidationError):
                                     logger.error(f"Failed to parse JSON from LLM output: {content.text}")
@@ -698,7 +694,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         raise InterruptError(event.call_id, output=event.output)
                 yield event
 
-            if is_output_model:
+            if self.output_model is not None:
                 break
 
             tool_calls = [
