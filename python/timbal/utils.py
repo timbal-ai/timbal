@@ -241,10 +241,13 @@ async def dump(value: Any) -> Any:
     elif isinstance(value, Path):
         return value.as_posix()
     elif isinstance(value, Message):
-        return {
+        result = {
             "role": value.role,
             "content": await asyncio.gather(*[dump(c) for c in value.content]),
         }
+        if value.stop_reason is not None:
+            result["stop_reason"] = value.stop_reason
+        return result
     # Perform the check via mro to avoid circular imports between Runnable and dump
     elif any(cls.__name__ == "Runnable" for cls in value.__class__.__mro__):
         return value.model_dump()

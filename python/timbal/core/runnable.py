@@ -45,6 +45,7 @@ from ..types.events import (
     StartEvent,
 )
 from ..types.events.delta import Custom, DeltaEvent, DeltaItem, TextDelta
+from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import dump, sync_to_async_gen
 
@@ -802,17 +803,20 @@ class Runnable(ABC, BaseModel):
                     if final_output is not None:
                         output = final_output
 
-            span.status = RunStatus(
-                code="success",
-                reason=None,  # TODO
-                message=None,  # TODO
-            )
             # If the output is an OutputEvent, we extract the output
             # to avoid nesting an output event inside another output event
+            status_already_set = False
             if isinstance(output, OutputEvent):
                 if output.status.code == "cancelled":
                     span.status = output.status
+                    status_already_set = True
                 output = output.output
+
+            if not status_already_set:
+                # Determine stop_reason from Message output (LLM responses)
+                stop_reason = output.stop_reason if isinstance(output, Message) else None
+                span.status = RunStatus(code="success", reason=stop_reason, message=None)
+
             span.output = output
 
             # Restore the call context to this runnable before executing post_hook

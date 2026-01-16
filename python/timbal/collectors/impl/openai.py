@@ -104,6 +104,7 @@ class ChatCompletionCollector(BaseCollector):
         self._output_tokens: int = 0
         self._text_block_started: bool = False
         self._content_blocks: set[str] = set()
+        self._stop_reason: str | None = None
 
     @classmethod
     @override
@@ -118,6 +119,11 @@ class ChatCompletionCollector(BaseCollector):
             self._handle_usage(event)
         if not len(event.choices):
             return None
+        # Capture finish_reason from the choice
+        # Possible values: 'stop', 'length', 'tool_calls', 'content_filter', 'function_call'
+        # 'length' indicates max_tokens was reached
+        if event.choices[0].finish_reason:
+            self._stop_reason = event.choices[0].finish_reason
         # Calculate TTFT (Time To First Token) on first token
         if self._first_token is None:
             self._first_token = time.perf_counter()
@@ -232,7 +238,7 @@ class ChatCompletionCollector(BaseCollector):
             tool_calls = [{**tc, "id": uuid7(as_type="str").replace("-", "")} for tc in self._tool_calls]
             content.extend(tool_calls)
 
-        return Message.validate({"role": "assistant", "content": content})
+        return Message.validate({"role": "assistant", "content": content, "stop_reason": self._stop_reason})
 
 
 @register_collector
@@ -244,6 +250,7 @@ class ResponseCollector(BaseCollector):
         self._start = start
         self._first_token: float | None = None
         self._output_tokens: int = 0
+        self._stop_reason: str | None = None
         self.content_blocks: set[str] = set()
         self.content: dict[str, dict[str, Any]] = {}
 
@@ -432,6 +439,14 @@ class ResponseCollector(BaseCollector):
 
     def _handle_completed(self, event: ResponseCompletedEvent) -> None:
         """Handle completed events from OpenAI."""
+        # Capture stop reason from the response
+        # status can be: 'completed', 'failed', 'in_progress', 'cancelled', 'queued', 'incomplete'
+        # incomplete_details.reason can be: 'max_output_tokens', 'content_filter'
+        if event.response.status == "incomplete" and event.response.incomplete_details:
+            self._stop_reason = event.response.incomplete_details.reason  # 'max_output_tokens' or 'content_filter'
+        else:
+            self._stop_reason = event.response.status  # 'completed', 'failed', etc.
+
         run_context = get_run_context()
         usage = event.response.usage
         input_tokens = int(usage.input_tokens)
@@ -491,5 +506,4 @@ class ResponseCollector(BaseCollector):
                 # Unreachable
                 raise AssertionError(f"Unknown content block type: {content_block['type']}")
 
-        message = Message(role="assistant", content=content)
-        return message
+        return Message(role="assistant", content=content, stop_reason=self._stop_reason)

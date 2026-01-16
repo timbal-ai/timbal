@@ -95,6 +95,7 @@ class AnthropicCollector(BaseCollector):
         self._start = start
         self._first_token: float | None = None
         self._output_tokens: int = 0
+        self._stop_reason: str | None = None
         self.content_blocks: set[str] = set()
         self.content: list[dict[str, Any]] = []
 
@@ -249,6 +250,11 @@ class AnthropicCollector(BaseCollector):
 
     def _handle_message_delta(self, event: RawMessageDeltaEvent) -> None:
         """Handle message delta events with output usage information."""
+        # Capture stop_reason from the delta event
+        # Possible values: 'end_turn', 'max_tokens', 'stop_sequence', 'tool_use', 'pause_turn', 'refusal'
+        if event.delta.stop_reason:
+            self._stop_reason = event.delta.stop_reason
+
         run_context = get_run_context()
         if not run_context:
             return None
@@ -315,4 +321,4 @@ class AnthropicCollector(BaseCollector):
                 # Unreachable
                 raise AssertionError(f"Unknown content block type: {content_block['type']}")
 
-        return Message(role="assistant", content=content)
+        return Message(role="assistant", content=content, stop_reason=self._stop_reason)

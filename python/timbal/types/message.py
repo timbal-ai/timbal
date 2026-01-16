@@ -22,24 +22,35 @@ class Message:
     Attributes:
         role: The role of the message sender
         content: The content of the message, which can include text and tool interactions
+        stop_reason: The reason the LLM stopped generating (only for assistant messages).
+            Provider-specific values:
+            - Anthropic: 'end_turn', 'max_tokens', 'stop_sequence', 'tool_use', 'pause_turn', 'refusal'
+            - OpenAI Chat Completions: 'stop', 'length', 'tool_calls', 'content_filter', 'function_call'
+            - OpenAI Responses: 'completed', 'max_output_tokens', 'content_filter', etc.
     """
 
-    __slots__ = ("role", "content")
+    __slots__ = ("role", "content", "stop_reason")
 
-    def __init__(self, role: Any, content: Any) -> None:
+    def __init__(self, role: Any, content: Any, stop_reason: str | None = None) -> None:
         """Initialize a Message instance.
 
         Args:
             role: The role of the message sender
             content: The content of the message
+            stop_reason: The reason the LLM stopped generating (optional, only for assistant messages)
         """
         object.__setattr__(self, "role", role)
         object.__setattr__(self, "content", content)
+        object.__setattr__(self, "stop_reason", stop_reason)
 
     def __str__(self) -> str:
+        if self.stop_reason:
+            return f"Message(role={self.role}, content={self.content}, stop_reason={self.stop_reason})"
         return f"Message(role={self.role}, content={self.content})"
 
     def __repr__(self) -> str:
+        if self.stop_reason:
+            return f"Message(role={self.role}, content={self.content}, stop_reason={self.stop_reason})"
         return f"Message(role={self.role}, content={self.content})"
 
     def to_openai_responses_input(self) -> list[dict[str, Any]]:
@@ -121,10 +132,11 @@ class Message:
         if isinstance(value, dict):
             role = value.get("role", "user")
             content = value.get("content", None)
+            stop_reason = value.get("stop_reason", None)
             if not isinstance(content, list):
                 content = [content]
             content = [content_factory(item) for item in content]
-            return cls(role=role, content=content)
+            return cls(role=role, content=content, stop_reason=stop_reason)
         return cls.validate(
             {
                 "role": "user",
@@ -141,10 +153,14 @@ class Message:
             return None
         if not isinstance(value, cls):
             raise ValueError("Cannot serialize a non-message object.")
-        return {
+        result = {
             "role": value.role,
             "content": value.content,
         }
+        # Only include stop_reason if it's set (to avoid breaking existing serialization)
+        if value.stop_reason is not None:
+            result["stop_reason"] = value.stop_reason
+        return result
 
     @classmethod
     def __get_pydantic_json_schema__(cls, _core_schema: CoreSchema, _handler: GetJsonSchemaHandler) -> dict[str, Any]:
