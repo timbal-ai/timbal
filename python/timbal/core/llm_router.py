@@ -336,6 +336,7 @@ async def _llm_router(
             client = AsyncOpenAI(api_key=api_key, default_headers=default_headers)
 
     elif provider == "anthropic":
+        default_headers["x-provider"] = "anthropic"
         if not max_tokens:
             raise ValueError("'max_tokens' is required for claude models.")
         if not api_key:
@@ -441,7 +442,7 @@ async def _llm_router(
                 # TODO: Review when Anthropic promotes structured outputs to stable API.
                 # Currently using beta endpoint because structured outputs (output_format with json_schema)
                 # is only available via the beta API with the "structured-outputs-2025-11-13" feature flag.
-                # See: https://docs.anthropic.com/en/docs/build-with-claude/structured-output
+                # See: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
                 anthropic_kwargs["output_format"] = {
                     "type": "json_schema",
                     "schema": transform_schema(output_model),
