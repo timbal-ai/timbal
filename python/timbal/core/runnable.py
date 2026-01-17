@@ -526,29 +526,29 @@ class Runnable(ABC, BaseModel):
 
             return await loop.run_in_executor(None, fn_with_ctx)
 
-    async def _resolve_default_params(self) -> dict[str, Any]:
-        """Resolve default parameters by executing any callable values.
+    async def _resolve_input_params(self, input: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Merge fixed defaults, runtime defaults (lambdas), and input. Input takes priority."""
+        input = input or {}
+        resolved = dict(self._default_fixed_params)
 
-        Merges static default parameters with the results of executing
-        runtime callable parameters in parallel.
+        # Resolve runtime params (lambdas), skipping any already in input
+        if self._default_runtime_params:
+            tasks = []
+            callable_param_names = []
+            for param_name, callable_info in self._default_runtime_params.items():
+                if param_name in input:
+                    continue  # Already provided, skip resolution
+                tasks.append(self._execute_runtime_callable(callable_info["callable"], callable_info["is_coroutine"]))
+                callable_param_names.append(param_name)
 
-        Returns:
-            Dictionary containing resolved default parameters
-        """
-        resolved_params = dict(self._default_fixed_params)
-        if not self._default_runtime_params:
-            return resolved_params
+            if tasks:
+                results = await asyncio.gather(*tasks)
+                for param_name, result in zip(callable_param_names, results, strict=False):
+                    resolved[param_name] = result
 
-        tasks = []
-        callable_param_names = []
-        for param_name, callable_info in self._default_runtime_params.items():
-            tasks.append(self._execute_runtime_callable(callable_info["callable"], callable_info["is_coroutine"]))
-            callable_param_names.append(param_name)
-
-        results = await asyncio.gather(*tasks)
-        for param_name, result in zip(callable_param_names, results, strict=False):
-            resolved_params[param_name] = result
-        return resolved_params
+        # Input takes priority over defaults
+        resolved.update(input)
+        return resolved
 
     async def _execute_handler(
         self, validated_input: dict[str, Any], run_context: Any, span: Any, event_queue: asyncio.Queue | None = None
@@ -701,15 +701,6 @@ class Runnable(ABC, BaseModel):
         )
         run_context._trace[_call_id] = span
 
-        # Execute the 'when' condition inside the appropriate runnable context
-        if hasattr(self, "when") and self.when:
-            should_run = await self._execute_runtime_callable(self.when["callable"], self.when["is_coroutine"])
-            if not should_run:
-                # Remove the span entry. As if this was never run
-                run_context._trace.pop(_call_id)
-                # Clean exit. The async for loop will complete normally but won't iterate over anything
-                return
-
         # We store a preliminary version of the input and output in the span, in case resolution fails
         input, output, error = kwargs, None, None
         span.input = input
@@ -728,11 +719,9 @@ class Runnable(ABC, BaseModel):
                 logger.info(start_event.type, **start_event.model_dump())
             yield start_event
 
-            # We store the unvalidated input, as sent by the user.
-            # This will ensure full replayability of the run.
-            # Resolve default params (executing any callable values)
-            resolved_default_params = await self._resolve_default_params()
-            input = {**resolved_default_params, **input}
+            # Resolve input params (merging fixed defaults, runtime defaults, and provided input)
+            # We then store the unvalidated input, as sent by the user to ensure full replayability of the run.
+            input = await self._resolve_input_params(input)
             span.input = input
             span._input_dump = await dump(input)
 

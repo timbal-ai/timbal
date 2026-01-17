@@ -6,6 +6,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from uuid_extensions import uuid7
 
+from ..errors import SpanNotFound
 from .config import PlatformConfig, PlatformSubject
 from .tracing.providers import InMemoryTracingProvider, PlatformTracingProvider, TracingProvider
 from .tracing.span import Span
@@ -174,18 +175,22 @@ class RunContext(BaseModel):
         return parent_span
 
     def step_span(self, name: str) -> Span:
-        """Get the span for a neighbor step by name."""
-        span = self.current_span()
-        parent_call_id = span.parent_call_id
+        """Get the span for a neighbor step by name.
+
+        Uses get_parent_call_id() to find sibling spans. This allows workflows to
+        temporarily set parent_call_id before evaluating lambdas, enabling step_span
+        to find the correct siblings without requiring a span for the current call.
+
+        Raises:
+            SpanNotFound: If the step's span doesn't exist (step was skipped or never ran).
+        """
+        from . import get_parent_call_id
+
+        parent_call_id = get_parent_call_id()
         for span in self._trace.values():
-            if (
-                span.parent_call_id == parent_call_id
-                and
-                # span.call_id != span.call_id and  # Don't match self
-                span.path.endswith("." + name)
-            ):
+            if span.parent_call_id == parent_call_id and span.path.endswith("." + name):
                 return span
-        raise RuntimeError(f"Could not resolve step span for call ID {parent_call_id} and step name {name}")
+        raise SpanNotFound(name)
 
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics for the current call and all parent calls.

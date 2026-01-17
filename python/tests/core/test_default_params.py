@@ -315,7 +315,7 @@ class TestDefaultParamsPerformance:
         )
 
         start_time = time.time()
-        resolved_params = await tool._resolve_default_params()
+        resolved_params = await tool._resolve_input_params()
         end_time = time.time()
 
         # Should resolve quickly (under 1 second for simple functions)
@@ -339,7 +339,7 @@ class TestDefaultParamsPerformance:
         start_time = time.time()
 
         # Resolve all params concurrently
-        tasks = [tool._resolve_default_params() for tool in tools]
+        tasks = [tool._resolve_input_params() for tool in tools]
         results = await asyncio.gather(*tasks)
 
         end_time = time.time()
@@ -367,7 +367,7 @@ class TestDefaultParamsPerformance:
         tool = Tool(name="parallel_tool", handler=handler, default_params={"val1": slow_func1, "val2": slow_func2})
 
         start_time = time.time()
-        resolved_params = await tool._resolve_default_params()
+        resolved_params = await tool._resolve_input_params()
         end_time = time.time()
 
         # Should be faster than sequential execution (less than 0.15s vs 0.2s)
@@ -388,7 +388,7 @@ class TestDefaultParamsEdgeCases:
 
         tool = Tool(name="empty_tool", handler=handler, default_params={})
 
-        resolved_params = await tool._resolve_default_params()
+        resolved_params = await tool._resolve_input_params()
         assert resolved_params == {}
 
     @pytest.mark.asyncio
@@ -403,7 +403,7 @@ class TestDefaultParamsEdgeCases:
 
         tool = Tool(name="none_tool", handler=handler, default_params={"value": return_none})
 
-        resolved_params = await tool._resolve_default_params()
+        resolved_params = await tool._resolve_input_params()
         assert resolved_params["value"] is None
 
     @pytest.mark.asyncio
@@ -423,7 +423,7 @@ class TestDefaultParamsEdgeCases:
             name="mixed_none_tool", handler=handler, default_params={"none_val": return_none, "valid_val": return_value}
         )
 
-        resolved_params = await tool._resolve_default_params()
+        resolved_params = await tool._resolve_input_params()
         assert resolved_params["none_val"] is None
         assert resolved_params["valid_val"] == "valid"
 
@@ -441,7 +441,7 @@ class TestDefaultParamsEdgeCases:
 
         # The exception should propagate when resolving default params
         with pytest.raises(ValueError, match="Test error"):
-            await tool._resolve_default_params()
+            await tool._resolve_input_params()
 
 
 class TestDefaultParamsWithAgents:
@@ -478,7 +478,7 @@ class TestDefaultParamsWithAgents:
         assert "session_id" in agent._default_runtime_params
 
         # Test resolution
-        resolved_params = await agent._resolve_default_params()
+        resolved_params = await agent._resolve_input_params()
         assert "current_time" in resolved_params
         assert "session_id" in resolved_params
         assert resolved_params["session_id"] == "session_123"
@@ -502,8 +502,8 @@ class TestDefaultParamsWithAgents:
         assert len(agent._default_runtime_params) == 2
 
         # Test multiple resolutions to verify callables are executed each time
-        resolved1 = await agent._resolve_default_params()
-        resolved2 = await agent._resolve_default_params()
+        resolved1 = await agent._resolve_input_params()
+        resolved2 = await agent._resolve_input_params()
 
         # Static value should be same
         assert resolved1["static_context"] == resolved2["static_context"] == "production"
@@ -530,7 +530,7 @@ class TestDefaultParamsWithAgents:
 
         # Test that both are resolved independently
         resolved_system = await agent._resolve_system_prompt()
-        resolved_defaults = await agent._resolve_default_params()
+        resolved_defaults = await agent._resolve_input_params()
 
         # System prompt should have template functions resolved
         assert "{os::getcwd}" not in resolved_system
@@ -629,8 +629,8 @@ class TestDefaultParamsWithNestedTools:
         assert action_tool._default_fixed_params == {"action": "unknown"}
 
         # Test resolution works for both
-        agent_resolved = await agent._resolve_default_params()
-        tool_resolved = await action_tool._resolve_default_params()
+        agent_resolved = await agent._resolve_input_params()
+        tool_resolved = await action_tool._resolve_input_params()
 
         assert "session_" in agent_resolved["session_id"]
         assert agent_resolved["environment"] == "production"
@@ -709,7 +709,7 @@ class TestDefaultParamsIntegration:
         # Test that each tool gets its own resolved default params
         resolved_params = []
         for tool in tools:
-            params = await tool._resolve_default_params()
+            params = await tool._resolve_input_params()
             resolved_params.append(params)
 
         # Each tool should have unique context values
@@ -738,7 +738,7 @@ class TestDefaultParamsIntegration:
 
         # Test that the tool's default param resolution fails as expected
         with pytest.raises(RuntimeError, match="Default param failed"):
-            await tool_with_failing_default._resolve_default_params()
+            await tool_with_failing_default._resolve_input_params()
 
         # This confirms the error handling behavior without needing LLM calls
 
@@ -761,7 +761,7 @@ class TestDefaultParamsIntegration:
         )
 
         # Test the tool directly without involving LLM calls
-        resolved_params = await streaming_tool._resolve_default_params()
+        resolved_params = await streaming_tool._resolve_input_params()
         assert resolved_params["chunk_size"] == 5
         assert "STREAM_" in resolved_params["prefix"]
 

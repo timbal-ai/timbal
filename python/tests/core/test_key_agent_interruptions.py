@@ -14,7 +14,7 @@ from timbal.types.message import Message
 from .conftest import assert_has_output_event
 
 MODELS_TO_TEST = [
-    pytest.param("anthropic/claude-haiku-4-5", {"max_tokens": 8092}, id="anthropic-claude-haiku"),  # messages
+    pytest.param("anthropic/claude-haiku-4-5", {"max_tokens": 8092}, id="anthropic-claude-haiku-4-5"),  # messages
     pytest.param("openai/gpt-5.2", {}, id="openai-gpt-5.2"),  # responses
     pytest.param("google/gemini-2.5-flash-lite", {}, id="google-gemini-2.5-flash-lite"),  # chat completions
 ]
@@ -117,7 +117,7 @@ class TestKeyAgentInterruptions:
         # Start agent execution and interrupt it while search is running
         task1 = asyncio.create_task(agent(prompt=prompt1).collect())
         # Wait long enough for the LLM to decide to use web search and for the search to start
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         task1.cancel()
         result1 = await task1
 

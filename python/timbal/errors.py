@@ -68,6 +68,24 @@ class PlatformError(TimbalError):
     """Error raised when a platform API call fails."""
 
 
+class SpanNotFound(TimbalError):
+    """Error raised when trying to access a span that doesn't exist in the trace.
+
+    This is raised by step_span() when the requested step has no span,
+    meaning it was skipped or never ran. Used in pull-based workflow skip
+    logic to determine if a step can execute based on the availability of
+    its dependencies' spans/outputs.
+
+    Args:
+        step_name: The name of the step whose span was not found.
+        message: Optional message describing the error.
+    """
+
+    def __init__(self, step_name: str, message: str = "") -> None:
+        super().__init__(message or f"Span not found for step '{step_name}'")
+        self.step_name = step_name
+
+
 def bail(message: str | None = None, propagate: bool = True) -> None:
     """Raise an EarlyExit error with the given message.
 
