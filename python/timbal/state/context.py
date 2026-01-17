@@ -167,8 +167,9 @@ class RunContext(BaseModel):
 
     def parent_span(self) -> Span:
         """Get the span for the parent call."""
-        span = self.current_span()
-        parent_call_id = span.parent_call_id
+        from . import get_parent_call_id
+
+        parent_call_id = get_parent_call_id()
         parent_span = self._trace.get(parent_call_id)
         if not parent_span:
             raise RuntimeError(f"Could not resolve parent span for call ID {parent_call_id}")
