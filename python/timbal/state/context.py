@@ -15,6 +15,16 @@ from .tracing.trace import Trace
 logger = structlog.get_logger("timbal.state.context")
 
 
+class _NoDefault:
+    """INTERNAL: Sentinel to distinguish 'no default provided' from 'default is None'."""
+
+    def __repr__(self) -> str:
+        return "<no default>"
+
+
+_NO_DEFAULT = _NoDefault()
+
+
 class RunContext(BaseModel):
     """Runtime execution context shared across all components in a run.
 
@@ -175,15 +185,22 @@ class RunContext(BaseModel):
             raise RuntimeError(f"Could not resolve parent span for call ID {parent_call_id}")
         return parent_span
 
-    def step_span(self, name: str) -> Span:
+    def step_span(self, name: str, default: Any = _NO_DEFAULT) -> Span | Any:
         """Get the span for a neighbor step by name.
 
         Uses get_parent_call_id() to find sibling spans. This allows workflows to
         temporarily set parent_call_id before evaluating lambdas, enabling step_span
         to find the correct siblings without requiring a span for the current call.
 
+        Args:
+            name: The name of the step to find.
+            default: Value to return if span not found. If not provided, raises SpanNotFound.
+
+        Returns:
+            The span for the requested step, or the default value if provided and not found.
+
         Raises:
-            SpanNotFound: If the step's span doesn't exist (step was skipped or never ran).
+            SpanNotFound: If the step's span doesn't exist and no default is provided.
         """
         from . import get_parent_call_id
 
@@ -191,7 +208,10 @@ class RunContext(BaseModel):
         for span in self._trace.values():
             if span.parent_call_id == parent_call_id and span.path.endswith("." + name):
                 return span
-        raise SpanNotFound(name)
+
+        if isinstance(default, _NoDefault):
+            raise SpanNotFound(name)
+        return default
 
     def update_usage(self, key: str, value: int) -> None:
         """Update usage statistics for the current call and all parent calls.

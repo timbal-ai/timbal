@@ -67,13 +67,18 @@ packages = ["python/timbal"]
 exclude = [
     "/**/.*",
     "/**/__pycache__",
+    "*.lock",
+    "*.md",
+    "/*.py",
     "/.git",
     "/.github",
-    "/dist",
-    "/examples",
     "/cli",
-    "/docs", 
+    "/dist",
+    "/docs",
+    "/examples",
+    "/python/tests",
     "/sandbox",
+    "/scripts",
 ]
 
 [tool.hatch.envs.default]

@@ -1,9 +1,0 @@
-- name: simple_test
-  description: A basic test case
-  turns:
-    - input:
-        prompt: "Hello"
-      output:
-        content:
-          validators:
-            contains: ["hello"]
