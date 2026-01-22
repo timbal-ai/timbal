@@ -12,6 +12,7 @@ import structlog
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
@@ -72,6 +73,14 @@ def create_app(
         FastAPI: Configured FastAPI application with all endpoints.
     """
     app = FastAPI(lifespan=lambda app: lifespan(app, import_spec))
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/healthcheck")
     async def healthcheck() -> Response:
