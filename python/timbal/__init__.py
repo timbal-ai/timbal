@@ -12,7 +12,7 @@ except ImportError:
     __version__ = "0.0.0.dev0"
 
 # Lazy imports - only load when accessed
-__all__ = ["Agent", "Tool", "Workflow"]
+__all__ = ["Agent", "Tool", "Workflow", "MCPToolSet"]
 
 def __getattr__(name: str):
     """Lazy import mechanism for top-level exports.
@@ -29,4 +29,7 @@ def __getattr__(name: str):
     elif name == "Workflow":
         from .core import Workflow
         return Workflow
+    elif name == "MCPToolSet":
+        from .core import MCPToolSet
+        return MCPToolSet
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
