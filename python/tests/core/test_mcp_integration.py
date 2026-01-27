@@ -1,9 +1,3 @@
-"""Tests for MCP integration (Model Context Protocol).
-
-These tests focus on the public API of MCPToolSet, the main interface
-for integrating MCP servers with Timbal agents.
-"""
-
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
