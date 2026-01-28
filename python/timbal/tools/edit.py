@@ -5,6 +5,7 @@ Performs exact string replacements in files with diff output.
 Supports replacing all occurrences or just the first match.
 Supports ~ (home directory) and environment variables in paths.
 """
+
 import difflib
 import hashlib
 import os
@@ -20,10 +21,8 @@ logger = structlog.get_logger("timbal.tools.edit")
 
 
 class Edit(Tool):
-
     # TODO Add parameter to limit permissions to a specific path
     def __init__(self, **kwargs):
-
         async def _edit(
             path: str,
             old_string: str,
@@ -38,7 +37,7 @@ class Edit(Tool):
             - Indentation (must match precisely)
             - Line endings
             - Every character exactly as it appears in the file
-            
+
             If the match fails, read the file first to see the exact content.
 
             Args:
@@ -68,9 +67,10 @@ class Edit(Tool):
 
             # Verify file state tracking BEFORE reading - fail fast
             # This is a security feature, we don't enforce the user to keep track of the fs state in the run context
-            if run_context and hasattr(run_context, "_fs_state"):
+            fs_state = run_context._session_state.get("fs_state", {}) if run_context else {}
+            if run_context and fs_state:
                 # Check if file has been read in this conversation
-                if str(path) not in run_context._fs_state:
+                if str(path) not in fs_state:
                     raise FileNotReadError(
                         f"Cannot edit {path} - file has not been read in this conversation. "
                         f"Please read the file first to understand its current state."
@@ -79,9 +79,9 @@ class Edit(Tool):
             original_bytes = path.read_bytes()
             # Verify file hasn't changed since last read
             # This is a security feature, we don't enforce the user to keep track of the fs state in the run context
-            if run_context and hasattr(run_context, "_fs_state"):
+            if run_context and fs_state:
                 current_hash = hashlib.sha256(original_bytes).hexdigest()
-                stored_hash = run_context._fs_state[str(path)]
+                stored_hash = fs_state[str(path)]
                 if stored_hash and current_hash != stored_hash:
                     raise FileModifiedError(
                         f"Cannot edit {path} - file has been modified since you last read it. "
@@ -98,21 +98,25 @@ class Edit(Tool):
                 new_content = original_content.replace(old_string, new_string, 1)
 
             # Generate clean, IDE-style diff with minimal context
-            diff_lines = list(difflib.unified_diff(
-                original_content.splitlines(keepends=False),
-                new_content.splitlines(keepends=False),
-                fromfile=f"a/{path.name}",
-                tofile=f"b/{path.name}",
-                lineterm="",
-                n=3  # 3 lines of context (standard)
-            ))
+            diff_lines = list(
+                difflib.unified_diff(
+                    original_content.splitlines(keepends=False),
+                    new_content.splitlines(keepends=False),
+                    fromfile=f"a/{path.name}",
+                    tofile=f"b/{path.name}",
+                    lineterm="",
+                    n=3,  # 3 lines of context (standard)
+                )
+            )
 
             path.write_text(new_content, encoding="utf-8")
-            
+
             # Update file state tracking with new hash
-            if run_context and hasattr(run_context, "_fs_state"):
+            if run_context:
                 new_hash = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
-                run_context._fs_state[str(path)] = new_hash
+                if "fs_state" not in run_context._session_state:
+                    run_context._session_state["fs_state"] = {}
+                run_context._session_state["fs_state"][str(path)] = new_hash
 
             return "\n".join(diff_lines)
 
@@ -124,5 +128,5 @@ class Edit(Tool):
                 "character-for-character including all whitespace, indentation, tabs, and line endings."
             ),
             handler=_edit,
-            **kwargs
+            **kwargs,
         )

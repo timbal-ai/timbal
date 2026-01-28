@@ -28,8 +28,9 @@ from ..collectors import get_collector_registry
 from ..collectors.impl.timbal import TimbalCollector
 from ..errors import EarlyExit, InterruptError
 from ..state import (
-    get_or_create_run_context,
+    get_call_id,
     get_parent_call_id,
+    get_run_context,
     set_call_id,
     set_parent_call_id,
     set_run_context,
@@ -678,28 +679,37 @@ class Runnable(ABC, BaseModel):
         else:
             run_in_background = False
 
-        _parent_call_id = get_parent_call_id()
-        _call_id = uuid7(as_type="str").replace("-", "")
-        set_call_id(_call_id)
-        if self._is_orchestrator:
-            set_parent_call_id(_call_id)
-
         # Generate new context or reset it if appropriate
-        run_context = get_or_create_run_context()
-        if not _parent_call_id and run_context._trace:
+        _parent_call_id = get_parent_call_id()
+        _call_id = get_call_id()
+        run_context = get_run_context()
+        if run_context is None:
+            run_context = RunContext()
+            _parent_call_id = None
+            _call_id = None
+        elif "." not in self._path and run_context._trace:
+            session_state = run_context._session_state
             run_context = RunContext(parent_id=run_context.id)
-            set_run_context(run_context)
+            run_context._session_state = session_state
+            _parent_call_id = None
+            _call_id = None
+        set_run_context(run_context)
 
-        assert _call_id not in run_context._trace, f"Call ID {_call_id} already exists in trace."
+        _new_parent_call_id = _call_id
+        _new_call_id: str = uuid7(as_type="str").replace("-", "")  # type: ignore
+        set_parent_call_id(_new_parent_call_id)
+        set_call_id(_new_call_id)
+
+        assert _new_call_id not in run_context._trace, f"Call ID {_new_call_id} already exists in trace."
         span = Span(
             path=self._path,
-            call_id=_call_id,
-            parent_call_id=_parent_call_id,
+            call_id=_new_call_id,
+            parent_call_id=_new_parent_call_id,
             t0=t0,
             metadata={**self.metadata},  # Shallow copy
             runnable=self,
         )
-        run_context._trace[_call_id] = span
+        run_context._trace[_new_call_id] = span
 
         # We store a preliminary version of the input and output in the span, in case resolution fails
         input, output, error = kwargs, None, None
@@ -727,10 +737,8 @@ class Runnable(ABC, BaseModel):
 
             if self.pre_hook is not None:
                 await self._execute_runtime_callable(self.pre_hook, self._pre_hook_is_coroutine)
-                # restore
-                set_call_id(_call_id)
-                if self._is_orchestrator:
-                    set_parent_call_id(_call_id)
+                set_parent_call_id(_new_parent_call_id)
+                set_call_id(_new_call_id)
 
             # Pydantic model_validate() does not mutate the input dict
             validated_input = dict(self.params_model.model_validate(input))
@@ -759,9 +767,8 @@ class Runnable(ABC, BaseModel):
                         span._output_dump = await dump(output)
                         span.output = output
 
-                        set_call_id(_call_id)
-                        if self._is_orchestrator:
-                            set_parent_call_id(_call_id)
+                        set_parent_call_id(_new_parent_call_id)
+                        set_call_id(_new_call_id)
                         if self.post_hook is not None:
                             await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
 
@@ -808,11 +815,8 @@ class Runnable(ABC, BaseModel):
 
             span.output = output
 
-            # Restore the call context to this runnable before executing post_hook
-            # This ensures post_hook modifies the correct span, not any nested ones
-            set_call_id(_call_id)
-            if self._is_orchestrator:
-                set_parent_call_id(_call_id)
+            set_parent_call_id(_new_parent_call_id)
+            set_call_id(_new_call_id)
             if self.post_hook is not None and not run_in_background:
                 await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
 
@@ -886,9 +890,8 @@ class Runnable(ABC, BaseModel):
             output_event._input_dump = span._input_dump
             output_event._output_dump = span._output_dump
             await run_context._save_trace()
-            if _parent_call_id is None:
-                # We don't want to propagate this between runs. We use this variable to check if we're at an entry point
-                set_parent_call_id(None)
+            set_parent_call_id(_parent_call_id)
+            set_call_id(_call_id)
             if output_event.type in self._log_events:
                 logger.info(output_event.type, **output_event.model_dump())
             yield output_event

@@ -72,6 +72,7 @@ class RunContext(BaseModel):
     _base_path: Path | None = PrivateAttr(default=None)
     _trace: Trace = PrivateAttr()
     _tracing_provider: type[TracingProvider] = PrivateAttr()
+    _session_state: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize the RunContext after Pydantic model creation.
@@ -165,6 +166,18 @@ class RunContext(BaseModel):
         """
         await self._tracing_provider.put(self)
 
+    def root_span(self) -> Span | None:
+        """Get the root span of the trace (the first span with no parent)."""
+        if self._trace._root_call_id is None:
+            return None
+        return self._trace.get(self._trace._root_call_id)
+
+    def parent_of(self, span: Span) -> Span | None:
+        """Get the parent of a span. If the span has no parent, it's the root."""
+        if span.parent_call_id is None:
+            return None
+        return self._trace.get(span.parent_call_id)
+
     def current_span(self) -> Span:
         """Get the span for the current call."""
         from . import get_call_id
@@ -226,7 +239,7 @@ class RunContext(BaseModel):
         """
         from . import get_call_id
 
-        call_id = get_call_id()
+        call_id = get_call_id() or self._trace._root_call_id
         # Update usage for all parents in the call stack
         while call_id:
             assert call_id in self._trace, f"RunContext.update_usage: Call ID {call_id} not found in trace."

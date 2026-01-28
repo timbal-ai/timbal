@@ -4,6 +4,7 @@ Read tool for file access with path expansion support.
 Returns a File object with content formatted for LLM consumption.
 Supports ~ (home directory) and environment variables in paths.
 """
+
 import hashlib
 import os
 from itertools import islice
@@ -19,22 +20,16 @@ logger = structlog.get_logger("timbal.tools.read")
 
 
 class Read(Tool):
-
     def __init__(self, **kwargs):
-        
-        async def _read(
-            path: str,
-            start_line: int | None = None,
-            end_line: int | None = None
-        ) -> File | str:
+        async def _read(path: str, start_line: int | None = None, end_line: int | None = None) -> File | str:
             """
             Read a file at the specified path.
-            
+
             Args:
                 path: Path to the file to read
                 start_line: Optional starting line number (1-indexed, inclusive)
                 end_line: Optional ending line number (1-indexed, inclusive)
-            
+
             Returns:
                 File object with content (optionally sliced to line range)
             """
@@ -55,9 +50,11 @@ class Read(Tool):
                 return contents
 
             # Update file state tracking with new hash
-            if run_context and hasattr(run_context, "_fs_state"):
+            if run_context:
                 new_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-                run_context._fs_state[str(path)] = new_hash
+                if "fs_state" not in run_context._session_state:
+                    run_context._session_state["fs_state"] = {}
+                run_context._session_state["fs_state"][str(path)] = new_hash
 
             file = File.validate(path)
 
@@ -92,12 +89,12 @@ class Read(Tool):
                 lines = list(islice(f, start_idx, start_idx + num_lines if num_lines else None))
 
             # Return empty string if no lines found (out of range)
-            content = ''.join(lines)
+            content = "".join(lines)
             return content if content else ""
-            
+
         super().__init__(
             name="read",
             description="Read a file at the specified path. Optionally specify start_line and end_line to read only a specific line range.",
             handler=_read,
-            **kwargs
+            **kwargs,
         )
