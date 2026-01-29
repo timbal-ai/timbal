@@ -80,6 +80,9 @@ class Span(BaseModel):
         ),
         exclude=True,
     )
+    # INTERNAL: Exposed as a field instead of PrivateAttr for deserialization support.
+    # Do not access directly; use RunContext.get_session() instead.
+    session: Any = Field(None, exclude=True)
 
     _input_dump: Any = PrivateAttr()
     """The dumped/serialized version of input for internal use."""
@@ -87,6 +90,8 @@ class Span(BaseModel):
     """The dumped/serialized version of output for internal use."""
     _memory_dump: Any = PrivateAttr()
     """The dumped/serialized version of memory for internal use."""
+    _session_dump: Any = PrivateAttr()
+    """The dumped/serialized version of session for internal use."""
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
         """Override model_dump to use dumped versions of input and output during serialization."""
@@ -98,4 +103,6 @@ class Span(BaseModel):
             data["output"] = self._output_dump
         if hasattr(self, "_memory_dump"):
             data["memory"] = self._memory_dump
+        if hasattr(self, "_session_dump"):
+            data["session"] = self._session_dump
         return data

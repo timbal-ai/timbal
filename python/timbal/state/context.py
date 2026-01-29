@@ -48,12 +48,12 @@ class RunContext(BaseModel):
         description="Unique identifier for the run.",
     )
     parent_id: str | None = Field(
-        None,
+        default=None,
         description="Whether this run is a direct child of another run.",
     )
 
     platform_config: PlatformConfig | None = Field(
-        None,
+        default=None,
         description="Platform configuration for the run.",
     )
 
@@ -72,7 +72,7 @@ class RunContext(BaseModel):
     _base_path: Path | None = PrivateAttr(default=None)
     _trace: Trace = PrivateAttr()
     _tracing_provider: type[TracingProvider] = PrivateAttr()
-    _session_state: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _session_data: dict[str, Any] | None = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize the RunContext after Pydantic model creation.
@@ -164,7 +164,26 @@ class RunContext(BaseModel):
         tracing provider. Manual calls to this method may interfere with
         the framework's automatic tracing lifecycle.
         """
+        # Sync session data to root span before saving
+        root = self.root_span()
+        if root is not None and self._session_data is not None:
+            from ..utils import dump
+
+            root.session = self._session_data
+            root._session_dump = await dump(self._session_data)
         await self._tracing_provider.put(self)
+
+    async def get_session(self) -> dict[str, Any]:
+        """Get session data that persists across runs."""
+        if self._session_data is None:
+            self._session_data = {}
+            if self.parent_id:
+                trace = await self._tracing_provider.get(self)
+                if trace is not None and trace._root_call_id is not None:
+                    root = trace.get(trace._root_call_id)
+                    if root is not None and root.session is not None:
+                        self._session_data.update(root.session)
+        return self._session_data
 
     def root_span(self) -> Span | None:
         """Get the root span of the trace (the first span with no parent)."""

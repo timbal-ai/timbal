@@ -688,9 +688,7 @@ class Runnable(ABC, BaseModel):
             _parent_call_id = None
             _call_id = None
         elif "." not in self._path and run_context._trace:
-            session_state = run_context._session_state
             run_context = RunContext(parent_id=run_context.id)
-            run_context._session_state = session_state
             _parent_call_id = None
             _call_id = None
         set_run_context(run_context)
