@@ -30,7 +30,7 @@ from uuid_extensions import uuid7
 
 from ..errors import InterruptError, bail
 from ..state import get_run_context
-from ..types.content import CustomContent, TextContent, ToolUseContent
+from ..types.content import CustomContent, FileContent, TextContent, ToolUseContent
 from ..types.events import BaseEvent, OutputEvent
 from ..types.message import Message
 from ..utils import coerce_to_dict, dump
@@ -303,7 +303,7 @@ class Agent(Runnable):
             self.system_prompt += f"""
 <skills>
 Skills provide additional knowledge of a specific topic. The following skills are available:
-{"\n".join(skills_metadata)}
+{chr(10).join(skills_metadata)}
 In skills documentation, you will encounter references to additional files.
 If the file is relevant for the user query, USE the `read_skill` tool to get its content.
 </skills>"""
@@ -581,7 +581,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             elif event.error is not None:
                 content = event.error
             elif isinstance(event.output, Message):
-                content = event.output.content
+                content = [c for c in event.output.content if isinstance(c, TextContent | FileContent)]
             else:
                 content = event.output
             tool_result = Message.validate(
