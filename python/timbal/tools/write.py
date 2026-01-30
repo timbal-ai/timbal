@@ -71,9 +71,10 @@ class Write(Tool):
             # Update file state tracking with new hash
             if run_context:
                 new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-                if "fs_state" not in run_context._session_state:
-                    run_context._session_state["fs_state"] = {}
-                run_context._session_state["fs_state"][str(path)] = new_hash
+                session = await run_context.get_session()
+                if "fs_state" not in session:
+                    session["fs_state"] = {}
+                session["fs_state"][str(path)] = new_hash
 
             return "\n".join(diff_lines)
 

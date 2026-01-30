@@ -10,8 +10,8 @@ Tests the complete workflow of file operations with state tracking to ensure:
 Every test creates its own fresh RunContext and tool instances.
 No fixtures. No shared state. Complete isolation.
 
-The fs_state is stored in RunContext._session_state["fs_state"] which is automatically
-preserved when child RunContexts are created during nested runnable execution.
+The fs_state is stored in the session data accessible via RunContext.get_session()["fs_state"]
+which is automatically preserved across runs.
 """
 
 import hashlib
@@ -24,9 +24,10 @@ from timbal.tools.read import Read
 from timbal.tools.write import Write
 
 
-def get_fs_state(ctx: RunContext) -> dict:
+async def get_fs_state(ctx: RunContext) -> dict:
     """Helper to get fs_state from session state."""
-    return ctx._session_state.get("fs_state", {})
+    session = await ctx.get_session()
+    return session.get("fs_state", {})
 
 
 class TestReadToolWithFsState:
@@ -50,7 +51,7 @@ class TestReadToolWithFsState:
 
         assert result.error is None
         assert result.output == test_content
-        fs_state = get_fs_state(ctx)
+        fs_state = await get_fs_state(ctx)
         assert str(test_file) in fs_state
         expected_hash = hashlib.sha256(test_content.encode("utf-8")).hexdigest()
         assert fs_state[str(test_file)] == expected_hash
@@ -73,7 +74,7 @@ class TestReadToolWithFsState:
         await read_tool(path=str(file1)).collect()
         await read_tool(path=str(file2)).collect()
 
-        fs_state = get_fs_state(ctx)
+        fs_state = await get_fs_state(ctx)
         assert str(file1) in fs_state
         assert str(file2) in fs_state
 
@@ -92,13 +93,13 @@ class TestReadToolWithFsState:
         # Create fresh tool
         read_tool = Read()
         await read_tool(path=str(test_file)).collect()
-        original_hash = get_fs_state(ctx)[str(test_file)]
+        original_hash = (await get_fs_state(ctx))[str(test_file)]
 
         new_content = "Modified content"
         test_file.write_text(new_content, encoding="utf-8")
 
         await read_tool(path=str(test_file)).collect()
-        new_hash = get_fs_state(ctx)[str(test_file)]
+        new_hash = (await get_fs_state(ctx))[str(test_file)]
 
         expected_new_hash = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
         assert new_hash != original_hash
@@ -195,12 +196,12 @@ class TestEditToolWithFsState:
         # Create fresh tools
         read_tool = Read()
         await read_tool(path=str(test_file)).collect()
-        original_hash = get_fs_state(ctx)[str(test_file)]
+        original_hash = (await get_fs_state(ctx))[str(test_file)]
 
         edit_tool = Edit()
         await edit_tool(path=str(test_file), old_string="Original", new_string="Modified").collect()
 
-        new_hash = get_fs_state(ctx)[str(test_file)]
+        new_hash = (await get_fs_state(ctx))[str(test_file)]
         new_content = "Modified content"
         expected_new_hash = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
         assert new_hash != original_hash
@@ -275,7 +276,7 @@ class TestWriteToolWithFsState:
 
         assert result.error is None
         assert test_file.exists()
-        fs_state = get_fs_state(ctx)
+        fs_state = await get_fs_state(ctx)
         assert str(test_file) in fs_state
         expected_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         assert fs_state[str(test_file)] == expected_hash
@@ -295,12 +296,12 @@ class TestWriteToolWithFsState:
         # Create fresh tool
         write_tool = Write()
         await write_tool(path=str(test_file), content=original_content).collect()
-        original_hash = get_fs_state(ctx)[str(test_file)]
+        original_hash = (await get_fs_state(ctx))[str(test_file)]
 
         new_content = "New content"
         await write_tool(path=str(test_file), content=new_content).collect()
 
-        new_hash = get_fs_state(ctx)[str(test_file)]
+        new_hash = (await get_fs_state(ctx))[str(test_file)]
         expected_new_hash = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
         assert new_hash != original_hash
         assert new_hash == expected_new_hash
@@ -466,7 +467,7 @@ class TestComplexWorkflows:
         result = await write_tool(path=str(nested_file), content=content).collect()
         assert result.error is None
         assert nested_file.exists()
-        fs_state = get_fs_state(ctx)
+        fs_state = await get_fs_state(ctx)
         assert str(nested_file) in fs_state
 
         edit_tool = Edit()

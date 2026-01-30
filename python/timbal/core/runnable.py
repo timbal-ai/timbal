@@ -691,6 +691,7 @@ class Runnable(ABC, BaseModel):
             run_context = RunContext(parent_id=run_context.id)
             _parent_call_id = None
             _call_id = None
+        await run_context.get_session()
         set_run_context(run_context)
 
         _new_parent_call_id = _call_id

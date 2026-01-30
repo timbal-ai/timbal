@@ -179,10 +179,17 @@ class RunContext(BaseModel):
             self._session_data = {}
             if self.parent_id:
                 trace = await self._tracing_provider.get(self)
-                if trace is not None and trace._root_call_id is not None:
-                    root = trace.get(trace._root_call_id)
-                    if root is not None and root.session is not None:
-                        self._session_data.update(root.session)
+                if trace is None or trace._root_call_id is None:
+                    logger.error(
+                        "Parent trace not found. Continuing without session data...",
+                        parent_id=self.parent_id,
+                        run_id=self.id,
+                    )
+                    return self._session_data
+                root_span = trace.get(trace._root_call_id)
+                assert root_span is not None, "Root span not found"
+                if root_span.session is not None:
+                    self._session_data.update(root_span.session)
         return self._session_data
 
     def root_span(self) -> Span | None:
