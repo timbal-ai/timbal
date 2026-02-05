@@ -1,0 +1,54 @@
+---
+title: "Windsurf"
+description: "Step-by-step instructions to integrate Timbal with Windsurf through MCP."
+---
+
+> ### Step 1: Open the Windsurf interface
+1. Launch the Windsurf app on your system.
+2. Log in with your account if required.
+
+> ### Step 2: Access MCP settings
+1. In the top menu, click **Settings** (<Icon icon="gear" size="14" />  on the top-right) -> **Windsurf Setting**s.
+2. Navigate to the **Cascade** section → **MCP Servers**.
+3. Click the **Open MCP Marketplace** link.
+
+
+> ### Step 3: Add Timbal as a new MCP server
+1. In the **Installed MCPs** list, click the **Settings** button (<Icon icon="gear" size="14" /> positioned to the right of the title). 
+2. The file `mcp_config.json` will open.
+3. Add the Timbal MCP URL (`https://api.timbal.ai/mcp`). For example, you can set the server name `"timbal-mcp"`:
+    ```json title=mcp_config.json
+    {
+        "mcpServers": {
+            "timbal-mcp": {
+                "serverUrl": "https://api.timbal.ai/mcp",
+                // Use this to authenticate with a Timbal API Key instead of OAuth
+                // "headers": {
+                //    "Authorization": "TIMBAL_API_KEY"
+                // }
+                }
+            }
+    }
+    ```
+4. Save the configuration.
+
+#### Option 1: Connect via OAuth
+5. A browser window will open for authentication.
+    <Note>
+    If the pop-up does not appear, you can manually click the **Connect** button next to Timbal MCP in the **MCP Marketplace**.
+    </Note>
+6. Log in using your preferred OAuth method: GitHub, Google, Microsoft, or Timbal OAuth.
+    <Warning>
+    Make sure to log in with your active Timbal account — the account registered on the [Timbal Platform](https://app.timbal.ai). Using a different account may prevent access to Timbal tools.
+    </Warning>
+7. Accept the OAuth permissions.
+8. Return to Windsurf — Timbal should now appear in green, with available tools listed inside.
+
+#### Option 2: Connect using a Timbal Api Key
+5. If you added a `"Authorization"` with `"TIMBAL_API_KEY"` in `mcp_config.json`, Windsurf will automatically use it — no browser login is needed.  
+6. Check the **Installed MCPs** list — Timbal should appear in green, with its tools ready to use.  
+
+> ### Step 4: Start using Timbal in Windsurf
+1. Open the **Toggle Cascade Side Bar** (<Icon icon="sidebar" size="14" />  on top-right).
+2. Start a chat.
+3. You can now use **Timbal tools** in your conversation. Windsurf will leverage the MCP integration automatically.

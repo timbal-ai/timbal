@@ -1,0 +1,62 @@
+---
+title: "VS Code"
+description: "Learn how to connect Timbal to VS Code via MCP and use its functionality inside the editor."
+---
+
+> ### Step 1: Open the VS Code App
+1. Launch the **VS Code** app on your system.
+2. Log in with your account if required.
+
+> ### Step 2: Access MCP settings
+1. Go to **Manage** button (<Icon icon="gear" size="14" />) at the bottom-left corner of the VS Code window.
+2. Select **Profiles**.
+3. In the Profiles window, go to Contents → **MCP Servers**.
+4. Open the `mcp.json` configuration file.
+
+> ### Step 3: Add Timbal as a new MCP server
+1. Add the Timbal MCP URL (`https://api.timbal.ai/mcp`). For example, you can set the server name `"timbal-mcp"`:
+    ```json title="mcp.json"
+    {
+    "servers": {
+        "timbal-mcp": {
+            "url": "https://api.timbal.ai/mcp",
+            "type": "http",
+            // Use this to authenticate with a Timbal API Key instead of OAuth
+            // "headers": {
+            //   "Authorization": "Bearer TIMBAL_API_KEY"
+            // }
+            }
+        },
+    "inputs": []
+    }
+    ```
+2. Save the file.
+3. After saving the file, click the **Start** button above the Timbal MCP server entry.
+
+#### Option 1: Connect via OAuth
+4. A browser window will open for authentication.
+    <Note>
+    If the browser does not open automatically, you can start the connection manually from the MCP Servers panel.
+    </Note>
+
+5. Log in using your preferred OAuth method (GitHub, Google, Microsoft, or Timbal OAuth).
+6. Accept the requested permissions.
+7. Return to VS Code. In the `mcp.json` file, the status should change from **Start** to **Running**.
+
+    <Warning> Make sure you log in with your active Timbal account (the one registered on the Timbal platform). Using a different account may prevent access to Timbal tools. </Warning>
+
+#### Option 2: Connect using a Timbal API Key
+4. If you add the `"Authorization"` header with your `"TIMBAL_API_KEY"` in `mcp.json`, VS Code will authenticate automatically.
+5. No browser login is required.
+6. In the `mcp.json` file, the status should display **Running** instead of **Start**.
+
+> ### Step 4: Verify the MCP server is running
+
+1. Open the left sidebar.
+2. Go to **Extensions**.
+3. At the bottom, under **MCP Servers – Installed**, you should see **Timbal MCP** listed.
+4. Click the **Manage** button (<Icon icon="gear" size="14" />) to view and verify the configuration details.
+
+> ### Step 5: Test the integration
+1. Open a new chat.
+2. You can now use **Timbal tools** in your conversation. VS Code will automatically leverage the MCP integration.

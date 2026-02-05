@@ -138,23 +138,33 @@ The response will be in Catalan.
 - Sync/Async: Handles both sync and async functions automatically
 
 
-## Dynamic Tools via ToolSets
-Timbal supports dynamic tool resolution through ToolSets.
-Instead of providing a static list of tools, you can define a ToolSet that determines which tools are available based on runtime conditions.
+## Dynamic Tools
+Timbal provides the `ToolSet` class for dynamic tool resolution. ToolSets resolve tools at runtime before each LLM call, enabling dynamic tool availability based on execution context. Use ToolSets instead of static tool lists when:
 
-Tool availability must be implemented in the `resolve()` method, which returns a list of `Runnable` tools.
+- **Context-dependent availability**: Tools should only appear under certain conditions (user permissions, environment state, iteration count)
+- **Lazy loading**: Defer tool initialization until actually needed
+- **Dynamic configuration**: Tools need runtime parameters or state that isn't known at agent creation
+- **Conditional behavior**: Tool availability changes during execution
+- **Token efficiency**: Reduce token consumption by exposing only relevant tools instead of all available tools
+- **Improved clarity**: When many tools exist but only a few are available per context, the agent sees fewer options and is less likely to get confused
 
-```python highlight={23}
-from timbal import Agent, Tool, ToolSet
+Implement the `resolve()` method to return a list of tools. Access runtime data through `get_run_context()` to inspect the current execution state.
+
+### Example: Role-based tool access
+
+This example shows accessing input parameters to conditionally provide tools. The role can be set via prehook or when calling the agent:
+
+```python
+from timbal import Agent, Tool
+from timbal.core.tool_set import ToolSet
+from timbal.state import get_run_context
 
 class RoleBasedToolSet(ToolSet):
-    """ToolSet that provides different tools based on user role."""    
-    role: str
-
     async def resolve(self) -> list[Tool]:
-        """Dynamically resolve tools based on the user's role."""
+        span = get_run_context().current_span()
+        role = span.input.get("role", "user")
         
-        if self.role == "admin":
+        if role == "admin":
             return [
                 Tool(handler=view_profile),
                 Tool(handler=delete_user),
@@ -167,6 +177,15 @@ class RoleBasedToolSet(ToolSet):
 admin_agent = Agent(
     name="admin_agent",
     model="openai/gpt-4o-mini",
-    tools=[RoleBasedToolSet(role="admin")]  # ToolSet resolved at runtime
+    tools=[RoleBasedToolSet()]
 )
+
+# Role can be set via prehook or as a parameter
+await admin_agent(prompt="Delete user 123", role="admin").collect()
 ```
+
+The `resolve()` method is called before each LLM call. It reads the `role` from the input parameters and returns different tools:
+- `role == "admin"`: returns `view_profile`, `delete_user`, `modify_permissions`
+- Otherwise: returns only `view_profile`
+
+The agent only sees the tools returned by `resolve()`, preventing unauthorized actions when the role is not "admin".

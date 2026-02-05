@@ -7,7 +7,7 @@ description: "Master proven strategies for designing advanced, specialized AI ag
 
 Agents are autonomous execution units that **orchestrate LLM interactions with tool calling**. 
 
-Without tools, an agent functions as a basic LLM. The simplest agent requires just a name and model:
+Without tools, an agent functions as a basic LLM. The simplest agent requires just a **name** and **model**:
 
 ```python
 from timbal import Agent
@@ -53,9 +53,11 @@ Execute agents by calling them with a `prompt` parameter and using `.collect()` 
 
 ```python
 response = await agent(
-    prompt=Message.validate("What is the capital of Germany?")
+    prompt="What is the capital of Germany?"
 ).collect()
 ```
+
+### Streaming Events
 
 For real-time processing, you can stream events as they happen:
 
@@ -64,7 +66,7 @@ async for event in agent(prompt="Hello"):
     print(event)
 ```
 
-## Input and Output
+## Input
 
 Agents communicate through `Message` objects - Timbal's data structure that standardizes both input and output.
 
@@ -94,6 +96,89 @@ response = await agent(
     prompt=["Describe this image", File.validate("image.png")]
 ).collect()
 ```
+
+### Passing Input Parameters
+
+You can pass custom input parameters when calling an agent. Access these values anywhere in your agent (tools, system prompts, hooks) using `get_run_context().current_span().input`:
+
+```python
+from timbal import Agent, Tool
+from timbal.state import get_run_context
+
+def get_user_info():
+    span = get_run_context().current_span()
+    user_id = span.input.get("user_id")
+    role = span.input.get("role")
+    return f"User {user_id} with role {role}"
+
+agent = Agent(
+    name="user_agent",
+    model="openai/gpt-4o-mini",
+    tools=[Tool(handler=get_user_info)]
+)
+
+# Pass custom inputs
+response = await agent(
+    prompt="Who am I?",
+    user_id="123",
+    role="admin"
+).collect()
+```
+
+The tool can access `user_id` and `role` from the input parameters. Input parameters work with both `.collect()` and streaming.
+
+<Note>
+For more information about accessing input parameters and using the run context, see the [Context & State Management](/core-concepts/context) page.
+</Note>
+
+### Overriding Model Configuration
+
+What if you want to change the model, `max_tokens`, or `thinking` for each run? Instead of creating multiple agents, you can pass these as input parameters. This is useful for A/B testing different models, adjusting token limits per request, or dynamically selecting models based on task complexity.
+
+```python
+# Agent with default values
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",  # Default model
+    model_params={"max_tokens": 1024}  # Default max_tokens
+)
+
+# Override model: was "openai/gpt-4o-mini", now "anthropic/claude-sonnet-4-latest"
+response = await agent(
+    prompt="What is the capital of Germany?",
+    model="anthropic/claude-sonnet-4-latest"
+).collect()
+
+# Override max_tokens: was 1024, now 2048
+async for event in agent(
+    prompt="What is the capital of Germany?",
+    max_tokens=2048
+):
+    print(event)
+
+# Override thinking (provider-specific format)
+# For OpenAI: {"effort": "high", "summary": true}
+response = await agent(
+    prompt="Solve this complex problem",
+    model="openai/gpt-4o",
+    thinking={"effort": "high", "summary": True}
+).collect()
+
+# For Anthropic: {"budget_tokens": 10000}
+response = await agent(
+    prompt="Solve this complex problem",
+    model="anthropic/claude-sonnet-4-latest",
+    thinking={
+        "type": "enabled",
+        "budget_tokens": 10000}
+).collect()
+```
+
+<Warning>
+The parameter names `model`, `max_tokens`, and `thinking` are reserved and will affect model configuration when passed as input. These parameters will not be available as regular input to your agent. If you need to pass custom data without changing the actual model configuration, use different parameter names (e.g., `data_model` instead of `model` if you want to pass a data model name).
+</Warning>
+
+## Output
 
 Calling `.collect()` returns an `OutputEvent` containing the agent's response. Access the `Message` via the `.output` property:
 

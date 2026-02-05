@@ -5,7 +5,7 @@ description: "Give your agents the ability to interact with the outside world th
 
 ## Basic Usage
 
-Add tools to agents as functions or `Tool` objects:
+Add functions directly as tools:
 
 ```python
 def get_weather(location: str) -> str:
@@ -21,19 +21,32 @@ agent = Agent(
 
 ## Tool Configuration
 
-Use `Tool` for custom descriptions and parameter control:
+Use the `Tool` type for custom descriptions and parameter control. The `handler` parameter is required and must be the function:
 
 ```python
 from timbal import Tool
 
-# Custom description - helpful when function name isn't clear enough
+agent = Agent(
+    name="weather_agent",
+    model="openai/gpt-4o-mini",
+    tools=[Tool(handler=get_weather)]
+)
+```
+
+### Custom Description
+
+If the function name or docstring doesn't clearly describe what the tool does, add a custom `description`. This is the description the LLM sees about the tool:
+
+```python
 Tool(
     handler=get_weather,
     description="Get current weather information for any location"
 )
 ```
 
-When a tool has many parameters, use `schema_params_mode="required"` to reduce tokens and avoid overwhelming the LLM with unnecessary options:
+### Parameter Visibility
+
+When a tool has many parameters, reduce tokens and avoid overwhelming the LLM by showing only required parameters:
 
 ```python
 Tool(
@@ -59,14 +72,16 @@ Tool(
 )
 ```
 
-Set default values that are automatically applied when the tool is called:
+### Default Parameters
+
+Set default values that are automatically applied when the tool is called. These values are used when not specified by the LLM:
 
 ```python
 Tool(
     handler=database_query,
     default_params={
         "timeout": 30
-    }  # These values are used when not specified by the LLM
+    }
 )
 ```
 
@@ -87,6 +102,63 @@ tool = Tool(
         "timestamp": get_current_timestamp,
         "user_id": "system_user"
     }
+)
+```
+
+## Built-in Tools
+
+Timbal provides built-in tools for common use cases. These tools are ready to use and don't require implementing handlers.
+
+### WebSearch
+
+`WebSearch` enables agents to search the web. 
+
+<Warning>
+`WebSearch` only works with **OpenAI** and **Anthropic** models. It's a specification-only tool that defines the tool schema for the LLM but doesn't contain executable logic. The actual web search execution is handled by the model provider. Other model providers are not supported.
+</Warning>
+
+```python
+from timbal import Agent
+from timbal.tools import WebSearch
+
+agent = Agent(
+    name="research_agent",
+    model="openai/gpt-4o-mini",
+    tools=[
+        WebSearch(
+            allowed_domains=["wikipedia.org", "github.com"],  # Restrict to specific domains
+            user_location={
+                "type": "approximate",
+                "country": "US",
+                "city": "New York"
+            }  # Localize results
+        )
+    ]
+)
+```
+
+Available options:
+- `allowed_domains`: List of domains to restrict searches to
+- `blocked_domains`: List of domains to exclude (Anthropic only)
+- `user_location`: Dictionary with location info to localize search results. Must include `type` field. Common values are `"approximate"` or `"exact"`, but valid values depend on the provider.
+
+#### Multiple Instances of the Same Tool
+
+If you need multiple instances of the same built-in tool with different configurations, they will have the same name by default, which causes conflicts. Set unique names and descriptions for each instance:
+
+```python
+general_search = WebSearch()
+general_search.name = "general_search"
+general_search.description = "Search the web for general information."
+
+domain_search = WebSearch(allowed_domains=["example.com"])
+domain_search.name = "domain_search"
+domain_search.description = "Search only within example.com domain."
+
+agent = Agent(
+    name="research_agent",
+    model="anthropic/claude-opus-4-latest",
+    tools=[general_search, domain_search]
 )
 ```
 
@@ -121,11 +193,20 @@ travel_agent = Agent(
 )
 ```
 
-## Dynamic Tools via ToolSets
+## Dynamic Tools
 
-Instead of providing a static list of tools, you can use a `ToolSet` to dynamically determine which tools are available based on runtime conditions. 
+When tool availability depends on runtime conditions (user role, permissions, input parameters), you need dynamic tool resolution.
 
-Refer to [Dynamic Agents](/agents/dynamic#dynamic-tools-via-toolsets) for a more detailed explanation.
+Instead of exposing all tools to the agent, use Timbal's `ToolSet` class to resolve which tools are available at runtime.
+
+For example, with a role-based ToolSet:
+
+- **Role: admin** → Available tools: `delete_user`, `modify_permissions`, `view_profile`
+- **Role: user** → Available tools: `view_profile`
+
+The ToolSet checks the role at runtime and returns only the relevant tools. The agent only has access to the tools returned by the ToolSet for that role. Users without admin role won't see admin tools, preventing the agent from attempting unauthorized actions.
+
+See [Dynamic Agents](/agents/dynamic#dynamic-tools) for implementation details and examples.
 
 
 
