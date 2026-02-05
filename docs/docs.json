@@ -213,14 +213,14 @@
       {
         "tab": "MCP Integration",
         "pages": [
-          "mcp/index",
+          "mcp-integration/index",
           {
             "group": "Connecting Timbal",
             "pages": [
-                "mcp/cursor",
-                "mcp/vscode",
-                "mcp/windsurf",
-                "mcp/zed"
+                "mcp-integration/cursor",
+                "mcp-integration/vscode",
+                "mcp-integration/windsurf",
+                "mcp-integration/zed"
               ]
             }
           ]
