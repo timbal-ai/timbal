@@ -159,10 +159,10 @@
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "API Documentation",
             "pages": [
               "api-reference/introduction",
               "api-reference/authentication",
@@ -209,6 +209,21 @@
             ]
           }
         ]
+      },
+      {
+        "tab": "MCP Integration",
+        "pages": [
+          "mcp-integration/index",
+          {
+            "group": "Connecting Timbal",
+            "pages": [
+                "mcp-integration/cursor",
+                "mcp-integration/vscode",
+                "mcp-integration/windsurf",
+                "mcp-integration/zed"
+              ]
+            }
+          ]
       }
     ]
   },

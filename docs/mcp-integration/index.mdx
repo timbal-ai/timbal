@@ -1,0 +1,32 @@
+---
+title: "Overview"
+description: "Learn how to integrate Timbal with MCP on supported servers."
+---
+
+## What is MCP?
+
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io/docs/getting-started/intro) is an open standard that enables communication between AI models and external tools and services.
+
+By exposing **Timbal as an MCP server**, AI-powered editors and applications can interact with Timbal’s functionality directly.
+
+## Connecting Timbal via MCP
+
+To use Timbal with MCP, you first need to configure your editor or client to connect to Timbal’s MCP endpoint:
+
+```
+https://api.timbal.ai/mcp
+```
+
+<Note>
+Each editor or client handles MCP connections differently. The following sections inside **Connecting Timbal** provide detailed, step-by-step instructions for connecting Timbal to specific editors and tools.
+</Note>
+
+Once the connection is configured, authentication is required to access Timbal’s features. An **active Timbal account** on the [Timbal Platform](https://app.timbal.ai) <Icon icon="arrow-up-right-from-square" size="10" /> is needed.
+
+**Authentication** can be performed using one of the following methods:
+- **OAuth** (Google, Microsoft, GitHub, or Timbal OAuth)
+- **API Key**
+
+<Info>
+See the [Authentication documentation](https://docs.timbal.ai/api-reference/authentication#authentication) for instructions on generating an API Key.
+</Info>

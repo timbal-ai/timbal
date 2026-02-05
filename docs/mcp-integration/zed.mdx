@@ -1,0 +1,45 @@
+---
+title: "Zed"
+description: "Connect Timbal to Zed via MCP"
+---
+
+> ## Step 1: Open the Zed interface
+1. Launch the Zed app on your system.
+2. Log in with your account if required.
+
+> ## Step 2: Access MCP settings
+1. Open the **Agent panel** (<Icon icon="star" size="14" />).
+2. In the **Toggle Agent Menu** (the three points ...), click **Settings**.
+3. In section Model Context Protocol (MCP) Servers click `+ Add Server`.
+4. Select **Add Custom Server**.
+
+> ## Step 3: Add Timbal as a new MCP server
+1. A popup titled **Add MCP Server** will appear.
+2. In the bottom-left corner, click **Configure Remote**.
+2. Add the Timbal MCP URL (`https://api.timbal.ai/mcp`). For example, you can name the server `"timbal-mcp"`:
+    ```json title="Add MCP Server"
+    {
+        "timbal-mcp": { // The name of Timbal MCP server
+            "url": "https://api.timbal.ai/mcp",
+            "headers": {
+                "Authorization": "Bearer <TIMBAL_API_KEY>"
+            }
+        }
+    }
+    ```
+    <Note>
+    Zed currently supports authentication using API Keys only. OAuth authentication is not supported for MCP connections in Zed.
+    </Note>
+3. Click Add Server to save the configuration.
+
+> ## Step 4: Verify the connection
+1. You can see in the right the Settings the MCP Servers the tools available in green. 
+2. Click the gear icon next to the server to view the list of available tools.
+
+> ## Step 5: Start using Timbal in Windsurf
+1. Open the **Agent panel**.
+2. Start a new chat.
+3. You can now use **Timbal tools** in your conversation. Zed will automatically leverage the MCP integration.
+    <Note>
+    You will be prompted in the chat to confirm before running a Timbal MCP tool. Make sure to accept the request to allow the tool to execute.
+    </Note>
