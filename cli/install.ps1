@@ -102,44 +102,28 @@ Possible Solutions:
 }
 
 
-function Test-DockerInstallation() {
-    Write-Information "Checking Docker installation..."
+function Test-GitInstallation() {
+    Write-Information "Checking for 'git' command in PATH..."
 
     try {
-        Get-Command docker -ErrorAction Stop | Out-Null
-        Write-Information "Docker command found successfully."
+        Get-Command git -ErrorAction Stop | Out-Null
+        Write-Information "'git' command found successfully."
     } catch [System.Management.Automation.CommandNotFoundException] {
-        # Specific catch for command not found
-        $warningMessage = @"
-Warning: Docker command not found in PATH.
-Docker is required for 'timbal build' and 'timbal push' commands.
+        $errorMessage = @"
+'git' command not found in PATH. Git is required for version control and credential management with the Timbal Platform.
 
-Please follow the instructions in: https://docs.docker.com/desktop/setup/install/windows-install/
+Possible Solutions:
+1. Install git:
+   Download from: https://git-scm.com/downloads/win
+   Or via winget: winget install Git.Git
+2. If git is already installed, ensure its installation directory
+   is correctly added to your User or System PATH environment variable and restart your terminal.
 "@
-        Write-Warning $warningMessage
-        return
+        Write-Error $errorMessage
+        Exit 1
     } catch {
-        # Catch any other unexpected errors during the check
-        Write-Warning "An unexpected error occurred while checking for 'docker': $($_.Exception.Message)"
-        return
-    }
-
-    # Test Docker connectivity
-    Write-Information "Testing Docker connectivity by running 'hello-world' container..."
-    # Attempt to run hello-world, suppress output, and check exit status
-    # *> $null redirects both stdout (1) and stderr (2) streams to null
-    docker run --rm hello-world *> $null
-    if ($LASTEXITCODE -ne 0) {
-        $warningMessage = @"
-Warning: Docker engine appears to be not running, or the current user lacks permissions.
-Failed to run the 'hello-world' container (Exit Code: $LASTEXITCODE).
-You might need to start Docker Desktop or configure user permissions.
-For Windows, ensure Docker Desktop is running. For Linux/WSL, you might need to add your user to the 'docker' group.
-See relevant documentation: https://docs.docker.com/desktop/setup/install/windows-install/
-"@
-        Write-Warning $warningMessage
-    } else {
-        Write-Information "Docker connection successful ('hello-world' container ran successfully)."
+        Write-Error "An unexpected error occurred while checking for 'git': $($_.Exception.Message)"
+        Exit 1
     }
 }
 
@@ -257,8 +241,7 @@ function Install-Binary($install_args) {
     Initialize-Environment
 
     Test-UvInstallation
-    # TODO Also issue a warning that for authenticating to the registry, one might check the .docker/config.json file and update key "credsStore": "".
-    Test-DockerInstallation
+    Test-GitInstallation
 
     $InstallDir = Join-Path -Path $env:USERPROFILE -ChildPath ".local\bin"
 
@@ -288,7 +271,12 @@ function Install-Binary($install_args) {
         Write-Information "'$InstallDir' is already in your user PATH."
     }
 
-    Write-Information "Successfully installed timbal. Setup 'TIMBAL_API_KEY' env variable to configure Timbal Platform access."
+    # Configure git credential helper for api.timbal.ai
+    Write-Information "Configuring git credential helper for api.timbal.ai..."
+    git config --global credential.https://api.timbal.ai.helper '!timbal credential-helper'
+    Write-Information "Git credential helper configured."
+
+    Write-Information "Successfully installed timbal. Run 'timbal configure' to set up your credentials and settings."
 }
 
 

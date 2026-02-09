@@ -64,12 +64,12 @@ error_exit() {
 set_install_dir() {
     DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 
-    if [ -z "$HOME" ]; then 
+    if [ -z "$HOME" ]; then
         error_exit "\$HOME env variable is not set. Cannot determine default install location."
     fi
 
     # If INSTALL_DIR is not set, use the default
-    if [ -z "${INSTALL_DIR}" ]; then 
+    if [ -z "${INSTALL_DIR}" ]; then
         INSTALL_DIR="$DEFAULT_INSTALL_DIR"
         echo "Installing timbal to default location: $INSTALL_DIR"
     else
@@ -116,27 +116,16 @@ If the command doesn't work, please refer to the documentation:
 }
 
 
-check_docker() {
-    if ! command_exists docker; then
-        echo "Warning: Docker is not installed."
-        echo "Docker is required for 'timbal build' and 'timbal push' commands."
-        echo ""
-        echo "If you're on macOS, follow the instructions here:"
-        echo "    https://docs.docker.com/desktop/setup/install/mac-install/"
-        echo ""
-        echo "If you're on Linux, follow the instructions here:"
-        echo "    https://docs.docker.com/engine/install/"
-        return
-    fi
+check_git() {
+    if ! command_exists git; then
+        error_exit "git is not installed or not in PATH.
+Git is required for version control and credential management with the Timbal Platform.
 
-    # Test Docker connectivity
-    echo "Testing Docker connectivity..."
-    if docker run --rm hello-world >/dev/null 2>&1; then
-        echo "Docker connection successful."
-    else
-        echo "Warning: Docker engine appears to be not running, or the current user lacks permissions."
-        echo "You might need to start Docker or configure user permissions (e.g., add user to 'docker' group)."
-        echo "See: https://docs.docker.com/engine/install/linux-postinstall/"
+Install git:
+    macOS:  brew install git
+    Ubuntu/Debian: sudo apt install git
+    Fedora: sudo dnf install git
+    Other:  https://git-scm.com/downloads"
     fi
 }
 
@@ -181,11 +170,14 @@ setup_timbal() {
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
     ARCH=$(uname -m | tr '[:upper:]' '[:lower:]')
 
-    if ! command_exists jq; then 
-        error_exit "jq is required to parse the manifest. Please install it using your package manager."
-    fi
-
-    DOWNLOAD_URL=$(jq -r ".binaries.${OS}.${ARCH}.url" "$MANIFEST_PATH")
+    # Parse the URL from the manifest without jq.
+    # The manifest is pretty-printed JSON, so we find the OS section,
+    # then within it find the arch, then grab the url on the next line.
+    DOWNLOAD_URL=$(sed -n "/\"${OS}\"/,/^        }/p" "$MANIFEST_PATH" \
+        | sed -n "/\"${ARCH}\"/,/}/p" \
+        | grep '"url"' \
+        | head -1 \
+        | sed 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 
     if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
         error_exit "No download URL found for OS: $OS, ARCH: $ARCH"
@@ -204,12 +196,12 @@ setup_timbal() {
             # Ask if user wants to overwrite. Default to No.
             read -p "Overwrite? (y/N): " choice
             case "$choice" in
-                y|Y ) 
-                    echo "Overwriting existing file..." 
+                y|Y )
+                    echo "Overwriting existing file..."
                     rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH"
                     ;;
-                * ) 
-                    echo "Skipping installation because file exists." 
+                * )
+                    echo "Skipping installation because file exists."
                     return
                     ;;
             esac
@@ -226,7 +218,7 @@ setup_timbal() {
             xattr -d com.apple.quarantine "$CLI_EXECUTABLE_PATH" 2>/dev/null || echo "Info: Failed to remove quarantine attribute (this is common if it wasn't set). Gatekeeper might still prompt on first run."
         fi
     fi
-        
+
     # Add install directory to PATH if it's not already there
     setup_path
 }
@@ -282,6 +274,16 @@ setup_path() {
 }
 
 
+setup_credential_helper() {
+    echo "Configuring git credential helper for api.timbal.ai..."
+    git config --global credential.https://api.timbal.ai.helper '!timbal credential-helper' || {
+        echo "Warning: Failed to configure git credential helper."
+        return
+    }
+    echo "Git credential helper configured."
+}
+
+
 main() {
     set_install_dir
 
@@ -293,7 +295,7 @@ main() {
             echo "The installations may interfere with one another."
             echo "Do you want to continue with this installation anyway?"
             read -p "Continue? (y/N): " choice
-            case "$choice" in 
+            case "$choice" in
                 y|Y ) echo "Continuing with installation...";;
                 * ) echo "Exiting installation."; exit 1;;
             esac
@@ -301,12 +303,14 @@ main() {
     fi
 
     check_uv
-    check_docker
+    check_git
 
     setup_timbal
 
+    setup_credential_helper
+
     if command_exists timbal; then
-        echo "Successfully installed timbal. Setup 'TIMBAL_API_KEY' env variable to configure Timbal Platform access."
+        echo "Successfully installed timbal. Run 'timbal configure' to set up your credentials and settings."
     else
         echo 'Error: timbal not installed.'
         exit 1

@@ -1,10 +1,7 @@
 import asyncio
 from datetime import datetime
 
-from dotenv import load_dotenv
 from timbal import Agent
-
-load_dotenv()
 
 
 def get_datetime() -> str:
@@ -12,8 +9,8 @@ def get_datetime() -> str:
 
 
 agent = Agent(
-    name="demo_agent",
-    model="openai/gpt-4o-mini",
+    name="agent",
+    model="openai/gpt-5.2",
     tools=[get_datetime],
 )
 
@@ -24,7 +21,7 @@ async def main():
         if prompt == "q":
             break
         agent_output_event = await agent(prompt=prompt).collect()
-        print(f"Agent: {agent_output_event.output}") # noqa: T201
+        print(f"Agent: {agent_output_event.output}")  # noqa: T201
 
 
 if __name__ == "__main__":
@@ -32,6 +29,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         # Catch any Ctrl+C that wasn't caught in main()
-        print("\nGoodbye!") # noqa: T201
+        print("\nGoodbye!")  # noqa: T201
     finally:
-        print("Goodbye!") # noqa: T201
+        print("Goodbye!")  # noqa: T201

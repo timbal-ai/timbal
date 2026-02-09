@@ -1,6 +1,9 @@
-# Configuration for timbal.️
-# Check the docs for more info: https://docs.timbal.ai/deployment
+# Auto-generated. Do not modify.
+_id: "{{id}}"
+_type: "{{type}}"
 
+# Configuration for timbal.
+# Check the docs for more info: https://docs.timbal.ai/deployment
 
 build:
 
@@ -13,7 +16,6 @@ build:
   # run:
   #   - "echo env is ready!"
   #   - "echo another command if needed"
-
 
 # Fully Qualified Name (FQN) to the timbal app to run.
 fqn: "{{fully_qualified_name}}"

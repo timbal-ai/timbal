@@ -1,5 +1,6 @@
 const std = @import("std");
 const fs = std.fs;
+const utils = @import("../utils.zig");
 
 // Embed template files into the binary.
 const dockerignore = @embedFile("../init-templates/.dockerignore");
@@ -105,7 +106,11 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         "agent.py::agent"
     else
         "workflow.py::workflow";
-    const timbal_yaml_replaced = try std.mem.replaceOwned(u8, allocator, timbal_yaml, "{{fully_qualified_name}}", fully_qualified_name);
+    const component_id = try utils.genSecureId(allocator);
+    defer allocator.free(component_id);
+    const timbal_yaml_with_id = try std.mem.replaceOwned(u8, allocator, timbal_yaml, "{{id}}", component_id);
+    defer allocator.free(timbal_yaml_with_id);
+    const timbal_yaml_replaced = try std.mem.replaceOwned(u8, allocator, timbal_yaml_with_id, "{{fully_qualified_name}}", fully_qualified_name);
     defer allocator.free(timbal_yaml_replaced);
 
     var init_templates = std.ArrayList(struct { content: []const u8, dist: []const u8 }).init(allocator);
