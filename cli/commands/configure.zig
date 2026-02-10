@@ -167,7 +167,9 @@ fn upsertValue(
     }
 
     if (in_target and !replaced) {
-        try result.append('\n');
+        if (result.items.len > 0 and result.items[result.items.len - 1] != '\n') {
+            try result.append('\n');
+        }
         try result.appendSlice(key);
         try result.appendSlice(" = ");
         try result.appendSlice(value);
@@ -357,7 +359,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // --- Prompt: Default output format (written to config) ---
-    if (try promptField(allocator, stdout, stdin, "Default output format", current_output, false)) |new_output| {
+    if (try promptField(allocator, stdout, stdin, "Default output format", current_output orelse "json", false)) |new_output| {
         defer allocator.free(new_output);
         // Validate the value.
         if (!std.mem.eql(u8, new_output, "json") and !std.mem.eql(u8, new_output, "text")) {
@@ -366,6 +368,24 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         }
         const new_config = try upsertValue(allocator, config_content, profile, "output", new_output);
+        allocator.free(config_content);
+        config_content = new_config;
+    } else if (current_output == null) {
+        const new_config = try upsertValue(allocator, config_content, profile, "output", "json");
+        allocator.free(config_content);
+        config_content = new_config;
+    }
+
+    // --- Prompt: Base URL (written to config) ---
+    const current_base_url = readValue(config_content, profile, "base_url");
+    if (try promptField(allocator, stdout, stdin, "Platform base URL", current_base_url orelse "https://api.timbal.ai", false)) |new_base_url| {
+        defer allocator.free(new_base_url);
+        const new_config = try upsertValue(allocator, config_content, profile, "base_url", new_base_url);
+        allocator.free(config_content);
+        config_content = new_config;
+    } else if (current_base_url == null) {
+        // No existing value and user pressed enter — save the default
+        const new_config = try upsertValue(allocator, config_content, profile, "base_url", "https://api.timbal.ai");
         allocator.free(config_content);
         config_content = new_config;
     }

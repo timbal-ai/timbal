@@ -19,9 +19,9 @@ fn printUsage() !void {
         "\x1b[1;32mUsage: \x1b[1;36mtimbal \x1b[0;36m[OPTIONS] <COMMAND>\n" ++
         "\n" ++
         "\x1b[1;32mCommands:\n" ++
-        "    \x1b[1;36madd       \x1b[0mAdd a component to an existing project\n" ++
         "    \x1b[1;36mconfigure \x1b[0mConfigure Timbal credentials and settings\n" ++
         "    \x1b[1;36mcreate    \x1b[0mCreate a new project with interactive setup\n" ++
+        "    \x1b[1;36madd       \x1b[0mAdd a component to an existing project\n" ++
         "    \x1b[1;36mupgrade   \x1b[0mUpgrade timbal to the latest version\n" ++
         "    \x1b[1;36mhelp      \x1b[0mDisplay this help message\n" ++
         "\n" ++
