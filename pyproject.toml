@@ -132,3 +132,6 @@ addopts = [
 testpaths = [
     "python/tests"
 ]
+
+[tool.uv.workspace]
+members = ["ace"]
