@@ -21,6 +21,7 @@ fn printUsage() !void {
         "\n" ++
         "\x1b[1;32mSetup:\n" ++
         "\x1b[0m    git config --global credential.https://api.timbal.ai.helper '!timbal credential-helper'\n" ++
+        "    git config --global credential.https://api.dev.timbal.ai.helper '!timbal credential-helper'\n" ++
         "\n" ++
         "\x1b[1;32mGlobal options:\n" ++
         "    \x1b[1;36m--profile <NAME>\x1b[0m  Use a named profile (overrides TIMBAL_PROFILE env var)\n" ++
@@ -148,8 +149,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (host == null) return;
     defer allocator.free(host.?);
 
-    // Only respond for api.timbal.ai.
-    if (!std.mem.eql(u8, host.?, "api.timbal.ai")) return;
+    // Only respond for Timbal hosts.
+    if (!std.mem.endsWith(u8, host.?, "timbal.ai")) return;
 
     // Profile priority: --profile flag > TIMBAL_PROFILE env var > "default"
     const env_profile = std.process.getEnvVarOwned(allocator, "TIMBAL_PROFILE") catch |err| blk: {
@@ -174,5 +175,5 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const api_key = readApiKey(content, profile) orelse return;
 
     // Output Git credential protocol response.
-    try stdout.print("protocol=https\nhost=api.timbal.ai\nusername=timbal\npassword={s}\n\n", .{api_key});
+    try stdout.print("protocol=https\nhost={s}\nusername=timbal\npassword={s}\n\n", .{ host.?, api_key });
 }
