@@ -131,3 +131,71 @@ These simple examples show the basics. In practice, hooks excel at:
 More advanced patterns in the [Agents](../agents) section.
 </Tip>
 
+## Using Agents in Hooks
+
+When you use an Agent inside a `pre_hook` or `post_hook`, you need to call `.nest()` to establish the proper hierarchical path for tracing and context management. This ensures the agent's execution is correctly nested under the parent agent's path.
+
+<Note>
+Agents used as tools within another agent are automatically nested. However, agents used in hooks require manual nesting.
+</Note>
+
+```python highlight={13}
+from timbal import Agent
+from timbal.state import get_run_context
+
+# Agent that will be used in a hook
+agent_is_company = Agent(
+    name="agent_is_company",
+    system_prompt="""Determine if the input is a company name.
+    Return only 'true' or 'false'.""",
+    model="openai/gpt-4.1-mini"
+)
+
+# Nest the agent under the parent agent's path
+agent_is_company.nest("agent")
+
+async def pre_hook():
+    span = get_run_context().current_span()
+    
+    result = await agent_is_company(
+        prompt=f"Is '{span.input.get('name')}' a company?"
+    ).collect()
+    
+    span.is_company = result.output.content[0].text.strip().lower() == "true"
+
+agent = Agent(
+    name="agent",
+    model="openai/gpt-4.1-mini",
+    pre_hook=pre_hook
+)
+```
+
+The `.nest()` method updates the agent's path hierarchy, ensuring proper tracing structure (e.g., `agent.agent_is_company` instead of just `agent_is_company`), correct context propagation, and accurate memory resolution for nested agent calls.
+
+## Early Exit with bail()
+
+Use `bail()` to exit early from any Runnable execution when validation fails or conditions aren't met. The `bail()` function raises an `EarlyExit` error that stops execution of the current runnable.
+
+You can use `bail()` in:
+- **Handlers**: Exit early from tool or agent handlers
+- **Hooks**: Exit early from pre_hook or post_hook functions
+- **Default parameter callables**: Exit early when computing default values
+
+```python highlight={6}
+from timbal.errors import bail
+from timbal import Tool
+
+def process_data(role: str) -> str:
+    if role != "admin":
+        bail("Admin access required")
+    
+    return f"Processed: {role}"
+
+tool = Tool(
+    name="process_data",
+    handler=process_data
+)
+```
+
+This is useful for input validation, filtering unwanted requests, or implementing conditional logic in any Runnable.
+

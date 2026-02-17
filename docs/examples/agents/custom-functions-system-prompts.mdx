@@ -1,0 +1,37 @@
+---
+title: "Custom Functions in System Prompts"
+description: "Use your own functions to build dynamic system prompts that include real-time data and custom logic"
+---
+
+Pass a function to `system_prompt` that builds the prompt using your custom functions:
+
+```python
+from datetime import datetime
+from timbal import Agent
+from timbal.state import get_run_context
+
+def get_system_prompt() -> str:
+    span = get_run_context().current_span()
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    user_id = span.input.get("user_id", "unknown")
+    
+    return f"""You are a helpful assistant.
+Current time: {current_time}
+User: {user_id}"""
+
+agent = Agent(
+    name="TimeAwareAgent",
+    model="openai/gpt-4o-mini",
+    system_prompt=get_system_prompt
+)
+```
+
+Your function is executed each time the agent runs, ensuring the system prompt always contains up-to-date information.
+
+## Key Features
+
+- **Custom Functions**: Define your own functions to fetch and format data
+- **Automatic Execution**: Your function is called each time the agent runs
+- **Access Runtime Context**: Use `get_run_context()` to access current execution data and user inputs
+- **Full Control**: Build the system prompt dynamically with any logic you need
+- **Real-time Data**: Perfect for integrating APIs, databases, or any dynamic data source

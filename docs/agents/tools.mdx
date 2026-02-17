@@ -193,6 +193,10 @@ travel_agent = Agent(
 )
 ```
 
+<Note>
+**Automatic Nesting:** When an agent is used as a tool within another agent (as shown above), it's automatically nested for proper tracing and context management. However, if you use an agent inside a `pre_hook` or `post_hook`, you must manually call `.nest()`. See [Using Agents in Hooks](/core-concepts/context#using-agents-in-hooks) for details.
+</Note>
+
 ## Dynamic Tools
 
 When tool availability depends on runtime conditions (user role, permissions, input parameters), you need dynamic tool resolution.

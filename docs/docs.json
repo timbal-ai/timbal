@@ -137,8 +137,8 @@
               {
                 "group": "Dynamic Agents",
                 "pages": [
-                  "examples/agents/real-time-data",
-                  "examples/agents/context-aware"
+                  "examples/agents/custom-functions-system-prompts",
+                  "examples/agents/adaptive-system-prompts"
                 ]
               },
               {

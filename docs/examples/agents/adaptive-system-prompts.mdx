@@ -1,0 +1,53 @@
+---
+title: "Adaptive System Prompts"
+description: "Adapt agent behavior based on detected context or origin"
+---
+
+Combine `pre_hook` with a dynamic system prompt function to adapt agent behavior based on detected context.
+
+This example shows how to detect the origin platform and adjust the system prompt accordingly:
+
+```python
+from timbal import Agent
+from timbal.state import get_run_context
+
+def get_system_prompt() -> str:
+    client_chain = get_run_context().current_span().client_chain
+
+    prompts = {
+        "whatsapp": "You are a WhatsApp business assistant. Keep responses concise and friendly. Use emojis appropriately.",
+        "slack": "You are a Slack bot for internal team communication. Be professional but approachable. Use Slack formatting.",
+    }
+    
+    return prompts.get(client_chain, "You are a helpful assistant.")
+
+def pre_hook():
+    span = get_run_context().current_span()
+    prompt_text = span.input.get("prompt")
+    
+    if "whatsapp" in prompt_text:
+        span.client_chain = "whatsapp"
+    elif "slack" in prompt_text:
+        span.client_chain = "slack"
+    else:
+        span.client_chain = "unknown"
+
+agent = Agent(
+    name="ContextAwareAgent",
+    model="openai/gpt-4o-mini",
+    system_prompt=get_system_prompt,
+    pre_hook=pre_hook
+)
+
+# Different origins get different system prompts
+result1 = await agent(prompt="whatsapp: Hi! I need help").collect()
+result2 = await agent(prompt="slack: @bot Can you help?").collect()
+result3 = await agent(prompt="Hi! I need help").collect()
+```
+
+## Key Features
+
+- **Pre-hook Detection**: Use `pre_hook` to detect context or origin from message content
+- **Dynamic System Prompts**: System prompt adapts based on detected context
+- **Platform-Specific Responses**: Different tones and formats per platform
+- **Combined Pattern**: Shows how to combine hooks with dynamic system prompts
