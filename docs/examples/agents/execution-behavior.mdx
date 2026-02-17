@@ -1,0 +1,144 @@
+---
+title: "Execution Behavior"
+description: "Validate agent execution flow, tool usage, and sequence of operations"
+---
+
+Execution behavior validation ensures your agent follows the expected workflow. Verify tool selection, parameter values, execution order, and sequence compliance using flow validators.
+
+## Example
+
+This example demonstrates how to validate complex execution flows with parallel tool execution and sequential processing using nested `seq!` and `parallel!` validators.
+
+### Eval Configuration
+
+```yaml evals.yaml
+- name: eval_travel_assistant_workflow
+  description: Fetch data in parallel then processes sequentially
+  runnable: agent.py::agent
+  params:
+    prompt: "I'm planning a trip to Madrid. What's the current time, the weather forecast, and flight prices?"
+  seq!:
+    - llm
+    - parallel!:
+        - get_datetime:
+            input:
+              timezone:
+                eq!: "Europe/Madrid"
+        - get_weather:
+            input:
+              city:
+                eq!: "Madrid"
+    - search_flights:
+        input:
+          destination:
+            contains!: "Madrid"
+    - llm
+```
+
+### Agent Implementation
+
+```python agent.py
+from timbal import Agent
+
+async def get_datetime(timezone: str) -> str:
+    """Get current datetime for a timezone."""
+    return f"2024-01-15 14:30:00 {timezone}"
+
+async def get_weather(city: str) -> str:
+    """Get weather forecast for a city."""
+    weather_data = {
+        "Madrid": "Sunny, 18°C",
+        "Barcelona": "Cloudy, 15°C"
+    }
+    return weather_data.get(city, "Weather data unavailable")
+
+async def search_flights(destination: str) -> str:
+    """Search for flights to a destination."""
+    return f"Found flights to {destination}"
+
+agent = Agent(
+    name="travel_assistant",
+    model="openai/gpt-5.2",
+    tools=[get_datetime, get_weather, search_flights],
+)
+```
+
+### Running Evaluations
+
+```bash
+python -m timbal.evals.cli evals.yaml
+```
+
+## How It Works
+
+1. **Initial Processing**: The agent starts with an LLM call to understand the request.
+
+2. **Parallel Execution**: Two tools (`get_datetime` and `get_weather`) execute in parallel using `parallel!`, improving efficiency by fetching independent data simultaneously.
+
+3. **Sequential Processing**: After parallel execution completes, `search_flights` runs sequentially, as it may depend on the previous results.
+
+4. **Final Processing**: A final LLM call synthesizes all the gathered information into a response.
+
+5. **Validation**: The `seq!` validator ensures:
+   - Tools execute in the correct order
+   - Parallel tools run simultaneously (overlapping execution times)
+   - Tool inputs match expected values using nested validators
+
+## Evaluation Results
+
+### Successful Validation
+
+When the agent follows the expected workflow with parallel and sequential execution:
+
+```
+──────────────────── Timbal Evals ────────────────────
+collected 1 evals from 1 file
+
+ PASSED  evals.yaml::eval_travel_assistant_workflow [4.65s]
+└── travel_assistant
+    └── ✓ seq!
+        ├── llm
+        ├── ✓ parallel!
+        │   ├── get_datetime
+        │   │   └── ✓ input.timezone.eq! ("Europe/Madrid")
+        │   └── get_weather
+        │       └── ✓ input.city.eq! ("Madrid")
+        ├── search_flights
+        │   └── ✓ input.destination.contains! ("Madrid")
+        └── llm
+
+============================= 1 passed in 4.65s ==============================
+```
+
+### Failed Validation
+
+When the agent doesn't follow the expected execution pattern:
+
+```
+──────────────────── Timbal Evals ────────────────────
+collected 1 evals from 1 file
+
+ FAILED  evals.yaml::eval_travel_assistant_workflow [4.36s]
+└── travel_assistant
+    └── ✗ seq!
+        ├── llm
+        ├── ✗ parallel!
+        │   ├── get_datetime
+        │   │   └── ✓ input.timezone.eq! ("Europe/Madrid")
+        │   └── get_weather
+        │       └── ✓ input.city.eq! ("Madrid")
+        ├── search_flights
+        │   └── ✓ input.destination.contains! ("Madrid")
+        └── llm
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 1 failed in 4.36s !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+```
+
+## Key Features
+
+- **Nested Flow Validation**: Combine `seq!` and `parallel!` to validate complex execution patterns
+- **Parallel Execution**: Use `parallel!` to ensure independent tools run simultaneously for better performance
+- **Sequential Processing**: Use `seq!` to enforce order when tools depend on previous results
+- **Tool Input Validation**: Validate tool input parameters using nested validators within flow validators
+- **Span Validation**: Validate individual span properties (input, output, elapsed, usage) within sequences
+- **Workflow Compliance**: Ensure agents follow expected execution patterns and optimize tool usage

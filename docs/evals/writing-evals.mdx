@@ -82,12 +82,24 @@ params:
 
 ### With Messages
 
+Use `messages` to establish conversation history for multi-turn testing:
+
 ```yaml
 params:
   messages:
     - role: user
-      content: "What's the weather like?"
+      content: "What's the weather like in New York?"
+    - role: assistant
+      content: "It's currently 15°C and raining in New York."
+    - role: user
+      content: "Should I bring an umbrella?"
 ```
+
+The agent receives the full conversation history and responds to the last message. This is useful for testing context retention, memory, and whether the agent avoids redundant tool calls when context is already available.
+
+<Warning>
+When using `messages` instead of `prompt`, the agent's input key will be `messages` rather than `prompt`.
+</Warning>
 
 ### Additional Parameters
 
@@ -167,6 +179,12 @@ llm:
     output_tokens:
       lte!: 1000
 ```
+
+<Note>
+The token field names depend on the model provider:
+- **OpenAI**: Use `input_text_tokens` and `output_text_tokens` (e.g., `input_text_tokens: lte!: 500`, `output_text_tokens: lte!: 1000`)
+- **Anthropic**: Use `input_tokens` and `output_tokens` (e.g., `input_tokens: lte!: 500`, `output_tokens: lte!: 1000`)
+</Note>
 
 For multi-model scenarios, tokens are automatically summed across models.
 

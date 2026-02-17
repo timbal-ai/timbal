@@ -182,6 +182,12 @@ llm:
       lte!: 1000
 ```
 
+<Note>
+The token field names depend on the model provider:
+- **OpenAI**: Use `input_text_tokens` and `output_text_tokens` (e.g., `input_text_tokens: lte!: 500`, `output_text_tokens: lte!: 1000`)
+- **Anthropic**: Use `input_tokens` and `output_tokens` (e.g., `input_tokens: lte!: 500`, `output_tokens: lte!: 1000`)
+</Note>
+
 ## Combining Validators
 
 ### Multiple Validators on One Target
