@@ -3,33 +3,64 @@ title: "Audio"
 description: "AI agents can process audio files for transcription and analysis using speech-to-text capabilities"
 ---
 
-Agents automatically handle audio files when included in prompts. First validate your audio file with Timbal's `File` type, then pass it alongside text in a list:
+Transcribe audio files in a `pre_hook` before processing.
+
+<Note>
+This example uses OpenAI's transcription API, but you can use any transcription service (ElevenLabs, Google Cloud, or custom implementations).
+</Note>
+
+The `[Audio]` prefix is added to the transcribed text to clearly indicate that the content originated from an audio file. This helps the agent understand the context and source of the information, which can be useful for:
+- **Context Awareness**: The agent knows the text came from audio transcription
+- **Mixed Content**: When combining text and audio in the same prompt, the prefix distinguishes transcribed content
+- **Traceability**: Makes it easier to track which parts of the conversation came from audio vs. text input
 
 ```python
 from timbal import Agent
+from timbal.state import get_run_context
 from timbal.types.file import File
+from timbal.types.content import content_factory
+import os
+from openai import AsyncOpenAI
+
+async def stt(audio_file: File) -> str:
+    """Transcribe an audio file."""
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    transcript = await client.audio.transcriptions.create(
+        model="whisper-1",
+        file=audio_file,
+    )
+    return transcript.text
+
+async def pre_hook():
+    """Transcribe audio files before processing."""
+    span = get_run_context().current_span()
+    prompt = span.input.get("prompt")
+    
+    # Transcribe audio file and add prefix
+    if (isinstance(prompt, File) and 
+        prompt.__content_type__ and 
+        prompt.__content_type__.startswith("audio/")):
+        transcription = await stt(prompt)
+        span.input["prompt"] = content_factory(f"[Audio]: {transcription}")
 
 agent = Agent(
     name="AudioAgent",
-    model="openai/gpt-4o-audio-preview", # Audio-capable model
-    system_prompt="Transcribe and analyze audio content."
+    model="openai/gpt-4.1-mini",
+    pre_hook=pre_hook
 )
 
-# Validate audio file and analyze
-audio_file = File.validate("path/to/recording.mp3")
-result = await agent(
-    prompt=["Transcribe this audio and summarize the key points", audio_file]
-).collect()
-
-print(result.output.content[0].text)
+audio_file = File.validate("/path/to/recording.wav")
+result = await agent(prompt=audio_file).collect()
 ```
 
 <Warning>
-Use vision-capable models for audio processing. Check [Model Capabilities](/model_capabilities) to see which models support audio input.
+This example uses OpenAI's transcription API directly. For more advanced features like language detection, timestamps, and better error handling, refer to the [OpenAI Audio API documentation](https://platform.openai.com/docs/guides/speech-to-text).
 </Warning>
 
 ## Key Features
 
-- **Automatic Processing**: Audio files are automatically transcribed to text
-- **Speech Analysis**: Extract content, sentiment, and insights from audio recordings
+- **Pre-hook Transcription**: Audio is transcribed before the agent processes it
+- **Any Model**: Works with any text model, not just audio-capable ones
+- **Flexible Providers**: Use any transcription service (OpenAI, ElevenLabs, or custom)
+- **Audio Prefix**: The "[Audio]" prefix clearly indicates transcribed content
 - **File Support**: Works with local files, URLs, and base64 data
