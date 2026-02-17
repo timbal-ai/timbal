@@ -1,4 +1,3 @@
-import asyncio
 import os
 import subprocess
 import sys
@@ -106,20 +105,20 @@ class TestFastAPIApp:
         return ImportSpec(path=agent_fixture_file, target="agent_fixture")
 
     @pytest.fixture
-    def tool_app(self, tool_import_spec):
+    def tool_app(self, tool_import_spec, monkeypatch):
         """Create a FastAPI app with real tool fixture."""
-        shutdown_event = asyncio.Event()
-        app = create_app(tool_import_spec, shutdown_event)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tool_import_spec.path}::{tool_import_spec.target}")
+        app = create_app()
         # Manually load the runnable since TestClient doesn't trigger lifespan
         app.state.runnable = tool_import_spec.load()
         app.state.job_store = JobStore()
         return app
 
     @pytest.fixture
-    def agent_app(self, agent_import_spec):
+    def agent_app(self, agent_import_spec, monkeypatch):
         """Create a FastAPI app with real agent fixture."""
-        shutdown_event = asyncio.Event()
-        app = create_app(agent_import_spec, shutdown_event)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{agent_import_spec.path}::{agent_import_spec.target}")
+        app = create_app()
         # Manually load the runnable since TestClient doesn't trigger lifespan
         app.state.runnable = agent_import_spec.load()
         app.state.job_store = JobStore()
@@ -138,11 +137,6 @@ class TestFastAPIApp:
     def test_healthcheck_endpoint(self, tool_client):
         """Test /healthcheck endpoint returns 204."""
         response = tool_client.get("/healthcheck")
-        assert response.status_code == 204
-
-    def test_shutdown_endpoint(self, tool_client):
-        """Test /shutdown endpoint returns 204."""
-        response = tool_client.post("/shutdown")
         assert response.status_code == 204
 
     def test_params_model_schema_endpoint_tool(self, tool_client):
@@ -272,10 +266,10 @@ class TestServerLifecycle:
         """Create a real ImportSpec for the tool fixture."""
         return ImportSpec(path=tool_fixture_file, target="tool_fixture")
 
-    def test_create_app_basic(self, tool_import_spec):
+    def test_create_app_basic(self, tool_import_spec, monkeypatch):
         """Test basic FastAPI app creation with real import spec."""
-        shutdown_event = asyncio.Event()
-        app = create_app(tool_import_spec, shutdown_event)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tool_import_spec.path}::{tool_import_spec.target}")
+        app = create_app()
 
         # Verify app was created successfully
         assert app is not None
@@ -306,14 +300,3 @@ class TestServerLifecycle:
                 os.environ["TIMBAL_ENABLE_NGROK"] = original_value
             elif "TIMBAL_ENABLE_NGROK" in os.environ:
                 del os.environ["TIMBAL_ENABLE_NGROK"]
-
-    def test_signal_constants_exist(self):
-        """Test that required signal constants exist."""
-        import signal
-
-        # Test that signal constants exist and are accessible
-        assert hasattr(signal, "SIGTERM")
-        assert hasattr(signal, "SIGINT")
-        assert callable(signal.signal)
-        assert isinstance(signal.SIGTERM, int)
-        assert isinstance(signal.SIGINT, int)

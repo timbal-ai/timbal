@@ -314,8 +314,6 @@ async def _llm_router(
             default_headers["x-timbal-app-id"] = run_context.platform_config.subject.app_id
         if run_context.platform_config.subject.version_id:
             default_headers["x-timbal-version-id"] = run_context.platform_config.subject.version_id
-        if run_context.platform_config.subject.project_id:
-            default_headers["x-timbal-project-id"] = run_context.platform_config.subject.project_id
 
     if provider == "openai":
         default_headers["x-provider"] = "openai"

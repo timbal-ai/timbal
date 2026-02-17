@@ -1,7 +1,6 @@
 """Integration tests for HTTP server with real agent calls."""
 
 import asyncio
-import time
 from pathlib import Path
 
 import httpx
@@ -24,10 +23,10 @@ class TestHttpIntegration:
         return ImportSpec(path=slow_agent_fixture_file, target="slow_agent")
 
     @pytest.fixture
-    async def server(self, slow_agent_import_spec):
+    async def server(self, slow_agent_import_spec, monkeypatch):
         """Start a real HTTP server for testing."""
-        shutdown_event = asyncio.Event()
-        app = create_app(slow_agent_import_spec, shutdown_event)
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{slow_agent_import_spec.path}::{slow_agent_import_spec.target}")
+        app = create_app()
         app.state.runnable = slow_agent_import_spec.load()
         app.state.job_store = JobStore()
 

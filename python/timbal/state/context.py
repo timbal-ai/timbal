@@ -98,7 +98,6 @@ class RunContext(BaseModel):
         if self.platform_config and not self.platform_config.subject:
             org_id = os.getenv("TIMBAL_ORG_ID")
             app_id = os.getenv("TIMBAL_APP_ID")
-            project_id = os.getenv("TIMBAL_PROJECT_ID")
             if org_id:
                 if app_id:
                     version_id = os.getenv("TIMBAL_VERSION_ID")
@@ -107,11 +106,6 @@ class RunContext(BaseModel):
                         app_id=app_id,
                         version_id=version_id,
                     )
-                elif project_id:
-                    self.platform_config.subject = PlatformSubject(
-                        org_id=org_id,
-                        project_id=project_id,
-                    )
                 else:
                     self.platform_config.subject = PlatformSubject(
                         org_id=org_id,
@@ -119,19 +113,18 @@ class RunContext(BaseModel):
 
         self._trace = Trace()
         if self.platform_config:
-            if self.platform_config.subject:
-                if self.platform_config.subject.app_id or self.platform_config.subject.project_id:
-                    logger.info(
-                        f"Platform configuration found (subject: {self.platform_config.subject}). "
-                        "Using platform tracing provider.",
-                        event_name="tracing_setup",
-                        run_id=self.id,
-                    )
-                    self._tracing_provider = PlatformTracingProvider
-                    return
+            if self.platform_config.subject and self.platform_config.subject.app_id:
+                logger.info(
+                    f"Platform configuration found (subject: {self.platform_config.subject}). "
+                    "Using platform tracing provider.",
+                    event_name="tracing_setup",
+                    run_id=self.id,
+                )
+                self._tracing_provider = PlatformTracingProvider
+                return
             logger.warning(
                 "Platform configuration found but no valid subject. "
-                "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID or TIMBAL_PROJECT_ID environment variables to enable platform tracing.",
+                "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID environment variables to enable platform tracing.",
                 event_name="tracing_setup",
                 run_id=self.id,
             )

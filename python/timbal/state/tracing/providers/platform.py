@@ -28,8 +28,6 @@ class PlatformTracingProvider(TracingProvider):
 
         if subject.app_id:
             subject_path = f"apps/{subject.app_id}"
-        elif subject.project_id:
-            subject_path = f"projects/{subject.project_id}"
         else:
             raise ValueError("Cannot use platform tracing provider without an app or project subject")
         res = await _request(
@@ -57,8 +55,6 @@ class PlatformTracingProvider(TracingProvider):
         if subject.app_id:
             subject_path = f"apps/{subject.app_id}"
             payload["version_id"] = subject.version_id
-        elif subject.project_id:
-            subject_path = f"projects/{subject.project_id}"
         else:
             raise ValueError("Cannot use platform tracing provider without an app or project subject")
         res = await _request(

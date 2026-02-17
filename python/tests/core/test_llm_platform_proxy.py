@@ -4,10 +4,10 @@ IMPORTANT: These tests require a .env.test_llm_platform_proxy file in the tests/
 Copy .env.test_llm_platform_proxy.example to .env.test_llm_platform_proxy and configure the following variables:
     - TIMBAL_API_HOST (e.g., api.timbal.ai)
     - TIMBAL_ORG_ID (your organization ID)
-    - TIMBAL_PROJECT_ID (your project ID)
 
 All tests in this file will be skipped if .env.test_llm_platform_proxy is not found.
 """
+
 import os
 from pathlib import Path
 
@@ -28,7 +28,7 @@ def load_test_env():
     """Load environment variables from .env.test_llm_platform_proxy file."""
     if not TEST_ENV_FILE.exists():
         return False
-    
+
     with open(TEST_ENV_FILE) as f:
         for line in f:
             line = line.strip()
@@ -46,10 +46,10 @@ class TestPlatformProxy:
         """Set up platform config via environment variables."""
         # Save the entire environment
         self.saved_environ = os.environ.copy()
-        
+
         # Clear the entire environment
         os.environ.clear()
-        
+
         # Load only the test environment variables from .env.test_llm_platform_proxy
         load_test_env()
 
@@ -64,7 +64,7 @@ class TestPlatformProxy:
         """Test OpenAI uses platform proxy."""
         from timbal import Agent
         from timbal.state import RunContext, set_run_context
-        
+
         run_context = RunContext()
         set_run_context(run_context)
         agent = Agent(name="test", model="openai/gpt-4o-mini")
@@ -75,7 +75,7 @@ class TestPlatformProxy:
         """Test Anthropic uses platform proxy."""
         from timbal import Agent
         from timbal.state import RunContext, set_run_context
-        
+
         run_context = RunContext()
         set_run_context(run_context)
         agent = Agent(name="test", model="anthropic/claude-haiku-4-5", model_params={"max_tokens": 1024})
@@ -86,7 +86,7 @@ class TestPlatformProxy:
         """Test Google Gemini uses platform proxy."""
         from timbal import Agent
         from timbal.state import RunContext, set_run_context
-        
+
         run_context = RunContext()
         set_run_context(run_context)
         agent = Agent(name="test", model="google/gemini-2.5-flash-lite")
@@ -97,7 +97,7 @@ class TestPlatformProxy:
         """Test TogetherAI uses platform proxy."""
         from timbal import Agent
         from timbal.state import RunContext, set_run_context
-        
+
         run_context = RunContext()
         set_run_context(run_context)
         agent = Agent(name="test", model="togetherai/deepseek-ai/DeepSeek-V3.1")

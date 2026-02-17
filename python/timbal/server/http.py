@@ -1,8 +1,6 @@
 import argparse
-import asyncio
 import json
 import os
-import signal
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -29,49 +27,32 @@ async def lifespan(
     app: FastAPI,
     import_spec: ImportSpec,
 ) -> AsyncGenerator[None, None]:
-    """Manages the lifecycle of the FastAPI application.
-
-    This context manager handles the setup and teardown of the application,
-    including loading the specified Python module and its runnable object.
-
-    Args:
-        app: The FastAPI application instance.
-        import_spec: ImportSpec containing the path to Python module and target object name.
-                     The loaded object will be set as app.state.runnable.
-
-    Raises:
-        ValueError: If the module or specified object cannot be loaded.
-        ImportError: If the module cannot be imported.
-        AttributeError: If the target object does not exist in the module.
-    """
-    # ? Any additional setup
-
     logger.info("loading_runnable", import_spec=import_spec)
     app.state.runnable = import_spec.load()
     app.state.job_store = JobStore()
-
     yield
 
-    # ? Any additional cleanup
 
+def create_app() -> FastAPI:
+    """Factory for the FastAPI app. Called by uvicorn in each worker process.
 
-def create_app(
-    import_spec: ImportSpec,
-    shutdown_event: asyncio.Event,
-) -> FastAPI:
-    """Creates a FastAPI application for the Timbal HTTP server.
-
-    This function creates a FastAPI application with endpoints for running Timbal
-    runnables (tools, agents, workflows) over a REST API. It handles module loading,
-    parameter validation, runnable execution, and streaming responses.
-
-    Args:
-        import_spec: ImportSpec containing the path to Python module and target object name.
-        shutdown_event: Asyncio event to signal graceful shutdown.
-
-    Returns:
-        FastAPI: Configured FastAPI application with all endpoints.
+    Reads TIMBAL_RUNNABLE from the environment so that it works as a zero-arg
+    factory with uvicorn's ``factory=True`` — required for multi-worker support
+    since uvicorn spawns workers via multiprocessing and can't pickle app instances.
     """
+    setup_logging()
+
+    raw = os.environ.get("TIMBAL_RUNNABLE")
+    if not raw:
+        raise RuntimeError("TIMBAL_RUNNABLE environment variable is not set.")
+    parts = raw.split("::")
+    if len(parts) != 2:
+        raise RuntimeError(f"Invalid TIMBAL_RUNNABLE format: {raw}")
+    import_spec = ImportSpec(
+        path=Path(parts[0]).expanduser().resolve(),
+        target=parts[1],
+    )
+
     app = FastAPI(lifespan=lambda app: lifespan(app, import_spec))
 
     app.add_middleware(
@@ -84,11 +65,6 @@ def create_app(
 
     @app.get("/healthcheck")
     async def healthcheck() -> Response:
-        return Response(status_code=204)
-
-    @app.post("/shutdown")
-    async def shutdown() -> Response:
-        shutdown_event.set()
         return Response(status_code=204)
 
     @app.get("/params_model_schema")
@@ -171,60 +147,6 @@ def create_app(
     return app
 
 
-async def main(
-    host: str,
-    port: int,
-    workers: int,
-    import_spec: ImportSpec,
-) -> None:
-    """Runs the HTTP server with the specified configuration.
-
-    Sets up a FastAPI application with healthcheck, shutdown, run, and stream endpoints.
-    Handles graceful shutdown on SIGTERM and SIGINT signals. Optionally enables
-    ngrok tunneling for public access.
-
-    Args:
-        host: The hostname to bind the server to (e.g., '0.0.0.0', '127.0.0.1').
-        port: The port number to listen on.
-        workers: Number of worker processes to spawn.
-        import_spec: ImportSpec containing the path to Python module and target object name.
-                     The loaded object will be set as app.state.runnable.
-
-    Raises:
-        Exception: If server startup fails or runnable loading fails.
-    """
-    shutdown_event = asyncio.Event()
-
-    app = create_app(import_spec, shutdown_event)
-
-    if os.getenv("TIMBAL_ENABLE_NGROK", "false").lower() == "true":
-        from pyngrok import ngrok
-
-        public_url = ngrok.connect(str(port), "http")
-        logger.info("ngrok_public_url", public_url=public_url)
-
-    config = uvicorn.Config(
-        app,
-        host=host,
-        port=port,
-        workers=workers,
-        log_level=None,
-    )
-    server = uvicorn.Server(config)
-
-    def signal_handler() -> None:
-        logger.info("shutdown_signal_received")
-        shutdown_event.set()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda _signum, _frame: signal_handler())
-
-    serve_task = asyncio.create_task(server.serve())
-    await shutdown_event.wait()
-    server.should_exit = True
-    await serve_task
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Timbal HTTP server.")
     parser.add_argument("-v", "--version", action="store_true", help="Show version and exit.")
@@ -262,7 +184,6 @@ if __name__ == "__main__":
         sys.exit(0)
 
     load_dotenv()
-    setup_logging()
 
     # We can overwrite the env configuration with the --import_spec flag
     import_spec = args.import_spec
@@ -287,34 +208,21 @@ if __name__ == "__main__":
     if len(import_parts) != 2:
         print("Invalid import spec format. Use 'path/to/file.py::object_name' or 'path/to/file.py'", file=sys.stderr)  # noqa: T201
         sys.exit(1)
-    import_path, import_target = import_parts
-    import_spec = ImportSpec(
-        path=Path(import_path).expanduser().resolve(),
-        target=import_target,
-    )
+
+    # Resolve to absolute path so workers can find it.
+    import_path = str(Path(import_parts[0]).expanduser().resolve())
+    import_spec = f"{import_path}::{import_parts[1]}"
 
     if is_port_in_use(args.port):
         print(f"Port {args.port} is already in use. Please use a different port.")  # noqa: T201
         sys.exit(1)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    try:
-        loop.run_until_complete(
-            main(
-                host=args.host,
-                port=args.port,
-                workers=args.workers,
-                import_spec=import_spec,
-            )
-        )
-    except Exception as e:
-        logger.error("server_stopped", error=str(e))
-    finally:
-        pending = asyncio.all_tasks(loop)
-        logger.info("loop_pending_tasks", count=len(pending))
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        loop.close()
-        logger.info("loop_closed")
+    os.environ["TIMBAL_RUNNABLE"] = import_spec
+    uvicorn.run(
+        "timbal.server.http:create_app",
+        factory=True,
+        host=args.host,
+        port=args.port,
+        workers=args.workers,
+        log_config=None,
+    )

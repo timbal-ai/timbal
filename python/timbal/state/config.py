@@ -30,7 +30,7 @@ class PlatformAuth(BaseModel):
         else:
             raise NotImplementedError(f"Unknown auth type: {self.type}")
 
-    @property 
+    @property
     def header_value(self) -> str:
         """Format header value for requests authenticating with the platform."""
         if self.type == PlatformAuthType.BEARER:
@@ -46,8 +46,6 @@ class PlatformSubject(BaseModel):
 
     org_id: str
     """Organization identifier."""
-    project_id: str | None = None
-    """Project identifier. Either project or app must be specified."""
     app_id: str | None = None
     """Application identifier. Either project or app must be specified."""
     version_id: str | None = None
