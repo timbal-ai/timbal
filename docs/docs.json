@@ -138,7 +138,8 @@
                 "group": "Dynamic Agents",
                 "pages": [
                   "examples/agents/custom-functions-system-prompts",
-                  "examples/agents/adaptive-system-prompts"
+                  "examples/agents/adaptive-system-prompts",
+                  "examples/agents/content-aware-tools"
                 ]
               },
               {

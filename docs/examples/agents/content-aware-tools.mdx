@@ -1,0 +1,81 @@
+---
+title: "Content-Aware Tools"
+description: "Use ToolSet to resolve tools dynamically based on content type - automatically select image or PDF tools"
+---
+
+Use `ToolSet` to resolve tools dynamically at runtime. This example shows how tools automatically adapt based on the content type:
+
+```python
+from timbal import Agent, Tool
+from timbal.core.tool_set import ToolSet
+from timbal.state import get_run_context
+from timbal.types.file import File
+
+def analyze_image(image_path: str) -> str:
+    """Analyze an image using computer vision."""
+    return f"Image analysis for: {image_path}"
+
+def analyze_pdf(pdf_path: str) -> str:
+    """Analyze a PDF document."""
+    return f"Analysis for: {pdf_path}"
+
+def get_file_type(file_url: File) -> str:
+    """Detect file type from content type or extension."""
+    content_type = file_url.__content_type__
+
+    if content_type and content_type.startswith("image/"):
+        return "image"
+    elif content_type and content_type.startswith("application/pdf"):
+        return "pdf"
+    
+    return "unknown"
+
+class FileTypeBasedToolSet(ToolSet):
+    async def resolve(self) -> list[Tool]:
+        span = get_run_context().current_span()
+        prompt = span.input.get("prompt", "")    
+        tools = []
+
+        if isinstance(prompt, File):
+            file_type = get_file_type(prompt)
+            
+            if file_type == "image":
+                tools = [Tool(handler=analyze_image)]
+            elif file_type == "pdf":
+                tools = [Tool(handler=analyze_pdf)]
+        
+        return tools
+
+agent = Agent(
+    name="FileTypeAwareAgent",
+    model="openai/gpt-5.2",
+    tools=[FileTypeBasedToolSet()]
+)
+
+# It does not have any tool available
+result1 = await agent(
+    prompt="What is Python?",
+).collect()
+
+# Image analysis tool added
+result2 = await agent(
+    prompt=File.validate('/path/to/image.jpg')
+).collect()
+
+# PDF analysis tool added
+result3 = await agent(
+    prompt=File.validate('/path/to/document.pdf'),
+).collect()
+```
+
+The `resolve()` method is called before each LLM call. It detects the file type and returns different tools:
+- **Text/no file**: No tools available
+- **Image files**: Adds `analyze_image`
+- **PDF files**: Adds `analyze_pdf`
+
+## Key Features
+
+- **File Type Detection**: Automatically detects file type from content type
+- **Context-Aware Tools**: Only relevant tools are exposed based on content type
+- **Token Efficiency**: Reduces token usage by showing only necessary tools
+- **Flexible**: Easily extend to support more file types
