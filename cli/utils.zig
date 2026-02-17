@@ -48,6 +48,104 @@ const nouns = [_][]const u8{
     "yak",     "zebra",
 };
 
+/// Parsed representation of a timbal.yaml configuration file.
+pub const TimbalYaml = struct {
+    id: ?[]const u8,
+    type: ?[]const u8,
+    fqn: []const u8,
+    system_packages: []const []const u8,
+    run_commands: []const []const u8,
+
+    pub fn deinit(self: *TimbalYaml, allocator: std.mem.Allocator) void {
+        if (self.id) |s| allocator.free(s);
+        if (self.type) |s| allocator.free(s);
+        allocator.free(self.fqn);
+        for (self.system_packages) |pkg| allocator.free(pkg);
+        allocator.free(self.system_packages);
+        for (self.run_commands) |cmd| allocator.free(cmd);
+        allocator.free(self.run_commands);
+    }
+};
+
+/// Strip surrounding quotes from a YAML value.
+fn stripQuotes(value: []const u8) []const u8 {
+    if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
+        return value[1 .. value.len - 1];
+    }
+    return value;
+}
+
+/// Parse a timbal.yaml file from its content string.
+/// Returns a TimbalYaml struct (caller owns all memory) or null if required fields are missing.
+pub fn parseTimbalYaml(allocator: std.mem.Allocator, content: []const u8) ?TimbalYaml {
+    var id: ?[]const u8 = null;
+    var comp_type: ?[]const u8 = null;
+    var fqn: ?[]const u8 = null;
+    var system_packages = std.ArrayList([]const u8).init(allocator);
+    var run_commands = std.ArrayList([]const u8).init(allocator);
+
+    var current_section: enum { None, SystemPackages, RunCommands } = .None;
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+
+        // Skip empty lines and comments.
+        if (trimmed.len == 0 or std.mem.startsWith(u8, trimmed, "#")) continue;
+
+        // List items in current section.
+        if (current_section == .SystemPackages and std.mem.startsWith(u8, trimmed, "-")) {
+            const value = stripQuotes(std.mem.trim(u8, trimmed[1..], " \t"));
+            system_packages.append(allocator.dupe(u8, value) catch return null) catch return null;
+            continue;
+        }
+        if (current_section == .RunCommands and std.mem.startsWith(u8, trimmed, "-")) {
+            const value = stripQuotes(std.mem.trim(u8, trimmed[1..], " \t"));
+            run_commands.append(allocator.dupe(u8, value) catch return null) catch return null;
+            continue;
+        }
+
+        // Top-level keys.
+        if (std.mem.startsWith(u8, trimmed, "_id:")) {
+            current_section = .None;
+            const value = stripQuotes(std.mem.trim(u8, trimmed[4..], " \t"));
+            id = allocator.dupe(u8, value) catch return null;
+        } else if (std.mem.startsWith(u8, trimmed, "_type:")) {
+            current_section = .None;
+            const value = stripQuotes(std.mem.trim(u8, trimmed[6..], " \t"));
+            comp_type = allocator.dupe(u8, value) catch return null;
+        } else if (std.mem.startsWith(u8, trimmed, "fqn:")) {
+            current_section = .None;
+            const value = stripQuotes(std.mem.trim(u8, trimmed[4..], " \t"));
+            fqn = allocator.dupe(u8, value) catch return null;
+        } else if (std.mem.startsWith(u8, trimmed, "system_packages:")) {
+            current_section = .SystemPackages;
+        } else if (std.mem.startsWith(u8, trimmed, "run:")) {
+            current_section = .RunCommands;
+        } else {
+            current_section = .None;
+        }
+    }
+
+    if (fqn == null) {
+        if (id) |s| allocator.free(s);
+        if (comp_type) |s| allocator.free(s);
+        for (system_packages.items) |pkg| allocator.free(pkg);
+        system_packages.deinit();
+        for (run_commands.items) |cmd| allocator.free(cmd);
+        run_commands.deinit();
+        return null;
+    }
+
+    return TimbalYaml{
+        .id = id,
+        .type = comp_type,
+        .fqn = fqn.?,
+        .system_packages = system_packages.toOwnedSlice() catch return null,
+        .run_commands = run_commands.toOwnedSlice() catch return null,
+    };
+}
+
 /// Generates a funny name like "curious-quokka" or "zesty-penguin".
 /// The caller owns the returned memory and must free it with the provided allocator.
 pub fn genFunnyName(allocator: std.mem.Allocator) ![]u8 {

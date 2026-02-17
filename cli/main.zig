@@ -7,6 +7,7 @@ const build_cmd = @import("commands/build.zig");
 const push_cmd = @import("commands/push.zig");
 const configure_cmd = @import("commands/configure.zig");
 const credential_helper_cmd = @import("commands/credential_helper.zig");
+const start_cmd = @import("commands/start.zig");
 const upgrade_cmd = @import("commands/upgrade.zig");
 
 // Embedded version.
@@ -22,6 +23,7 @@ fn printUsage() !void {
         "    \x1b[1;36mconfigure \x1b[0mConfigure Timbal credentials and settings\n" ++
         "    \x1b[1;36mcreate    \x1b[0mCreate a new project with interactive setup\n" ++
         "    \x1b[1;36madd       \x1b[0mAdd a component to an existing project\n" ++
+        "    \x1b[1;36mstart     \x1b[0mStart a project (UI, API, agents, and workflows)\n" ++
         "    \x1b[1;36mupgrade   \x1b[0mUpgrade timbal to the latest version\n" ++
         "    \x1b[1;36mhelp      \x1b[0mDisplay this help message\n" ++
         "\n" ++
@@ -73,6 +75,8 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, action, "push")) {
         std.debug.print("\x1b[1;33mWarning:\x1b[0m 'timbal push' is deprecated.\n\n", .{});
         try push_cmd.run(allocator, args[2..]);
+    } else if (std.mem.eql(u8, action, "start")) {
+        try start_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "configure")) {
         try configure_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "credential-helper")) {
