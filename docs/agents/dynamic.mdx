@@ -87,8 +87,7 @@ agent = Agent(
 
 The previous example used a built-in function (datetime). You can also create your own custom functions:
 
-```python
-# my_functions.py
+```python title="my_functions.py"
 def get_server_status():
     """Get server status."""
     status = check_server()  # Calls external function
@@ -104,8 +103,7 @@ agent = Agent(
 
 You can also pass dynamic parameters to these functions using `RunContext` data that you previously set in the context.
 
-```python
-# my_functions.py
+```python title="my_functions.py"
 from timbal.core import Tool, Agent
 from timbal.state import get_run_context
 

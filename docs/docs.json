@@ -37,6 +37,7 @@
               "agents/index",
               "agents/memory",
               "agents/tools",
+              "agents/thinking",
               "agents/background-tasks",
               "agents/skills",
               "agents/structured-output",
@@ -155,7 +156,12 @@
           },
           {
             "group": "Workflows",
-            "pages": ["examples/workflows/sequential-steps"]
+            "pages": [
+              "examples/workflows/sequential-steps",
+              "examples/workflows/conditional-routing",
+              "examples/workflows/parallel-fan-out",
+              "examples/workflows/workflow-composition"
+            ]
           }
         ]
       },

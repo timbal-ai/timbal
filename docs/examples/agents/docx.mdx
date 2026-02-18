@@ -21,7 +21,7 @@ result = await agent(
     prompt=["Summarize this document and highlight the main sections", docx_file]
 ).collect()
 
-print(result.output.content[0].text)
+print(result.output.collect_text())
 ```
 
 ## Key Features

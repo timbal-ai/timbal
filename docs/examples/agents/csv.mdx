@@ -21,7 +21,7 @@ result = await agent(
     prompt=["What insights can you find in this data?", csv_file]
 ).collect()
 
-print(result.output.content[0].text)
+print(result.output.collect_text())
 ```
 
 ## Key Features

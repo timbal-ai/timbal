@@ -26,6 +26,8 @@ For a full step-by-step guide, check the [quickstart section](/quickstart) or se
 
 You can specify any model using the "provider/model" format. See all supported models in [Model Capabilities](../model_capabilities).
 
+Some models support advanced capabilities like [thinking/reasoning](/agents/thinking), which enables extended reasoning processes for complex problem-solving.
+
 Some models require specific parameters (like `max_tokens` for Claude). Use `model_params` to pass any additional model configuration: 
 
 ```python highlight={4}
@@ -193,10 +195,22 @@ result = await agent(prompt="What's 2+2?").collect()
 print(result.output)
 # Message(role=assistant, content=[TextContent(type='text', text='2 + 2 = 4.')])
 
-# Access the message text
+# You can access content directly
 print(result.output.content[0].text)
 # "2 + 2 = 4."
+
+# However, the best way to get text is using collect_text()
+print(result.output.collect_text())
+# "2 + 2 = 4."
 ```
+
+<Warning>
+**Important:** When using models with [thinking/reasoning](/agents/thinking) enabled, the content array structure changes:
+- `content[0]` will contain the thinking/reasoning content
+- `content[1]` will contain the actual text response
+
+Directly accessing `result.output.content[0].text` may return thinking content instead of the response text. Always use `collect_text()` to reliably extract the text response, regardless of whether thinking is enabled.
+</Warning>
 
 ## Messages
 

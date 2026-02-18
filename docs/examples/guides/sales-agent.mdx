@@ -226,7 +226,7 @@ def post_hook():
     if not from_number:
         return
     try:
-        response_text = (span.output.content[0].text or "").strip()
+        response_text = (span.output.collect_text() or "").strip()
     except Exception:
         return
     if not response_text:

@@ -1,8 +1,87 @@
 ---
 title: "Sequential Steps"
-description: "Executing multiple steps in a workflow in order"
+description: "Chain multiple processing steps with data passing between them"
 ---
 
-<Warning>
-This example is currently in development.
-</Warning>
+A document processing pipeline that fetches content, extracts key information, summarizes it with an LLM, and formats the final output. Each step depends on the previous one's output.
+
+## Workflow
+
+```python pipeline.py
+from timbal import Agent, Workflow
+from timbal.state import get_run_context
+
+
+def fetch_content(url: str) -> str:
+    """Fetch raw content from a URL."""
+    import urllib.request
+    with urllib.request.urlopen(url) as response:
+        return response.read().decode("utf-8")
+
+
+def extract_metadata(html: str) -> dict:
+    """Extract title and text from HTML content."""
+    import re
+    title_match = re.search(r"<title>(.*?)</title>", html)
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"\s+", " ", text).strip()
+    return {
+        "title": title_match.group(1) if title_match else "Untitled",
+        "text": text[:5000],
+    }
+
+
+summarizer = Agent(
+    name="summarizer",
+    model="openai/gpt-4.1-mini",
+    system_prompt="Summarize the given text in 3 bullet points. Be concise."
+)
+
+
+def format_report(title: str, summary: str) -> str:
+    """Format the final report."""
+    return f"# {title}\n\n{summary}"
+
+
+pipeline = (
+    Workflow(name="document_pipeline")
+    .step(fetch_content, url="https://example.com")
+    .step(extract_metadata,
+        html=lambda: get_run_context().step_span("fetch_content").output)
+    .step(summarizer,
+        prompt=lambda: get_run_context().step_span("extract_metadata").output["text"])
+    .step(format_report,
+        title=lambda: get_run_context().step_span("extract_metadata").output["title"],
+        summary=lambda: get_run_context().step_span("summarizer").output.collect_text())
+)
+```
+
+## How It Works
+
+```
+fetch_content → extract_metadata → summarizer → format_report
+```
+
+1. **`fetch_content`** — fetches raw HTML from the URL
+2. **`extract_metadata`** — parses title and text from the HTML (waits for `fetch_content`)
+3. **`summarizer`** — LLM summarizes the extracted text (waits for `extract_metadata`)
+4. **`format_report`** — combines title and summary into a report (waits for both `extract_metadata` and `summarizer`)
+
+Each lambda creates an automatic dependency. No step runs until its dependencies are resolved.
+
+## Running
+
+```python
+result = await pipeline().collect()
+print(result.output)
+```
+
+The output will be similar to:
+
+```
+# Example Domain
+
+- The page serves as an illustrative example for documentation purposes
+- It can be used freely without permission or coordination
+- More information is available through IANA at the referenced link
+```

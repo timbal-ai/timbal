@@ -16,12 +16,6 @@ This guide shows how to create a Slack bot using Timbal that can:
     ```bash
     pip install slack-sdk
     ```
-    
-    Or using uv (recommended):
-    ```bash
-    uv add slack-sdk
-    ```
-    
     <Note>
       For all available Slack API methods and capabilities, see the [Slack API Methods Reference](https://docs.slack.dev/reference/methods).
     </Note>
@@ -198,7 +192,7 @@ def post_hook():
     # Extract response context
     slack_channel = span.slack_channel
     slack_thread_ts = span.slack_thread_ts
-    reply = span.output.content[0].text
+    reply = span.output.collect_text()
 
     # Send response if not empty
     if reply.strip():
@@ -262,7 +256,7 @@ def post_hook():
         return
 
     # Get response and send to Slack
-    reply = span.output.content[0].text
+    reply = span.output.collect_text()
     slack_channel = span.slack_channel
     slack_thread_ts = span.slack_thread_ts
     
@@ -293,10 +287,6 @@ Timbal provides built-in ngrok integration for easy local development. To use th
     2. Install ngrok on your system and the Python package:
     ```bash
     pip install pyngrok
-    ```
-    Or using uv (recommended):
-    ```bash
-    uv add pyngrok
     ```
     3. Configure your authtoken:
     ```bash

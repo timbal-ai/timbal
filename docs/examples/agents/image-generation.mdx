@@ -73,7 +73,7 @@ agent = Agent(
 result = await agent(
     prompt="Create a picture of a cat."
 ).collect()
-print("Generated image saved to:", result.output.content[0].text)
+print("Generated image saved to:", result.output.collect_text())
 ```
 
 ## Key Features

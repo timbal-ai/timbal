@@ -18,44 +18,81 @@ th {
 td {
   text-align: left !important;
 }
+
+/* X icons: black in light mode, white in dark mode */
+table svg[data-icon="x"] {
+  color: #000000;
+}
+
+@media (prefers-color-scheme: dark) {
+  table svg[data-icon="x"] {
+    color: #ffffff;
+  }
+}
+
+/* Also handle dark mode class if used */
+.dark table svg[data-icon="x"],
+[data-theme="dark"] table svg[data-icon="x"] {
+  color: #ffffff;
+}
 `}
 </style>
 
-Not all AI models can do the same things. Some can use tools, handle images, or return structured results—others can't.
+Not all AI models can do the same things. Some can use tools, handle images, search the web, process audio, or use thinking modes—others can't.
 
-Here's a quick look at what popular models can and can't do:
+Here's a comprehensive look at what all supported models can and can't do:
 
-
-
-| Provider | Model | Image Input | Object Generation | Tool Usage | Tool Streaming |
-|:---------|:------|:------------|:------------------|:-----------|:---------------|
-| **OpenAI** | `gpt-5` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `gpt-5-mini` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `gpt-5-nano` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `gpt-4.1` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `gpt-4.1-mini` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `gpt-4.1-nano` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `gpt-4o` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `gpt-4o-mini` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `gpt-4-turbo` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `gpt-4` | <Icon icon="x" color="#000" size={12}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `o3-mini` | <Icon icon="x" color="#000" size={12}/> | <Icon icon="x" color="#000" size={12}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `o3` | <Icon icon="x" color="#000" size={12}/> | <Icon icon="x" color="#000" size={12}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `o4-mini` | <Icon icon="x" color="#000" size={12}/> | <Icon icon="x" color="#000" size={12}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **OpenAI** | `o1` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="#000" size={12}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Anthropic** | `claude-opus-4-latest` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Anthropic** | `claude-sonnet-4-latest` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Anthropic** | `claude-3-7-sonnet-latest` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Anthropic** | `claude-3-5-sonnet-latest` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Anthropic** | `claude-3-5-haiku-latest` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Google Generative AI** | `gemini-2.0-flash-exp` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Google Generative AI** | `gemini-1.5-flash` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Google Generative AI** | `gemini-1.5-pro` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Google Vertex** | `gemini-2.0-flash-exp` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Google Vertex** | `gemini-1.5-flash` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-| **Google Vertex** | `gemini-1.5-pro` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
-
-<sub>Source: [Model capabilities documentation](https://ai-sdk.dev/docs/foundations/providers-and-models#model-capabilities)</sub>
+| Provider | Model | Image Input | Web Search | Thinking |
+|:---------|:------|:------------|:-----------|:---------|
+| **OpenAI** | `gpt-5` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `gpt-5-mini` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `gpt-5-nano` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `gpt-5.1` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `gpt-5.2` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `gpt-4.1` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **OpenAI** | `gpt-4.1-mini` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **OpenAI** | `gpt-4.1-nano` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **OpenAI** | `gpt-4o` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **OpenAI** | `gpt-4o-mini` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **OpenAI** | `gpt-4-turbo` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **OpenAI** | `o1` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `o1-pro` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `o3` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `o3-mini` | <Icon icon="x" color="currentColor" size={12}/> |  <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `o3-pro` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `o3-deep-research` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/>  |
+| **OpenAI** | `o4-mini` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **OpenAI** | `o4-mini-deep-research` | <Icon icon="circle-check" color="#16a34a" size={18}/>  | <Icon icon="circle-check" color="#16a34a" size={18}/> |<Icon icon="circle-check" color="#16a34a" size={18}/>  |
+| **Anthropic** | `claude-opus-4-1` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **Anthropic** | `claude-opus-4-0` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **Anthropic** | `claude-opus-4-5` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **Anthropic** | `claude-sonnet-4-0` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **Anthropic** | `claude-sonnet-4-5` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **Anthropic** | `claude-haiku-4-5` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **Anthropic** | `claude-3-7-sonnet-latest` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |
+| **Anthropic** | `claude-3-5-haiku-latest` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="circle-check" color="#16a34a" size={18}/> |  <Icon icon="x" color="currentColor" size={12}/> |
+| **TogetherAI** | `mistralai/Mistral-Small-24B-Instruct-2501` | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **TogetherAI** | `mistralai/Mistral-7B-Instruct-v0.3` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **TogetherAI** | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo` | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **TogetherAI** | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **TogetherAI** | `deepseek-ai/DeepSeek-V3.1` | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **TogetherAI** | `deepseek-ai/DeepSeek-R1` | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-3-pro-preview` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-3-flash-preview` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-2.5-pro` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-2.5-flash` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-2.5-flash-lite` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-2.5-flash-preview-native-audio-dialog` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-2.5-flash-exp-native-audio-thinking-dialog` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-2.5-flash-image-preview` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-2.5-flash-preview-tts` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-2.5-pro-preview-tts` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **Google** | `gemini-2.0-flash-preview-image-generation` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **xAI** | `grok-4` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **xAI** | `grok-4-fast-reasoning` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **xAI** | `grok-4-fast-non-reasoning` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **xAI** | `grok-4.1-mini` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
+| **xAI** | `grok-4.1-fast-non-reasoning` | <Icon icon="circle-check" color="#16a34a" size={18}/> | <Icon icon="x" color="currentColor" size={12}/> | <Icon icon="x" color="currentColor" size={12}/> |
 
 
 

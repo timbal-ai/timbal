@@ -1,0 +1,107 @@
+---
+title: "Thinking & Reasoning"
+description: "Enable advanced reasoning capabilities for models that support thinking modes"
+---
+
+## What is Thinking?
+
+**Thinking** (also called **reasoning**) is an advanced capability that allows AI models to engage in extended reasoning processes before generating their final response. Models with thinking capabilities can work through complex problems step-by-step, showing their reasoning process, which leads to more accurate and well-thought-out answers.
+
+<Note>
+Not all models support thinking capabilities. See the [Model Capabilities](/model_capabilities) page to check which models have thinking support.
+</Note>
+
+## Using Thinking
+
+Thinking is configured differently depending on the model provider. Pass the `thinking` parameter when creating an agent or override it per request.
+
+### Anthropic Models
+
+For Anthropic models, thinking is configured with a dictionary containing `type` and `budget_tokens`:
+
+```python
+agent = Agent(
+    name="reasoning_agent",
+    model="anthropic/claude-sonnet-4-5",
+    model_params={
+        "max_tokens": 20000,
+        "thinking": {
+            "type": "enabled",
+            "budget_tokens": 10000  # Must be >= 1024 and < max_tokens
+        }
+    }
+)
+```
+
+**Parameters:**
+- `type`: Must be `"enabled"` to activate thinking
+- `budget_tokens`: The maximum number of tokens the model can use for reasoning (must be >= 1024 and < max_tokens)
+
+<Note>
+**Important:** When using thinking with Anthropic models, `budget_tokens` must be less than `max_tokens` because thinking tokens count toward the total token budget. The `max_tokens` parameter sets the total output limit, while `budget_tokens` allocates a portion of that budget specifically for reasoning. Make sure to set `max_tokens` high enough to accommodate both thinking and the final response.
+</Note>
+
+### OpenAI Models
+
+For OpenAI models, thinking is configured with a dictionary containing `effort` and `summary`:
+
+```python
+agent = Agent(
+    name="reasoning_agent",
+    model="openai/gpt-5",
+    model_params={
+        "thinking": {
+            "effort": "high",  # Options: "minimal", "low", "medium", "high"
+            "summary": "auto"     # Options: "auto", "concise", "detailed"
+        }
+    }
+)
+```
+
+**Parameters:**
+- `effort`: Controls how much computational effort the model puts into reasoning
+  - `"minimal"` - Light reasoning
+  - `"low"` - Moderate reasoning
+  - `"medium"` - Substantial reasoning
+  - `"high"` - Maximum reasoning effort
+- `summary`: Controls how the reasoning is summarized
+  - `"auto"` - Automatic summary
+  - `"concise"` - Brief summary
+  - `"detailed"` - Comprehensive summary
+
+### Overriding Thinking Per Request
+
+You can override thinking configuration for individual requests:
+
+```python
+# Default agent without thinking
+agent = Agent(
+    name="my_agent",
+    model="anthropic/claude-sonnet-4-5",
+    model_params={
+        "max_tokens"=2400
+    }
+)
+
+# Enable thinking for this specific request
+result = await agent(
+    prompt="Solve this complex problem",
+    thinking={
+        "type": "enabled",
+        "budget_tokens": 1500
+    }
+).collect()
+```
+
+## When to Use Thinking
+
+Thinking is particularly useful for:
+- **Complex problem-solving** - Multi-step reasoning tasks
+- **Mathematical problems** - Calculations requiring step-by-step work
+- **Code analysis** - Understanding and debugging complex code
+- **Strategic planning** - Long-term thinking and planning
+- **Scientific reasoning** - Hypothesis testing and analysis
+
+<Note>
+Thinking modes consume more tokens and may increase response time, but often produce more accurate and well-reasoned responses for complex tasks.
+</Note>

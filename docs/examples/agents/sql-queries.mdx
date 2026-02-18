@@ -48,7 +48,7 @@ result2 = await agent(
     prompt="How many high priority tickets do we have from customer 103?"
 ).collect()
 
-print(result2.output.content[0].text)
+print(result2.output.collect_text())
 
 # There is currently 1 high priority ticket from customer 103. Would you like to see more details or do anything else?
 ```

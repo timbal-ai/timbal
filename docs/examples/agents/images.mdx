@@ -25,7 +25,7 @@ result = await agent(
     prompt=["Analyze these images and provide a description of each one", image1, image2, image3]
 ).collect()
 
-print(result.output.content[0].text)
+print(result.output.collect_text())
 ```
 
 <Warning>

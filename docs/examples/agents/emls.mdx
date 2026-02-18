@@ -21,7 +21,7 @@ result = await agent(
     prompt=["Summarize this email and extract the key points", eml_file]
 ).collect()
 
-print(result.output.content[0].text)
+print(result.output.collect_text())
 ```
 
 ## Key Features

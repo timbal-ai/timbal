@@ -78,7 +78,7 @@ async def tts(text: str) -> File:
 async def post_hook():
     """Convert text output to audio."""
     span = get_run_context().current_span()
-    text = span.output.content[0].text
+    text = span.output.collect_text()
     span.output = await tts(text)
 
 
@@ -142,7 +142,7 @@ async def pre_hook():
 async def post_hook():
     """Convert text output to audio."""
     span = get_run_context().current_span()
-    text = span.output.content[0].text
+    text = span.output.collect_text()
     span.output = await tts(text)
 
 

@@ -95,15 +95,16 @@ Pre-hooks are perfect for:
 
 ### Post-hooks: Processing Output After Completion
 
-A `post_hook` runs after your handler and can access both input and output:
+A `post_hook` runs after your handler and can access both input and output. You can also **modify or completely replace the output** by assigning a new value to `span.output`:
 
-```python highlight={13}
+```python highlight={8}
 def post_hook():
     span = get_run_context().current_span()
     # Retrieve custom data stored in pre_hook
     greet_time = span.greet_time
     print(f"Greeting at {greet_time}")
     # Modify the output before it's returned
+    # You can assign any value to completely replace the handler's output
     span.output = "Greeting overridden!"
 
 greet_tool = Tool(
@@ -115,6 +116,10 @@ greet_tool = Tool(
 
 result = await greet_tool(name="alice").collect() # "Greeting overridden!"
 ```
+
+<Note>
+**Output Modification**: You can completely replace the output in a post-hook by assigning to `span.output`. The assigned value will be returned instead of the handler's original output. This is useful for transforming results, adding metadata, or implementing custom response formatting.
+</Note>
 
 Post-hooks are perfect for:
 - **Logging**: Record execution details and results
@@ -161,7 +166,7 @@ async def pre_hook():
         prompt=f"Is '{span.input.get('name')}' a company?"
     ).collect()
     
-    span.is_company = result.output.content[0].text.strip().lower() == "true"
+    span.is_company = result.output.collect_text().strip().lower() == "true"
 
 agent = Agent(
     name="agent",

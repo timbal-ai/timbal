@@ -412,7 +412,7 @@ def save_draft(self):
     """Create a draft response to the original message"""
     span = get_run_context().current_span()
     original_message = span.input['input_email']
-    response_text = span.output.content[0].text
+    response_text = span.output.collect_text()
 
     try:
         # Extract sender email from the original message

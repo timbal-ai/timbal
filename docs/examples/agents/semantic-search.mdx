@@ -63,7 +63,7 @@ result3 = await agent(
     prompt="Search in articles table for 'How can I install music software on my computer?'"
 ).collect()
 
-print(result3.output.content[0].text)
+print(result3.output.collect_text())
 ```
 
 ## Key Features
