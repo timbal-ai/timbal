@@ -2,9 +2,102 @@ const std = @import("std");
 const fs = std.fs;
 
 const utils = @import("../utils.zig");
-const timbal_version = @import("../version.zig").timbal_version;
-
 const Color = utils.Color;
+
+const builtin = @import("builtin");
+
+fn enableWindowsConsole() u32 {
+    if (builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+
+        // Set output codepage to UTF-8.
+        const orig_cp = windows.kernel32.GetConsoleOutputCP();
+        _ = windows.kernel32.SetConsoleOutputCP(65001);
+
+        // Enable VT processing on stdout so ANSI escape codes render correctly.
+        const stdout_handle = std.io.getStdOut().handle;
+        var mode: windows.DWORD = 0;
+        if (windows.kernel32.GetConsoleMode(stdout_handle, &mode) != 0) {
+            _ = windows.kernel32.SetConsoleMode(stdout_handle, mode | windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+
+        return orig_cp;
+    }
+    return 0;
+}
+
+fn restoreWindowsConsole(orig_cp: u32) void {
+    if (builtin.os.tag == .windows) {
+        _ = std.os.windows.kernel32.SetConsoleOutputCP(orig_cp);
+    }
+}
+
+const is_windows = builtin.os.tag == .windows;
+const sep = if (is_windows) "\\" else "/";
+
+fn getHomePath(allocator: std.mem.Allocator) ![]u8 {
+    return if (is_windows)
+        std.process.getEnvVarOwned(allocator, "USERPROFILE")
+    else
+        std.process.getEnvVarOwned(allocator, "HOME");
+}
+
+fn getCredentialsPath(allocator: std.mem.Allocator) ![]u8 {
+    const home = try getHomePath(allocator);
+    defer allocator.free(home);
+    return std.fmt.allocPrint(allocator, "{s}{s}.timbal{s}credentials", .{ home, sep, sep });
+}
+
+fn getConfigPath(allocator: std.mem.Allocator) ![]u8 {
+    const home = try getHomePath(allocator);
+    defer allocator.free(home);
+    return std.fmt.allocPrint(allocator, "{s}{s}.timbal{s}config", .{ home, sep, sep });
+}
+
+fn isSectionHeader(line: []const u8, profile: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (std.mem.eql(u8, profile, "default")) {
+        return std.mem.eql(u8, trimmed, "[default]");
+    }
+    if (!std.mem.startsWith(u8, trimmed, "[profile ")) return false;
+    if (!std.mem.endsWith(u8, trimmed, "]")) return false;
+    const inner = trimmed["[profile ".len .. trimmed.len - 1];
+    return std.mem.eql(u8, std.mem.trim(u8, inner, " \t"), profile);
+}
+
+fn isAnySectionHeader(line: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    return trimmed.len >= 2 and trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']';
+}
+
+fn readValue(content: []const u8, profile: []const u8, key: []const u8) ?[]const u8 {
+    var in_target = false;
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (isAnySectionHeader(trimmed)) {
+            in_target = isSectionHeader(trimmed, profile);
+            continue;
+        }
+        if (in_target and std.mem.startsWith(u8, trimmed, key)) {
+            const rest = trimmed[key.len..];
+            const after_key = std.mem.trimLeft(u8, rest, " \t");
+            if (after_key.len > 0 and after_key[0] == '=') {
+                const value = std.mem.trim(u8, after_key[1..], " \t");
+                if (value.len > 0) return value;
+            }
+        }
+    }
+    return null;
+}
+
+/// Strip protocol prefix (e.g. "https://api.timbal.ai" -> "api.timbal.ai").
+fn stripProtocol(url: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, url, "://")) |idx| {
+        return url[idx + 3 ..];
+    }
+    return url;
+}
 
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
@@ -21,9 +114,7 @@ fn printUsage() !void {
         "\x1b[1;32mArguments:\n" ++
         "    \x1b[1;36m[PATH]         \x1b[0mPath to the project directory (default: current directory)\n" ++
         "\n" ++
-        "\x1b[1;32mGlobal options:\n" ++
-        "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help       \x1b[0mDisplay the concise help for this command\n" ++
-        "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version    \x1b[0mDisplay the timbal version\n" ++
+        utils.global_options_help ++
         "\n");
 }
 
@@ -176,19 +267,29 @@ fn findAvailablePort(start: u16) u16 {
 }
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const orig_cp = enableWindowsConsole();
+    defer restoreWindowsConsole(orig_cp);
+
     const stdout = std.io.getStdOut().writer();
 
     const base_port: u16 = 4455;
     var project_path: ?[]const u8 = null;
+    var profile_flag: ?[]const u8 = null;
 
     // Parse arguments.
-    for (args) |arg| {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage();
             return;
-        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("Timbal {s}\n", .{timbal_version});
-            return;
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            i += 1;
+            if (i >= args.len) {
+                try printUsageWithError("Error: --profile requires a name argument");
+                return;
+            }
+            profile_flag = args[i];
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             if (project_path != null) {
                 try printUsageWithError("Error: multiple paths provided");
@@ -200,6 +301,50 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         }
     }
+
+    // Resolve profile: --profile flag > TIMBAL_PROFILE env var > "default".
+    const env_profile = std.process.getEnvVarOwned(allocator, "TIMBAL_PROFILE") catch |err| blk: {
+        if (err == error.EnvironmentVariableNotFound) break :blk null;
+        return err;
+    };
+    defer if (env_profile) |p| allocator.free(p);
+    const profile: []const u8 = profile_flag orelse (env_profile orelse "default");
+
+    // Load credentials and config for the profile.
+    const stderr_writer = std.io.getStdErr().writer();
+
+    const credentials_path = try getCredentialsPath(allocator);
+    defer allocator.free(credentials_path);
+    const credentials_content = std.fs.cwd().readFileAlloc(allocator, credentials_path, 1024 * 1024) catch |err| {
+        if (err == error.FileNotFound) {
+            try stderr_writer.print("Error: Timbal is not configured. Run '{s}timbal configure{s}' first.\n", .{ Color.bold_cyan, Color.reset });
+            return;
+        }
+        return err;
+    };
+    defer allocator.free(credentials_content);
+
+    const config_path = try getConfigPath(allocator);
+    defer allocator.free(config_path);
+    const config_content = std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024) catch |err| {
+        if (err == error.FileNotFound) {
+            try stderr_writer.print("Error: Timbal is not configured. Run '{s}timbal configure{s}' first.\n", .{ Color.bold_cyan, Color.reset });
+            return;
+        }
+        return err;
+    };
+    defer allocator.free(config_content);
+
+    const api_key = readValue(credentials_content, profile, "api_key") orelse {
+        try stderr_writer.print("Error: No API key found for profile '{s}'. Run '{s}timbal configure --profile {s}{s}' to set it up.\n", .{ profile, Color.bold_cyan, profile, Color.reset });
+        return;
+    };
+    const org_id = readValue(config_content, profile, "org") orelse {
+        try stderr_writer.print("Error: No organization ID found for profile '{s}'. Run '{s}timbal configure --profile {s}{s}' to set it up.\n", .{ profile, Color.bold_cyan, profile, Color.reset });
+        return;
+    };
+    const base_url = readValue(config_content, profile, "base_url") orelse "https://api.timbal.ai";
+    const api_host = stripProtocol(base_url);
 
     // Check that required tools are installed.
     const stderr = std.io.getStdErr().writer();
@@ -377,6 +522,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     service_env.put("FORCE_COLOR", "1") catch return;
     service_env.put("TIMBAL_LOG_EVENTS", "START,OUTPUT") catch return;
     service_env.put("TIMBAL_LOG_FORMAT", "dev") catch return;
+    service_env.put("TIMBAL_DELTA_EVENTS", "true") catch return;
+    service_env.put("TIMBAL_API_KEY", api_key) catch return;
+    service_env.put("TIMBAL_ORG_ID", org_id) catch return;
+    service_env.put("TIMBAL_API_HOST", api_host) catch return;
 
     var color_idx: usize = 0;
 

@@ -2,7 +2,6 @@ const std = @import("std");
 const fs = std.fs;
 
 const utils = @import("../utils.zig");
-const timbal_version = @import("../version.zig").timbal_version;
 
 const Color = utils.Color;
 
@@ -32,11 +31,7 @@ fn printUsage() !void {
         "\x1b[1;32mOptions:\n" ++
         "    \x1b[1;36m--template <URL>\x1b[0m Use a template from a URL\n" ++
         "\n" ++
-        "\x1b[1;32mGlobal options:\n" ++
-        "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet      \x1b[0mDo not print any output\n" ++
-        "    \x1b[1;36m-v\x1b[0m, \x1b[1;36m--verbose    \x1b[0mUse verbose output\n" ++
-        "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help       \x1b[0mDisplay the concise help for this command\n" ++
-        "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version    \x1b[0mDisplay the timbal version\n" ++
+        utils.global_options_help ++
         "\n");
 }
 
@@ -498,9 +493,12 @@ fn initGitRepo(allocator: std.mem.Allocator, path: []const u8) !void {
 }
 
 fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config: ProjectConfig) !void {
-    // Extract project name from path
+    // Extract project name from path (handle both / and \ separators)
     const project_name = blk: {
-        if (std.mem.lastIndexOf(u8, config.path, "/")) |idx| {
+        const last_fwd = std.mem.lastIndexOf(u8, config.path, "/");
+        const last_back = std.mem.lastIndexOf(u8, config.path, "\\");
+        const last_sep = if (last_fwd) |f| if (last_back) |b| @max(f, b) else f else last_back;
+        if (last_sep) |idx| {
             break :blk config.path[idx + 1 ..];
         }
         break :blk config.path;
@@ -639,13 +637,75 @@ const builtin = @import("builtin");
 
 const is_windows = builtin.os.tag == .windows;
 
-const TerminalState = if (is_windows) void else std.posix.termios;
+// Windows console input mode flags not provided by Zig stdlib.
+const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+const ENABLE_LINE_INPUT: u32 = 0x0002;
+const ENABLE_ECHO_INPUT: u32 = 0x0004;
+const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+const CP_UTF8: u32 = 65001;
+
+const WindowsTerminalState = struct {
+    stdin_mode: std.os.windows.DWORD,
+    stdout_mode: std.os.windows.DWORD,
+    output_cp: u32,
+};
+
+const TerminalState = if (is_windows) WindowsTerminalState else std.posix.termios;
 
 const terminal = if (is_windows) struct {
     fn enableRawMode() !TerminalState {
-        return {};
+        const windows = std.os.windows;
+
+        const stdin_handle = std.io.getStdIn().handle;
+        var orig_stdin_mode: windows.DWORD = 0;
+        if (windows.kernel32.GetConsoleMode(stdin_handle, &orig_stdin_mode) == 0) {
+            return error.GetConsoleModeError;
+        }
+
+        // Disable line-buffering, echo, and CTRL+C processing.
+        // Enable VT input so arrow keys arrive as \x1b[A/\x1b[B escape sequences.
+        var new_stdin_mode = orig_stdin_mode;
+        new_stdin_mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
+        new_stdin_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+
+        if (windows.kernel32.SetConsoleMode(stdin_handle, new_stdin_mode) == 0) {
+            return error.SetConsoleModeError;
+        }
+
+        // Enable ANSI/VT processing on stdout so escape codes render correctly.
+        const stdout_handle = std.io.getStdOut().handle;
+        var orig_stdout_mode: windows.DWORD = 0;
+        if (windows.kernel32.GetConsoleMode(stdout_handle, &orig_stdout_mode) == 0) {
+            _ = windows.kernel32.SetConsoleMode(stdin_handle, orig_stdin_mode);
+            return error.GetConsoleModeError;
+        }
+
+        var new_stdout_mode = orig_stdout_mode;
+        new_stdout_mode |= windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+
+        if (windows.kernel32.SetConsoleMode(stdout_handle, new_stdout_mode) == 0) {
+            _ = windows.kernel32.SetConsoleMode(stdin_handle, orig_stdin_mode);
+            return error.SetConsoleModeError;
+        }
+
+        // Set console output codepage to UTF-8 so Unicode characters render correctly.
+        const orig_output_cp = windows.kernel32.GetConsoleOutputCP();
+        _ = windows.kernel32.SetConsoleOutputCP(CP_UTF8);
+
+        return WindowsTerminalState{
+            .stdin_mode = orig_stdin_mode,
+            .stdout_mode = orig_stdout_mode,
+            .output_cp = orig_output_cp,
+        };
     }
-    fn disableRawMode(_: TerminalState) void {}
+
+    fn disableRawMode(original: TerminalState) void {
+        const windows = std.os.windows;
+        _ = windows.kernel32.SetConsoleMode(std.io.getStdIn().handle, original.stdin_mode);
+        _ = windows.kernel32.SetConsoleMode(std.io.getStdOut().handle, original.stdout_mode);
+        _ = windows.kernel32.SetConsoleOutputCP(original.output_cp);
+    }
 } else struct {
     fn enableRawMode() !TerminalState {
         const stdin_fd = std.io.getStdIn().handle;
@@ -679,9 +739,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage();
-            return;
-        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("Timbal {s}\n", .{timbal_version});
             return;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;

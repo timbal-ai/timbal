@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const utils = @import("utils.zig");
+
 const add_cmd = @import("commands/add.zig");
 const create_cmd = @import("commands/create.zig");
 const init_cmd = @import("commands/init.zig");
@@ -25,19 +27,14 @@ fn printUsage() !void {
         "    \x1b[1;36madd       \x1b[0mAdd a component to an existing project\n" ++
         "    \x1b[1;36mstart     \x1b[0mStart a project (UI, API, agents, and workflows)\n" ++
         "    \x1b[1;36mupgrade   \x1b[0mUpgrade timbal to the latest version\n" ++
-        "    \x1b[1;36mhelp      \x1b[0mDisplay this help message\n" ++
+        "    \x1b[1;36mversion   \x1b[0mDisplay the current version\n" ++
         "\n" ++
         "\x1b[1;32mDeprecated commands:\n" ++
         "    \x1b[0;90minit    Initialize a new application\n" ++
         "    \x1b[0;90mbuild   Build the application into a container\n" ++
         "    \x1b[0;90mpush    Push an application to the Timbal Platform\x1b[0m\n" ++
         "\n" ++
-        "\x1b[1;32mGlobal options:\n" ++
-        "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet       \x1b[0mDo not print any output\n" ++
-        "    \x1b[1;36m-v\x1b[0m, \x1b[1;36m--verbose     \x1b[0mUse verbose output\n" ++
-        "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help        \x1b[0mDisplay the concise help for this command\n" ++
-        "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version     \x1b[0mDisplay the timbal version\n" ++
-        "    \x1b[1;36m--profile <NAME>\x1b[0m  Use a named profile (overrides TIMBAL_PROFILE env var)\n" ++
+        utils.global_options_help ++
         "\n");
 }
 
@@ -83,11 +80,11 @@ pub fn main() !void {
         try credential_helper_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "upgrade")) {
         try upgrade_cmd.run(allocator, args[2..]);
-    } else if (std.mem.eql(u8, action, "help")) {
-        try printUsage();
-    } else if (std.mem.eql(u8, action, "-V") or std.mem.eql(u8, action, "--version")) {
+    } else if (std.mem.eql(u8, action, "version")) {
         std.debug.print("Timbal {s}\n", .{timbal_version});
         std.process.exit(0);
+    } else if (std.mem.eql(u8, action, "-h") or std.mem.eql(u8, action, "--help")) {
+        try printUsage();
     } else {
         try printUsageWithError("Error: unknown command");
     }

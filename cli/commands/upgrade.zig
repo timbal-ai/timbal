@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const fs = std.fs;
+const utils = @import("../utils.zig");
 
 // Embedded version.
 const timbal_version = @import("../version.zig").timbal_version;
@@ -17,11 +18,7 @@ fn printUsage() !void {
         "\n" ++
         "\x1b[1;32mUsage: \x1b[1;36mtimbal upgrade\n" ++
         "\n" ++
-        "\x1b[1;32mGlobal options:\n" ++
-        "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet      \x1b[0mDo not print any output\n" ++
-        "    \x1b[1;36m-v\x1b[0m, \x1b[1;36m--verbose\x1b[0;36m... \x1b[0mUse verbose output\n" ++
-        "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help       \x1b[0mDisplay the concise help for this command\n" ++
-        "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version    \x1b[0mDisplay the timbal version\n" ++
+        utils.global_options_help ++
         "\n");
 }
 
@@ -245,9 +242,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage();
-            return;
-        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("Timbal {s}\n", .{timbal_version});
             return;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;

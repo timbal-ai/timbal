@@ -2,9 +2,6 @@ const builtin = @import("builtin");
 const std = @import("std");
 const fs = std.fs;
 
-// Embedded version.
-const timbal_version = @import("../version.zig").timbal_version;
-
 const utils = @import("../utils.zig");
 const Color = utils.Color;
 
@@ -22,12 +19,7 @@ fn printUsage() !void {
         "\n" ++
         "\x1b[1;32mUsage: \x1b[1;36mtimbal configure \x1b[0;36m[OPTIONS]\n" ++
         "\n" ++
-        "\x1b[1;32mGlobal options:\n" ++
-        "    \x1b[1;36m--profile <NAME>\x1b[0m  Use a named profile (overrides TIMBAL_PROFILE env var)\n" ++
-        "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet      \x1b[0mDo not print any output\n" ++
-        "    \x1b[1;36m-v\x1b[0m, \x1b[1;36m--verbose    \x1b[0mUse verbose output\n" ++
-        "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help       \x1b[0mDisplay the concise help for this command\n" ++
-        "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version    \x1b[0mDisplay the timbal version\n" ++
+        utils.global_options_help ++
         "\n");
 }
 
@@ -173,7 +165,6 @@ fn upsertValue(
         try result.appendSlice(key);
         try result.appendSlice(" = ");
         try result.appendSlice(value);
-        try result.append('\n');
         replaced = true;
     }
 
@@ -186,6 +177,10 @@ fn upsertValue(
         try result.appendSlice(key);
         try result.appendSlice(" = ");
         try result.appendSlice(value);
+    }
+
+    // Ensure file ends with exactly one newline.
+    if (result.items.len > 0 and result.items[result.items.len - 1] != '\n') {
         try result.append('\n');
     }
 
@@ -242,30 +237,53 @@ fn promptField(
         try stdout.print("{s} [None]: ", .{label});
     }
 
-    // Read input, hiding it if secret on Unix.
-    if (secret and !is_windows) {
-        const stdin_fd = std.io.getStdIn().handle;
-        const original = std.posix.tcgetattr(stdin_fd) catch {
-            // Fallback to normal read.
-            return readLine(allocator, stdin, stdout);
-        };
+    // Read input, hiding it if secret.
+    if (secret) {
+        if (is_windows) {
+            const stdin_handle = std.io.getStdIn().handle;
+            var orig_mode: std.os.windows.DWORD = 0;
+            const got_mode = std.os.windows.kernel32.GetConsoleMode(stdin_handle, &orig_mode) != 0;
 
-        var noecho = original;
-        noecho.lflag.ECHO = false;
-        std.posix.tcsetattr(stdin_fd, .NOW, noecho) catch {};
+            if (got_mode) {
+                // Disable echo input (0x0004).
+                _ = std.os.windows.kernel32.SetConsoleMode(stdin_handle, orig_mode & ~@as(u32, 0x0004));
+            }
 
-        var buf: [512]u8 = undefined;
-        const input = stdin.readUntilDelimiter(&buf, '\n') catch |err| {
+            var buf: [512]u8 = undefined;
+            const input = stdin.readUntilDelimiter(&buf, '\n') catch |err| {
+                if (got_mode) _ = std.os.windows.kernel32.SetConsoleMode(stdin_handle, orig_mode);
+                return err;
+            };
+
+            if (got_mode) _ = std.os.windows.kernel32.SetConsoleMode(stdin_handle, orig_mode);
+
+            const trimmed = std.mem.trim(u8, input, " \t\r");
+            if (trimmed.len == 0) return null;
+            return try allocator.dupe(u8, trimmed);
+        } else {
+            const stdin_fd = std.io.getStdIn().handle;
+            const original = std.posix.tcgetattr(stdin_fd) catch {
+                // Fallback to normal read.
+                return readLine(allocator, stdin, stdout);
+            };
+
+            var noecho = original;
+            noecho.lflag.ECHO = false;
+            std.posix.tcsetattr(stdin_fd, .NOW, noecho) catch {};
+
+            var buf: [512]u8 = undefined;
+            const input = stdin.readUntilDelimiter(&buf, '\n') catch |err| {
+                std.posix.tcsetattr(stdin_fd, .NOW, original) catch {};
+                return err;
+            };
+
             std.posix.tcsetattr(stdin_fd, .NOW, original) catch {};
-            return err;
-        };
+            try stdout.print("\n", .{});
 
-        std.posix.tcsetattr(stdin_fd, .NOW, original) catch {};
-        try stdout.print("\n", .{});
-
-        const trimmed = std.mem.trim(u8, input, " \t\r");
-        if (trimmed.len == 0) return null;
-        return try allocator.dupe(u8, trimmed);
+            const trimmed = std.mem.trim(u8, input, " \t\r");
+            if (trimmed.len == 0) return null;
+            return try allocator.dupe(u8, trimmed);
+        }
     }
 
     return readLine(allocator, stdin, stdout);
@@ -306,9 +324,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage();
             return;
-        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("Timbal {s}\n", .{timbal_version});
-            return;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
@@ -346,46 +361,62 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var config_content = try readFileOrEmpty(allocator, config_path);
     defer allocator.free(config_content);
 
-    // Read current values for this profile.
-    const current_api_key = readValue(credentials_content, profile, "api_key");
-    const current_output = readValue(config_content, profile, "output");
+    // Read current values for this profile (duped so they survive buffer frees).
+    const current_api_key = if (readValue(credentials_content, profile, "api_key")) |v| try allocator.dupe(u8, v) else null;
+    defer if (current_api_key) |v| allocator.free(v);
+    const current_org = if (readValue(config_content, profile, "org")) |v| try allocator.dupe(u8, v) else null;
+    defer if (current_org) |v| allocator.free(v);
+    const current_base_url = if (readValue(config_content, profile, "base_url")) |v| try allocator.dupe(u8, v) else null;
+    defer if (current_base_url) |v| allocator.free(v);
+    const current_output = if (readValue(config_content, profile, "output")) |v| try allocator.dupe(u8, v) else null;
+    defer if (current_output) |v| allocator.free(v);
 
     // --- Prompt: API Key (secret, written to credentials) ---
-    if (try promptField(allocator, stdout, stdin, "Timbal API Key", current_api_key, true)) |new_key| {
-        defer allocator.free(new_key);
-        const new_credentials = try upsertValue(allocator, credentials_content, profile, "api_key", new_key);
-        allocator.free(credentials_content);
-        credentials_content = new_credentials;
-    }
+    const api_key_input = try promptField(allocator, stdout, stdin, "Timbal API Key (https://app.timbal.ai/profile/api-keys)", current_api_key, true);
+    defer if (api_key_input) |k| allocator.free(k);
+    const final_api_key = api_key_input orelse current_api_key;
+
+    // --- Prompt: Organization ID (written to config) ---
+    const org_input = try promptField(allocator, stdout, stdin, "Organization ID", current_org, false);
+    defer if (org_input) |o| allocator.free(o);
+    const final_org = org_input orelse current_org;
+
+    // --- Prompt: Base URL (written to config) ---
+    const base_url_input = try promptField(allocator, stdout, stdin, "Platform base URL", current_base_url orelse "https://api.timbal.ai", false);
+    defer if (base_url_input) |b| allocator.free(b);
+    const final_base_url = base_url_input orelse (current_base_url orelse "https://api.timbal.ai");
 
     // --- Prompt: Default output format (written to config) ---
-    if (try promptField(allocator, stdout, stdin, "Default output format", current_output orelse "json", false)) |new_output| {
-        defer allocator.free(new_output);
-        // Validate the value.
-        if (!std.mem.eql(u8, new_output, "json") and !std.mem.eql(u8, new_output, "text")) {
+    const output_input = try promptField(allocator, stdout, stdin, "Default output format", current_output orelse "json", false);
+    defer if (output_input) |o| allocator.free(o);
+    if (output_input) |val| {
+        if (!std.mem.eql(u8, val, "json") and !std.mem.eql(u8, val, "text")) {
             const stderr = std.io.getStdErr().writer();
             try stderr.writeAll("Error: output format must be \"json\" or \"text\".\n");
             return;
         }
-        const new_config = try upsertValue(allocator, config_content, profile, "output", new_output);
-        allocator.free(config_content);
-        config_content = new_config;
-    } else if (current_output == null) {
-        const new_config = try upsertValue(allocator, config_content, profile, "output", "json");
+    }
+    const final_output = output_input orelse (current_output orelse "json");
+
+    // Always upsert all fields to keep file clean.
+    if (final_api_key) |key| {
+        const new_creds = try upsertValue(allocator, credentials_content, profile, "api_key", key);
+        allocator.free(credentials_content);
+        credentials_content = new_creds;
+    }
+
+    if (final_org) |org| {
+        const new_config = try upsertValue(allocator, config_content, profile, "org", org);
         allocator.free(config_content);
         config_content = new_config;
     }
-
-    // --- Prompt: Base URL (written to config) ---
-    const current_base_url = readValue(config_content, profile, "base_url");
-    if (try promptField(allocator, stdout, stdin, "Platform base URL", current_base_url orelse "https://api.timbal.ai", false)) |new_base_url| {
-        defer allocator.free(new_base_url);
-        const new_config = try upsertValue(allocator, config_content, profile, "base_url", new_base_url);
+    {
+        const new_config = try upsertValue(allocator, config_content, profile, "base_url", final_base_url);
         allocator.free(config_content);
         config_content = new_config;
-    } else if (current_base_url == null) {
-        // No existing value and user pressed enter — save the default
-        const new_config = try upsertValue(allocator, config_content, profile, "base_url", "https://api.timbal.ai");
+    }
+    {
+        const new_config = try upsertValue(allocator, config_content, profile, "output", final_output);
         allocator.free(config_content);
         config_content = new_config;
     }

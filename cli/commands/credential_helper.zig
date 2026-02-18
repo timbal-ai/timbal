@@ -1,8 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
-
-// Embedded version.
-const timbal_version = @import("../version.zig").timbal_version;
+const utils = @import("../utils.zig");
 
 const is_windows = builtin.os.tag == .windows;
 const sep = if (is_windows) "\\" else "/";
@@ -23,10 +21,7 @@ fn printUsage() !void {
         "\x1b[0m    git config --global credential.https://api.timbal.ai.helper '!timbal credential-helper'\n" ++
         "    git config --global credential.https://api.dev.timbal.ai.helper '!timbal credential-helper'\n" ++
         "\n" ++
-        "\x1b[1;32mGlobal options:\n" ++
-        "    \x1b[1;36m--profile <NAME>\x1b[0m  Use a named profile (overrides TIMBAL_PROFILE env var)\n" ++
-        "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help       \x1b[0mDisplay the concise help for this command\n" ++
-        "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version    \x1b[0mDisplay the timbal version\n" ++
+        utils.global_options_help ++
         "\n");
 }
 
@@ -111,9 +106,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage();
-            return;
-        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("Timbal {s}\n", .{timbal_version});
             return;
         } else if (std.mem.eql(u8, arg, "--profile")) {
             i += 1;

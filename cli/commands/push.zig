@@ -1,8 +1,6 @@
 const std = @import("std");
 const fs = std.fs;
-
-// Embedded version.
-const timbal_version = @import("../version.zig").timbal_version;
+const utils = @import("../utils.zig");
 
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
@@ -24,11 +22,7 @@ fn printUsage() !void {
         "\x1b[1;32mOptions:\n" ++
         "    \x1b[1;36m--name \x1b[0m The name of the app version that will be created\n" ++
         "\n" ++
-        "\x1b[1;32mGlobal options:\n" ++
-        "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet      \x1b[0mDo not print any output\n" ++
-        "    \x1b[1;36m-v\x1b[0m, \x1b[1;36m--verbose\x1b[0;36m... \x1b[0mUse verbose output\n" ++
-        "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help       \x1b[0mDisplay the concise help for this command\n" ++
-        "    \x1b[1;36m-V\x1b[0m, \x1b[1;36m--version    \x1b[0mDisplay the timbal version\n" ++
+        utils.global_options_help ++
         "\n");
 }
 
@@ -86,9 +80,6 @@ fn parseArgs(args: []const []const u8) !TimbalPushArgs {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage();
-            std.process.exit(0);
-        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("Timbal {s}\n", .{timbal_version});
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
