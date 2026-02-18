@@ -19,6 +19,7 @@ pub const ProjectType = enum {
 
 pub const blueprint_api_url = "https://github.com/timbal-ai/blueprint-api/archive/refs/heads/main.tar.gz";
 pub const blueprint_ui_url = "https://github.com/timbal-ai/blueprint-ui/archive/refs/heads/main.tar.gz";
+pub const blueprint_ui_simple_chat_url = "https://github.com/timbal-ai/blueprint-ui-simple-chat/archive/refs/heads/main.tar.gz";
 
 // Embed template files into the binary.
 const tmpl_pyproject_toml = @embedFile("init-templates/pyproject.toml");
@@ -50,15 +51,15 @@ const nouns = [_][]const u8{
 
 /// Parsed representation of a timbal.yaml configuration file.
 pub const TimbalYaml = struct {
-    id: ?[]const u8,
-    type: ?[]const u8,
+    id: []const u8,
+    type: []const u8,
     fqn: []const u8,
     system_packages: []const []const u8,
     run_commands: []const []const u8,
 
     pub fn deinit(self: *TimbalYaml, allocator: std.mem.Allocator) void {
-        if (self.id) |s| allocator.free(s);
-        if (self.type) |s| allocator.free(s);
+        allocator.free(self.id);
+        allocator.free(self.type);
         allocator.free(self.fqn);
         for (self.system_packages) |pkg| allocator.free(pkg);
         allocator.free(self.system_packages);
@@ -77,6 +78,7 @@ fn stripQuotes(value: []const u8) []const u8 {
 
 /// Parse a timbal.yaml file from its content string.
 /// Returns a TimbalYaml struct (caller owns all memory) or null if required fields are missing.
+/// Prints an error message to stderr if required fields are missing.
 pub fn parseTimbalYaml(allocator: std.mem.Allocator, content: []const u8) ?TimbalYaml {
     var id: ?[]const u8 = null;
     var comp_type: ?[]const u8 = null;
@@ -127,9 +129,33 @@ pub fn parseTimbalYaml(allocator: std.mem.Allocator, content: []const u8) ?Timba
         }
     }
 
+    // Check for missing required fields and print appropriate error messages
+    const stderr = std.io.getStdErr().writer();
+    var has_error = false;
+
+    if (id == null) {
+        stderr.print("Error: timbal.yaml is missing required field '_id'.\n", .{}) catch {};
+        has_error = true;
+    }
+
+    if (comp_type == null) {
+        stderr.print("Error: timbal.yaml is missing required field '_type'.\n", .{}) catch {};
+        has_error = true;
+    }
+
     if (fqn == null) {
+        stderr.print("Error: timbal.yaml is missing required field 'fqn'.\n", .{}) catch {};
+        has_error = true;
+    }
+
+    if (has_error) {
+        stderr.print("\nYou may be using a modified or outdated manifest file.\n", .{}) catch {};
+        stderr.print("Please ensure your timbal.yaml contains all required fields: _id, _type, and fqn.\n", .{}) catch {};
+
+        // Clean up any allocated memory before returning null
         if (id) |s| allocator.free(s);
         if (comp_type) |s| allocator.free(s);
+        if (fqn) |s| allocator.free(s);
         for (system_packages.items) |pkg| allocator.free(pkg);
         system_packages.deinit();
         for (run_commands.items) |cmd| allocator.free(cmd);
@@ -137,12 +163,34 @@ pub fn parseTimbalYaml(allocator: std.mem.Allocator, content: []const u8) ?Timba
         return null;
     }
 
+    const owned_system_packages = system_packages.toOwnedSlice() catch {
+        allocator.free(id.?);
+        allocator.free(comp_type.?);
+        allocator.free(fqn.?);
+        for (system_packages.items) |pkg| allocator.free(pkg);
+        system_packages.deinit();
+        for (run_commands.items) |cmd| allocator.free(cmd);
+        run_commands.deinit();
+        return null;
+    };
+
+    const owned_run_commands = run_commands.toOwnedSlice() catch {
+        allocator.free(id.?);
+        allocator.free(comp_type.?);
+        allocator.free(fqn.?);
+        for (owned_system_packages) |pkg| allocator.free(pkg);
+        allocator.free(owned_system_packages);
+        for (run_commands.items) |cmd| allocator.free(cmd);
+        run_commands.deinit();
+        return null;
+    };
+
     return TimbalYaml{
-        .id = id,
-        .type = comp_type,
+        .id = id.?,
+        .type = comp_type.?,
         .fqn = fqn.?,
-        .system_packages = system_packages.toOwnedSlice() catch return null,
-        .run_commands = run_commands.toOwnedSlice() catch return null,
+        .system_packages = owned_system_packages,
+        .run_commands = owned_run_commands,
     };
 }
 

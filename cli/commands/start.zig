@@ -403,7 +403,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer workforce_buf.deinit();
         for (members.items, 0..) |member, idx| {
             if (idx > 0) workforce_buf.append(',') catch {};
-            const entry = std.fmt.allocPrint(allocator, "{s}:{d}", .{ member.name, member.port }) catch continue;
+            const entry = std.fmt.allocPrint(allocator, "{s}:{d}", .{ member.config.id, member.port }) catch continue;
             defer allocator.free(entry);
             workforce_buf.appendSlice(entry) catch {};
         }

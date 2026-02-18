@@ -8,6 +8,12 @@ const Color = utils.Color;
 
 const ProjectType = utils.ProjectType;
 
+const UIType = enum {
+    chat,
+    blank,
+    none,
+};
+
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.print("{s}\n\n", .{err});
@@ -61,7 +67,7 @@ const Editor = enum {
 
 const ProjectConfig = struct {
     project_type: ProjectType,
-    with_ui: bool,
+    ui_type: UIType,
     path: []const u8, // absolute path for display
     relative_path: []const u8, // original path for commands
 };
@@ -232,16 +238,22 @@ fn selectProjectType() !ProjectType {
     };
 }
 
-fn selectUI() !bool {
-    const options = [_][]const u8{ "Yes", "No" };
+fn selectUI() !UIType {
+    const options = [_][]const u8{ "Chat", "Blank", "None" };
     const descriptions = [_][]const u8{
-        "Include a web UI for your project",
+        "Simple chat interface for your agent",
+        "Blank canvas to build your own UI",
         "API only, no user interface",
     };
 
-    const selected = try selectOption("Do you want a UI for your project?", &options, &descriptions);
+    const selected = try selectOption("What UI do you want for your project?", &options, &descriptions);
 
-    return selected == 0;
+    return switch (selected) {
+        0 => .chat,
+        1 => .blank,
+        2 => .none,
+        else => unreachable,
+    };
 }
 
 fn isCommandAvailable(allocator: std.mem.Allocator, cmd: []const u8) bool {
@@ -442,7 +454,11 @@ fn printSummary(config: ProjectConfig) !void {
         .workflow => "Workflow",
     };
 
-    const ui_str = if (config.with_ui) "Yes" else "No";
+    const ui_str = switch (config.ui_type) {
+        .chat => "Chat",
+        .blank => "Blank",
+        .none => "None",
+    };
 
     try stdout.writeAll("\n");
     try stdout.print("{s}  Project Summary{s}\n", .{ Color.bold, Color.reset });
@@ -491,8 +507,13 @@ fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config:
     };
 
     // Download blueprints
-    if (config.with_ui) {
-        try utils.fetchBlueprint(allocator, config.path, "ui", utils.blueprint_ui_url);
+    if (config.ui_type != .none) {
+        const ui_url = switch (config.ui_type) {
+            .chat => utils.blueprint_ui_simple_chat_url,
+            .blank => utils.blueprint_ui_url,
+            .none => unreachable,
+        };
+        try utils.fetchBlueprint(allocator, config.path, "ui", ui_url);
     }
 
     try utils.fetchBlueprint(allocator, config.path, "api", utils.blueprint_api_url);
@@ -561,12 +582,12 @@ fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config:
         .agent => "agent.py",
         .workflow => "workflow.py",
     };
-    const ui_section = if (config.with_ui)
+    const ui_section = if (config.ui_type != .none)
         \\ui/              - React + Vite + TypeScript + shadcn (Bun)
         \\
     else
         "";
-    const ui_note = if (config.with_ui)
+    const ui_note = if (config.ui_type != .none)
         \\
         \\> Do not rename or move the `api/`, `ui/`, or `workforce/` directories.
         \\> You are free to edit the contents inside each one.
@@ -738,7 +759,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
-    const with_ui = selectUI() catch |err| {
+    const ui_type = selectUI() catch |err| {
         if (err == error.UserCancelled) {
             showCursor();
             std.debug.print("\n{s}Cancelled.{s}\n", .{ Color.dim, Color.reset });
@@ -764,7 +785,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const config = ProjectConfig{
         .project_type = project_type,
-        .with_ui = with_ui,
+        .ui_type = ui_type,
         .path = path,
         .relative_path = target_path,
     };
