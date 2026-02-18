@@ -3,63 +3,95 @@ title: "Installation"
 description: "Step-by-step instructions for setting up Timbal CLI and Python package"
 ---
 
-Timbal uses `uv` for python dependency management and package handling, streamlining project setup and execution for a seamless development experience.
-
-<Info>
-Install uv to manage your Python dependencies.
-
-- On **macOS/Linux**:
-
-  Use `curl` to download the script and execute it with `sh`:
-
-  ```bash
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  ```
-
-  If your system doesn't have `curl`, you can use `wget`:
-
-  ```bash
-  wget -qO- https://astral.sh/uv/install.sh | sh
-  ```
-  
-- On **Windows**:
-
-  Use `irm` to download the script and `iex` to execute it:
-
-  ```powershell
-  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-  ```
-
-If you run into any issues, refer to **[UV's installation](https://docs.astral.sh/uv/get-started/installation/)** guide for more information.
-</Info>
-
-## CLI
+## Installation methods
 
 The **Timbal CLI** provides a command-line interface for managing Timbal projects, including initialization, building, deploying, and other project management tasks.
 
-<Info>
-Before installing the CLI, ensure you have [docker](https://docs.docker.com/engine/install/) installed and running.
-</Info>
+<Tabs>
+  <Tab title="macOS / Linux">
+    Use `curl` to download and execute the installation script:
 
-**macOS/Linux**
+    ```bash
+    curl -LsSf https://timbal.ai/install.sh | sh
+    ```
 
-Use `curl` to download and execute the installation script:
+    If your system doesn't have `curl`, you can use `wget`:
 
-```bash
-curl -LsSf https://timbal.ai/install.sh | sh
-```
+    ```bash
+    wget -qO- https://timbal.ai/install.sh | sh
+    ```
+  </Tab>
+  <Tab title="Windows">
+    Use PowerShell to download and execute the installation script:
 
-**Windows**
-
-Use PowerShell to download and execute the installation script:
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://timbal.ai/install.ps1 | iex"
-```
+    ```powershell
+    powershell -ExecutionPolicy ByPass -c "irm https://timbal.ai/install.ps1 | iex"
+    ```
+  </Tab>
+</Tabs>
 
 <Tip>
-Once installed, you can use the `timbal` command to manage your projects! You can skip to the [quickstart guide](./quickstart) to get started.
+The installation script may be inspected before use:
+
+<Tabs>
+  <Tab title="macOS / Linux">
+    ```bash
+    curl -LsSf https://timbal.ai/install.sh | less
+    ```
+  </Tab>
+  <Tab title="Windows">
+    ```powershell
+    irm https://timbal.ai/install.ps1 | less
+    ```
+  </Tab>
+</Tabs>
+
+Alternatively, the installer or binaries can be downloaded directly from [GitHub](https://github.com/timbal-ai/timbal/releases).
 </Tip>
+
+## Upgrading
+
+To upgrade the CLI to the latest version, you can either run:
+
+```bash
+timbal upgrade
+```
+
+Or re-run the installation script:
+
+<Tabs>
+  <Tab title="macOS / Linux">
+    ```bash
+    curl -LsSf https://timbal.ai/install.sh | sh
+    ```
+  </Tab>
+  <Tab title="Windows">
+    ```powershell
+    powershell -ExecutionPolicy ByPass -c "irm https://timbal.ai/install.ps1 | iex"
+    ```
+  </Tab>
+</Tabs>
+
+## Uninstallation
+
+To remove the CLI, delete the binary and the `~/.timbal` data directory:
+
+<Tabs>
+  <Tab title="macOS / Linux">
+    ```bash
+    rm ~/.local/bin/timbal
+    rm -rf ~/.timbal
+    ```
+  </Tab>
+  <Tab title="Windows">
+    ```powershell
+    Remove-Item "$env:USERPROFILE\.local\bin\timbal.exe"
+    Remove-Item -Recurse -Force "$env:USERPROFILE\.timbal"
+    ```
+  </Tab>
+</Tabs>
+
+---
 
 ## Python Package
 
@@ -73,6 +105,12 @@ Using `pip`:
 
 ```bash
 pip install timbal
+```
+
+Or with `uv`:
+
+```bash
+uv add timbal
 ```
 
 Alternatively, if you want the latest changes and want to experiment with beta features, you can clone the repository and install from source:
