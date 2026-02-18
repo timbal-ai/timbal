@@ -77,11 +77,7 @@ Model = Literal[
     # TogetherAI models
     "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",
     "togetherai/mistralai/Mistral-7B-Instruct-v0.3",
-    "togetherai/Qwen/Qwen2.5-VL-72B-Instruct",
-    "togetherai/Qwen/Qwen2.5-Coder-32B-Instruct",
-    "togetherai/meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo",
     "togetherai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
-    "togetherai/meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo",
     "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
     "togetherai/deepseek-ai/DeepSeek-V3.1",
     "togetherai/deepseek-ai/DeepSeek-R1",
@@ -97,8 +93,6 @@ Model = Literal[
     "google/gemini-2.5-flash-preview-tts",
     "google/gemini-2.5-pro-preview-tts",
     "google/gemini-2.0-flash-preview-image-generation",
-    "google/gemini-2.0-flash",
-    "google/gemini-2.0-flash-lite",
     # x.ai/Grok models
     "xai/grok-4",
     "xai/grok-4-fast-reasoning",
@@ -244,7 +238,6 @@ async def _llm_router(
             "Thinking configuration for the LLM. Provider-specific. "
             "For OpenAI models, this should be a dictionary with 'effort' and 'summary' keys. "
             "For Anthropic models, this should be a dictionary with 'budget_tokens' key. "
-            "For Google models, this should be a dictionary with 'thinking_level' key."
         ),
     ),
     base_url: str | SecretStr | None = Field(
