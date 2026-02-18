@@ -73,10 +73,19 @@ fn readApiKey(content: []const u8, profile: []const u8) ?[]const u8 {
     return null;
 }
 
+const GitInput = struct {
+    host: ?[]u8 = null,
+    path: ?[]u8 = null,
+
+    fn deinit(self: *GitInput, allocator: std.mem.Allocator) void {
+        if (self.host) |h| allocator.free(h);
+        if (self.path) |p| allocator.free(p);
+    }
+};
+
 /// Parse the Git credential protocol input from stdin.
-/// Returns the host value if found.
-fn parseGitInput(allocator: std.mem.Allocator, stdin: std.io.GenericReader(std.fs.File, std.posix.ReadError, std.fs.File.read)) !?[]u8 {
-    var host: ?[]u8 = null;
+fn parseGitInput(allocator: std.mem.Allocator, stdin: std.io.GenericReader(std.fs.File, std.posix.ReadError, std.fs.File.read)) !GitInput {
+    var result = GitInput{};
 
     while (true) {
         var buf: [1024]u8 = undefined;
@@ -88,12 +97,15 @@ fn parseGitInput(allocator: std.mem.Allocator, stdin: std.io.GenericReader(std.f
         if (trimmed.len == 0) break;
 
         if (std.mem.startsWith(u8, trimmed, "host=")) {
-            if (host) |old| allocator.free(old);
-            host = try allocator.dupe(u8, trimmed["host=".len..]);
+            if (result.host) |old| allocator.free(old);
+            result.host = try allocator.dupe(u8, trimmed["host=".len..]);
+        } else if (std.mem.startsWith(u8, trimmed, "path=")) {
+            if (result.path) |old| allocator.free(old);
+            result.path = try allocator.dupe(u8, trimmed["path=".len..]);
         }
     }
 
-    return host;
+    return result;
 }
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -136,13 +148,14 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const stdin = std.io.getStdIn().reader();
     const stdout = std.io.getStdOut().writer();
 
-    // Parse Git's input to check the host.
-    const host = try parseGitInput(allocator, stdin);
-    if (host == null) return;
-    defer allocator.free(host.?);
+    // Parse Git's input to check the host and path.
+    var git_input = try parseGitInput(allocator, stdin);
+    defer git_input.deinit(allocator);
+
+    const host = git_input.host orelse return;
 
     // Only respond for Timbal hosts.
-    if (!std.mem.endsWith(u8, host.?, "timbal.ai")) return;
+    if (!std.mem.endsWith(u8, host, "timbal.ai")) return;
 
     // Profile priority: --profile flag > TIMBAL_PROFILE env var > "default"
     const env_profile = std.process.getEnvVarOwned(allocator, "TIMBAL_PROFILE") catch |err| blk: {
@@ -167,5 +180,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const api_key = readApiKey(content, profile) orelse return;
 
     // Output Git credential protocol response.
-    try stdout.print("protocol=https\nhost={s}\nusername=timbal\npassword={s}\n\n", .{ host.?, api_key });
+    try stdout.print("protocol=https\nhost={s}\n", .{host});
+    if (git_input.path) |path| {
+        try stdout.print("path={s}\n", .{path});
+    }
+    try stdout.print("username=timbal\npassword={s}\n\n", .{api_key});
 }

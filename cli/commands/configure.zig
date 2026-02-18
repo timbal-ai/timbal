@@ -304,6 +304,78 @@ fn readLine(
     return try allocator.dupe(u8, trimmed);
 }
 
+fn runGitConfig(
+    allocator: std.mem.Allocator,
+    stdout: std.fs.File.Writer,
+    verbose: bool,
+    key: []const u8,
+    value: []const u8,
+) !void {
+    try runGitConfigWithFlag(allocator, stdout, verbose, null, key, value);
+}
+
+fn runGitConfigWithFlag(
+    allocator: std.mem.Allocator,
+    stdout: std.fs.File.Writer,
+    verbose: bool,
+    flag: ?[]const u8,
+    key: []const u8,
+    value: []const u8,
+) !void {
+    if (verbose) {
+        if (flag) |f| {
+            try stdout.print("Running: git config --global {s} {s} '{s}'\n", .{ f, key, value });
+        } else {
+            try stdout.print("Running: git config --global {s} '{s}'\n", .{ key, value });
+        }
+    }
+
+    var argv_buf: [6][]const u8 = undefined;
+    var argc: usize = 0;
+    argv_buf[argc] = "git";
+    argc += 1;
+    argv_buf[argc] = "config";
+    argc += 1;
+    argv_buf[argc] = "--global";
+    argc += 1;
+    if (flag) |f| {
+        argv_buf[argc] = f;
+        argc += 1;
+    }
+    argv_buf[argc] = key;
+    argc += 1;
+    argv_buf[argc] = value;
+    argc += 1;
+    const argv = argv_buf[0..argc];
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    if (child.spawn()) |_| {
+        const term = child.wait() catch |err| {
+            if (verbose) {
+                try stdout.print("Warning: Failed to wait for git process: {}\n", .{err});
+            }
+            return;
+        };
+        if (verbose) {
+            if (term.Exited == 0) {
+                try stdout.print("Set {s} = {s}\n", .{ key, value });
+            } else {
+                try stdout.print("Warning: git config exited with code {d}.\n", .{term.Exited});
+            }
+        }
+    } else |err| {
+        if (verbose) {
+            try stdout.print("Warning: Failed to spawn git process: {}\n", .{err});
+        } else {
+            try stdout.print("Warning: Failed to set git config {s}.\n", .{key});
+        }
+    }
+}
+
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var verbose: bool = false;
     _ = &verbose;
@@ -424,4 +496,20 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Write files.
     try writeFile(allocator, timbal_dir, credentials_path, credentials_content);
     try writeFile(allocator, timbal_dir, config_path, config_content);
+
+    // Configure git credential settings for the base URL.
+    if (verbose) {
+        try stdout.print("Configuring git credentials for {s}...\n", .{final_base_url});
+    }
+
+    const use_http_path_key = try std.fmt.allocPrint(allocator, "credential.{s}.useHttpPath", .{final_base_url});
+    defer allocator.free(use_http_path_key);
+    try runGitConfig(allocator, stdout, verbose, use_http_path_key, "false");
+
+    const helper_key = try std.fmt.allocPrint(allocator, "credential.{s}.helper", .{final_base_url});
+    defer allocator.free(helper_key);
+    // Set empty string first to clear any inherited system/global credential helpers
+    // (e.g. Git Credential Manager on Windows), then add the timbal helper.
+    try runGitConfigWithFlag(allocator, stdout, verbose, "--replace-all", helper_key, "");
+    try runGitConfigWithFlag(allocator, stdout, verbose, "--add", helper_key, "!timbal credential-helper");
 }

@@ -25,42 +25,38 @@ fn printUsage() !void {
         "\n");
 }
 
-fn downloadInstallScript(allocator: std.mem.Allocator, url: []const u8, quiet: bool, verbose: bool) ![]const u8 {
-    if (!quiet) {
-        std.debug.print("Downloading install script from {s}...\n", .{url});
-    }
-
-    var client = std.http.Client{ .allocator = allocator };
-    defer client.deinit();
-
-    var script_buffer = std.ArrayList(u8).init(allocator);
-    defer script_buffer.deinit();
-
-    const res = client.fetch(.{
-        .location = .{ .url = url },
-        .method = .GET,
-        .response_storage = .{ .dynamic = &script_buffer },
-    }) catch |err| {
-        const stderr = std.io.getStdErr().writer();
-        try stderr.print("Error: Failed to download install script: {}\n", .{err});
-        std.process.exit(1);
+fn getOsName() ?[]const u8 {
+    return switch (builtin.os.tag) {
+        .linux => "linux",
+        .macos => "darwin",
+        .windows => "windows",
+        else => null,
     };
+}
 
-    if (res.status != .ok) {
-        const stderr = std.io.getStdErr().writer();
-        try stderr.print("Error: Failed to download install script (HTTP {d})\n", .{@intFromEnum(res.status)});
-        std.process.exit(1);
-    }
-
-    if (verbose) {
-        std.debug.print("Downloaded {d} bytes\n", .{script_buffer.items.len});
-    }
-
-    return script_buffer.toOwnedSlice();
+fn getArchName() ?[]const u8 {
+    return switch (builtin.cpu.arch) {
+        .x86_64 => "x86_64",
+        .aarch64 => if (builtin.os.tag == .macos) "arm64" else "aarch64",
+        else => null,
+    };
 }
 
 fn upgradeUnix(allocator: std.mem.Allocator, quiet: bool, verbose: bool, force: bool) !void {
-    // Check if we're already on the latest version.
+    const stderr = std.io.getStdErr().writer();
+
+    // Get the path of the currently running executable.
+    const self_exe = std.fs.selfExePathAlloc(allocator) catch {
+        try stderr.writeAll("Error: Failed to determine the path of the current executable.\n");
+        std.process.exit(1);
+    };
+    defer allocator.free(self_exe);
+
+    if (verbose) {
+        std.debug.print("Current executable: {s}\n", .{self_exe});
+    }
+
+    // Download the manifest to get the download URL.
     const manifest_url = "https://github.com/timbal-ai/timbal/releases/latest/download/manifest.json";
 
     if (!quiet) {
@@ -73,16 +69,22 @@ fn upgradeUnix(allocator: std.mem.Allocator, quiet: bool, verbose: bool, force: 
     var manifest_buffer = std.ArrayList(u8).init(allocator);
     defer manifest_buffer.deinit();
 
-    const manifest_fetched = blk: {
-        const res = client.fetch(.{
-            .location = .{ .url = manifest_url },
-            .method = .GET,
-            .response_storage = .{ .dynamic = &manifest_buffer },
-        }) catch break :blk false;
-        break :blk res.status == .ok;
+    const manifest_res = client.fetch(.{
+        .location = .{ .url = manifest_url },
+        .method = .GET,
+        .response_storage = .{ .dynamic = &manifest_buffer },
+    }) catch |err| {
+        try stderr.print("Error: Failed to download manifest: {}\n", .{err});
+        std.process.exit(1);
     };
 
-    if (manifest_fetched and !force) {
+    if (manifest_res.status != .ok) {
+        try stderr.print("Error: Failed to download manifest (HTTP {d})\n", .{@intFromEnum(manifest_res.status)});
+        std.process.exit(1);
+    }
+
+    // Check if we're already on the latest version.
+    if (!force) {
         const latest_version = parseManifestField(allocator, manifest_buffer.items, "version");
         defer if (latest_version) |v| allocator.free(v);
 
@@ -97,34 +99,88 @@ fn upgradeUnix(allocator: std.mem.Allocator, quiet: bool, verbose: bool, force: 
         }
     }
 
-    const script_url = "https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.sh";
+    // Parse the download URL from the manifest.
+    const os_name = getOsName() orelse {
+        try stderr.writeAll("Error: Unsupported operating system.\n");
+        std.process.exit(1);
+    };
+    const arch_name = getArchName() orelse {
+        try stderr.writeAll("Error: Unsupported architecture.\n");
+        std.process.exit(1);
+    };
 
-    // Download the install script
-    const script_content = try downloadInstallScript(allocator, script_url, quiet, verbose);
-    defer allocator.free(script_content);
+    const download_url = parseManifestUrl(allocator, manifest_buffer.items, os_name, arch_name) orelse {
+        try stderr.print("Error: No download URL found in manifest for {s} {s}.\n", .{ os_name, arch_name });
+        std.process.exit(1);
+    };
+    defer allocator.free(download_url);
 
-    if (!quiet) {
-        std.debug.print("Launching install script...\n", .{});
-        std.debug.print("The upgrade will complete after this process exits.\n", .{});
+    if (verbose) {
+        std.debug.print("Download URL: {s}\n", .{download_url});
     }
 
-    // Execute via: sh -c 'script content' sh -y
-    // This passes -y as $0 argument
-    const argv = [_][]const u8{ "sh", "-c", script_content, "sh", "-y" };
+    // Download the new binary.
+    if (!quiet) {
+        std.debug.print("Downloading new version...\n", .{});
+    }
 
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
+    var binary_buffer = std.ArrayList(u8).init(allocator);
+    defer binary_buffer.deinit();
 
-    try child.spawn();
+    const bin_res = client.fetch(.{
+        .location = .{ .url = download_url },
+        .method = .GET,
+        .response_storage = .{ .dynamic = &binary_buffer },
+        .max_append_size = 50 * 1024 * 1024,
+    }) catch |err| {
+        try stderr.print("Error: Failed to download new binary: {}\n", .{err});
+        std.process.exit(1);
+    };
 
-    const term = try child.wait();
+    if (bin_res.status != .ok) {
+        try stderr.print("Error: Failed to download new binary (HTTP {d})\n", .{@intFromEnum(bin_res.status)});
+        std.process.exit(1);
+    }
 
-    if (term.Exited != 0) {
-        std.debug.print("Upgrade script exited with code: {d}\n", .{term.Exited});
-    } else {
-        std.debug.print("Upgrade completed successfully\n", .{});
+    if (verbose) {
+        std.debug.print("Downloaded {d} bytes\n", .{binary_buffer.items.len});
+    }
+
+    // Sanity check: a valid binary should be at least 100KB.
+    if (binary_buffer.items.len < 100 * 1024) {
+        try stderr.print("Error: Downloaded file is too small ({d} bytes). The download may have failed.\n", .{binary_buffer.items.len});
+        std.process.exit(1);
+    }
+
+    // On Unix we can simply overwrite the running binary in place.
+    if (!quiet) {
+        std.debug.print("Replacing binary...\n", .{});
+    }
+
+    // Remove and recreate to handle potential permission/inode issues cleanly.
+    std.fs.deleteFileAbsolute(self_exe) catch |err| {
+        try stderr.print("Error: Failed to remove current executable: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    const new_file = std.fs.createFileAbsolute(self_exe, .{}) catch |err| {
+        try stderr.print("Error: Failed to create new executable: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer new_file.close();
+
+    new_file.writeAll(binary_buffer.items) catch |err| {
+        try stderr.print("Error: Failed to write new executable: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    // Set executable permission.
+    std.posix.fchmod(new_file.handle, 0o755) catch |err| {
+        try stderr.print("Warning: Failed to set executable permission: {}\n", .{err});
+    };
+
+    if (!quiet) {
+        std.debug.print("Upgrade completed successfully.\n", .{});
     }
 }
 
@@ -199,8 +255,17 @@ fn upgradeWindows(allocator: std.mem.Allocator, quiet: bool, verbose: bool, forc
     }
 
     // Parse the download URL from the manifest
-    const download_url = parseManifestUrl(allocator, manifest_buffer.items, "windows", "x86_64") orelse {
-        try stderr.writeAll("Error: No download URL found in manifest for windows x86_64.\n");
+    const os_name = getOsName() orelse {
+        try stderr.writeAll("Error: Unsupported operating system.\n");
+        std.process.exit(1);
+    };
+    const arch_name = getArchName() orelse {
+        try stderr.writeAll("Error: Unsupported architecture.\n");
+        std.process.exit(1);
+    };
+
+    const download_url = parseManifestUrl(allocator, manifest_buffer.items, os_name, arch_name) orelse {
+        try stderr.print("Error: No download URL found in manifest for {s} {s}.\n", .{ os_name, arch_name });
         std.process.exit(1);
     };
     defer allocator.free(download_url);
