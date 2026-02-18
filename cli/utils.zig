@@ -18,7 +18,7 @@ pub const global_options_help =
     "    \x1b[1;36m-q\x1b[0m, \x1b[1;36m--quiet      \x1b[0mDo not print any output\n" ++
     "    \x1b[1;36m-v\x1b[0m, \x1b[1;36m--verbose    \x1b[0mUse verbose output\n" ++
     "    \x1b[1;36m-h\x1b[0m, \x1b[1;36m--help       \x1b[0mDisplay the concise help for this command\n" ++
-    "    \x1b[1;36m--profile <NAME>\x1b[0m  Use a named profile\n";
+    "    \x1b[1;36m--profile <NAME>\x1b[0m Use a named profile\n";
 
 pub const ProjectType = enum {
     agent,

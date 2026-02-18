@@ -33,9 +33,9 @@ fn printUsage() !void {
         "    \x1b[1;36mversion   \x1b[0mDisplay the current version\n" ++
         "\n" ++
         "\x1b[1;32mDeprecated commands:\n" ++
-        "    \x1b[0;90minit    Initialize a new application\n" ++
-        "    \x1b[0;90mbuild   Build the application into a container\n" ++
-        "    \x1b[0;90mpush    Push an application to the Timbal Platform\x1b[0m\n" ++
+        "    \x1b[0;90minit  Initialize a new application\n" ++
+        "    \x1b[0;90mbuild Build the application into a container\n" ++
+        "    \x1b[0;90mpush  Push an application to the Timbal Platform\x1b[0m\n" ++
         "\n" ++
         utils.global_options_help ++
         "\n");

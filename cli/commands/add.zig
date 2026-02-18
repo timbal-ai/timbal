@@ -18,10 +18,10 @@ fn printUsage() !void {
         "\x1b[1;32mUsage: \x1b[1;36mtimbal add \x1b[0;36m<COMPONENT>\n" ++
         "\n" ++
         "\x1b[1;32mComponents:\n" ++
-        "    \x1b[1;36magent     \x1b[0mAdd a new agent to the workforce\n" ++
-        "    \x1b[1;36mworkflow  \x1b[0mAdd a new workflow to the workforce\n" ++
-        "    \x1b[1;36mui        \x1b[0mAdd a UI blueprint (Chat or Blank)\n" ++
-        "    \x1b[1;36mapi       \x1b[0mAdd the API blueprint (Elysia + Bun)\n" ++
+        "    \x1b[1;36magent    \x1b[0mAdd a new agent to the workforce\n" ++
+        "    \x1b[1;36mworkflow \x1b[0mAdd a new workflow to the workforce\n" ++
+        "    \x1b[1;36mui       \x1b[0mAdd a UI blueprint (Chat or Blank)\n" ++
+        "    \x1b[1;36mapi      \x1b[0mAdd the API blueprint (Elysia + Bun)\n" ++
         "\n" ++
         utils.global_options_help ++
         "\n");

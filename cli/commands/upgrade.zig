@@ -16,7 +16,10 @@ fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.writeAll("Upgrade timbal to the latest version.\n" ++
         "\n" ++
-        "\x1b[1;32mUsage: \x1b[1;36mtimbal upgrade\n" ++
+        "\x1b[1;32mUsage: \x1b[1;36mtimbal upgrade \x1b[0;36m[OPTIONS]\n" ++
+        "\n" ++
+        "\x1b[1;32mOptions:\n" ++
+        "    \x1b[1;36m-f\x1b[0m, \x1b[1;36m--force \x1b[0mForce reinstall even if already on the latest version\n" ++
         "\n" ++
         utils.global_options_help ++
         "\n");
@@ -56,7 +59,44 @@ fn downloadInstallScript(allocator: std.mem.Allocator, url: []const u8, quiet: b
     return script_buffer.toOwnedSlice();
 }
 
-fn upgradeUnix(allocator: std.mem.Allocator, quiet: bool, verbose: bool) !void {
+fn upgradeUnix(allocator: std.mem.Allocator, quiet: bool, verbose: bool, force: bool) !void {
+    // Check if we're already on the latest version.
+    const manifest_url = "https://github.com/timbal-ai/timbal/releases/latest/download/manifest.json";
+
+    if (!quiet) {
+        std.debug.print("Fetching latest version info...\n", .{});
+    }
+
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    var manifest_buffer = std.ArrayList(u8).init(allocator);
+    defer manifest_buffer.deinit();
+
+    const manifest_fetched = blk: {
+        const res = client.fetch(.{
+            .location = .{ .url = manifest_url },
+            .method = .GET,
+            .response_storage = .{ .dynamic = &manifest_buffer },
+        }) catch break :blk false;
+        break :blk res.status == .ok;
+    };
+
+    if (manifest_fetched and !force) {
+        const latest_version = parseManifestField(allocator, manifest_buffer.items, "version");
+        defer if (latest_version) |v| allocator.free(v);
+
+        if (latest_version) |lv| {
+            if (std.mem.eql(u8, timbal_version, lv)) {
+                std.debug.print("Already on the latest version ({s}).\n", .{lv});
+                return;
+            }
+            if (!quiet) {
+                std.debug.print("New version available: {s}\n", .{lv});
+            }
+        }
+    }
+
     const script_url = "https://raw.githubusercontent.com/timbal-ai/timbal/main/cli/install.sh";
 
     // Download the install script
@@ -88,7 +128,7 @@ fn upgradeUnix(allocator: std.mem.Allocator, quiet: bool, verbose: bool) !void {
     }
 }
 
-fn upgradeWindows(allocator: std.mem.Allocator, quiet: bool, verbose: bool) !void {
+fn upgradeWindows(allocator: std.mem.Allocator, quiet: bool, verbose: bool, force: bool) !void {
     const stderr = std.io.getStdErr().writer();
 
     // Get the path of the currently running executable
@@ -108,11 +148,12 @@ fn upgradeWindows(allocator: std.mem.Allocator, quiet: bool, verbose: bool) !voi
         std.process.exit(1);
     };
 
-    const old_exe_path = try std.fmt.allocPrint(allocator, "{s}\\timbal.old.exe", .{install_dir});
+    const exe_basename = std.fs.path.basename(self_exe);
+    const old_exe_path = try std.fmt.allocPrint(allocator, "{s}\\{s}.old", .{ install_dir, exe_basename });
     defer allocator.free(old_exe_path);
 
-    const new_exe_path = try std.fmt.allocPrint(allocator, "{s}\\timbal.exe", .{install_dir});
-    defer allocator.free(new_exe_path);
+    // Write the new binary to the same path as the current executable.
+    const new_exe_path = self_exe;
 
     // Download the manifest to get the download URL
     const manifest_url = "https://github.com/timbal-ai/timbal/releases/latest/download/manifest.json";
@@ -139,6 +180,22 @@ fn upgradeWindows(allocator: std.mem.Allocator, quiet: bool, verbose: bool) !voi
     if (manifest_res.status != .ok) {
         try stderr.print("Error: Failed to download manifest (HTTP {d})\n", .{@intFromEnum(manifest_res.status)});
         std.process.exit(1);
+    }
+
+    // Check if we're already on the latest version.
+    if (!force) {
+        const latest_version = parseManifestField(allocator, manifest_buffer.items, "version");
+        defer if (latest_version) |v| allocator.free(v);
+
+        if (latest_version) |lv| {
+            if (std.mem.eql(u8, timbal_version, lv)) {
+                std.debug.print("Already on the latest version ({s}).\n", .{lv});
+                return;
+            }
+            if (!quiet) {
+                std.debug.print("New version available: {s}\n", .{lv});
+            }
+        }
     }
 
     // Parse the download URL from the manifest
@@ -179,6 +236,12 @@ fn upgradeWindows(allocator: std.mem.Allocator, quiet: bool, verbose: bool) !voi
         std.debug.print("Downloaded {d} bytes\n", .{binary_buffer.items.len});
     }
 
+    // Sanity check: a valid binary should be at least 100KB.
+    if (binary_buffer.items.len < 100 * 1024) {
+        try stderr.print("Error: Downloaded file is too small ({d} bytes). The download may have failed.\n", .{binary_buffer.items.len});
+        std.process.exit(1);
+    }
+
     // Clean up any leftover .old.exe from a previous upgrade
     std.fs.deleteFileAbsolute(old_exe_path) catch {};
 
@@ -216,6 +279,19 @@ fn upgradeWindows(allocator: std.mem.Allocator, quiet: bool, verbose: bool) !voi
     }
 }
 
+/// Parse a field from the top-level manifest JSON object.
+/// Caller owns the returned memory.
+fn parseManifestField(allocator: std.mem.Allocator, manifest: []const u8, field: []const u8) ?[]const u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, manifest, .{}) catch return null;
+    defer parsed.deinit();
+
+    const value = parsed.value.object.get(field) orelse return null;
+    return switch (value) {
+        .string => |s| allocator.dupe(u8, s) catch return null,
+        else => null,
+    };
+}
+
 /// Parse a URL from the manifest JSON for a given OS and architecture.
 /// Caller owns the returned memory.
 fn parseManifestUrl(allocator: std.mem.Allocator, manifest: []const u8, os: []const u8, arch: []const u8) ?[]const u8 {
@@ -236,6 +312,7 @@ fn parseManifestUrl(allocator: std.mem.Allocator, manifest: []const u8, os: []co
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var verbose: bool = false;
     var quiet: bool = false;
+    var force: bool = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -247,6 +324,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+            force = true;
         } else {
             try printUsageWithError("Error: unknown option");
             return;
@@ -262,10 +341,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     switch (os_tag) {
         .windows => {
-            try upgradeWindows(allocator, quiet, verbose);
+            try upgradeWindows(allocator, quiet, verbose, force);
         },
         .linux, .macos => {
-            try upgradeUnix(allocator, quiet, verbose);
+            try upgradeUnix(allocator, quiet, verbose, force);
         },
         else => {
             const stderr = std.io.getStdErr().writer();

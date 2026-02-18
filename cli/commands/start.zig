@@ -112,7 +112,7 @@ fn printUsage() !void {
         "\x1b[1;32mUsage: \x1b[1;36mtimbal start \x1b[0;36m[PATH] [OPTIONS]\n" ++
         "\n" ++
         "\x1b[1;32mArguments:\n" ++
-        "    \x1b[1;36m[PATH]         \x1b[0mPath to the project directory (default: current directory)\n" ++
+        "    \x1b[1;36m[PATH] \x1b[0mPath to the project directory (default: current directory)\n" ++
         "\n" ++
         utils.global_options_help ++
         "\n");

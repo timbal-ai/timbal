@@ -25,8 +25,8 @@ fn printUsage() !void {
         "    \x1b[0;36m[PATH]\x1b[0m The path to use for the project\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
-        "    \x1b[1;36m--agent \x1b[0m Initialize a timbal project as an agent (default)\n" ++
-        "    \x1b[1;36m--workflow \x1b[0m Initialize a timbal project as a workflow\n" ++
+        "    \x1b[1;36m--agent\x1b[0m    Initialize a timbal project as an agent (default)\n" ++
+        "    \x1b[1;36m--workflow\x1b[0m Initialize a timbal project as a workflow\n" ++
         "\n" ++
         utils.global_options_help ++
         "\n");
