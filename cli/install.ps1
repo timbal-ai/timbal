@@ -33,7 +33,9 @@ License: MIT License
 
 param (
     [Parameter(HelpMessage = "Print Help")]
-    [switch]$Help
+    [switch]$Help,
+    [Parameter(HelpMessage = "Automatically answer yes to all prompts")]
+    [switch]$Yes
 )
 
 
@@ -75,29 +77,42 @@ Please download and install it first:
 }
 
 
+function Install-Uv() {
+    Write-Information "Installing uv..."
+    try {
+        powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+        if ($LASTEXITCODE -ne 0) { throw "Exit code $LASTEXITCODE" }
+    } catch {
+        throw "Failed to install uv. Please install it manually from https://docs.astral.sh/uv/"
+    }
+    # Refresh PATH in current session
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+        throw "uv was installed but could not be found in PATH. Please restart your terminal and re-run this script."
+    }
+    Write-Information "uv installed successfully."
+}
+
+
 function Test-UvInstallation() {
     Write-Information "Checking for 'uv' command in PATH..."
 
-    try {
-        Get-Command uv -ErrorAction Stop | Out-Null
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
         Write-Information "'uv' command found successfully."
-    } catch [System.Management.Automation.CommandNotFoundException] {
-        # Specific catch for command not found
-        $errorMessage = @"
-'uv' command not found in PATH. Timbal requires 'uv' (from Astral) for Python project management.
+        return
+    }
 
-Possible Solutions:
-1. Install 'uv' using the official installer:
-   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-2. If 'uv' is already installed, ensure its installation directory
-   is correctly added to your User or System PATH environment variable and restart your terminal.
-"@
-        Write-Error $errorMessage
-        Exit 1
-    } catch {
-        # Catch any other unexpected errors during the check
-        Write-Error "An unexpected error occurred while checking for 'uv': $($_.Exception.Message)"
-        Exit 1
+    Write-Information "uv is not installed. Timbal requires uv for Python project management."
+    if ($Yes) {
+        Write-Information "Auto-installing uv (--yes flag provided)..."
+        Install-Uv
+    } else {
+        $choice = Read-Host "Install uv now? (Y/n)"
+        if ($choice -eq "n" -or $choice -eq "N") {
+            Write-Warning "Warning: uv is required for Timbal to work. You can install it later from https://docs.astral.sh/uv/"
+        } else {
+            Install-Uv
+        }
     }
 }
 
@@ -128,29 +143,42 @@ Possible Solutions:
 }
 
 
+function Install-Bun() {
+    Write-Information "Installing bun..."
+    try {
+        powershell -ExecutionPolicy ByPass -c "irm https://bun.sh/install.ps1 | iex"
+        if ($LASTEXITCODE -ne 0) { throw "Exit code $LASTEXITCODE" }
+    } catch {
+        throw "Failed to install bun. Please install it manually from https://bun.sh"
+    }
+    # Refresh PATH in current session
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
+        throw "bun was installed but could not be found in PATH. Please restart your terminal and re-run this script."
+    }
+    Write-Information "bun installed successfully."
+}
+
+
 function Test-BunInstallation() {
     Write-Information "Checking for 'bun' command in PATH..."
 
-    try {
-        Get-Command bun -ErrorAction Stop | Out-Null
+    if (Get-Command bun -ErrorAction SilentlyContinue) {
         Write-Information "'bun' command found successfully."
-    } catch [System.Management.Automation.CommandNotFoundException] {
-        $errorMessage = @"
-'bun' command not found in PATH. Timbal uses bun to manage packages and run UIs and APIs for your projects.
+        return
+    }
 
-Possible Solutions:
-1. Install 'bun' using the official installer:
-   powershell -c "irm bun.sh/install.ps1 | iex"
-2. If 'bun' is already installed, ensure its installation directory
-   is correctly added to your User or System PATH environment variable and restart your terminal.
-
-For more information, visit: https://bun.sh/docs/installation#windows
-"@
-        Write-Error $errorMessage
-        Exit 1
-    } catch {
-        Write-Error "An unexpected error occurred while checking for 'bun': $($_.Exception.Message)"
-        Exit 1
+    Write-Information "bun is not installed. Timbal uses bun to manage packages and run UIs and APIs for your projects."
+    if ($Yes) {
+        Write-Information "Auto-installing bun (--yes flag provided)..."
+        Install-Bun
+    } else {
+        $choice = Read-Host "Install bun now? (Y/n)"
+        if ($choice -eq "n" -or $choice -eq "N") {
+            Write-Warning "Warning: bun is required to run UIs and APIs with Timbal. You can install it later from https://bun.sh"
+        } else {
+            Install-Bun
+        }
     }
 }
 

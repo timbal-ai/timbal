@@ -106,13 +106,38 @@ command_exists() {
 
 check_uv() {
     if ! command_exists uv; then
-        error_exit "uv is not installed or not in PATH.
-Please install it using the following command:
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-
-If the command doesn't work, please refer to the documentation:
-    https://docs.astral.sh/uv/"
+        echo "uv is not installed. Timbal requires uv for Python project management."
+        if [ "$AUTO_YES" = true ]; then
+            echo "Auto-installing uv (--yes flag provided)..."
+            install_uv
+        else
+            read -p "Install uv now? (Y/n): " choice
+            case "$choice" in
+                n|N ) echo "Warning: uv is required for Timbal to work. You can install it later from https://docs.astral.sh/uv/";;
+                * ) install_uv;;
+            esac
+        fi
     fi
+}
+
+
+install_uv() {
+    if command_exists curl; then
+        curl -LsSf https://astral.sh/uv/install.sh | sh || error_exit "Failed to install uv."
+    elif command_exists wget; then
+        wget -qO- https://astral.sh/uv/install.sh | sh || error_exit "Failed to install uv."
+    else
+        error_exit "Cannot install uv: curl or wget is required. Please install uv manually from https://docs.astral.sh/uv/"
+    fi
+    # Re-source the shell environment to pick up uv in PATH
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*) ;;
+        *) export PATH="$HOME/.local/bin:$PATH" ;;
+    esac
+    if ! command_exists uv; then
+        error_exit "uv was installed but could not be found in PATH. Please restart your terminal and re-run this script."
+    fi
+    echo "uv installed successfully."
 }
 
 
@@ -132,15 +157,39 @@ Install git:
 
 check_bun() {
     if ! command_exists bun; then
-        error_exit "bun is not installed or not in PATH.
-Timbal uses bun to manage packages and run UIs and APIs for your projects.
-
-Install bun:
-    curl -fsSL https://bun.sh/install | bash
-
-If the command doesn't work, please refer to the documentation:
-    https://bun.sh/docs/installation"
+        echo "bun is not installed. Timbal uses bun to manage packages and run UIs and APIs for your projects."
+        if [ "$AUTO_YES" = true ]; then
+            echo "Auto-installing bun (--yes flag provided)..."
+            install_bun
+        else
+            read -p "Install bun now? (Y/n): " choice
+            case "$choice" in
+                n|N ) echo "Warning: bun is required to run UIs and APIs with Timbal. You can install it later from https://bun.sh";;
+                * ) install_bun;;
+            esac
+        fi
     fi
+}
+
+
+install_bun() {
+    if command_exists curl; then
+        curl -fsSL https://bun.sh/install | bash || error_exit "Failed to install bun."
+    elif command_exists wget; then
+        wget -qO- https://bun.sh/install | bash || error_exit "Failed to install bun."
+    else
+        error_exit "Cannot install bun: curl or wget is required. Please install bun manually from https://bun.sh"
+    fi
+    # Re-source the shell environment to pick up bun in PATH
+    bun_bin="${BUN_INSTALL:-$HOME/.bun}/bin"
+    case ":$PATH:" in
+        *":${bun_bin}:"*) ;;
+        *) export PATH="${bun_bin}:$PATH" ;;
+    esac
+    if ! command_exists bun; then
+        error_exit "bun was installed but could not be found in PATH. Please restart your terminal and re-run this script."
+    fi
+    echo "bun installed successfully."
 }
 
 
