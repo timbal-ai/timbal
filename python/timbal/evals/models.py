@@ -203,6 +203,11 @@ class EvalResult(BaseModel):
     captured_stdout: str = ""
     captured_stderr: str = ""
 
+    # ACE tracking
+    ace_context: list[dict[str, Any]] = Field(default_factory=list)
+    ace_active_policies: list[str] = Field(default_factory=list)
+    ace_policies: list[str] = Field(default_factory=list)
+
 
 class EvalSummary(BaseModel):
     """Summary of all eval runs."""

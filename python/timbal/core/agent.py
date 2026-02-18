@@ -678,17 +678,39 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     current_span._memory_dump.append(event._output_dump)
 
                     if self.output_model is not None:
+                        validation_error_msg = None
+                        validation_context = self.model_params.get("validation_context")
                         for content in event.output.content:
                             # TODO Refactor this. If the llm should return a fixed output model, we should error if it doesn't return it
                             if isinstance(content, TextContent):
                                 try:
                                     output = coerce_to_dict(content.text)
-                                    validated_output = self.output_model(**output)
+                                    validated_output = self.output_model.model_validate(output, context=validation_context)
                                     event.output = validated_output
                                     break
-                                except (json.JSONDecodeError, ValueError, ValidationError):
-                                    logger.error(f"Failed to parse JSON from LLM output: {content.text}")
+                                except (json.JSONDecodeError, ValueError, ValidationError) as e:
+                                    validation_error_msg = str(e)
+                                    logger.warning(f"Output validation failed: {validation_error_msg}")
                                     continue
+
+                        if validation_error_msg and i < self.max_iter - 1:
+                            # Feed the error back to the LLM so it can correct itself
+                            error_feedback = Message.validate({
+                                "role": "user",
+                                "content": [{
+                                    "type": "text",
+                                    "text": (
+                                        f"Your output failed validation:\n"
+                                        f"{validation_error_msg}\n\n"
+                                        f"Try again."
+                                    ),
+                                }],
+                            })
+                            current_span.memory.append(error_feedback)
+                            current_span._memory_dump.append(await dump(error_feedback))
+                            i += 1
+                            break  # Break out of async for to retry in while loop
+                        
                     # Propagate the interruption with the processed output
                     if interrupted:
                         raise InterruptError(event.call_id, output=event.output)

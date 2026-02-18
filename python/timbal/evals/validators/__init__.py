@@ -21,6 +21,7 @@ from .min_length import MinLengthValidator
 from .not_null import NotNullValidator
 from .parallel import ParallelValidator
 from .pattern import PatternValidator
+from .prompt import PromptValidator
 from .semantic import SemanticValidator
 from .seq import SeqValidator
 from .starts_with import StartsWithValidator
@@ -45,6 +46,7 @@ Validator = Annotated[
     | GtValidator
     | GteValidator
     | SemanticValidator
+    | PromptValidator
     | LanguageValidator
     | JsonValidator
     | EmailValidator

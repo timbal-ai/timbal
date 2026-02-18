@@ -1,7 +1,10 @@
 import time
 import traceback
+from typing import Any
 
-from ..state import RunContext, set_run_context
+from timbal.types.message import Message
+
+from ..state import RunContext, set_call_id, set_parent_call_id, set_run_context
 from .display import (
     OutputCapture,
     print_eval_result,
@@ -14,16 +17,18 @@ from .validators.base import BaseValidator
 from .validators.context import ValidationContext
 
 
-async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
+async def run_eval(eval: Eval, capture: bool = True, ace: Any | None = None) -> EvalResult:
     """Run a single eval and return the result."""
-    run_context = RunContext()  # type: ignore[call-arg]
-    set_run_context(run_context)
-
+    
     error: EvalError | None = None
     validator_results: list[ValidatorResult] = []
     captured_stdout = ""
     captured_stderr = ""
     cap = None
+
+    ace_context = []
+    ace_active_policies = []
+    ace_policies = []
 
     start_time = time.perf_counter()
     try:
@@ -31,8 +36,30 @@ async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
             cap = OutputCapture()
             cap.__enter__()
 
+        raw = eval.params.get("messages", eval.params.get("prompt", []))
+        if not isinstance(raw, list):
+            raw = [raw]
+        messages = [Message.validate(m) for m in raw]
+        
+        if ace:
+            ace_run_context = RunContext()
+            set_run_context(ace_run_context)
+            session = await ace_run_context.get_session()
+            ace_messages = await ace.handler(messages=messages)
+            messages = ace_messages
+            ace_context = session.get("ace_context", [])
+            ace_active_policies = session.get("ace_active_policies", [])
+            ace_policies = session.get("ace_policies", [])
+            # Reset for agent execution
+            set_call_id(None)
+            set_parent_call_id(None)
+        
+
+        run_context = RunContext()
+        set_run_context(run_context)
+
         # TODO We should handle the cases where output_event.error is not None
-        _ = await eval.runnable(**eval.params).collect()  # type: ignore
+        _ = await eval.runnable(messages=messages).collect()  # type: ignore
 
         trace = run_context._trace
         validation_context = ValidationContext(trace=trace)
@@ -90,6 +117,9 @@ async def run_eval(eval: Eval, capture: bool = True) -> EvalResult:
         validator_results=validator_results,
         captured_stdout=captured_stdout,
         captured_stderr=captured_stderr,
+        ace_context=ace_context,
+        ace_active_policies=ace_active_policies,
+        ace_policies=ace_policies,
     )
 
 
