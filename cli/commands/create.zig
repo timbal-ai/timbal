@@ -298,6 +298,12 @@ fn selectOpenProject(available_editors: []const Editor) !?Editor {
 
     const total_options = available_editors.len + 1;
 
+    // Find the longest option name for padding.
+    var max_name_len: usize = 0;
+    for (0..total_options) |i| {
+        if (options[i].len > max_name_len) max_name_len = options[i].len;
+    }
+
     const stdout = std.io.getStdOut().writer();
     const stdin = std.io.getStdIn();
 
@@ -314,25 +320,24 @@ fn selectOpenProject(available_editors: []const Editor) !?Editor {
 
     // Initial render
     for (0..total_options) |i| {
+        const padding = max_name_len - options[i].len;
         if (i == selected) {
-            try stdout.print("  {s}❯ {s}{s}{s}  {s}{s}{s}\n", .{
+            try stdout.print("  {s}❯ {s}{s}{s}", .{
                 Color.bold_cyan,
                 Color.bold,
                 options[i],
                 Color.reset,
-                Color.dim,
-                descriptions[i],
-                Color.reset,
             });
+            try stdout.writeByteNTimes(' ', padding + 2);
+            try stdout.print("{s}{s}{s}\n", .{ Color.dim, descriptions[i], Color.reset });
         } else {
-            try stdout.print("  {s}  {s}{s}  {s}{s}{s}\n", .{
+            try stdout.print("  {s}  {s}{s}", .{
                 Color.dim,
                 options[i],
                 Color.reset,
-                Color.dim,
-                descriptions[i],
-                Color.reset,
             });
+            try stdout.writeByteNTimes(' ', padding + 2);
+            try stdout.print("{s}{s}{s}\n", .{ Color.dim, descriptions[i], Color.reset });
         }
     }
 
@@ -379,25 +384,24 @@ fn selectOpenProject(available_editors: []const Editor) !?Editor {
         if (needs_redraw) {
             moveCursorUp(total_options);
             for (0..total_options) |i| {
+                const padding = max_name_len - options[i].len;
                 if (i == selected) {
-                    try stdout.print("  {s}❯ {s}{s}{s}  {s}{s}{s}\n", .{
+                    try stdout.print("  {s}❯ {s}{s}{s}", .{
                         Color.bold_cyan,
                         Color.bold,
                         options[i],
                         Color.reset,
-                        Color.dim,
-                        descriptions[i],
-                        Color.reset,
                     });
+                    try stdout.writeByteNTimes(' ', padding + 2);
+                    try stdout.print("{s}{s}{s}\n", .{ Color.dim, descriptions[i], Color.reset });
                 } else {
-                    try stdout.print("  {s}  {s}{s}  {s}{s}{s}\n", .{
+                    try stdout.print("  {s}  {s}{s}", .{
                         Color.dim,
                         options[i],
                         Color.reset,
-                        Color.dim,
-                        descriptions[i],
-                        Color.reset,
                     });
+                    try stdout.writeByteNTimes(' ', padding + 2);
+                    try stdout.print("{s}{s}{s}\n", .{ Color.dim, descriptions[i], Color.reset });
                 }
             }
         }

@@ -13,7 +13,10 @@ const start_cmd = @import("commands/start.zig");
 const upgrade_cmd = @import("commands/upgrade.zig");
 
 // Embedded version.
-const timbal_version = @import("version.zig").timbal_version;
+const version_info = @import("version.zig");
+const timbal_version = version_info.timbal_version;
+const timbal_commit_hash = version_info.timbal_commit_hash;
+const timbal_commit_date = version_info.timbal_commit_date;
 
 fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
@@ -81,7 +84,7 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, action, "upgrade")) {
         try upgrade_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "version")) {
-        std.debug.print("Timbal {s}\n", .{timbal_version});
+        std.debug.print("timbal {s} ({s} {s})\n", .{ timbal_version, timbal_commit_hash, timbal_commit_date });
         std.process.exit(0);
     } else if (std.mem.eql(u8, action, "-h") or std.mem.eql(u8, action, "--help")) {
         try printUsage();

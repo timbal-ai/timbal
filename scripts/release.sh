@@ -13,6 +13,10 @@ if ! TAG_COMMIT=$(git rev-parse "v$VERSION" 2>/dev/null); then
     exit 1
 fi
 
+# Extract short commit hash and commit date for the version string.
+COMMIT_HASH=$(git rev-parse --short "v$VERSION")
+COMMIT_DATE=$(git log -1 --format=%cs "v$VERSION")
+
 # TODO Add building the python package.
 
 cd cli
@@ -27,10 +31,10 @@ if [ -d "zig-out/$VERSION" ]; then
         # Skip to asset handling
     else
         echo "Rebuilding..."
-        zig build -Dversion="$VERSION" -Doptimize=ReleaseSmall
+        zig build -Dversion="$VERSION" -Dcommit_hash="$COMMIT_HASH" -Dcommit_date="$COMMIT_DATE" -Doptimize=ReleaseSmall
     fi
 else
-    zig build -Dversion="$VERSION" -Doptimize=ReleaseSmall
+    zig build -Dversion="$VERSION" -Dcommit_hash="$COMMIT_HASH" -Dcommit_date="$COMMIT_DATE" -Doptimize=ReleaseSmall
 fi
 
 cd ..
@@ -41,9 +45,9 @@ RELEASE_URL="https://github.com/timbal-ai/timbal/releases/download/v$VERSION"
 ASSETS_PATH="cli/zig-out/$VERSION"
 
 # Determine the correct sha256sum command based on the OS.
-if [ "$(uname -s)" = "Darwin" ]; then 
+if [ "$(uname -s)" = "Darwin" ]; then
     SHASUM_CMD="shasum -a 256"
-else 
+else
     SHASUM_CMD="sha256sum"
 fi
 
@@ -118,7 +122,7 @@ if gh release view "v$VERSION" > /dev/null 2>&1; then
         echo "Aborting release creation."
         exit 0
     fi
-fi 
+fi
 
 echo "Creating release v$VERSION from tag (commit: $TAG_COMMIT)..."
 gh release create "v$VERSION" \

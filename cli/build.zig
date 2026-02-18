@@ -44,14 +44,20 @@ pub fn build(b: *std.Build) !void {
 
     const version_opt = b.option([]const u8, "version", "The CLI version being built.");
     const version = version_opt orelse "dev";
+    const commit_hash_opt = b.option([]const u8, "commit_hash", "The short commit hash for this build.");
+    const commit_hash = commit_hash_opt orelse "unknown";
+    const commit_date_opt = b.option([]const u8, "commit_date", "The commit date (YYYY-MM-DD) for this build.");
+    const commit_date = commit_date_opt orelse "unknown";
 
     // Generate a version file. The CLI commands will import from this file to get the timbal version.
-    // const version_file = b.pathJoin(&.{ b.build_root, "version.zig" });
     const version_file = "version.zig";
-    const version_content = "pub const timbal_version = \"{s}\";";
     var file = try std.fs.cwd().createFile(version_file, .{});
     defer file.close();
-    const content = try std.fmt.allocPrint(b.allocator, version_content, .{version});
+    const content = try std.fmt.allocPrint(
+        b.allocator,
+        "pub const timbal_version = \"{s}\";\npub const timbal_commit_hash = \"{s}\";\npub const timbal_commit_date = \"{s}\";\n",
+        .{ version, commit_hash, commit_date },
+    );
     defer b.allocator.free(content);
     try file.writeAll(content);
 
