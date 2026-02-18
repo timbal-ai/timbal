@@ -128,6 +128,33 @@ Possible Solutions:
 }
 
 
+function Test-BunInstallation() {
+    Write-Information "Checking for 'bun' command in PATH..."
+
+    try {
+        Get-Command bun -ErrorAction Stop | Out-Null
+        Write-Information "'bun' command found successfully."
+    } catch [System.Management.Automation.CommandNotFoundException] {
+        $errorMessage = @"
+'bun' command not found in PATH. Timbal uses bun to manage packages and run UIs and APIs for your projects.
+
+Possible Solutions:
+1. Install 'bun' using the official installer:
+   powershell -c "irm bun.sh/install.ps1 | iex"
+2. If 'bun' is already installed, ensure its installation directory
+   is correctly added to your User or System PATH environment variable and restart your terminal.
+
+For more information, visit: https://bun.sh/docs/installation#windows
+"@
+        Write-Error $errorMessage
+        Exit 1
+    } catch {
+        Write-Error "An unexpected error occurred while checking for 'bun': $($_.Exception.Message)"
+        Exit 1
+    }
+}
+
+
 function Get-Arch() {
     try {
         # NOTE: this might return X64 on ARM64 Windows, which is OK since emulation is available.
@@ -240,8 +267,9 @@ function Install-Binary($install_args) {
 
     Initialize-Environment
 
-    Test-UvInstallation
     Test-GitInstallation
+    Test-UvInstallation
+    Test-BunInstallation
 
     $InstallDir = Join-Path -Path $env:USERPROFILE -ChildPath ".local\bin"
 
@@ -270,11 +298,6 @@ function Install-Binary($install_args) {
     } else {
         Write-Information "'$InstallDir' is already in your user PATH."
     }
-
-    # Configure git credential helper for api.timbal.ai
-    Write-Information "Configuring git credential helper for api.timbal.ai..."
-    git config --global credential.https://api.timbal.ai.helper '!timbal credential-helper'
-    Write-Information "Git credential helper configured."
 
     Write-Information "Successfully installed timbal. Run 'timbal configure' to set up your credentials and settings."
 }

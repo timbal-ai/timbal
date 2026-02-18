@@ -130,6 +130,20 @@ Install git:
 }
 
 
+check_bun() {
+    if ! command_exists bun; then
+        error_exit "bun is not installed or not in PATH.
+Timbal uses bun to manage packages and run UIs and APIs for your projects.
+
+Install bun:
+    curl -fsSL https://bun.sh/install | bash
+
+If the command doesn't work, please refer to the documentation:
+    https://bun.sh/docs/installation"
+    fi
+}
+
+
 download_file() {
     URL="$1"
     DESTINATION="$2"
@@ -274,16 +288,6 @@ setup_path() {
 }
 
 
-setup_credential_helper() {
-    echo "Configuring git credential helper for api.timbal.ai..."
-    git config --global credential.https://api.timbal.ai.helper '!timbal credential-helper' || {
-        echo "Warning: Failed to configure git credential helper."
-        return
-    }
-    echo "Git credential helper configured."
-}
-
-
 main() {
     set_install_dir
 
@@ -302,12 +306,11 @@ main() {
         fi
     fi
 
-    check_uv
     check_git
+    check_uv
+    check_bun
 
     setup_timbal
-
-    setup_credential_helper
 
     if command_exists timbal; then
         echo "Successfully installed timbal. Run 'timbal configure' to set up your credentials and settings."
