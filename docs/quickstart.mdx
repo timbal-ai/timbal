@@ -12,41 +12,39 @@ Before moving forward, ensure you've completed the [installation steps](/install
 Run the following Timbal CLI command to create a new project:
 
 ```bash
-timbal init my-project --agent
+timbal create my-project
 ```
 
-This creates a simple project structure with all the necessary files and dependencies to get started building an agent. If you want to build a workflow, you can use the `--workflow` flag instead. You can check all the options by running any `timbal` command with the `--help` flag.
+This will prompt you interactively to choose what you want to build (Agent or Workflow) and what UI you want for your project. After making your selections, it creates a project structure with all the necessary files and dependencies to get started.
 
 ### Project Structure
 
 After running the command, your project will look like this:
 
-<img
-  src="/images/project-structure.png"
-  alt="Project structure"
-  style={{width: '300px'}}
-  noZoom
-  className="rounded-lg"
-/>
-| File | Purpose |
-|------|---------|
-| **.venv** | Python virtual environment directory (automatically created) |
-| **.dockerignore** | Docker configuration for containerized deployment |
-| **agent.py** | Main application file where you define your AI agents and workflows.<br/>If you create a workflow, you'll have a `workflow.py` file instead |
-| **pyproject.toml** | Python project configuration and dependency management |
-| **timbal.yaml** | Timbal deployment configuration and settings |
-| **uv.lock** | Dependency lock file for reproducible builds |
-
-Timbal automatically sets up a Python virtual environment using `uv`. You can manage your project dependencies using `uv` commands just like in any other Python project. For example:
-
-```bash
-uv add package-name
+```
+my-project/
+├── api/              - Elysia API server (Bun)
+├── workforce/        - Your timbal components (Python)
+│   └── <name>/
+│       ├── agent.py  - Main app logic (or workflow.py for workflows)
+│       ├── timbal.yaml    - Timbal configuration
+│       └── pyproject.toml - Python dependencies
+├── ui/               - React + Vite + TypeScript + shadcn (Bun) [optional]
+├── .gitignore        - Git ignore file
+└── README.md         - Project documentation
 ```
 
-This makes it easy to add new packages and manage your project's dependencies.
+| Directory/File | Purpose |
+|---------------|---------|
+| **api/** | Elysia API server running on Bun |
+| **workforce/** | Your timbal components (Python). Contains subdirectories for each agent or workflow |
+| **workforce/\<name\>/agent.py** | Main application file where you define your AI agents.<br/>If you create a workflow, you'll have a `workflow.py` file instead |
+| **workforce/\<name\>/pyproject.toml** | Python project configuration and dependency management |
+| **workforce/\<name\>/timbal.yaml** | Timbal deployment configuration and settings |
+| **ui/** | React + Vite + TypeScript + shadcn running on Bun (only if UI is selected) |
 
 <Tip>
-You have your project structure set up. Next, you only need to edit the `agent.py` file to customize your agent's behavior and capabilities.
+You have your project structure set up. Next, you only need to edit the `agent.py` file (or `workflow.py` for workflows) in the `workforce/<name>/` directory to customize your agent's behavior and capabilities.
 </Tip>
 
 ## Build a simple Agent
