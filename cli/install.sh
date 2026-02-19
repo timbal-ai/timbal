@@ -76,14 +76,14 @@ set_install_dir() {
         echo "Installing timbal to user-specified location: $INSTALL_DIR"
     fi
 
+    # Create the directory if it doesn't exist
+    # Use mkdir -p to create parent directories as needed and avoid errors if it already exists
+    mkdir -p "$INSTALL_DIR" || error_exit "Failed to create installation directory: $INSTALL_DIR. Check permissions."
+
     # Expand INSTALL_DIR to an absolute path
     # Use a subshell for 'cd' to avoid changing the script's working directory
     INSTALL_DIR_EXPANDED=$(cd "$(dirname "$INSTALL_DIR")" && pwd)/$(basename "$INSTALL_DIR") || error_exit "Failed to resolve path: $INSTALL_DIR"
     INSTALL_DIR="$INSTALL_DIR_EXPANDED"
-
-    # Create the directory if it doesn't exist
-    # Use mkdir -p to create parent directories as needed and avoid errors if it already exists
-    mkdir -p "$INSTALL_DIR" || error_exit "Failed to create installation directory: $INSTALL_DIR. Check permissions."
 
     # Check if the directory is writable
     if [ ! -w "$INSTALL_DIR" ]; then
@@ -111,7 +111,7 @@ check_uv() {
             echo "Auto-installing uv (--yes flag provided)..."
             install_uv
         else
-            read -p "Install uv now? (Y/n): " choice
+            read -p "Install uv now? (Y/n): " choice < /dev/tty
             case "$choice" in
                 n|N ) echo "Warning: uv is required for Timbal to work. You can install it later from https://docs.astral.sh/uv/";;
                 * ) install_uv;;
@@ -162,7 +162,7 @@ check_bun() {
             echo "Auto-installing bun (--yes flag provided)..."
             install_bun
         else
-            read -p "Install bun now? (Y/n): " choice
+            read -p "Install bun now? (Y/n): " choice < /dev/tty
             case "$choice" in
                 n|N ) echo "Warning: bun is required to run UIs and APIs with Timbal. You can install it later from https://bun.sh";;
                 * ) install_bun;;
@@ -249,28 +249,6 @@ setup_timbal() {
     echo "Binary download URL: $DOWNLOAD_URL"
     echo "Target executable path: $CLI_EXECUTABLE_PATH"
 
-    # Check if the file already exists
-    if [ -e "$CLI_EXECUTABLE_PATH" ]; then
-        echo "A file already exists at $CLI_EXECUTABLE_PATH"
-        if [ "$AUTO_YES" = true ]; then
-            echo "Auto-accepting overwrite (--yes flag provided)"
-            rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH"
-        else
-            # Ask if user wants to overwrite. Default to No.
-            read -p "Overwrite? (y/N): " choice
-            case "$choice" in
-                y|Y )
-                    echo "Overwriting existing file..."
-                    rm -f "$CLI_EXECUTABLE_PATH" || error_exit "Failed to remove existing file at $CLI_EXECUTABLE_PATH"
-                    ;;
-                * )
-                    echo "Skipping installation because file exists."
-                    return
-                    ;;
-            esac
-        fi
-    fi
-
     download_file "$DOWNLOAD_URL" "$CLI_EXECUTABLE_PATH"
 
     chmod +x "$CLI_EXECUTABLE_PATH" || error_exit "Failed to set execute permission on $CLI_EXECUTABLE_PATH"
@@ -347,7 +325,7 @@ main() {
         else
             echo "The installations may interfere with one another."
             echo "Do you want to continue with this installation anyway?"
-            read -p "Continue? (y/N): " choice
+            read -p "Continue? (y/N): " choice < /dev/tty
             case "$choice" in
                 y|Y ) echo "Continuing with installation...";;
                 * ) echo "Exiting installation."; exit 1;;

@@ -245,19 +245,40 @@ fn promptField(
             const got_mode = std.os.windows.kernel32.GetConsoleMode(stdin_handle, &orig_mode) != 0;
 
             if (got_mode) {
-                // Disable echo input (0x0004).
-                _ = std.os.windows.kernel32.SetConsoleMode(stdin_handle, orig_mode & ~@as(u32, 0x0004));
+                // Disable echo input (0x0004) and line input (0x0002) for char-by-char reading.
+                _ = std.os.windows.kernel32.SetConsoleMode(stdin_handle, orig_mode & ~@as(u32, 0x0004 | 0x0002));
             }
 
             var buf: [512]u8 = undefined;
-            const input = stdin.readUntilDelimiter(&buf, '\n') catch |err| {
-                if (got_mode) _ = std.os.windows.kernel32.SetConsoleMode(stdin_handle, orig_mode);
-                return err;
-            };
+            var len: usize = 0;
+
+            while (true) {
+                const byte = stdin.readByte() catch |err| {
+                    if (got_mode) _ = std.os.windows.kernel32.SetConsoleMode(stdin_handle, orig_mode);
+                    return err;
+                };
+                if (byte == '\n' or byte == '\r') {
+                    break;
+                }
+                // Handle backspace (8 = BS).
+                if (byte == 8) {
+                    if (len > 0) {
+                        len -= 1;
+                        try stdout.print("\x08 \x08", .{});
+                    }
+                    continue;
+                }
+                if (len < buf.len) {
+                    buf[len] = byte;
+                    len += 1;
+                    try stdout.print("*", .{});
+                }
+            }
 
             if (got_mode) _ = std.os.windows.kernel32.SetConsoleMode(stdin_handle, orig_mode);
+            try stdout.print("\n", .{});
 
-            const trimmed = std.mem.trim(u8, input, " \t\r");
+            const trimmed = std.mem.trim(u8, buf[0..len], " \t\r");
             if (trimmed.len == 0) return null;
             return try allocator.dupe(u8, trimmed);
         } else {
@@ -267,20 +288,46 @@ fn promptField(
                 return readLine(allocator, stdin, stdout);
             };
 
-            var noecho = original;
-            noecho.lflag.ECHO = false;
-            std.posix.tcsetattr(stdin_fd, .NOW, noecho) catch {};
+            // Disable echo and canonical mode so we get chars one at a time.
+            var raw = original;
+            raw.lflag.ECHO = false;
+            raw.lflag.ICANON = false;
+            // Read one byte at a time.
+            raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+            raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+            std.posix.tcsetattr(stdin_fd, .NOW, raw) catch {};
 
             var buf: [512]u8 = undefined;
-            const input = stdin.readUntilDelimiter(&buf, '\n') catch |err| {
-                std.posix.tcsetattr(stdin_fd, .NOW, original) catch {};
-                return err;
-            };
+            var len: usize = 0;
+
+            while (true) {
+                const byte = stdin.readByte() catch |err| {
+                    std.posix.tcsetattr(stdin_fd, .NOW, original) catch {};
+                    return err;
+                };
+                if (byte == '\n' or byte == '\r') {
+                    break;
+                }
+                // Handle backspace (127 = DEL, 8 = BS).
+                if (byte == 127 or byte == 8) {
+                    if (len > 0) {
+                        len -= 1;
+                        // Erase the asterisk on screen.
+                        try stdout.print("\x08 \x08", .{});
+                    }
+                    continue;
+                }
+                if (len < buf.len) {
+                    buf[len] = byte;
+                    len += 1;
+                    try stdout.print("*", .{});
+                }
+            }
 
             std.posix.tcsetattr(stdin_fd, .NOW, original) catch {};
             try stdout.print("\n", .{});
 
-            const trimmed = std.mem.trim(u8, input, " \t\r");
+            const trimmed = std.mem.trim(u8, buf[0..len], " \t\r");
             if (trimmed.len == 0) return null;
             return try allocator.dupe(u8, trimmed);
         }
