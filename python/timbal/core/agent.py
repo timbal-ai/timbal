@@ -273,7 +273,7 @@ class Agent(Runnable):
 
         # Normalize tools and prevent duplicate names
         names = set()
-        skills_metadata = []
+        skills = []
         for i, tool in enumerate(self.tools):
             # ToolSet resolved later in _resolve_tools()
             if isinstance(tool, ToolSet):
@@ -281,7 +281,8 @@ class Agent(Runnable):
                     if tool.name in names:
                         raise ValueError(f"Skill '{tool.name}' already exists. You can only add a skill once.")
                     names.add(tool.name)
-                    skills_metadata.append(f"- **{tool.name}**: {tool.description}")
+                    skills.append(tool)
+                    # skills_metadata.append(f"- **{tool.name}**: {tool.description}")
                 continue
             if not isinstance(tool, Runnable):
                 if isinstance(tool, dict):
@@ -294,8 +295,9 @@ class Agent(Runnable):
             tool.nest(self._path)
             self.tools[i] = tool
 
-        if skills_metadata:
-            read_skill_tool = ReadSkill()
+        if skills:
+            skills_in_system_prompt = "\n".join([f"- **{skill.name}**: {skill.description}" for skill in skills])
+            read_skill_tool = ReadSkill(agent_path=self._path, skills=skills)
             read_skill_tool.nest(self._path)
             self.tools.append(read_skill_tool)
             if not isinstance(self.system_prompt, str):
@@ -303,7 +305,7 @@ class Agent(Runnable):
             self.system_prompt += f"""
 <skills>
 Skills provide additional knowledge of a specific topic. The following skills are available:
-{chr(10).join(skills_metadata)}
+{skills_in_system_prompt}
 In skills documentation, you will encounter references to additional files.
 If the file is relevant for the user query, USE the `read_skill` tool to get its content.
 </skills>"""
@@ -396,10 +398,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if len(self_spans) > 1:
             # TODO Handle multiple call_ids for this agent (we could access step spans)
             raise NotImplementedError("Multiple spans for the same agent are not supported yet.")
-        previous_span = self_spans[0]
-        if hasattr(previous_span, "in_context_skills"):
-            current_span.in_context_skills = previous_span.in_context_skills
 
+        previous_span = self_spans[0]
         # >= 1.1.0: memory stored in agent span
         if isinstance(previous_span.memory, list):
             memory = [Message.validate(m) for m in previous_span.memory]
@@ -685,7 +685,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             if isinstance(content, TextContent):
                                 try:
                                     output = coerce_to_dict(content.text)
-                                    validated_output = self.output_model.model_validate(output, context=validation_context)
+                                    validated_output = self.output_model.model_validate(
+                                        output, context=validation_context
+                                    )
                                     event.output = validated_output
                                     break
                                 except (json.JSONDecodeError, ValueError, ValidationError) as e:
@@ -695,22 +697,24 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
                         if validation_error_msg and i < self.max_iter - 1:
                             # Feed the error back to the LLM so it can correct itself
-                            error_feedback = Message.validate({
-                                "role": "user",
-                                "content": [{
-                                    "type": "text",
-                                    "text": (
-                                        f"Your output failed validation:\n"
-                                        f"{validation_error_msg}\n\n"
-                                        f"Try again."
-                                    ),
-                                }],
-                            })
+                            error_feedback = Message.validate(
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": (
+                                                f"Your output failed validation:\n{validation_error_msg}\n\nTry again."
+                                            ),
+                                        }
+                                    ],
+                                }
+                            )
                             current_span.memory.append(error_feedback)
                             current_span._memory_dump.append(await dump(error_feedback))
                             i += 1
                             break  # Break out of async for to retry in while loop
-                        
+
                     # Propagate the interruption with the processed output
                     if interrupted:
                         raise InterruptError(event.call_id, output=event.output)

@@ -12,7 +12,7 @@ except ImportError:
 import yaml
 from pydantic import Field, model_validator
 
-from ..state import get_run_context
+from ..state import get_or_create_run_context
 from .runnable import Runnable
 from .tool import Tool
 from .tool_set import ToolSet
@@ -20,10 +20,10 @@ from .tool_set import ToolSet
 
 class Skill(ToolSet):
     """Skill is a tool set that can be used to provide context to the agent."""
-    path: str | Path
-    tools: list[Tool] = []
-    references: dict[str, str] = {}
 
+    path: Path
+    tools: list[Runnable] = []
+    references: dict[str, str] = {}
 
     @model_validator(mode="after")
     def validate_skill_structure(self) -> "Skill":
@@ -32,10 +32,10 @@ class Skill(ToolSet):
 
         if not self.path.exists():
             raise ValueError(f"Skill path does not exist: {self.path}")
-        
+
         if not self.path.is_dir():
             raise ValueError(f"Skill path is not a directory: {self.path}")
-        
+
         skill_file = self.path / "SKILL.md"
         if not skill_file.exists():
             raise ValueError(f"Skill directory must contain a SKILL.md file: {self.path}")
@@ -55,9 +55,9 @@ class Skill(ToolSet):
         self.description = metadata.get("description")
         if not self.description:
             raise ValueError(f"SKILL.md must contain a description: {self.path}")
-        
+
         # Since we already read it, store the rest of the content
-        self.content = content[end_marker + 3:].strip()
+        self.content = content[end_marker + 3 :].strip()
 
         # Load tools from the tools directory
         tools_dir = self.path / "tools"
@@ -66,10 +66,10 @@ class Skill(ToolSet):
         for tool_path in tools_dir.iterdir():
             if not tool_path.is_file() or tool_path.suffix != ".py":
                 continue
-            
+
             # Dynamically load the module
             module_name = f"skill_{self.name}_{tool_path.stem}"
-            
+
             # Check if already loaded to prevent re-entry
             if module_name in sys.modules:
                 module = sys.modules[module_name]
@@ -89,7 +89,6 @@ class Skill(ToolSet):
 
         return self
 
-    
     def get_reference(self, name: str) -> str:
         """Get a specific reference file from the skill."""
         if name in self.references:
@@ -101,54 +100,50 @@ class Skill(ToolSet):
         self.references[name] = content
         return content
 
-
     @override
-    async def resolve(self) -> list[Tool]:
+    async def resolve(self) -> list[Runnable]:
         """See base class."""
-        # This will be resolved from the agent context. Thus we need to access the current span.
-        current_span = get_run_context().current_span()
-        if hasattr(current_span, "in_context_skills"):
-            # ? Can be an array, set, dict or any structure that can be checked for membership
-            if self.name in current_span.in_context_skills: 
-                return self.tools
+        session = await get_or_create_run_context().get_session()
+        if self.name in session.get("__in_context_skills", []):
+            return self.tools
         return []
 
 
 class ReadSkill(Tool):
     """Read a skill from the skills directory."""
 
-    def __init__(self, **kwargs: Any) -> None:
-        
+    def __init__(self, agent_path: str, skills: list["Skill"], **kwargs: Any) -> None:
+        _agent_path = agent_path
+        _skills = {s.name: s for s in skills}
+
         async def _read_skill(
-            name: str, 
+            name: str,
             reference: str | None = Field(None, description="Referenced file from a skill."),
         ) -> str:
             """Read documentation for a specific skill. Pass an optional reference to read a specific file from the skill."""
-            # The skill will be called by the agent (i.e. nested in the agent). We need to access the parent span to get the tools.
-            parent_span = get_run_context().parent_span()
-            assert hasattr(parent_span.runnable, "tools"), \
-                f"Parent runnable at path '{parent_span.path}' does not have a 'tools' attribute. Cannot resolve skill '{name}'."
-
-            skill = next((t for t in parent_span.runnable.tools if isinstance(t, Skill) and t.name == name), None)
+            skill = _skills.get(name)
             if not skill:
-                raise ValueError(f"Skill {name} not found")
-            
-            # Mark the skill as in context
-            if not hasattr(parent_span, "in_context_skills"):
-                parent_span.in_context_skills = []
-            parent_span.in_context_skills.append(name)
+                available = ", ".join(_skills.keys()) if _skills else "none"
+                raise ValueError(f"Skill '{name}' not found. Available skills: {available}")
+
+            session = await get_or_create_run_context().get_session()
+            if "__in_context_skills" not in session:
+                session["__in_context_skills"] = {}
+            if _agent_path not in session["__in_context_skills"]:
+                session["__in_context_skills"][_agent_path] = []
+                session["__in_context_skills"][_agent_path].append(name)
 
             if reference:
                 return skill.get_reference(reference)
             else:
                 return skill.content
-        
+
         super().__init__(
             name="read_skill",
             description=(
-                "Read documentation for a specific skill."
+                "Read documentation for a specific skill. "
                 "Provide the skill name to read its documentation file or provide reference to read a specific file from the skill."
             ),
             handler=_read_skill,
-            **kwargs
+            **kwargs,
         )
