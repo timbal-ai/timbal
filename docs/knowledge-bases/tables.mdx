@@ -258,7 +258,7 @@ from timbal.platform.kbs.tables import search_table
 results = await search_table(
   org_id="your-org-id",
   kb_id="your-kb-id",
-  name="Documents",
+  table_name="Documents",
   query="artificial intelligence and machine learning",
   embedding_names=["content_embeddings"],
 )
@@ -267,7 +267,7 @@ results = await search_table(
 results = await search_table(
   org_id="your-org-id",
   kb_id="your-kb-id",
-  name="Documents",
+  table_name="Documents",
   query="artificial intelligence and machine learning",
   embedding_names=["content_embeddings"],
   fts_columns=["title", "content"],  # Full-text search columns
