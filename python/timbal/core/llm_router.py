@@ -24,12 +24,12 @@ from openai import APIStatusError as OpenAIAPIStatusError
 from openai import APITimeoutError as OpenAIAPITimeoutError
 from openai import AsyncOpenAI
 from openai import RateLimitError as OpenAIRateLimitError  # APIError as OpenAIAPIError,
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, SecretStr
 
 from ..errors import APIKeyNotFoundError
 from ..state import get_call_id, get_or_create_run_context
 from ..types.message import Message
-from ..utils import resolve_default, transform_schema
+from ..utils import transform_schema
 from .runnable import Runnable
 
 logger = structlog.get_logger("timbal.core.llm_router")
@@ -54,51 +54,67 @@ Model = Literal[
     "openai/gpt-4.1-nano",
     "openai/gpt-4o",
     "openai/gpt-4o-mini",
-    "openai/gpt-4-turbo",
-    "openai/o1",
-    "openai/o1-pro",
     "openai/o3",
     "openai/o3-mini",
     "openai/o3-pro",
     "openai/o3-deep-research",
     "openai/o4-mini",
     "openai/o4-mini-deep-research",
-    "openai/gpt-4o-audio-preview",
     "openai/gpt-4o-mini-audio-preview",
     # Anthropic models
+    "anthropic/claude-opus-4-6",
+    "anthropic/claude-opus-4-5",
     "anthropic/claude-opus-4-1",
     "anthropic/claude-opus-4-0",
-    "anthropic/claude-opus-4-5",
-    "anthropic/claude-sonnet-4-0",
+    "anthropic/claude-sonnet-4-6",
     "anthropic/claude-sonnet-4-5",
+    "anthropic/claude-sonnet-4-0",
     "anthropic/claude-haiku-4-5",
     "anthropic/claude-3-7-sonnet-latest",
     "anthropic/claude-3-5-haiku-latest",
+    "anthropic/claude-3-opus-latest",
+    "anthropic/claude-3-haiku-20240307",
     # TogetherAI models
-    "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",
-    "togetherai/mistralai/Mistral-7B-Instruct-v0.3",
-    "togetherai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+    "togetherai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
     "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "togetherai/meta-llama/Llama-3.2-3B-Instruct-Turbo",
+    "togetherai/Qwen/Qwen3.5-397B-A17B",
+    "togetherai/Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
+    "togetherai/Qwen/Qwen3-235B-A22B-Thinking-2507",
+    "togetherai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+    "togetherai/Qwen/Qwen3-Coder-Next-FP8",
+    "togetherai/Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "togetherai/Qwen/Qwen2.5-7B-Instruct-Turbo",
     "togetherai/deepseek-ai/DeepSeek-V3.1",
     "togetherai/deepseek-ai/DeepSeek-R1",
+    "togetherai/moonshotai/Kimi-K2.5",
+    "togetherai/moonshotai/Kimi-K2-Instruct",
+    "togetherai/MiniMaxAI/MiniMax-M2.5",
+    "togetherai/zai-org/GLM-5",
+    "togetherai/zai-org/GLM-4.7",
+    "togetherai/openai/gpt-oss-120b",
+    "togetherai/google/gemma-3n-E4B-it",
+    "togetherai/google/gemma-3-27b-it",
+    "togetherai/nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+    "togetherai/deepcogito/cogito-v2-1-671b",
+    "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",
+    "togetherai/mistralai/Ministral-3-14B-Instruct-2512",
     # Gemini models
     "google/gemini-3-pro-preview",
     "google/gemini-3-flash-preview",
     "google/gemini-2.5-pro",
     "google/gemini-2.5-flash",
     "google/gemini-2.5-flash-lite",
-    "google/gemini-2.5-flash-preview-native-audio-dialog",
-    "google/gemini-2.5-flash-exp-native-audio-thinking-dialog",
-    "google/gemini-2.5-flash-image-preview",
+    "google/gemini-2.5-flash-native-audio-preview-12-2025",
+    "google/gemini-2.5-flash-image",
     "google/gemini-2.5-flash-preview-tts",
     "google/gemini-2.5-pro-preview-tts",
-    "google/gemini-2.0-flash-preview-image-generation",
     # x.ai/Grok models
     "xai/grok-4",
     "xai/grok-4-fast-reasoning",
     "xai/grok-4-fast-non-reasoning",
-    "xai/grok-4.1-mini",
-    "xai/grok-4.1-fast-non-reasoning",
+    "xai/grok-4-1-fast-reasoning",
+    "xai/grok-4-1-fast-non-reasoning",
 ]
 
 
@@ -212,78 +228,26 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
 
 
 async def _llm_router(
-    model: Model | str = Field(
-        ...,
-        description="Provider/Name of the LLM model to use.",
-    ),
-    system_prompt: str | None = Field(
-        None,
-        description="System prompt to guide the LLM's behavior and role.",
-    ),
-    messages: list[Message] = Field(
-        default_factory=list,
-        description="Chat history containing user and LLM messages.",
-    ),
-    tools: list[Runnable] | None = Field(
-        None,
-        description="List of tools/functions the LLM can call.",
-    ),
-    max_tokens: int | None = Field(
-        None,
-        description="Maximum number of tokens to generate.",
-    ),
-    thinking: Any = Field(
-        None,
-        description=(
-            "Thinking configuration for the LLM. Provider-specific. "
-            "For OpenAI models, this should be a dictionary with 'effort' and 'summary' keys. "
-            "For Anthropic models, this should be a dictionary with 'budget_tokens' key. "
-        ),
-    ),
-    base_url: str | SecretStr | None = Field(
-        None,
-        description="Base URL for the LLM provider.",
-    ),
-    api_key: str | SecretStr | None = Field(
-        None,
-        description="API key for the LLM provider.",
-    ),
-    max_retries: int = Field(
-        0,
-        description="Maximum number of retries for empty streams or transient failures.",
-    ),
-    retry_delay: float = Field(
-        1.0,
-        description="Base delay in seconds between retries (uses exponential backoff).",
-    ),
-    cache_control: Any = Field(
-        None,
-        description=(
-            "Cache control configuration for the LLM. Provider-specific."
-            "For Anthropic models, this should be a dictionary with 'type' and 'ttl' keys."
-        ),
-    ),
-    output_model: type[BaseModel] | None = Field(
-        None, description="Output model for the LLM. If provided, the output will be validated against this model."
-    ),
-) -> Message:  # type: ignore
+    model: Model | str,
+    system_prompt: str | None = None,
+    messages: list[Message] | None = None,
+    tools: list[Runnable] | None = None,
+    max_tokens: int | None = None,
+    thinking: Any = None,
+    max_retries: int = 0,
+    retry_delay: float = 1.0,
+    cache_control: Any = None,
+    output_model: type[BaseModel] | None = None,
+    base_url: str | SecretStr | None = None,
+    api_key: str | SecretStr | None = None,
+) -> Message:  # type: ignore[misc]  # Declared as Message for framework schema generation; runtime is an async generator of provider-specific chunks.
     """
     Internal LLM router function.
 
     WARNING: This function is for internal use only and may change frequently
     as LLM providers update their APIs. Use the stable Agent/Workflow APIs instead.
     """
-    model = resolve_default("model", model)
-    system_prompt = resolve_default("system_prompt", system_prompt)
-    tools = resolve_default("tools", tools)
-    max_tokens = resolve_default("max_tokens", max_tokens)
-    thinking = resolve_default("thinking", thinking)
-    base_url = resolve_default("base_url", base_url)
-    api_key = resolve_default("api_key", api_key)
-    max_retries = resolve_default("max_retries", max_retries)
-    retry_delay = resolve_default("retry_delay", retry_delay)
-    cache_control = resolve_default("anthropic_cache_system", cache_control)
-    output_model = resolve_default("output_model", output_model)
+    messages = messages or []
 
     # Convert SecretStr to str if needed
     if isinstance(base_url, SecretStr):
@@ -438,14 +402,14 @@ async def _llm_router(
                     "type": "json_schema",
                     "schema": transform_schema(output_model),
                 }
-                res = await client.beta.messages.create(betas=["structured-outputs-2025-11-13"], **anthropic_kwargs)
+                res = await client.beta.messages.create(betas=["structured-outputs-2025-11-13"], **anthropic_kwargs)  # type: ignore[attr-defined]
             else:
-                res = await client.messages.create(**anthropic_kwargs)
+                res = await client.messages.create(**anthropic_kwargs)  # type: ignore[attr-defined]
             async for chunk in res:
                 yield chunk
 
         async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, "Anthropic"):
-            yield res_chunk
+            yield res_chunk  # type: ignore[return-type]
 
     elif provider == "openai" and TIMBAL_OPENAI_API == "responses":
         responses_kwargs = {
@@ -484,12 +448,12 @@ async def _llm_router(
             }
 
         async def _create_stream():
-            res = await client.responses.create(**responses_kwargs)
+            res = await client.responses.create(**responses_kwargs)  # type: ignore[attr-defined]
             async for chunk in res:
                 yield chunk
 
         async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, "OpenAI Responses"):
-            yield res_chunk
+            yield res_chunk  # type: ignore[return-type]
 
     # Try with OpenAI Chat Completions compatible providers
     else:
@@ -528,11 +492,11 @@ async def _llm_router(
             }
 
         async def _create_stream():
-            res = await client.chat.completions.create(**chat_completions_kwargs)
+            res = await client.chat.completions.create(**chat_completions_kwargs)  # type: ignore[attr-defined]
             async for chunk in res:
                 yield chunk
 
         async for res_chunk in _retry_on_error(
             _create_stream, max_retries, retry_delay, f"{provider} Chat Completions"
         ):
-            yield res_chunk
+            yield res_chunk  # type: ignore[return-type]
