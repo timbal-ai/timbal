@@ -1,9 +1,9 @@
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, SecretStr, model_validator
 
 
-class PlatformAuthType(str, Enum):
+class PlatformAuthType(StrEnum):
     BEARER = "bearer"
     CUSTOM = "custom"
 
@@ -20,13 +20,19 @@ class PlatformAuth(BaseModel):
     header_name: str | None = None
     """If type is CUSTOM, this will be the name of the header to use."""
 
+    @model_validator(mode="after")
+    def validate_custom_header(self) -> "PlatformAuth":
+        if self.type == PlatformAuthType.CUSTOM and not self.header_name:
+            raise ValueError("header_name is required when auth type is 'custom'.")
+        return self
+
     @property
     def header_key(self) -> str:
         """Format header key for requests authenticating with the platform."""
         if self.type == PlatformAuthType.BEARER:
             return "Authorization"
         elif self.type == PlatformAuthType.CUSTOM:
-            return self.header_name
+            return self.header_name  # type: ignore[return-value]  # validated in validate_custom_header
         else:
             raise NotImplementedError(f"Unknown auth type: {self.type}")
 

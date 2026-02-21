@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from uuid_extensions import uuid7
 
 from ..errors import SpanNotFound
-from .config import PlatformConfig, PlatformSubject
+from .config import PlatformConfig
 from .tracing.providers import InMemoryTracingProvider, PlatformTracingProvider, TracingProvider
 from .tracing.span import Span
 from .tracing.trace import Trace
@@ -80,36 +80,12 @@ class RunContext(BaseModel):
         Sets up the tracing provider based on available configuration.
         Defaults to in-memory tracing if no custom provider is configured.
 
-        If no platform_config is provided, attempts to resolve it from the environment.
+        If no platform_config is provided, attempts to resolve it from
+        environment variables and ~/.timbal/ config files.
         """
-        # Resolve platform config from environment if not provided at initialization
-        if not self.platform_config:
-            host = os.getenv("TIMBAL_API_HOST")
-            if host:
-                token = os.getenv("TIMBAL_API_KEY") or os.getenv("TIMBAL_API_TOKEN")
-                if token:
-                    auth = {"type": "bearer", "token": token}
-                    self.platform_config = PlatformConfig(
-                        host=host,
-                        auth=auth,  # type: ignore
-                    )
+        from .config_loader import resolve_platform_config
 
-        # We validate this afterwards. We might want to send a platform config from the platform, and rely on the subject to be set locally with the env
-        if self.platform_config and not self.platform_config.subject:
-            org_id = os.getenv("TIMBAL_ORG_ID")
-            app_id = os.getenv("TIMBAL_APP_ID")
-            if org_id:
-                if app_id:
-                    version_id = os.getenv("TIMBAL_VERSION_ID")
-                    self.platform_config.subject = PlatformSubject(
-                        org_id=org_id,
-                        app_id=app_id,
-                        version_id=version_id,
-                    )
-                else:
-                    self.platform_config.subject = PlatformSubject(
-                        org_id=org_id,
-                    )
+        self.platform_config = resolve_platform_config(self.platform_config)
 
         self._trace = Trace()
         if self.platform_config:
