@@ -138,7 +138,7 @@ def print_eval_result(result: EvalResult) -> None:
         validator_results_map[(vr.path_key, vr.name)] = vr
 
     # Add validators
-    validators = eval._validators
+    validators = eval._validators + eval._invalid_validators
     if validators:
         # Add root path as first branch
         root_path = eval.runnable._path
@@ -188,7 +188,9 @@ def print_failure_details(result: EvalResult) -> None:
     failed_validators = [vr for vr in result.validator_results if not vr.passed]
     if failed_validators:
         for vr in failed_validators:
-            header = f"[red bold]✗[/red bold] [yellow]{vr.target}[/yellow].[green]{vr.name}[/green]"
+            symbol = "[yellow bold]⊘[/yellow bold]" if not vr.evaluated else "[red bold]✗[/red bold]"
+            border_style = "yellow" if not vr.evaluated else "red"
+            header = f"{symbol} [yellow]{vr.target}[/yellow].[green]{vr.name}[/green]"
             if vr.traceback:
                 content = vr.traceback.rstrip()
             elif vr.error:
@@ -200,7 +202,7 @@ def print_failure_details(result: EvalResult) -> None:
                     content,
                     title=header,
                     title_align="left",
-                    border_style="red",
+                    border_style=border_style,
                     padding=(0, 1),
                 )
             )
@@ -290,6 +292,9 @@ def _normalize_validator(v: Any) -> tuple[str, str, Any, bool, list[str], str]:
         return v
     elif isinstance(v, BaseValidator):
         return (v.target or "", v.name, v.value, v.negate, v.transform, v.path_key)
+    elif isinstance(v, dict) and "target" in v and "name" in v:
+        # Invalid validator dict format
+        return (v.get("target", ""), v.get("name", ""), v.get("value"), False, [], v.get("path_key", ""))
     else:
         return ("", "unknown!", v, False, [], "")
 
@@ -326,7 +331,9 @@ def _format_validator_status(
     result = results_map.get((path_key, validator)) if results_map else None
 
     if result is not None:
-        if result.passed:
+        if not result.evaluated:
+            status = "[bold yellow]⊘[/bold yellow]"
+        elif result.passed:
             status = "[bold green]✓[/bold green]"
         else:
             status = "[bold red]✗[/bold red]"
@@ -437,7 +444,12 @@ def _build_validator_tree(
                 if step_key in ("seq!", "parallel!", "any!"):
                     # Nested flow validator
                     if parent_result is not None:
-                        status = "[bold green]✓[/bold green]" if parent_result.passed else "[bold red]✗[/bold red]"
+                        if not parent_result.evaluated:
+                            status = "[bold yellow]⊘[/bold yellow]"
+                        elif parent_result.passed:
+                            status = "[bold green]✓[/bold green]"
+                        else:
+                            status = "[bold red]✗[/bold red]"
                     else:
                         status = "[dim]○[/dim]"
                     nested_flow_line = f"{status} [bold cyan]{step_key}[/bold cyan]"

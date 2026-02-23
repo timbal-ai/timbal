@@ -105,6 +105,20 @@ async def run_eval(eval: Eval, capture: bool = True, ace: Any | None = None) -> 
 
     duration = time.perf_counter() - start_time
 
+    # Add results for invalid validators that were not executed
+    for invalid_validator in eval._invalid_validators:
+        validator_results.append(
+            ValidatorResult(
+                target=invalid_validator["target"],
+                name=invalid_validator["name"],
+                value=invalid_validator["value"],
+                path_key=invalid_validator["path_key"],
+                passed=False,
+                error="Validator is invalid and was not executed",
+                evaluated=False,
+            )
+        )
+
     # Eval passes if no error and all validators passed
     all_validators_passed = all(vr.passed for vr in validator_results)
     passed = error is None and all_validators_passed
