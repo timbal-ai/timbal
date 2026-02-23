@@ -17,6 +17,42 @@ fi
 COMMIT_HASH=$(git rev-parse --short "v$VERSION")
 COMMIT_DATE=$(git log -1 --format=%cs "v$VERSION")
 
+# --- Generate release notes from git log ---
+PREV_TAG=$(git describe --tags --abbrev=0 "v$VERSION^" 2>/dev/null || true)
+
+if [ -n "$PREV_TAG" ]; then
+    CHANGELOG=$(git log --no-merges --pretty=format:"- %s (%h)" "${PREV_TAG}..v$VERSION")
+    COMPARE_URL="https://github.com/timbal-ai/timbal/compare/${PREV_TAG}...v${VERSION}"
+else
+    CHANGELOG=$(git log --no-merges --pretty=format:"- %s (%h)" "v$VERSION")
+    COMPARE_URL=""
+fi
+
+RELEASE_NOTES="## What's Changed
+
+${CHANGELOG}"
+
+if [ -n "$COMPARE_URL" ]; then
+    RELEASE_NOTES="${RELEASE_NOTES}
+
+**Full Changelog**: ${COMPARE_URL}"
+fi
+
+echo ""
+echo "=== Generated Release Notes ==="
+echo "$RELEASE_NOTES"
+echo "=== End Release Notes ==="
+echo ""
+read -p "Do you want to edit the release notes before publishing? (y/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    NOTES_TMPFILE=$(mktemp /tmp/timbal-release-notes-XXXXXX.md)
+    echo "$RELEASE_NOTES" > "$NOTES_TMPFILE"
+    ${EDITOR:-${VISUAL:-vi}} "$NOTES_TMPFILE"
+    RELEASE_NOTES=$(cat "$NOTES_TMPFILE")
+    rm -f "$NOTES_TMPFILE"
+fi
+
 # TODO Add building the python package.
 
 cd cli
@@ -128,5 +164,5 @@ echo "Creating release v$VERSION from tag (commit: $TAG_COMMIT)..."
 gh release create "v$VERSION" \
     "${ASSETS[@]}" \
     --title "v$VERSION" \
-    --notes "Release v$VERSION" \
+    --notes "$RELEASE_NOTES" \
     --target "$TAG_COMMIT"
