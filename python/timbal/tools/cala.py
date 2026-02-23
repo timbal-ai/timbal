@@ -14,11 +14,12 @@ class CalaSearch(Tool):
         timeout: httpx.Timeout = httpx.Timeout(300, connect=10),
         **kwargs: Any,
     ) -> None:
-        resolved_api_key = api_key or os.getenv("CALA_API_KEY")
-        if not resolved_api_key:
-            raise ValueError("Cala API key not found. Set CALA_API_KEY environment variable or pass api_key parameter.")
-
         async def _cala_search(input: str) -> dict:
+            resolved_api_key = api_key or os.getenv("CALA_API_KEY")
+            if not resolved_api_key:
+                raise ValueError(
+                    "Cala API key not found. Set CALA_API_KEY environment variable or pass api_key parameter."
+                )
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{base_url}/knowledge/search",
