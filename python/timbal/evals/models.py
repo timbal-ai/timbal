@@ -34,6 +34,8 @@ class Eval(BaseModel):
 
     # Parsed validators stored privately
     _validators: list = PrivateAttr(default_factory=list)
+    # Invalid validators that failed to parse (stored as dicts with target, name, value, path_key)
+    _invalid_validators: list[dict[str, Any]] = PrivateAttr(default_factory=list)
 
     @model_validator(mode="after")
     def parse_validators(self) -> "Eval":
@@ -45,6 +47,7 @@ class Eval(BaseModel):
             path_key: str,
             spec: dict[str, Any],
             step_counters: dict[str, int] | None = None,
+            invalid_validators: list[dict[str, Any]] | None = None,
         ):
             """
             Parse validators from a spec dict.
@@ -54,9 +57,12 @@ class Eval(BaseModel):
                 path_key: The unique path key with indices (e.g., "agent.seq#0.get_datetime#0")
                 spec: The spec dict containing validators and nested structures
                 step_counters: Counter dict for tracking step occurrences at current level
+                invalid_validators: List to append invalid validators to
             """
             if step_counters is None:
                 step_counters = {}
+            if invalid_validators is None:
+                invalid_validators = []
 
             validators = []
             for k, v in spec.items():
@@ -113,6 +119,7 @@ class Eval(BaseModel):
                                                     nested_path_key,
                                                     nested_step_spec,
                                                     {},
+                                                    invalid_validators,
                                                 )
                                                 nested_validators.extend(nested)
                             else:
@@ -123,7 +130,7 @@ class Eval(BaseModel):
                                 step_target = f"{target}.{step_key}"
                                 step_path_key = f"{path_key}.{step_key}#{step_count}"
                                 if isinstance(step_spec, dict):
-                                    nested = dfs(step_target, step_path_key, step_spec, {})
+                                    nested = dfs(step_target, step_path_key, step_spec, {}, invalid_validators)
                                     nested_validators.extend(nested)
                         else:
                             logger.warning("Invalid flow validator step", target=target, step=step)
@@ -141,6 +148,12 @@ class Eval(BaseModel):
                         validators.append(flow_validator)
                     except Exception:
                         logger.warning("Unknown flow validator", target=target, name=k)
+                        invalid_validators.append({
+                            "target": target,
+                            "name": k,
+                            "value": steps_for_flow,
+                            "path_key": path_key,
+                        })
                         continue
                     validators.extend(nested_validators)
                 elif k.endswith("!"):
@@ -157,11 +170,17 @@ class Eval(BaseModel):
                         validators.append(validator)
                     except Exception:
                         logger.warning("Unknown validator", target=target, name=k)
+                        invalid_validators.append({
+                            "target": target,
+                            "name": k,
+                            "value": v,
+                            "path_key": path_key,
+                        })
                 elif isinstance(v, dict):
                     # Nested property path (e.g., input.timezone)
                     nested_target = f"{target}.{k}"
                     nested_path_key = f"{path_key}.{k}"
-                    nested = dfs(nested_target, nested_path_key, v, step_counters)
+                    nested = dfs(nested_target, nested_path_key, v, step_counters, invalid_validators)
                     validators.extend(nested)
                 elif isinstance(v, list):
                     nested_target = f"{target}.{k}"
@@ -175,7 +194,8 @@ class Eval(BaseModel):
             return validators
 
         root_path = self.runnable._path
-        self._validators = dfs(root_path, root_path, self.model_extra, {})
+        self._invalid_validators = []
+        self._validators = dfs(root_path, root_path, self.model_extra, {}, self._invalid_validators)
         return self
 
 
@@ -197,6 +217,7 @@ class ValidatorResult(BaseModel):
     path_key: str = ""  # Unique path key with indices
     error: str | None = None
     traceback: str | None = None
+    evaluated: bool = True  # Whether the validator was actually executed
 
 
 class EvalResult(BaseModel):

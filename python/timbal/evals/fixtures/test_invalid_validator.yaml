@@ -1,0 +1,13 @@
+- name: "test_invalid_validator"
+  description: "Test eval with invalid validator to verify not evaluated status"
+  runnable: "agent.py::agent"
+  timeout: 30000
+
+  params:
+    prompt: "What time is it in Madrid?"
+
+  output:
+    type!: "string"
+    min_length!: 10
+    invalid_validator!: "this should not be executed"  # This validator doesn't exist
+    contains!: "Madrid"
