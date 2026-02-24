@@ -1,4 +1,5 @@
 - name: "dev"
+  runnable: "agent.py::agent"
   description: "eval used for development"
 
   tags: ["dev", "datetime"]

@@ -217,6 +217,7 @@ class ValidatorResult(BaseModel):
     path_key: str = ""  # Unique path key with indices
     error: str | None = None
     traceback: str | None = None
+    actual_value: Any = None  # The actual value that was validated
     evaluated: bool = True  # Whether the validator was actually executed
 
 

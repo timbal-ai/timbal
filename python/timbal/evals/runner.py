@@ -15,6 +15,8 @@ from .display import (
 from .models import Eval, EvalError, EvalResult, EvalSummary, ValidatorResult
 from .validators.base import BaseValidator
 from .validators.context import ValidationContext
+from .validators.llm_base import LLMValidator
+from .utils import resolve_target
 
 
 async def run_eval(eval: Eval, capture: bool = True, ace: Any | None = None) -> EvalResult:
@@ -76,6 +78,16 @@ async def run_eval(eval: Eval, capture: bool = True, ace: Any | None = None) -> 
         # Run validators and collect results
         for validator in eval._validators:
             if isinstance(validator, BaseValidator):
+                # Capture actual_value for LLM validators before validation
+                actual_value = None
+                if isinstance(validator, LLMValidator):
+                    _, resolved_value = resolve_target(trace, validator.target, validator.path_key)
+                    if isinstance(resolved_value, Message):
+                        resolved_value = resolved_value.collect_text()
+                    if isinstance(resolved_value, str):
+                        resolved_value = validator.apply_transform(resolved_value)
+                    actual_value = resolved_value
+                
                 try:
                     await validator(validation_context)
                     validator_results.append(
@@ -85,6 +97,7 @@ async def run_eval(eval: Eval, capture: bool = True, ace: Any | None = None) -> 
                             value=validator.value,
                             path_key=validator.path_key,
                             passed=True,
+                            actual_value=actual_value,
                         )
                     )
                 except Exception as e:
@@ -97,6 +110,7 @@ async def run_eval(eval: Eval, capture: bool = True, ace: Any | None = None) -> 
                             passed=False,
                             error=f"{type(e).__name__}: {e}",
                             traceback=traceback.format_exc(),
+                            actual_value=actual_value,
                         )
                     )
 
