@@ -163,6 +163,13 @@ class Eval(BaseModel):
                     nested_path_key = f"{path_key}.{k}"
                     nested = dfs(nested_target, nested_path_key, v, step_counters)
                     validators.extend(nested)
+                elif isinstance(v, list):
+                    nested_target = f"{target}.{k}"
+                    nested_path_key = f"{path_key}.{k}"
+                    for item in v:
+                        if isinstance(item, dict):
+                            nested = dfs(nested_target, nested_path_key, item, step_counters)
+                            validators.extend(nested)
                 else:
                     logger.warning("Invalid eval property", target=target, key=k, value=v)
             return validators
@@ -197,6 +204,7 @@ class EvalResult(BaseModel):
 
     eval: SkipValidation[Eval]
     passed: bool
+    agent_output: Any | None = None
     duration: float = 0.0
     error: SkipValidation[EvalError | None] = None
     validator_results: list[ValidatorResult] = Field(default_factory=list)

@@ -26,6 +26,7 @@ async def run_eval(eval: Eval, capture: bool = True, ace: Any | None = None) -> 
     captured_stderr = ""
     cap = None
 
+    agent_output: Any | None = None
     ace_context = []
     ace_active_policies = []
     ace_policies = []
@@ -67,7 +68,7 @@ async def run_eval(eval: Eval, capture: bool = True, ace: Any | None = None) -> 
         set_run_context(run_context)
 
         # TODO We should handle the cases where output_event.error is not None
-        _ = await eval.runnable(**input_kwargs, **eval.params).collect() # type: ignore
+        agent_output = await eval.runnable(**input_kwargs, **eval.params).collect() # type: ignore
 
         trace = run_context._trace
         validation_context = ValidationContext(trace=trace)
@@ -120,6 +121,7 @@ async def run_eval(eval: Eval, capture: bool = True, ace: Any | None = None) -> 
     return EvalResult(
         eval=eval,
         passed=passed,
+        agent_output=agent_output,
         duration=duration,
         error=error,
         validator_results=validator_results,
