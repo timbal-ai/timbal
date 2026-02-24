@@ -35,31 +35,39 @@ async def run_eval(eval: Eval, capture: bool = True, ace: Any | None = None) -> 
         if capture:
             cap = OutputCapture()
             cap.__enter__()
-
-        raw = eval.params.get("messages", eval.params.get("prompt", []))
-        if not isinstance(raw, list):
-            raw = [raw]
-        messages = [Message.validate(m) for m in raw]
         
         if ace:
+            if "messages" in eval.params:                                                                                                                  
+                raw = eval.params.pop("messages")                                                                                                          
+                if not isinstance(raw, list):                                                                                                              
+                    raw = [raw]                                                                                                                            
+                messages = [Message.validate(m) for m in raw]
+                input_key = "messages"
+            elif "prompt" in eval.params:
+                messages = [Message.validate(eval.params.pop("prompt"))]
+                input_key = "prompt"
+
             ace_run_context = RunContext()
             set_run_context(ace_run_context)
             session = await ace_run_context.get_session()
-            ace_messages = await ace.handler(messages=messages)
-            messages = ace_messages
+            messages = await ace.handler(messages=messages)
+            # messages = ace_messages
             ace_context = session.get("ace_context", [])
             ace_active_policies = session.get("ace_active_policies", [])
             ace_policies = session.get("ace_policies", [])
             # Reset for agent execution
             set_call_id(None)
             set_parent_call_id(None)
-        
+
+            input_kwargs = {input_key: messages[0] if input_key == "prompt" else messages}
+        else:
+            input_kwargs = {}
 
         run_context = RunContext()
         set_run_context(run_context)
 
         # TODO We should handle the cases where output_event.error is not None
-        _ = await eval.runnable(messages=messages).collect()  # type: ignore
+        _ = await eval.runnable(**input_kwargs, **eval.params).collect() # type: ignore
 
         trace = run_context._trace
         validation_context = ValidationContext(trace=trace)
