@@ -8,6 +8,7 @@ import socket
 from ast import literal_eval
 from collections.abc import AsyncGenerator, Callable, Generator
 from pathlib import Path
+import sys
 from typing import Any, Literal, cast
 
 import pydantic
@@ -194,7 +195,16 @@ class ImportSpec(BaseModel):
         spec = importlib.util.spec_from_file_location(self.path.stem, self.path.as_posix())
         if spec and spec.loader:
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            module_dir = str(self.path.parent)
+            added = module_dir not in sys.path
+            if added:
+                sys.path.insert(0, module_dir)
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                if added:
+                    sys.path.remove(module_dir)
+
             if self.target:
                 if hasattr(module, self.target):
                     obj = getattr(module, self.target)
