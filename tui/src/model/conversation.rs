@@ -26,6 +26,8 @@ pub enum OutputBlock {
     },
     /// An error message.
     Error(String),
+    /// Shell command output lines.
+    ShellOutput(Vec<String>),
 }
 
 /// Status of a tool call within a turn.
@@ -42,6 +44,8 @@ pub struct Turn {
     pub input: TurnInput,
     pub outputs: Vec<OutputBlock>,
     pub status: TurnStatus,
+    /// Whether this turn's output is collapsed.
+    pub collapsed: bool,
 }
 
 /// What the user submitted for this turn.
@@ -51,6 +55,8 @@ pub enum TurnInput {
     Message(String),
     /// A slash command (e.g. "/configure prod").
     Command(String),
+    /// A shell command (e.g. "!ls").
+    Shell(String),
 }
 
 impl Turn {
@@ -59,6 +65,7 @@ impl Turn {
             input: TurnInput::Message(text),
             outputs: Vec::new(),
             status: TurnStatus::Streaming,
+            collapsed: false,
         }
     }
 
@@ -67,7 +74,34 @@ impl Turn {
             input: TurnInput::Command(text),
             outputs: Vec::new(),
             status: TurnStatus::Complete,
+            collapsed: false,
         }
+    }
+
+    pub fn shell(cmd: String) -> Self {
+        Self {
+            input: TurnInput::Shell(cmd),
+            outputs: Vec::new(),
+            status: TurnStatus::Streaming,
+            collapsed: true,
+        }
+    }
+
+    /// Count total output lines for this turn.
+    pub fn output_line_count(&self) -> usize {
+        let mut count = 0;
+        for block in &self.outputs {
+            count += match block {
+                OutputBlock::Text(t) => t.lines().count(),
+                OutputBlock::RichLines(r) => r.len(),
+                OutputBlock::ToolCall { output, .. } => {
+                    1 + output.as_ref().map_or(0, |o| o.lines().count())
+                }
+                OutputBlock::Error(_) => 1,
+                OutputBlock::ShellOutput(lines) => lines.len(),
+            };
+        }
+        count
     }
 
     pub fn is_streaming(&self) -> bool {

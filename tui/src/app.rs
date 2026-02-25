@@ -44,6 +44,11 @@ pub struct App {
     pub help_state: HelpState,
     pub help_open: bool,
     pub project_open: bool,
+    pub shortcuts_open: bool,
+    /// Clickable hint lines: (doc_line, unused, turn_index). Set during render.
+    pub turn_line_ranges: Vec<(usize, usize, usize)>,
+    /// Current mouse row in screen coordinates (for hover effects).
+    pub mouse_row: Option<u16>,
     /// Active profile name (from TIMBAL_PROFILE env or "default").
     pub profile: String,
     /// Whether the active profile has credentials configured.
@@ -90,6 +95,9 @@ impl App {
             help_state: HelpState::new(),
             help_open: false,
             project_open: false,
+            shortcuts_open: false,
+            turn_line_ranges: Vec::new(),
+            mouse_row: None,
             profile,
             configured,
             project,
@@ -117,6 +125,10 @@ impl App {
 
     pub fn palette_open(&self) -> bool {
         !self.config_open && !self.help_open && self.input.starts_with('/')
+    }
+
+    pub fn bash_mode(&self) -> bool {
+        self.input.starts_with('!')
     }
 
     /// Get the current vectorscope frame (loops automatically).
@@ -268,11 +280,16 @@ impl App {
             Action::Quit => self.running = false,
 
             Action::Type(c) => {
-                self.input.push(c);
-                if self.input.starts_with('/') {
-                    self.palette_selected = Some(0);
+                if c == '?' && self.input.is_empty() {
+                    self.shortcuts_open = !self.shortcuts_open;
                 } else {
-                    self.palette_selected = None;
+                    self.shortcuts_open = false;
+                    self.input.push(c);
+                    if self.input.starts_with('/') {
+                        self.palette_selected = Some(0);
+                    } else {
+                        self.palette_selected = None;
+                    }
                 }
             }
 
@@ -317,20 +334,43 @@ impl App {
             Action::Submit => {
                 if self.palette_open() {
                     self.submit_command();
+                } else if self.bash_mode() {
+                    self.submit_shell();
                 } else if !self.input.is_empty() {
                     self.submit_message();
                 }
             }
 
             Action::Cancel => {
-                if self.palette_open() {
+                if self.shortcuts_open {
+                    self.shortcuts_open = false;
+                } else if self.palette_open() {
                     self.palette_selected = None;
+                    self.input.clear();
+                } else if self.bash_mode() {
                     self.input.clear();
                 } else if self.conversation.is_busy() {
                     if let Some(turn) = self.conversation.active_turn_mut() {
                         turn.interrupt();
                     }
                     self.log(EntryKind::Interrupted);
+                }
+            }
+
+            Action::MouseMove(row) => {
+                self.mouse_row = Some(row);
+            }
+
+            Action::Click(_col, row) => {
+                // Map screen row to doc line, check if it's a clickable hint line.
+                let doc_line = row as usize + self.scroll as usize;
+                for &(line, _, turn_idx) in &self.turn_line_ranges {
+                    if doc_line == line {
+                        if let Some(turn) = self.conversation.turns.get_mut(turn_idx) {
+                            turn.collapsed = !turn.collapsed;
+                        }
+                        break;
+                    }
                 }
             }
 
@@ -372,6 +412,55 @@ impl App {
                 self.apply(event);
             }
         }
+    }
+
+    /// Submit a shell command (input starts with `!`).
+    fn submit_shell(&mut self) {
+        let raw = std::mem::take(&mut self.input);
+        let cmd = raw.strip_prefix('!').unwrap_or(&raw).trim().to_string();
+        if cmd.is_empty() {
+            return;
+        }
+
+        self.log(EntryKind::Command(format!("!{}", cmd)));
+
+        let turn = Turn::shell(cmd.clone());
+        self.conversation.push(turn);
+        self.scroll = u16::MAX;
+
+        let tx = self.event_tx.clone();
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+
+        tokio::spawn(async move {
+            let result = tokio::process::Command::new(&shell)
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+                .await;
+
+            match result {
+                Ok(output) => {
+                    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+                    if !output.stderr.is_empty() {
+                        if !text.is_empty() && !text.ends_with('\n') {
+                            text.push('\n');
+                        }
+                        text.push_str(&String::from_utf8_lossy(&output.stderr));
+                    }
+                    let lines: Vec<String> = text
+                        .lines()
+                        .map(|l| l.to_string())
+                        .collect();
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::ShellOutput(lines)));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Error(
+                        format!("Failed to run command: {e}"),
+                    )));
+                }
+            }
+            let _ = tx.send(AppEvent::TurnComplete);
+        });
     }
 
     /// Submit a regular user message.

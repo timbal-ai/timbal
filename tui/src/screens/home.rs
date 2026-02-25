@@ -261,40 +261,62 @@ fn shorten_home(path: &str) -> String {
 // Conversation rendering (Turn-based)
 // ---------------------------------------------------------------------------
 
-fn conversation_lines(app: &App) -> Vec<Line<'static>> {
+const MAX_COLLAPSED_LINES: usize = 5;
+
+/// Returns (lines, clickable_lines) where each entry is (doc_line_index, turn_index).
+/// `hovered_line` is the doc line the mouse is over (for underline on hover).
+fn conversation_lines(app: &App, hovered_line: Option<usize>) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut clickable: Vec<(usize, usize)> = Vec::new();
     let spinner = Spinner::new(app.spinner_tick);
 
-    for turn in &app.conversation.turns {
+    for (turn_idx, turn) in app.conversation.turns.iter().enumerate() {
         // User input line.
-        let input_text = match &turn.input {
-            TurnInput::Message(text) => text.clone(),
-            TurnInput::Command(cmd) => cmd.clone(),
-        };
+        match &turn.input {
+            TurnInput::Shell(cmd) => {
+                lines.push(Line::from(vec![
+                    Span::styled("! ", Style::default().fg(theme::LOVE)),
+                    Span::styled(
+                        cmd.clone(),
+                        Style::default()
+                            .fg(theme::TEXT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+            _ => {
+                let input_text = match &turn.input {
+                    TurnInput::Message(text) => text.clone(),
+                    TurnInput::Command(cmd) => cmd.clone(),
+                    TurnInput::Shell(_) => unreachable!(),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("❯ ", Style::default().fg(theme::IRIS)),
+                    Span::styled(
+                        input_text,
+                        Style::default()
+                            .fg(theme::TEXT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+        }
 
-        lines.push(Line::from(vec![
-            Span::styled("❯ ", Style::default().fg(theme::IRIS)),
-            Span::styled(
-                input_text,
-                Style::default()
-                    .fg(theme::TEXT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        // Collect output lines, then apply turn-level collapse.
+        let mut output_lines: Vec<Line<'static>> = Vec::new();
 
-        // Output blocks.
         for block in &turn.outputs {
             match block {
                 OutputBlock::Text(text) => {
                     for line in text.lines() {
-                        lines.push(Line::from(vec![
+                        output_lines.push(Line::from(vec![
                             Span::styled("  ", Style::default()),
                             Span::styled(line.to_string(), Style::default().fg(theme::TEXT)),
                         ]));
                     }
                 }
                 OutputBlock::RichLines(rich) => {
-                    lines.extend(rich.iter().cloned());
+                    output_lines.extend(rich.iter().cloned());
                 }
                 OutputBlock::ToolCall {
                     name,
@@ -316,7 +338,7 @@ fn conversation_lines(app: &App) -> Vec<Line<'static>> {
                         ),
                     };
 
-                    lines.push(Line::from(vec![
+                    output_lines.push(Line::from(vec![
                         Span::styled("  ", Style::default()),
                         Span::styled(icon, style),
                         Span::styled(name.clone(), style),
@@ -324,7 +346,7 @@ fn conversation_lines(app: &App) -> Vec<Line<'static>> {
 
                     if let Some(out) = output {
                         for line in out.lines() {
-                            lines.push(Line::from(vec![
+                            output_lines.push(Line::from(vec![
                                 Span::styled("    ", Style::default()),
                                 Span::styled(
                                     line.to_string(),
@@ -335,12 +357,66 @@ fn conversation_lines(app: &App) -> Vec<Line<'static>> {
                     }
                 }
                 OutputBlock::Error(msg) => {
-                    lines.push(Line::from(vec![
+                    output_lines.push(Line::from(vec![
                         Span::styled("  ✗ ", Style::default().fg(theme::LOVE)),
                         Span::styled(msg.clone(), Style::default().fg(theme::LOVE)),
                     ]));
                 }
+                OutputBlock::ShellOutput(shell_lines) => {
+                    for (i, line) in shell_lines.iter().enumerate() {
+                        if i == 0 {
+                            output_lines.push(Line::from(vec![
+                                Span::styled("  └ ", Style::default().fg(theme::MUTED)),
+                                Span::styled(
+                                    line.clone(),
+                                    Style::default().fg(theme::SUBTLE),
+                                ),
+                            ]));
+                        } else {
+                            output_lines.push(Line::from(vec![
+                                Span::styled("    ", Style::default()),
+                                Span::styled(
+                                    line.clone(),
+                                    Style::default().fg(theme::SUBTLE),
+                                ),
+                            ]));
+                        }
+                    }
+                }
             }
+        }
+
+        // Apply turn-level collapse.
+        let total = output_lines.len();
+        if turn.collapsed && total > MAX_COLLAPSED_LINES {
+            lines.extend(output_lines.into_iter().take(MAX_COLLAPSED_LINES));
+            let remaining = total - MAX_COLLAPSED_LINES;
+            let hint_line = lines.len();
+            let hovered = hovered_line == Some(hint_line);
+            let mut text_style = Style::default().fg(theme::MUTED);
+            if hovered {
+                text_style = text_style.add_modifier(Modifier::UNDERLINED);
+            }
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(format!("… +{remaining} lines (click to expand)"), text_style),
+            ]));
+            clickable.push((hint_line, turn_idx));
+        } else if !turn.collapsed && total > MAX_COLLAPSED_LINES {
+            lines.extend(output_lines);
+            let hint_line = lines.len();
+            let hovered = hovered_line == Some(hint_line);
+            let mut text_style = Style::default().fg(theme::MUTED);
+            if hovered {
+                text_style = text_style.add_modifier(Modifier::UNDERLINED);
+            }
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled("▴ click to collapse", text_style),
+            ]));
+            clickable.push((hint_line, turn_idx));
+        } else {
+            lines.extend(output_lines);
         }
 
         // Turn status indicator.
@@ -369,26 +445,36 @@ fn conversation_lines(app: &App) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
     }
 
-    lines
+    (lines, clickable)
 }
 
 // ---------------------------------------------------------------------------
 // Input / Palette / Separator
 // ---------------------------------------------------------------------------
 
-fn separator_line(width: u16) -> Line<'static> {
+fn separator_line(app: &App, width: u16) -> Line<'static> {
+    let color = if app.bash_mode() { theme::LOVE } else { theme::MUTED };
     Line::from(Span::styled(
         "─".repeat(width as usize),
-        Style::default().fg(theme::MUTED),
+        Style::default().fg(color),
     ))
 }
 
 fn input_line(app: &App) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("❯ ", Style::default().fg(theme::IRIS)),
-        Span::styled(app.input.clone(), Style::default().fg(theme::TEXT)),
-        Span::styled("█", Style::default().fg(theme::SUBTLE)),
-    ])
+    if app.bash_mode() {
+        let display = app.input.strip_prefix('!').unwrap_or(&app.input);
+        Line::from(vec![
+            Span::styled("! ", Style::default().fg(theme::LOVE)),
+            Span::styled(display.to_string(), Style::default().fg(theme::TEXT)),
+            Span::styled("█", Style::default().fg(theme::SUBTLE)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("❯ ", Style::default().fg(theme::IRIS)),
+            Span::styled(app.input.clone(), Style::default().fg(theme::TEXT)),
+            Span::styled("█", Style::default().fg(theme::SUBTLE)),
+        ])
+    }
 }
 
 fn palette_lines(app: &App, width: u16) -> Vec<Line<'static>> {
@@ -445,6 +531,26 @@ fn palette_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         .collect()
 }
 
+fn shortcuts_lines(width: u16) -> Vec<Line<'static>> {
+    let s = Style::default().fg(theme::MUTED);
+    let col = (width / 3) as usize;
+
+    let rows: &[(&str, &str, &str)] = &[
+        ("! for bash mode", "esc to cancel", "shift + click to select"),
+        ("/ for commands", "\u{2191}/\u{2193} to scroll", "ctrl + c to quit"),
+    ];
+
+    let mut lines = Vec::new();
+    for &(left, mid, right) in rows {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<w$}", left, w = col), s),
+            Span::styled(format!("{:<w$}", mid, w = col), s),
+            Span::styled(right, s),
+        ]));
+    }
+    lines
+}
+
 // ---------------------------------------------------------------------------
 // Main render
 // ---------------------------------------------------------------------------
@@ -465,7 +571,16 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     doc.extend(styled_logo(app));
 
     // Conversation turns.
-    let conv_lines = conversation_lines(app);
+    let logo_offset = doc.len();
+    // Compute the doc line the mouse is hovering over (relative to conversation start).
+    let hovered_doc_line = app.mouse_row.map(|r| r as usize + app.scroll as usize);
+    let hovered_conv_line = hovered_doc_line.and_then(|d| d.checked_sub(logo_offset));
+    let (conv_lines, clickable) = conversation_lines(app, hovered_conv_line);
+    // Offset clickable line positions by logo lines so they map to doc positions.
+    app.turn_line_ranges = clickable
+        .into_iter()
+        .map(|(line, idx)| (line + logo_offset, 0, idx))
+        .collect();
     if !conv_lines.is_empty() {
         doc.extend(conv_lines);
     }
@@ -481,9 +596,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     // Input (hidden when a dialog is open).
     if !app.config_open && !app.help_open && !app.project_open {
-        doc.push(separator_line(width));
+        doc.push(separator_line(app, width));
         doc.push(input_line(app));
-        doc.push(separator_line(width));
+        doc.push(separator_line(app, width));
 
         if is_busy {
             doc.push(Line::from(""));
@@ -491,7 +606,22 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                 "  esc to interrupt",
                 Style::default().fg(theme::MUTED),
             )));
+        } else if app.bash_mode() {
+            doc.push(Line::from(Span::styled(
+                "  ! for bash mode",
+                Style::default().fg(theme::LOVE),
+            )));
+        } else if app.input.is_empty() && !app.shortcuts_open {
+            doc.push(Line::from(Span::styled(
+                "  ? for shortcuts",
+                Style::default().fg(theme::MUTED),
+            )));
         }
+    }
+
+    // Shortcuts panel.
+    if app.shortcuts_open {
+        doc.extend(shortcuts_lines(width));
     }
 
     // Palette.

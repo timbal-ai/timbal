@@ -167,7 +167,8 @@ fn build_general(lines: &mut Vec<Line<'static>>) {
 
     let shortcuts: &[(&str, &str)] = &[
         ("/ for commands", "ctrl + c to quit"),
-        ("esc to interrupt", "\u{2191}/\u{2193} to navigate palette"),
+        ("! for bash mode", "esc to cancel"),
+        ("\u{2191}/\u{2193} to navigate palette", "shift + click to select text"),
     ];
     for (left, right) in shortcuts {
         lines.push(Line::from(vec![
