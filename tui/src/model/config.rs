@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use color_eyre::Result;
 use dirs::home_dir;
 
-fn timbal_dir() -> PathBuf {
+pub fn timbal_dir() -> PathBuf {
     home_dir().unwrap_or_default().join(".timbal")
 }
 
@@ -21,7 +21,7 @@ fn read_or_empty(path: &Path) -> String {
 }
 
 /// Read a key from an INI section (profile).
-/// "default" → [default], anything else → [profile <name>].
+/// "default" -> [default], anything else -> [profile <name>].
 pub fn read_value(content: &str, profile: &str, key: &str) -> Option<String> {
     let section_header = section_header(profile);
     let mut in_target = false;

@@ -12,9 +12,14 @@ pub enum Action {
     PaletteDown,
     ScrollUp,
     ScrollDown,
+    Tab,
+    Left,
+    Right,
 }
 
-pub fn poll() -> Result<Option<Action>> {
+/// Blocking poll for terminal input with a 16ms timeout.
+/// Designed to be called from tokio::task::spawn_blocking.
+pub fn poll_blocking() -> Result<Option<Action>> {
     if event::poll(Duration::from_millis(16))? {
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
@@ -38,6 +43,9 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         KeyCode::Down => Some(Action::PaletteDown),
         KeyCode::PageUp => Some(Action::ScrollUp),
         KeyCode::PageDown => Some(Action::ScrollDown),
+        KeyCode::Tab => Some(Action::Tab),
+        KeyCode::Left => Some(Action::Left),
+        KeyCode::Right => Some(Action::Right),
         KeyCode::Char(c) => Some(Action::Type(c)),
         _ => None,
     }

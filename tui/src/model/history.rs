@@ -1,12 +1,11 @@
-use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::credentials_path;
+use super::config::timbal_dir;
 
 fn history_path() -> std::path::PathBuf {
-    credentials_path().parent().unwrap().join("history.jsonl")
+    timbal_dir().join("history.jsonl")
 }
 
 fn now_ts() -> u64 {
@@ -33,8 +32,8 @@ pub enum EntryKind {
     SessionStart,
 }
 
-impl fmt::Display for EntryKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for EntryKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EntryKind::Message(text) => write!(f, "{text}"),
             EntryKind::Command(cmd) => write!(f, "{cmd}"),
@@ -79,7 +78,10 @@ impl Entry {
             EntryKind::SessionStart => "session_start",
         };
         let content = self.kind.to_string().replace('"', "\\\"");
-        format!(r#"{{"ts":{},"kind":"{}","content":"{}"}}"#, self.ts, kind_tag, content)
+        format!(
+            r#"{{"ts":{},"kind":"{}","content":"{}"}}"#,
+            self.ts, kind_tag, content
+        )
     }
 }
 

@@ -1,12 +1,12 @@
 use ratatui::{
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Constraint, Flex, Layout},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
-use crate::config::{mask_key, TimbalConfig};
+use crate::model::config::{mask_key, TimbalConfig};
 use crate::theme;
 
 fn resolve_profile(profile_arg: Option<String>) -> String {
@@ -51,11 +51,10 @@ impl ConfigField {
 pub struct ConfigureState {
     pub profile: String,
     pub current_field: usize,
-    pub values: [String; 3], // ApiKey, Org, BaseUrl
+    pub values: [String; 3],
     pub input: String,
     pub saved: bool,
     pub error: Option<String>,
-    /// Existing values loaded from disk (for display only).
     pub existing: TimbalConfig,
 }
 
@@ -87,7 +86,6 @@ impl ConfigureState {
         ConfigField::all()[self.current_field]
     }
 
-    /// Commit the current input and advance to the next field (or save).
     pub fn advance(&mut self) -> bool {
         let val = self.input.trim().to_string();
         self.values[self.current_field] = val;
@@ -95,14 +93,12 @@ impl ConfigureState {
 
         if self.current_field + 1 < ConfigField::all().len() {
             self.current_field += 1;
-            // Pre-fill input with existing value for non-secret fields.
             let field = self.current_field();
             if !field.is_secret() {
                 self.input = self.values[self.current_field].clone();
             }
             false
         } else {
-            // All fields filled — save.
             self.save();
             true
         }
@@ -130,7 +126,6 @@ impl ConfigureState {
         }
     }
 
-    /// Display value for a field (masked if secret, placeholder if empty).
     fn display_existing(&self, field: ConfigField) -> String {
         let existing = match field {
             ConfigField::ApiKey => self.existing.api_key.as_deref(),
@@ -144,6 +139,10 @@ impl ConfigureState {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Full-screen centered render
+// ---------------------------------------------------------------------------
 
 pub fn render(state: &mut ConfigureState, frame: &mut Frame) {
     let area = frame.area();
@@ -161,61 +160,90 @@ pub fn render(state: &mut ConfigureState, frame: &mut Frame) {
         .border_style(Style::default().fg(theme::MUTED))
         .title(Span::styled(
             title,
-            Style::default().fg(theme::IRIS).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::IRIS)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(form_area);
     frame.render_widget(block, form_area);
 
+    let lines = build_field_lines(state);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+// ---------------------------------------------------------------------------
+// Build lines for embedding in the scrollable document
+// ---------------------------------------------------------------------------
+
+pub fn build_lines(state: &ConfigureState, width: u16) -> Vec<Line<'static>> {
+    let title = format!(" Configure Timbal [profile: {}] ", state.profile);
+    let bold = Modifier::BOLD;
+
+    let mut out: Vec<Line<'static>> = Vec::new();
+
+    let sep_len = width.saturating_sub(title.len() as u16) as usize;
+    out.push(Line::from(vec![
+        Span::styled(
+            title.clone(),
+            Style::default().fg(theme::IRIS).add_modifier(bold),
+        ),
+        Span::styled("─".repeat(sep_len), Style::default().fg(theme::MUTED)),
+    ]));
+
+    out.extend(build_field_lines(state));
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Shared field rendering logic (used by both render modes)
+// ---------------------------------------------------------------------------
+
+fn build_field_lines(state: &ConfigureState) -> Vec<Line<'static>> {
+    let bold = Modifier::BOLD;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
     if state.saved {
-        let lines = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "  ✓ Credentials saved to ~/.timbal/",
-                Style::default().fg(theme::FOAM).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  Press Esc to return",
-                Style::default().fg(theme::MUTED),
-            )),
-        ];
-        frame.render_widget(Paragraph::new(lines), inner);
-        return;
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  ✓ Credentials saved to ~/.timbal/",
+            Style::default().fg(theme::FOAM).add_modifier(bold),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Press Enter to dismiss",
+            Style::default().fg(theme::MUTED),
+        )));
+        return lines;
     }
 
-    if let Some(ref err) = state.error.clone() {
-        let lines = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                format!("  ✗ {err}"),
-                Style::default().fg(theme::LOVE),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  Press Esc to return",
-                Style::default().fg(theme::MUTED),
-            )),
-        ];
-        frame.render_widget(Paragraph::new(lines), inner);
-        return;
+    if let Some(ref err) = state.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  ✗ {err}"),
+            Style::default().fg(theme::LOVE),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Press Enter to dismiss",
+            Style::default().fg(theme::MUTED),
+        )));
+        return lines;
     }
 
-    let mut lines: Vec<Line> = vec![Line::from("")];
+    lines.push(Line::from(""));
 
-    // Render each field.
     for (i, &field) in ConfigField::all().iter().enumerate() {
         let is_active = i == state.current_field;
 
         let label_style = if is_active {
-            Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme::TEXT).add_modifier(bold)
         } else if i < state.current_field {
             Style::default().fg(theme::SUBTLE)
         } else {
             Style::default().fg(theme::MUTED)
         };
 
-        // Label + hint.
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(field.label(), label_style),
@@ -226,20 +254,17 @@ pub fn render(state: &mut ConfigureState, frame: &mut Frame) {
         ]));
 
         if is_active {
-            // Active input line.
             let existing = state.display_existing(field);
             let placeholder = if existing.is_empty() {
                 "".to_string()
             } else {
                 format!("[{existing}] ")
             };
-
             let display = if field.is_secret() {
                 "•".repeat(state.input.len())
             } else {
                 state.input.clone()
             };
-
             lines.push(Line::from(vec![
                 Span::styled("  ❯ ", Style::default().fg(theme::IRIS)),
                 Span::styled(placeholder, Style::default().fg(theme::MUTED)),
@@ -247,7 +272,6 @@ pub fn render(state: &mut ConfigureState, frame: &mut Frame) {
                 Span::styled("█", Style::default().fg(theme::SUBTLE)),
             ]));
         } else if i < state.current_field {
-            // Completed field — show submitted value.
             let val = &state.values[i];
             let display = if field.is_secret() && !val.is_empty() {
                 mask_key(val)
@@ -257,7 +281,11 @@ pub fn render(state: &mut ConfigureState, frame: &mut Frame) {
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
-                    if display.is_empty() { "(skipped)".to_string() } else { display },
+                    if display.is_empty() {
+                        "(skipped)".to_string()
+                    } else {
+                        display
+                    },
                     Style::default().fg(theme::FOAM),
                 ),
             ]));
@@ -271,215 +299,5 @@ pub fn render(state: &mut ConfigureState, frame: &mut Frame) {
         Style::default().fg(theme::MUTED),
     )));
 
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// Build the config panel as lines (for embedding into a scrollable document).
-pub fn build_lines(state: &ConfigureState, width: u16) -> Vec<Line<'static>> {
-    let title = format!(" Configure Timbal [profile: {}] ", state.profile);
-    let bold = Modifier::BOLD;
-
-    let mut out: Vec<Line<'static>> = Vec::new();
-
-    // Title separator line.
-    let sep_len = width.saturating_sub(title.len() as u16) as usize;
-    out.push(Line::from(vec![
-        Span::styled(title.clone(), Style::default().fg(theme::IRIS).add_modifier(bold)),
-        Span::styled("─".repeat(sep_len), Style::default().fg(theme::MUTED)),
-    ]));
-
-    if state.saved {
-        out.push(Line::from(Span::styled(
-            " ✓ Credentials saved to ~/.timbal/",
-            Style::default().fg(theme::FOAM).add_modifier(bold),
-        )));
-        out.push(Line::from(Span::styled(
-            " Press Enter to dismiss",
-            Style::default().fg(theme::MUTED),
-        )));
-        return out;
-    }
-
-    if let Some(ref err) = state.error {
-        out.push(Line::from(Span::styled(
-            format!(" ✗ {err}"),
-            Style::default().fg(theme::LOVE),
-        )));
-        out.push(Line::from(Span::styled(
-            " Press Enter to dismiss",
-            Style::default().fg(theme::MUTED),
-        )));
-        return out;
-    }
-
-    for (i, &field) in ConfigField::all().iter().enumerate() {
-        let is_active = i == state.current_field;
-
-        let label_style = if is_active {
-            Style::default().fg(theme::TEXT).add_modifier(bold)
-        } else if i < state.current_field {
-            Style::default().fg(theme::SUBTLE)
-        } else {
-            Style::default().fg(theme::MUTED)
-        };
-
-        out.push(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(field.label(), label_style),
-            Span::styled(format!("  {}", field.hint()), Style::default().fg(theme::MUTED)),
-        ]));
-
-        if is_active {
-            let existing = state.display_existing(field);
-            let placeholder = if existing.is_empty() {
-                "".to_string()
-            } else {
-                format!("[{existing}] ")
-            };
-            let display = if field.is_secret() {
-                "•".repeat(state.input.len())
-            } else {
-                state.input.clone()
-            };
-            out.push(Line::from(vec![
-                Span::styled(" ❯ ", Style::default().fg(theme::IRIS)),
-                Span::styled(placeholder, Style::default().fg(theme::MUTED)),
-                Span::styled(display, Style::default().fg(theme::TEXT)),
-                Span::styled("█", Style::default().fg(theme::SUBTLE)),
-            ]));
-        } else if i < state.current_field {
-            let val = &state.values[i];
-            let display = if field.is_secret() && !val.is_empty() {
-                mask_key(val)
-            } else {
-                val.clone()
-            };
-            out.push(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(
-                    if display.is_empty() { "(skipped)".to_string() } else { display },
-                    Style::default().fg(theme::FOAM),
-                ),
-            ]));
-        }
-
-        out.push(Line::from(""));
-    }
-
-    out.push(Line::from(Span::styled(
-        " Enter to confirm · Esc to dismiss",
-        Style::default().fg(theme::MUTED),
-    )));
-
-    out
-}
-
-/// Render the config form inline into the given area (no centering, no fullscreen).
-pub fn render_inline(state: &mut ConfigureState, frame: &mut Frame, area: Rect) {
-    let title = format!(" Configure Timbal [profile: {}] ", state.profile);
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(theme::MUTED))
-        .title(Span::styled(
-            title,
-            Style::default().fg(theme::IRIS).add_modifier(Modifier::BOLD),
-        ));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if state.saved {
-        let lines = vec![
-            Line::from(Span::styled(
-                " ✓ Credentials saved to ~/.timbal/",
-                Style::default().fg(theme::FOAM).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                " Press Enter to dismiss",
-                Style::default().fg(theme::MUTED),
-            )),
-        ];
-        frame.render_widget(Paragraph::new(lines), inner);
-        return;
-    }
-
-    if let Some(ref err) = state.error.clone() {
-        let lines = vec![
-            Line::from(Span::styled(
-                format!(" ✗ {err}"),
-                Style::default().fg(theme::LOVE),
-            )),
-            Line::from(Span::styled(
-                " Press Enter to dismiss",
-                Style::default().fg(theme::MUTED),
-            )),
-        ];
-        frame.render_widget(Paragraph::new(lines), inner);
-        return;
-    }
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    for (i, &field) in ConfigField::all().iter().enumerate() {
-        let is_active = i == state.current_field;
-
-        let label_style = if is_active {
-            Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)
-        } else if i < state.current_field {
-            Style::default().fg(theme::SUBTLE)
-        } else {
-            Style::default().fg(theme::MUTED)
-        };
-
-        lines.push(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(field.label(), label_style),
-            Span::styled(format!("  {}", field.hint()), Style::default().fg(theme::MUTED)),
-        ]));
-
-        if is_active {
-            let existing = state.display_existing(field);
-            let placeholder = if existing.is_empty() {
-                "".to_string()
-            } else {
-                format!("[{existing}] ")
-            };
-
-            let display = if field.is_secret() {
-                "•".repeat(state.input.len())
-            } else {
-                state.input.clone()
-            };
-
-            lines.push(Line::from(vec![
-                Span::styled(" ❯ ", Style::default().fg(theme::IRIS)),
-                Span::styled(placeholder, Style::default().fg(theme::MUTED)),
-                Span::styled(display, Style::default().fg(theme::TEXT)),
-                Span::styled("█", Style::default().fg(theme::SUBTLE)),
-            ]));
-        } else if i < state.current_field {
-            let val = &state.values[i];
-            let display = if field.is_secret() && !val.is_empty() {
-                mask_key(val)
-            } else {
-                val.clone()
-            };
-            lines.push(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(
-                    if display.is_empty() { "(skipped)".to_string() } else { display },
-                    Style::default().fg(theme::FOAM),
-                ),
-            ]));
-        }
-
-        lines.push(Line::from(""));
-    }
-
-    lines.push(Line::from(Span::styled(
-        " Enter to confirm · Esc to dismiss",
-        Style::default().fg(theme::MUTED),
-    )));
-
-    frame.render_widget(Paragraph::new(lines), inner);
+    lines
 }
