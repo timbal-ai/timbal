@@ -220,7 +220,8 @@ Content
 class TestAgentWithSkills:
     """Test Agent integration with Skills."""
 
-    def test_agent_with_skills_path(self, skills_dir):
+    @pytest.mark.asyncio
+    async def test_agent_with_skills_path(self, skills_dir):
         """Test creating agent with skills_path."""
         agent = Agent(name="car_agent", model="openai/gpt-4o-mini", skills_path=skills_dir)
 
@@ -232,10 +233,11 @@ class TestAgentWithSkills:
         read_skill_tools = [t for t in agent.tools if isinstance(t, ReadSkill)]
         assert len(read_skill_tools) == 1
 
-        # System prompt should mention skills
-        assert "skills" in agent.system_prompt.lower()
-        assert "cars" in agent.system_prompt
-        assert "bikes" in agent.system_prompt
+        # Resolved system prompt should mention skills
+        system_prompt = await agent._resolve_system_prompt()
+        assert "skills" in system_prompt.lower()
+        assert "cars" in system_prompt
+        assert "bikes" in system_prompt
 
     def test_agent_with_skills_path_string(self, skills_dir):
         """Test that skills_path accepts string."""
@@ -256,7 +258,8 @@ class TestAgentWithSkills:
         with pytest.raises(ValueError, match="Skill 'cars' already exists"):
             Agent(name="agent", model="openai/gpt-4o-mini", skills_path=skills_dir, tools=[skill])
 
-    def test_agent_skills_in_system_prompt(self, skills_dir):
+    @pytest.mark.asyncio
+    async def test_agent_skills_in_system_prompt(self, skills_dir):
         """Test that skills are documented in system prompt."""
         agent = Agent(
             name="agent",
@@ -268,11 +271,71 @@ class TestAgentWithSkills:
         # Original prompt should be preserved
         assert "helpful assistant" in agent.system_prompt
 
-        # Skills section should be added
-        assert "<skills>" in agent.system_prompt
-        assert "cars" in agent.system_prompt
-        assert "Information about cars" in agent.system_prompt
-        assert "read_skill" in agent.system_prompt
+        # Skills section should be appended at resolution time
+        system_prompt = await agent._resolve_system_prompt()
+        assert "<skills>" in system_prompt
+        assert "cars" in system_prompt
+        assert "Information about cars" in system_prompt
+        assert "read_skill" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_agent_skills_with_callable_system_prompt(self, skills_dir):
+        """Test that skills modifier is appended to a dynamically resolved system prompt."""
+
+        def get_system_prompt() -> str:
+            return "You are a car expert."
+
+        agent = Agent(
+            name="agent",
+            model="openai/gpt-4o-mini",
+            skills_path=skills_dir,
+            system_prompt=get_system_prompt,
+        )
+
+        # Static system_prompt should be None since it was a callable
+        assert agent.system_prompt is None
+
+        # Resolved prompt should contain both the callable result and the skills section
+        system_prompt = await agent._resolve_system_prompt()
+        assert "car expert" in system_prompt
+        assert "<skills>" in system_prompt
+        assert "cars" in system_prompt
+        assert "bikes" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_agent_skills_with_async_callable_system_prompt(self, skills_dir):
+        """Test that skills modifier is appended to an async dynamically resolved system prompt."""
+
+        async def get_system_prompt() -> str:
+            return "You are an async car expert."
+
+        agent = Agent(
+            name="agent",
+            model="openai/gpt-4o-mini",
+            skills_path=skills_dir,
+            system_prompt=get_system_prompt,
+        )
+
+        assert agent.system_prompt is None
+
+        system_prompt = await agent._resolve_system_prompt()
+        assert "async car expert" in system_prompt
+        assert "<skills>" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_agent_skills_with_no_system_prompt(self, skills_dir):
+        """Test that skills modifier becomes the system prompt when none is provided."""
+        agent = Agent(
+            name="agent",
+            model="openai/gpt-4o-mini",
+            skills_path=skills_dir,
+        )
+
+        assert agent.system_prompt is None
+
+        system_prompt = await agent._resolve_system_prompt()
+        assert system_prompt == agent._system_prompt_skills
+        assert "<skills>" in system_prompt
 
 
 class TestReadSkillTool:

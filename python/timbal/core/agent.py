@@ -120,6 +120,8 @@ class Agent(Runnable):
     """Callable passed as system_prompt."""
     _system_prompt_fn_is_async: bool = PrivateAttr(default=False)
     """Whether _system_prompt_fn is async."""
+    _system_prompt_skills: str | None = PrivateAttr(default=None)
+    """System prompt modifier for skills."""
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize agent after Pydantic model creation."""
@@ -296,19 +298,15 @@ class Agent(Runnable):
             self.tools[i] = tool
 
         if skills:
-            skills_in_system_prompt = "\n".join([f"- **{skill.name}**: {skill.description}" for skill in skills])
-            read_skill_tool = ReadSkill(agent_path=self._path, skills=skills)
-            read_skill_tool.nest(self._path)
-            self.tools.append(read_skill_tool)
-            if not isinstance(self.system_prompt, str):
-                self.system_prompt = ""
-            self.system_prompt += f"""
-<skills>
+            self._system_prompt_skills = f"""<skills>
 Skills provide additional knowledge of a specific topic. The following skills are available:
-{skills_in_system_prompt}
+{chr(10).join([f"- **{skill.name}**: {skill.description}" for skill in skills])}
 In skills documentation, you will encounter references to additional files.
 If the file is relevant for the user query, USE the `read_skill` tool to get its content.
 </skills>"""
+            read_skill_tool = ReadSkill(agent_path=self._path, skills=skills)
+            read_skill_tool.nest(self._path)
+            self.tools.append(read_skill_tool)
 
         self._is_orchestrator = True
         self._is_coroutine = False
@@ -339,25 +337,37 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
     async def _resolve_system_prompt(self) -> str | None:
         """Resolve system prompt by executing callable or embedded template functions."""
-        if self._system_prompt_fn is not None:
-            return await self._execute_runtime_callable(self._system_prompt_fn, self._system_prompt_fn_is_async)
-
-        if not self.system_prompt:
-            return None
-        if not self._system_prompt_templates:
-            return self.system_prompt
-
-        # Execute template functions in parallel
-        system_prompt_tasks = []
-        for _, v in self._system_prompt_templates.items():
-            callable_fn = v["callable"]
-            system_prompt_tasks.append(self._execute_runtime_callable(callable_fn, v["is_coroutine"]))
-        results = await asyncio.gather(*system_prompt_tasks)
-
-        # Substitute results into template
         system_prompt = self.system_prompt
-        for (k, _), result in zip(self._system_prompt_templates.items(), results, strict=False):
-            system_prompt = system_prompt.replace(k, str(result) if result is not None else "")
+
+        if self._system_prompt_fn is not None:
+            system_prompt = await self._execute_runtime_callable(
+                self._system_prompt_fn, self._system_prompt_fn_is_async
+            )
+        elif self._system_prompt_templates:
+            assert isinstance(system_prompt, str)
+            # Execute template functions in parallel
+            system_prompt_tasks = []
+            for _, v in self._system_prompt_templates.items():
+                callable_fn = v["callable"]
+                system_prompt_tasks.append(self._execute_runtime_callable(callable_fn, v["is_coroutine"]))
+            results = await asyncio.gather(*system_prompt_tasks)
+            # Substitute results into template
+            for (k, _), result in zip(self._system_prompt_templates.items(), results, strict=False):
+                system_prompt = system_prompt.replace(k, str(result) if result is not None else "")
+
+        if self._system_prompt_skills:
+            if not isinstance(system_prompt, str):
+                system_prompt = self._system_prompt_skills
+            else:
+                system_prompt += "\n\n" + self._system_prompt_skills
+
+        if system_prompt is not None and not isinstance(system_prompt, str):
+            logger.warning(
+                "Invalid system prompt type after resolution, ignoring...",
+                system_prompt=system_prompt,
+                system_prompt_type=type(system_prompt).__name__,
+            )
+            system_prompt = None
 
         return system_prompt
 
