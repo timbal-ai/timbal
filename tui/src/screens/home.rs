@@ -437,7 +437,16 @@ fn conversation_lines(app: &App, hovered_line: Option<usize>) -> (Vec<Line<'stat
                     Span::styled("Interrupted", Style::default().fg(theme::SUBTLE)),
                 ]));
             }
-            TurnStatus::Completed(_) | TurnStatus::Complete => {}
+            TurnStatus::Completed(msg) => {
+                // Show status for non-shell turns (commands like /help, /configure).
+                if !matches!(turn.input, TurnInput::Shell(_)) {
+                    lines.push(Line::from(vec![
+                        Span::styled("  └ ", Style::default().fg(theme::MUTED)),
+                        Span::styled(msg.clone(), Style::default().fg(theme::SUBTLE)),
+                    ]));
+                }
+            }
+            TurnStatus::Complete => {}
         }
 
         lines.push(Line::from(""));
