@@ -585,10 +585,14 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         doc.extend(conv_lines);
     }
 
-    // Vectorscope placeholder — after conversation, before input box.
+    // Vectorscope placeholder — only for LLM message turns, not shell/command.
     let scope_doc_start = doc.len() as u16;
     let is_busy = app.conversation.is_busy();
-    if is_busy {
+    let show_scope = is_busy
+        && app.conversation.turns.last().is_some_and(|t| {
+            matches!(t.input, TurnInput::Message(_))
+        });
+    if show_scope {
         for _ in 0..SCOPE_HEIGHT {
             doc.push(Line::from(""));
         }
@@ -664,7 +668,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     );
 
     // Overlay the vectorscope widget on top of the blank placeholder lines.
-    if is_busy && !app.scope_frames.is_empty() {
+    if show_scope && !app.scope_frames.is_empty() {
         let scope_screen_y = scope_doc_start.saturating_sub(app.scroll);
 
         if scope_screen_y < visible_height {

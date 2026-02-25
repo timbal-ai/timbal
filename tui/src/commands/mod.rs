@@ -3,6 +3,7 @@ pub mod configure;
 pub mod help;
 pub mod project;
 pub mod quit;
+pub mod test;
 
 use crate::app::AppEvent;
 
@@ -37,6 +38,7 @@ impl CommandRegistry {
         reg.register(Box::new(clear::ClearCommand));
         reg.register(Box::new(help::HelpCommand));
         reg.register(Box::new(project::ProjectCommand));
+        reg.register(Box::new(test::TestCommand));
         reg
     }
 

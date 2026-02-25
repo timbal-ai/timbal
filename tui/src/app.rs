@@ -27,6 +27,8 @@ pub enum AppEvent {
     OpenHelp,
     /// Show project structure info.
     ShowProject,
+    /// Run the streaming test command.
+    RunStreamingTest,
     /// A command produced output to display inline.
     CommandOutput(OutputBlock),
     /// An output block from a background task (streaming response, tool output, etc.).
@@ -463,6 +465,83 @@ impl App {
         });
     }
 
+    /// Run the streaming test: spawns a Python process that prints lines with delays.
+    /// Reuses the command turn already created by submit_command — just makes it streaming.
+    fn run_streaming_test(&mut self) {
+        if let Some(turn) = self.conversation.turns.last_mut() {
+            turn.status = crate::model::conversation::TurnStatus::Streaming;
+        }
+        self.scroll = u16::MAX;
+
+        let tx = self.event_tx.clone();
+
+        let python_code = r#"
+import asyncio, sys
+
+async def main():
+    steps = [
+        "Connecting to API...",
+        "Authenticating...",
+        "Fetching model list...",
+        "Selected: claude-sonnet-4-20250514",
+        "Sending prompt...",
+        "Receiving response chunk 1...",
+        "Receiving response chunk 2...",
+        "Receiving response chunk 3...",
+        "Processing tool call: Read(src/main.rs)",
+        "Tool result: 52 lines",
+        "Generating final response...",
+        "Done. 247 tokens used.",
+    ]
+    for step in steps:
+        print(step, flush=True)
+        await asyncio.sleep(0.4)
+
+asyncio.run(main())
+"#;
+
+        tokio::spawn(async move {
+            use tokio::process::Command;
+            use tokio::io::{AsyncBufReadExt, BufReader};
+
+            let mut child = match Command::new("uv")
+                .args(["run", "python", "-c", python_code])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Error(
+                        format!("Failed to spawn: {e}"),
+                    )));
+                    let _ = tx.send(AppEvent::TurnComplete);
+                    return;
+                }
+            };
+
+            if let Some(stdout) = child.stdout.take() {
+                let mut reader = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Text(
+                        format!("  {line}"),
+                    )));
+                }
+            }
+
+            // Check for stderr after stdout is done.
+            if let Some(stderr) = child.stderr.take() {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Error(line)));
+                }
+            }
+
+            let _ = child.wait().await;
+            let _ = tx.send(AppEvent::TurnComplete);
+        });
+    }
+
     /// Submit a regular user message.
     fn submit_message(&mut self) {
         let text = std::mem::take(&mut self.input);
@@ -501,6 +580,9 @@ impl App {
             AppEvent::ShowProject => {
                 self.project_open = true;
                 self.scroll = u16::MAX;
+            }
+            AppEvent::RunStreamingTest => {
+                self.run_streaming_test();
             }
             AppEvent::CommandOutput(block) => {
                 // Attach output to the last turn (the command turn we just created).
