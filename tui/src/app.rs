@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use crate::audio::{self, Frame};
 use crate::commands::{self, CommandRegistry};
 use crate::event::{self, Action};
+use crate::model::config::TimbalConfig;
 use crate::model::conversation::{Conversation, OutputBlock, Turn};
 use crate::model::history::{self, Entry, EntryKind};
 use crate::screens::configure::ConfigureState;
@@ -17,8 +18,8 @@ use crate::ui;
 pub enum AppEvent {
     /// Quit the application.
     Quit,
-    /// Open the configure dialog with an optional profile.
-    OpenConfigure(Option<String>),
+    /// Open the configure dialog (uses the app's active profile).
+    OpenConfigure,
     /// Clear conversation history.
     ClearConversation,
     /// Open the help panel.
@@ -39,6 +40,10 @@ pub struct App {
     pub config_open: bool,
     pub help_state: HelpState,
     pub help_open: bool,
+    /// Active profile name (from TIMBAL_PROFILE env or "default").
+    pub profile: String,
+    /// Whether the active profile has credentials configured.
+    pub configured: bool,
     pub conversation: Conversation,
     pub scroll: u16,
     /// Precomputed vectorscope animation frames (decoded once at startup).
@@ -58,9 +63,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Result<Self> {
+    pub fn new(profile_override: Option<String>) -> Result<Self> {
         let scope_frames = audio::load_frames();
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+
+        let profile = profile_override
+            .or_else(|| std::env::var("TIMBAL_PROFILE").ok())
+            .unwrap_or_else(|| "default".to_string());
+        let config = TimbalConfig::load(&profile);
+        let configured = config.is_configured();
 
         let mut app = Self {
             running: true,
@@ -70,6 +81,8 @@ impl App {
             config_open: false,
             help_state: HelpState::new(),
             help_open: false,
+            profile,
+            configured,
             conversation: Conversation::new(),
             scroll: 0,
             scope_frames,
@@ -195,6 +208,9 @@ impl App {
                             self.log(EntryKind::ConfigureSaved(profile.clone()));
                             self.config_open = false;
                             self.configure_state = ConfigureState::new();
+                            // Refresh configured status after saving.
+                            let cfg = TimbalConfig::load(&self.profile);
+                            self.configured = cfg.is_configured();
                             if let Some(turn) = self.conversation.turns.last_mut() {
                                 turn.complete_with(format!(
                                     "Credentials saved (profile: {profile})"
@@ -354,8 +370,9 @@ impl App {
             AppEvent::Quit => {
                 self.running = false;
             }
-            AppEvent::OpenConfigure(profile) => {
-                self.configure_state = ConfigureState::with_profile(profile);
+            AppEvent::OpenConfigure => {
+                self.configure_state =
+                    ConfigureState::for_profile(self.profile.clone());
                 self.config_open = true;
             }
             AppEvent::ClearConversation => {

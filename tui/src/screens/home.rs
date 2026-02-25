@@ -16,10 +16,10 @@ use crate::widgets::vectorscope::Vectorscope;
 // Logo
 // ---------------------------------------------------------------------------
 
-fn styled_logo() -> Vec<Line<'static>> {
+fn styled_logo(app: &App) -> Vec<Line<'static>> {
     let bold = Modifier::BOLD;
     let c = Alignment::Center;
-    vec![
+    let mut logo = vec![
         Line::from(""),
         Line::from(""),
         Line::from(vec![
@@ -172,6 +172,11 @@ fn styled_logo() -> Vec<Line<'static>> {
                 format!(" v{} ", crate::VERSION),
                 Style::default().fg(theme::SURFACE).bg(theme::IRIS),
             ),
+            Span::raw("  "),
+            Span::styled(
+                format!(" {} ", app.profile),
+                Style::default().fg(theme::SURFACE).bg(theme::FOAM),
+            ),
         ]),
         Line::from(Span::styled(
             "Build reliable, enterprise-grade AI applications",
@@ -186,11 +191,30 @@ fn styled_logo() -> Vec<Line<'static>> {
             Style::default().fg(theme::MUTED),
         )),
         Line::from(""),
-        Line::from(""),
-    ]
-    .into_iter()
-    .map(|l| l.alignment(c))
-    .collect()
+    ];
+
+    if !app.configured {
+        logo.push(Line::from(vec![
+            Span::styled("⚠ ", Style::default().fg(theme::GOLD)),
+            Span::styled(
+                "No API key configured. Run ",
+                Style::default().fg(theme::GOLD),
+            ),
+            Span::styled(
+                "/configure",
+                Style::default().fg(theme::IRIS).add_modifier(bold),
+            ),
+            Span::styled(
+                " to set up credentials.",
+                Style::default().fg(theme::GOLD),
+            ),
+        ]));
+        logo.push(Line::from(""));
+    }
+
+    logo.into_iter()
+        .map(|l| l.alignment(c))
+        .collect()
 }
 
 fn shorten_home(path: &str) -> String {
@@ -408,7 +432,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let mut doc: Vec<Line<'static>> = Vec::new();
 
     // Logo.
-    doc.extend(styled_logo());
+    doc.extend(styled_logo(app));
 
     // Conversation turns.
     let conv_lines = conversation_lines(app);

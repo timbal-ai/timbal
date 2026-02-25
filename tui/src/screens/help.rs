@@ -200,7 +200,7 @@ fn build_commands(lines: &mut Vec<Line<'static>>) {
     lines.push(Line::from(""));
 
     let commands: &[(&str, &str)] = &[
-        ("/configure [profile]", "Set up API key and credentials"),
+        ("/configure", "Set up API key and credentials"),
         ("/clear", "Clear conversation history"),
         ("/help", "Show this help panel"),
         ("/quit", "Exit Timbal"),

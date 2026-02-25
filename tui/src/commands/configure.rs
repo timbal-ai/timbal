@@ -8,12 +8,11 @@ impl CommandHandler for ConfigureCommand {
         CommandMeta {
             name: "/configure",
             description: "Set up API key and credentials",
-            usage: "/configure [profile]",
+            usage: "/configure",
         }
     }
 
-    fn execute(&self, args: Option<&str>) -> Vec<AppEvent> {
-        let profile = args.map(str::to_string);
-        vec![AppEvent::OpenConfigure(profile)]
+    fn execute(&self, _args: Option<&str>) -> Vec<AppEvent> {
+        vec![AppEvent::OpenConfigure]
     }
 }

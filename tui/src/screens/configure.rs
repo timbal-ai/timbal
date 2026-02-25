@@ -9,12 +9,6 @@ use ratatui::{
 use crate::model::config::{mask_key, TimbalConfig};
 use crate::theme;
 
-fn resolve_profile(profile_arg: Option<String>) -> String {
-    profile_arg
-        .or_else(|| std::env::var("TIMBAL_PROFILE").ok())
-        .unwrap_or_else(|| "default".to_string())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigField {
     ApiKey,
@@ -60,11 +54,12 @@ pub struct ConfigureState {
 
 impl ConfigureState {
     pub fn new() -> Self {
-        Self::with_profile(None)
+        let profile = std::env::var("TIMBAL_PROFILE")
+            .unwrap_or_else(|_| "default".to_string());
+        Self::for_profile(profile)
     }
 
-    pub fn with_profile(profile: Option<String>) -> Self {
-        let profile = resolve_profile(profile);
+    pub fn for_profile(profile: String) -> Self {
         let existing = TimbalConfig::load(&profile);
         let base_url_default = existing
             .base_url

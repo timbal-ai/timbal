@@ -126,6 +126,11 @@ pub struct TimbalConfig {
 }
 
 impl TimbalConfig {
+    /// Whether this config has the minimum required credentials set.
+    pub fn is_configured(&self) -> bool {
+        self.api_key.is_some()
+    }
+
     pub fn load(profile: &str) -> Self {
         let creds = read_or_empty(&credentials_path());
         let cfg = read_or_empty(&config_path());
