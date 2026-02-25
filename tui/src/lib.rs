@@ -1,0 +1,11 @@
+pub mod app;
+pub mod audio;
+pub mod commands;
+pub mod config;
+pub mod history;
+pub mod event;
+pub mod screens;
+pub mod theme;
+pub mod tui;
+pub mod ui;
+pub mod widgets;

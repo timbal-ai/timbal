@@ -23,6 +23,7 @@ version.zig
 
 *.dump
 *.wav
+*.mp3
 
 # Safe testing during development
 sandbox/
@@ -32,5 +33,7 @@ node_modules/
 .docusaurus/
 
 **/ace/
+**/target/
 
 **/*lancedb*/
+

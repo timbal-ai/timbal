@@ -1,0 +1,28 @@
+[package]
+name = "timbal-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal UI for Timbal AI agent framework"
+license = "Apache-2.0"
+authors = ["Timbal AI <team@timbal.ai>"]
+repository = "https://github.com/timbal-ai/timbal"
+homepage = "https://timbal.ai"
+readme = "README.md"
+keywords = ["tui", "terminal", "ai", "agent"]
+categories = ["command-line-interface"]
+
+[[bin]]
+name = "timbal"
+path = "src/main.rs"
+
+[dependencies]
+color-eyre = "0.6.5"
+crossterm = "0.28"
+dirs = "6.0.0"
+ratatui = "0.30.0"
+symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
