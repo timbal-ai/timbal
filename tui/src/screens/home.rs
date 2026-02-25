@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Margin},
+    layout::{Alignment, Margin},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
@@ -223,6 +223,25 @@ fn history_lines(app: &App) -> Vec<Line<'static>> {
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
+
+                // Look ahead for child outcome events (e.g. Interrupted).
+                let mut j = i + 1;
+                while j < visible.len() {
+                    match &visible[j].kind {
+                        EntryKind::Interrupted => {
+                            lines.push(Line::from(vec![
+                                Span::styled("  └ ", Style::default().fg(theme::MUTED)),
+                                Span::styled(
+                                    "Interrupted",
+                                    Style::default().fg(theme::SUBTLE),
+                                ),
+                            ]));
+                            i = j;
+                            j += 1;
+                        }
+                        _ => break,
+                    }
+                }
             }
             EntryKind::Command(cmd) => {
                 lines.push(Line::from(vec![
@@ -260,12 +279,23 @@ fn history_lines(app: &App) -> Vec<Line<'static>> {
                             i = j;
                             j += 1;
                         }
+                        EntryKind::Interrupted => {
+                            lines.push(Line::from(vec![
+                                Span::styled("  └ ", Style::default().fg(theme::MUTED)),
+                                Span::styled(
+                                    "Interrupted",
+                                    Style::default().fg(theme::SUBTLE),
+                                ),
+                            ]));
+                            i = j;
+                            j += 1;
+                        }
                         EntryKind::Message(_) | EntryKind::Command(_) => break,
                         _ => break,
                     }
                 }
             }
-            EntryKind::ConfigureSaved(_) | EntryKind::ConfigureCancelled => {
+            EntryKind::ConfigureSaved(_) | EntryKind::ConfigureCancelled | EntryKind::Interrupted => {
                 lines.push(Line::from(Span::styled(
                     format!("  └ {}", entry.kind),
                     Style::default().fg(theme::MUTED),
@@ -348,6 +378,8 @@ fn palette_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         .collect()
 }
 
+const SCOPE_HEIGHT: u16 = 20;
+
 pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     let padded = area.inner(Margin {
@@ -356,9 +388,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     });
     let width = padded.width;
 
-    let vectorscope_height: u16 = if app.thinking { 20 } else { 0 };
-
-    // Build one scrollable document: logo + history + input + palette + config.
+    // Build one scrollable document.
     let mut doc: Vec<Line<'static>> = Vec::new();
 
     // Logo.
@@ -380,13 +410,20 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         doc.extend(h);
     }
 
+    // Vectorscope placeholder — right after "Thinking...", before the input box.
+    let scope_doc_start = doc.len() as u16;
+    if app.thinking {
+        for _ in 0..SCOPE_HEIGHT {
+            doc.push(Line::from(""));
+        }
+    }
+
     // Input (hidden when config dialog is open).
     if !app.config_open {
         doc.push(separator_line(width));
         doc.push(input_line(app));
         doc.push(separator_line(width));
 
-        // "esc to interrupt" hint when thinking.
         if app.thinking {
             doc.push(Line::from(""));
             doc.push(Line::from(Span::styled(
@@ -396,28 +433,27 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         }
     }
 
-    // Palette (below input, part of the scroll).
+    // Palette.
     if app.palette_open() {
         doc.extend(palette_lines(app, width));
     }
 
-    // Config panel (below palette, part of the scroll).
+    // Config panel.
     if app.config_open {
         doc.extend(configure::build_lines(&app.configure_state, width));
     }
 
     let total_lines = doc.len() as u16;
 
-    // Layout: scrollable doc fills everything except anchored vectorscope.
-    let [scroll_area, scope_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(vectorscope_height)])
-            .areas(padded);
+    // The entire padded area is the scroll area.
+    let scroll_area = padded;
 
     // Clamp scroll.
     let visible_height = scroll_area.height;
     let max_scroll = total_lines.saturating_sub(visible_height);
     app.scroll = app.scroll.min(max_scroll);
 
+    // Render the scrollable text document.
     frame.render_widget(
         Paragraph::new(doc)
             .wrap(Wrap { trim: false })
@@ -425,16 +461,37 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         scroll_area,
     );
 
-    // Vectorscope loader (only thing anchored at bottom).
-    if app.thinking && vectorscope_height > 0 {
-        let scope_size = scope_area.height.min(scope_area.width / 2);
-        let [scope_centered] =
-            Layout::horizontal([Constraint::Length(scope_size * 2)]).areas(scope_area);
+    // Overlay the vectorscope widget on top of the blank placeholder lines.
+    if app.thinking && !app.scope_frames.is_empty() {
+        // Where does the scope start on screen?
+        let scope_screen_y = scope_doc_start.saturating_sub(app.scroll);
 
-        frame.render_stateful_widget(
-            Vectorscope::new(&app.sample_buffer),
-            scope_centered,
-            &mut app.vectorscope_state,
-        );
+        if scope_screen_y < visible_height {
+            let available = visible_height.saturating_sub(scope_screen_y);
+            let h = SCOPE_HEIGHT.min(available);
+
+            if h > 2 {
+                let scope_rect = ratatui::layout::Rect::new(
+                    scroll_area.x,
+                    scroll_area.y + scope_screen_y,
+                    scroll_area.width,
+                    h,
+                );
+
+                // Center horizontally.
+                let scope_size = h.min(scope_rect.width / 2);
+                let x_offset = (scope_rect.width.saturating_sub(scope_size * 2)) / 2;
+
+                let centered = ratatui::layout::Rect::new(
+                    scope_rect.x + x_offset,
+                    scope_rect.y,
+                    scope_size * 2,
+                    h,
+                );
+
+                let points = app.current_scope_frame();
+                frame.render_widget(Vectorscope::new(points), centered);
+            }
+        }
     }
 }

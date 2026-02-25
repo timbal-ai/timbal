@@ -15,6 +15,10 @@ categories = ["command-line-interface"]
 name = "timbal"
 path = "src/main.rs"
 
+[[bin]]
+name = "precompute-frames"
+path = "src/bin/precompute_frames.rs"
+
 [dependencies]
 color-eyre = "0.6.5"
 crossterm = "0.28"

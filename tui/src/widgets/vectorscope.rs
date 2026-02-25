@@ -3,71 +3,35 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     symbols::Marker,
-    widgets::{Axis, Chart, Dataset, GraphType, StatefulWidget, Widget},
+    widgets::{Axis, Chart, Dataset, GraphType, Widget},
 };
 
-use crate::audio::SampleBuffer;
 use crate::theme;
 
-const FRAMES: usize = 2048;
-
-pub struct VectorscopeState {
-    pub scale: f64,
-    pub scatter: bool,
+/// Stateless vectorscope widget. Renders a precomputed frame of (left, right) points.
+pub struct Vectorscope<'a> {
+    points: &'a [(f64, f64)],
+    scale: f64,
 }
 
-impl Default for VectorscopeState {
-    fn default() -> Self {
+impl<'a> Vectorscope<'a> {
+    pub fn new(points: &'a [(f64, f64)]) -> Self {
         Self {
+            points,
             scale: 1.0,
-            scatter: true,
         }
     }
 }
 
-/// Reusable vectorscope widget. Plots stereo L/R samples as a Lissajous figure.
-/// Use as a loading animation or standalone visualization.
-pub struct Vectorscope<'a> {
-    pub sample_buffer: &'a SampleBuffer,
-}
+impl Widget for Vectorscope<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if self.points.is_empty() {
+            return;
+        }
 
-impl<'a> Vectorscope<'a> {
-    pub fn new(sample_buffer: &'a SampleBuffer) -> Self {
-        Self { sample_buffer }
-    }
-}
-
-impl StatefulWidget for Vectorscope<'_> {
-    type State = VectorscopeState;
-
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let raw: Vec<f32> = {
-            let guard = self.sample_buffer.lock().unwrap();
-            let needed = FRAMES * 2;
-            if guard.len() < needed {
-                return;
-            }
-            let start = guard.len() - needed;
-            guard[start..].to_vec()
-        };
-
-        let points: Vec<(f64, f64)> = (0..FRAMES)
-            .map(|i| {
-                let left = raw[i * 2] as f64;
-                let right = raw[i * 2 + 1] as f64;
-                (left, right)
-            })
-            .collect();
-
-        let s = state.scale;
+        let s = self.scale;
         let h_line: Vec<(f64, f64)> = vec![(-s, 0.0), (s, 0.0)];
         let v_line: Vec<(f64, f64)> = vec![(0.0, -s), (0.0, s)];
-
-        let graph_type = if state.scatter {
-            GraphType::Scatter
-        } else {
-            GraphType::Line
-        };
 
         let datasets = vec![
             Dataset::default()
@@ -82,9 +46,9 @@ impl StatefulWidget for Vectorscope<'_> {
                 .data(&v_line),
             Dataset::default()
                 .marker(Marker::Braille)
-                .graph_type(graph_type)
+                .graph_type(GraphType::Scatter)
                 .style(Style::default().fg(theme::LOVE))
-                .data(&points),
+                .data(self.points),
         ];
 
         let chart = Chart::new(datasets)
@@ -100,6 +64,6 @@ impl StatefulWidget for Vectorscope<'_> {
             )
             .style(Style::default());
 
-        Widget::render(chart, area, buf);
+        chart.render(area, buf);
     }
 }

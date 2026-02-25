@@ -24,6 +24,7 @@ version.zig
 *.dump
 *.wav
 *.mp3
+*.bin
 
 # Safe testing during development
 sandbox/

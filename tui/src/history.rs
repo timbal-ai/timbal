@@ -27,6 +27,8 @@ pub enum EntryKind {
     ConfigureSaved(String),
     /// /configure was cancelled.
     ConfigureCancelled,
+    /// Thinking was interrupted by the user.
+    Interrupted,
     /// Session started.
     SessionStart,
 }
@@ -40,6 +42,7 @@ impl fmt::Display for EntryKind {
                 write!(f, "Credentials saved (profile: {profile})")
             }
             EntryKind::ConfigureCancelled => write!(f, "Config dialog dismissed"),
+            EntryKind::Interrupted => write!(f, "Interrupted"),
             EntryKind::SessionStart => write!(f, "Session started"),
         }
     }
@@ -72,6 +75,7 @@ impl Entry {
             EntryKind::Command(_) => "command",
             EntryKind::ConfigureSaved(_) => "configure_saved",
             EntryKind::ConfigureCancelled => "configure_cancelled",
+            EntryKind::Interrupted => "interrupted",
             EntryKind::SessionStart => "session_start",
         };
         let content = self.kind.to_string().replace('"', "\\\"");

@@ -1,20 +1,15 @@
-use std::path::PathBuf;
-
 use color_eyre::Result;
 use ratatui::DefaultTerminal;
 
-use crate::audio::{self, SampleBuffer};
+use crate::audio::{self, Frame};
 use crate::commands;
 use crate::event::{self, Action};
 use crate::history::{self, Entry, EntryKind};
 use crate::screens::configure::ConfigureState;
 use crate::ui;
-use crate::widgets::vectorscope::VectorscopeState;
 
 pub struct App {
     pub running: bool,
-    pub sample_buffer: SampleBuffer,
-    pub vectorscope_state: VectorscopeState,
     pub input: String,
     pub thinking: bool,
     pub palette_selected: Option<usize>,
@@ -22,16 +17,20 @@ pub struct App {
     pub config_open: bool,
     pub history: Vec<Entry>,
     pub scroll: u16,
+    /// Precomputed vectorscope animation frames (decoded once at startup).
+    pub scope_frames: Vec<Frame>,
+    /// Current animation frame index (advances every N render ticks, wraps for looping).
+    pub scope_tick: usize,
+    /// Render tick counter for throttling the animation.
+    render_tick: usize,
 }
 
 impl App {
-    pub fn new(mp3_path: PathBuf) -> Result<Self> {
-        let sample_buffer = audio::decode_mp3(&mp3_path)?;
+    pub fn new() -> Result<Self> {
+        let scope_frames = audio::load_frames();
 
         let mut app = Self {
             running: true,
-            sample_buffer,
-            vectorscope_state: VectorscopeState::default(),
             input: String::new(),
             thinking: false,
             palette_selected: None,
@@ -39,6 +38,9 @@ impl App {
             config_open: false,
             history: Vec::new(),
             scroll: 0,
+            scope_frames,
+            scope_tick: 0,
+            render_tick: 0,
         };
 
         app.log(EntryKind::SessionStart);
@@ -56,8 +58,29 @@ impl App {
         !self.config_open && self.input.starts_with('/')
     }
 
+    /// Get the current vectorscope frame (loops automatically).
+    pub fn current_scope_frame(&self) -> &[(f64, f64)] {
+        if self.scope_frames.is_empty() {
+            return &[];
+        }
+        &self.scope_frames[self.scope_tick % self.scope_frames.len()]
+    }
+
+    /// Advance the animation tick. Only moves to the next frame every 4 render ticks (~15fps).
+    pub fn advance_scope(&mut self) {
+        self.render_tick += 1;
+        if self.render_tick % 2 == 0 && !self.scope_frames.is_empty() {
+            self.scope_tick = (self.scope_tick + 1) % self.scope_frames.len();
+        }
+    }
+
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while self.running {
+            // Advance animation when thinking.
+            if self.thinking {
+                self.advance_scope();
+            }
+
             terminal.draw(|frame| ui::render(self, frame))?;
 
             if let Some(action) = event::poll()? {
@@ -68,7 +91,6 @@ impl App {
     }
 
     pub fn update(&mut self, action: Action) {
-        // Route input to the inline config panel when it's open.
         if self.config_open {
             match action {
                 Action::Cancel => {
@@ -155,7 +177,6 @@ impl App {
                     let matches = commands::filter(&self.input);
                     let idx = self.palette_selected.unwrap_or(0);
                     if let Some(cmd) = matches.get(idx) {
-                        // Build the full command text from the matched command name + any args.
                         let arg = commands::parse_arg(&self.input, cmd.name);
                         let cmd_text = match arg {
                             Some(a) => format!("{} {}", cmd.name, a),
@@ -172,8 +193,7 @@ impl App {
                                 self.log(EntryKind::Command(cmd_text));
                                 self.input.clear();
                                 self.palette_selected = None;
-                                self.configure_state =
-                                    ConfigureState::with_profile(profile);
+                                self.configure_state = ConfigureState::with_profile(profile);
                                 self.config_open = true;
                             }
                             _ => {
@@ -193,8 +213,9 @@ impl App {
                 if self.palette_open() {
                     self.palette_selected = None;
                     self.input.clear();
-                } else {
+                } else if self.thinking {
                     self.thinking = false;
+                    self.log(EntryKind::Interrupted);
                 }
             }
         }
