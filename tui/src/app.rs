@@ -35,6 +35,8 @@ pub enum AppEvent {
     PushOutput(OutputBlock),
     /// Mark the current turn as complete.
     TurnComplete,
+    /// Mark the current turn as complete with a visible status message.
+    TurnCompleteWith(String),
 }
 
 pub struct App {
@@ -454,14 +456,25 @@ impl App {
                         .map(|l| l.to_string())
                         .collect();
                     let _ = tx.send(AppEvent::PushOutput(OutputBlock::ShellOutput(lines)));
+
+                    let code = output.status.code().unwrap_or(-1);
+                    if output.status.success() {
+                        let _ = tx.send(AppEvent::TurnCompleteWith(
+                            format!("✓ exit {code}"),
+                        ));
+                    } else {
+                        let _ = tx.send(AppEvent::TurnCompleteWith(
+                            format!("✗ exit {code}"),
+                        ));
+                    }
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::PushOutput(OutputBlock::Error(
                         format!("Failed to run command: {e}"),
                     )));
+                    let _ = tx.send(AppEvent::TurnComplete);
                 }
             }
-            let _ = tx.send(AppEvent::TurnComplete);
         });
     }
 
@@ -537,8 +550,23 @@ asyncio.run(main())
                 }
             }
 
-            let _ = child.wait().await;
-            let _ = tx.send(AppEvent::TurnComplete);
+            match child.wait().await {
+                Ok(status) => {
+                    let code = status.code().unwrap_or(-1);
+                    if status.success() {
+                        let _ = tx.send(AppEvent::TurnCompleteWith(
+                            format!("✓ exit {code}"),
+                        ));
+                    } else {
+                        let _ = tx.send(AppEvent::TurnCompleteWith(
+                            format!("✗ exit {code}"),
+                        ));
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::TurnComplete);
+                }
+            }
         });
     }
 
@@ -600,6 +628,11 @@ asyncio.run(main())
             AppEvent::TurnComplete => {
                 if let Some(turn) = self.conversation.active_turn_mut() {
                     turn.complete();
+                }
+            }
+            AppEvent::TurnCompleteWith(msg) => {
+                if let Some(turn) = self.conversation.active_turn_mut() {
+                    turn.complete_with(msg);
                 }
             }
         }

@@ -302,6 +302,10 @@ fn conversation_lines(app: &App, hovered_line: Option<usize>) -> (Vec<Line<'stat
             }
         }
 
+        // Determine shell output color based on exit status.
+        let shell_failed = matches!(&turn.status, TurnStatus::Completed(msg) if msg.starts_with('✗'));
+        let shell_color = if shell_failed { theme::LOVE } else { theme::SUBTLE };
+
         // Collect output lines, then apply turn-level collapse.
         let mut output_lines: Vec<Line<'static>> = Vec::new();
 
@@ -369,7 +373,7 @@ fn conversation_lines(app: &App, hovered_line: Option<usize>) -> (Vec<Line<'stat
                                 Span::styled("  └ ", Style::default().fg(theme::MUTED)),
                                 Span::styled(
                                     line.clone(),
-                                    Style::default().fg(theme::SUBTLE),
+                                    Style::default().fg(shell_color),
                                 ),
                             ]));
                         } else {
@@ -377,7 +381,7 @@ fn conversation_lines(app: &App, hovered_line: Option<usize>) -> (Vec<Line<'stat
                                 Span::styled("    ", Style::default()),
                                 Span::styled(
                                     line.clone(),
-                                    Style::default().fg(theme::SUBTLE),
+                                    Style::default().fg(shell_color),
                                 ),
                             ]));
                         }
@@ -419,7 +423,7 @@ fn conversation_lines(app: &App, hovered_line: Option<usize>) -> (Vec<Line<'stat
             lines.extend(output_lines);
         }
 
-        // Turn status indicator.
+        // Turn status indicator (only for streaming and interrupted).
         match &turn.status {
             TurnStatus::Streaming => {
                 lines.push(Line::from(Span::styled(
@@ -433,13 +437,7 @@ fn conversation_lines(app: &App, hovered_line: Option<usize>) -> (Vec<Line<'stat
                     Span::styled("Interrupted", Style::default().fg(theme::SUBTLE)),
                 ]));
             }
-            TurnStatus::Completed(msg) => {
-                lines.push(Line::from(vec![
-                    Span::styled("  └ ", Style::default().fg(theme::MUTED)),
-                    Span::styled(msg.clone(), Style::default().fg(theme::SUBTLE)),
-                ]));
-            }
-            TurnStatus::Complete => {}
+            TurnStatus::Completed(_) | TurnStatus::Complete => {}
         }
 
         lines.push(Line::from(""));
