@@ -8,6 +8,7 @@ use crate::event::{self, Action};
 use crate::model::config::TimbalConfig;
 use crate::model::conversation::{Conversation, OutputBlock, Turn};
 use crate::model::history::{self, Entry, EntryKind};
+use crate::model::project::ProjectContext;
 use crate::screens::configure::ConfigureState;
 use crate::screens::help::HelpState;
 use crate::ui;
@@ -24,6 +25,8 @@ pub enum AppEvent {
     ClearConversation,
     /// Open the help panel.
     OpenHelp,
+    /// Show project structure info.
+    ShowProject,
     /// A command produced output to display inline.
     CommandOutput(OutputBlock),
     /// An output block from a background task (streaming response, tool output, etc.).
@@ -40,10 +43,13 @@ pub struct App {
     pub config_open: bool,
     pub help_state: HelpState,
     pub help_open: bool,
+    pub project_open: bool,
     /// Active profile name (from TIMBAL_PROFILE env or "default").
     pub profile: String,
     /// Whether the active profile has credentials configured.
     pub configured: bool,
+    /// Project context detected from the current directory.
+    pub project: ProjectContext,
     pub conversation: Conversation,
     pub scroll: u16,
     /// Precomputed vectorscope animation frames (decoded once at startup).
@@ -72,6 +78,8 @@ impl App {
             .unwrap_or_else(|| "default".to_string());
         let config = TimbalConfig::load(&profile);
         let configured = config.is_configured();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let project = ProjectContext::detect(&cwd);
 
         let mut app = Self {
             running: true,
@@ -81,8 +89,10 @@ impl App {
             config_open: false,
             help_state: HelpState::new(),
             help_open: false,
+            project_open: false,
             profile,
             configured,
+            project,
             conversation: Conversation::new(),
             scroll: 0,
             scope_frames,
@@ -168,6 +178,21 @@ impl App {
 
     /// Handle a terminal input action.
     fn handle_action(&mut self, action: Action) {
+        // If project panel is open, route input there.
+        if self.project_open {
+            match action {
+                Action::Cancel | Action::Submit => {
+                    self.project_open = false;
+                    if let Some(turn) = self.conversation.turns.last_mut() {
+                        turn.complete_with("Project info dismissed".to_string());
+                    }
+                }
+                Action::Quit => self.running = false,
+                _ => {}
+            }
+            return;
+        }
+
         // If help panel is open, route input there.
         if self.help_open {
             match action {
@@ -382,6 +407,10 @@ impl App {
             AppEvent::OpenHelp => {
                 self.help_state = HelpState::new();
                 self.help_open = true;
+                self.scroll = u16::MAX;
+            }
+            AppEvent::ShowProject => {
+                self.project_open = true;
                 self.scroll = u16::MAX;
             }
             AppEvent::CommandOutput(block) => {

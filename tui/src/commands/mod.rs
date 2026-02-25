@@ -1,6 +1,7 @@
 pub mod clear;
 pub mod configure;
 pub mod help;
+pub mod project;
 pub mod quit;
 
 use crate::app::AppEvent;
@@ -35,6 +36,7 @@ impl CommandRegistry {
         reg.register(Box::new(quit::QuitCommand));
         reg.register(Box::new(clear::ClearCommand));
         reg.register(Box::new(help::HelpCommand));
+        reg.register(Box::new(project::ProjectCommand));
         reg
     }
 

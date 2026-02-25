@@ -193,6 +193,36 @@ fn styled_logo(app: &App) -> Vec<Line<'static>> {
         Line::from(""),
     ];
 
+    // Project detection — only show warnings; silence when everything is valid.
+    if app.project.is_timbal_project {
+        if !app.project.legacy_members.is_empty() {
+            let names = app.project.legacy_members.join(", ");
+            logo.push(
+                Line::from(vec![
+                    Span::styled("⚠ ", Style::default().fg(theme::GOLD)),
+                    Span::styled(
+                        format!("Legacy members need migration: {names}"),
+                        Style::default().fg(theme::GOLD),
+                    ),
+                ])
+                .alignment(c),
+            );
+            logo.push(Line::from(""));
+        }
+    } else {
+        logo.push(
+            Line::from(vec![
+                Span::styled("⚠ ", Style::default().fg(theme::GOLD)),
+                Span::styled(
+                    "Not a Timbal project. Run `timbal create` to get started.",
+                    Style::default().fg(theme::GOLD),
+                ),
+            ])
+            .alignment(c),
+        );
+        logo.push(Line::from(""));
+    }
+
     if !app.configured {
         logo.push(Line::from(vec![
             Span::styled("⚠ ", Style::default().fg(theme::GOLD)),
@@ -449,8 +479,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         }
     }
 
-    // Input (hidden when config or help dialog is open).
-    if !app.config_open && !app.help_open {
+    // Input (hidden when a dialog is open).
+    if !app.config_open && !app.help_open && !app.project_open {
         doc.push(separator_line(width));
         doc.push(input_line(app));
         doc.push(separator_line(width));
@@ -480,6 +510,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // Help panel.
     if app.help_open {
         doc.extend(crate::screens::help::build_lines(&app.help_state, width));
+    }
+
+    // Project panel.
+    if app.project_open {
+        doc.extend(crate::screens::project::build_lines(app, width));
     }
 
     let total_lines = doc.len() as u16;
@@ -529,4 +564,5 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             }
         }
     }
+
 }
