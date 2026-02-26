@@ -41,7 +41,7 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     if app.project.has_ui {
         lines.push(Line::from(vec![
-            Span::styled("    ui  ", Style::default().fg(theme::FOAM)),
+            Span::styled("    ui  ", Style::default().fg(theme::PINE)),
             Span::styled("React Vite", Style::default().fg(theme::MUTED)),
             Span::styled("  ·  ", Style::default().fg(theme::SUBTLE)),
             Span::styled("shadcn", Style::default().fg(theme::MUTED)),
@@ -59,7 +59,7 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     if app.project.has_api {
         lines.push(Line::from(vec![
-            Span::styled("    api  ", Style::default().fg(theme::FOAM)),
+            Span::styled("    api  ", Style::default().fg(theme::PINE)),
             Span::styled("Elysia", Style::default().fg(theme::MUTED)),
             Span::styled("  ·  ", Style::default().fg(theme::SUBTLE)),
             Span::styled("bun", Style::default().fg(theme::MUTED)),
@@ -89,8 +89,8 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     } else {
         for m in app.project.members.iter() {
             let kind_color = match m.kind.as_str() {
-                "agent" => theme::IRIS,
-                "workflow" => theme::FOAM,
+                "agent" => theme::PINE,
+                "workflow" => theme::PINE,
                 _ => theme::SUBTLE,
             };
 
@@ -109,7 +109,9 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             lines.push(Line::from(member_line));
 
             // ACE — agents only.
+            let has_evals = m.evals.is_some();
             if m.kind == "agent" {
+                let connector = if has_evals { "├" } else { "└" };
                 if let Some(ace) = &m.ace {
                     let var_count = ace.variables.len();
                     let pol_count = ace.policies.len();
@@ -119,13 +121,13 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                         "  configured (empty)".to_string()
                     };
                     lines.push(Line::from(vec![
-                        Span::styled("     └ ", Style::default().fg(theme::MUTED)),
+                        Span::styled(format!("     {connector} "), Style::default().fg(theme::MUTED)),
                         Span::styled("ace", Style::default().fg(theme::GOLD)),
                         Span::styled(ace_detail, Style::default().fg(theme::MUTED)),
                     ]));
                 } else {
                     lines.push(Line::from(vec![
-                        Span::styled("     └ ", Style::default().fg(theme::MUTED)),
+                        Span::styled(format!("     {connector} "), Style::default().fg(theme::MUTED)),
                         Span::styled("ace  ", Style::default().fg(theme::SUBTLE)),
                         Span::styled("not configured  ", Style::default().fg(theme::SUBTLE)),
                         Span::styled(
@@ -134,6 +136,28 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                         ),
                     ]));
                 }
+            }
+
+            // Evals.
+            if let Some(evals) = &m.evals {
+                let eval_count: usize = evals.files.iter().map(|(_, cases)| cases.len()).sum();
+                let file_count = evals.files.len();
+                let detail = format!(
+                    "  {eval_count} eval{} in {file_count} file{}",
+                    if eval_count == 1 { "" } else { "s" },
+                    if file_count == 1 { "" } else { "s" },
+                );
+                lines.push(Line::from(vec![
+                    Span::styled("     └ ", Style::default().fg(theme::MUTED)),
+                    Span::styled("evals", Style::default().fg(theme::ROSE)),
+                    Span::styled(detail, Style::default().fg(theme::MUTED)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("     └ ", Style::default().fg(theme::MUTED)),
+                    Span::styled("evals  ", Style::default().fg(theme::SUBTLE)),
+                    Span::styled("no evals found", Style::default().fg(theme::SUBTLE)),
+                ]));
             }
 
             lines.push(Line::from(""));

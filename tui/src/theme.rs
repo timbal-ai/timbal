@@ -10,6 +10,8 @@ pub const LOVE: Color = Color::from_u32(0x00eb6f92);
 pub const GOLD: Color = Color::from_u32(0x00f6c177);
 pub const FOAM: Color = Color::from_u32(0x009ccfd8);
 pub const IRIS: Color = Color::from_u32(0x00c4a7e7);
+pub const ROSE: Color = Color::from_u32(0x00ebbcba);
+pub const PINE: Color = Color::from_u32(0x007ec9a0);
 
 pub const LOGO: &str = "\
  ████████╗ ██╗ ███╗   ███╗ ██████╗   █████╗  ██╗\n\

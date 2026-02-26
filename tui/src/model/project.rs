@@ -64,6 +64,36 @@ pub struct AceConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Evals schemas (evals/*.yaml)
+// ---------------------------------------------------------------------------
+
+/// A single eval test case parsed from an eval YAML file.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EvalCase {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub timeout: Option<f64>,
+    #[serde(default)]
+    pub runnable: Option<String>,
+    #[serde(default)]
+    pub params: Option<serde_yaml::Value>,
+    /// All remaining fields (validators, output, seq!, etc.) captured as-is.
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_yaml::Value>,
+}
+
+/// Evals discovered in a workforce member's evals/ directory.
+#[derive(Debug, Clone, Default)]
+pub struct EvalsConfig {
+    /// All eval cases discovered, grouped by source file name.
+    pub files: Vec<(String, Vec<EvalCase>)>,
+}
+
+// ---------------------------------------------------------------------------
 // Public models
 // ---------------------------------------------------------------------------
 
@@ -80,6 +110,8 @@ pub struct WorkforceMember {
     pub fqn: Option<String>,
     /// ACE configuration, if .ace/ directory exists.
     pub ace: Option<AceConfig>,
+    /// Evals configuration, if evals/ directory exists.
+    pub evals: Option<EvalsConfig>,
 }
 
 /// Context about the current directory as a Timbal project.
@@ -135,6 +167,7 @@ impl ProjectContext {
                     .unwrap_or_default();
 
                 let ace = detect_ace(&path);
+                let evals = detect_evals(&path);
 
                 match (cfg._id, cfg._type) {
                     (Some(id), Some(kind)) => {
@@ -144,6 +177,7 @@ impl ProjectContext {
                             kind,
                             fqn: cfg.fqn,
                             ace,
+                            evals,
                         });
                     }
                     _ => {
@@ -188,6 +222,62 @@ fn detect_ace(member_dir: &Path) -> Option<AceConfig> {
         variables,
         policies,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Evals detection
+// ---------------------------------------------------------------------------
+
+/// Discover eval files in a workforce member's evals/ directory.
+/// Follows the same pattern as the Python CLI: files matching `eval*.yaml` or `*eval.yaml`.
+fn detect_evals(member_dir: &Path) -> Option<EvalsConfig> {
+    let evals_dir = member_dir.join("evals");
+    if !evals_dir.is_dir() {
+        return None;
+    }
+
+    let entries = match fs::read_dir(&evals_dir) {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+
+    let mut files: Vec<(String, Vec<EvalCase>)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".yaml") && !name.ends_with(".yml") {
+            continue;
+        }
+
+        // Match eval*.yaml or *eval.yaml (case-insensitive stem check).
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
+        let is_eval_file = stem.starts_with("eval") || stem.ends_with("eval");
+        if !is_eval_file {
+            continue;
+        }
+
+        let content = match fs::read_to_string(&path) {
+            Ok(s) if !s.trim().is_empty() => s,
+            _ => continue,
+        };
+
+        if let Ok(cases) = serde_yaml::from_str::<Vec<EvalCase>>(&content) {
+            if !cases.is_empty() {
+                files.push((name, cases));
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return None;
+    }
+
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(EvalsConfig { files })
 }
 
 /// Load a YAML file as a map of name -> T. Tries .yaml then .yml.

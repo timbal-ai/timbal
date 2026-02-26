@@ -9,7 +9,7 @@ use crate::model::config::TimbalConfig;
 use crate::model::conversation::{Conversation, OutputBlock, Turn};
 use crate::model::history::{self, Entry, EntryKind};
 use crate::model::project::ProjectContext;
-use crate::screens::ace_explorer::AceExplorerState;
+use crate::screens::ace_explorer::{AceExplorerState, AceExplorerTab};
 use crate::screens::configure::ConfigureState;
 use crate::screens::help::HelpState;
 use crate::ui;
@@ -264,7 +264,9 @@ impl App {
                             state.editing_field = state.editing_field.saturating_sub(1);
                         }
                         Action::Submit => {
-                            state.start_field_edit();
+                            if state.current_tab() != AceExplorerTab::Evals {
+                                state.start_field_edit();
+                            }
                         }
                         Action::Quit => self.running = false,
                         _ => {}
@@ -298,8 +300,10 @@ impl App {
                             self.scroll = u16::MAX;
                         }
                         Action::Submit => {
-                            // Enter editing mode for the selected item.
-                            if state.current_item_count() > 0 {
+                            // Enter editing mode for the selected item (skip for read-only Evals tab).
+                            if state.current_item_count() > 0
+                                && state.current_tab() != AceExplorerTab::Evals
+                            {
                                 state.enter_right();
                             }
                         }
@@ -789,8 +793,12 @@ asyncio.run(main())
     fn open_ace_explorer(&mut self, member_idx: usize) {
         if let Some(member) = self.project.members.get(member_idx) {
             if let Some(ace) = &member.ace {
-                self.ace_explorer_state =
-                    Some(AceExplorerState::new(member.name.clone(), ace.clone()));
+                let evals = member.evals.clone().unwrap_or_default();
+                self.ace_explorer_state = Some(AceExplorerState::new(
+                    member.name.clone(),
+                    ace.clone(),
+                    evals,
+                ));
                 self.ace_explorer_open = true;
                 self.project_open = false;
                 self.scroll = u16::MAX;

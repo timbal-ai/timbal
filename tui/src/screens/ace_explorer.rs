@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::model::project::{AceConfig, AcePolicy, AceVariable};
+use crate::model::project::{AceConfig, AcePolicy, AceVariable, EvalCase, EvalsConfig};
 use crate::theme;
 
 // ---------------------------------------------------------------------------
@@ -18,16 +18,21 @@ use crate::theme;
 pub enum AceExplorerTab {
     Variables,
     Policies,
+    Evals,
 }
 
 impl AceExplorerTab {
-    pub const ALL: &'static [AceExplorerTab] =
-        &[AceExplorerTab::Variables, AceExplorerTab::Policies];
+    pub const ALL: &'static [AceExplorerTab] = &[
+        AceExplorerTab::Variables,
+        AceExplorerTab::Policies,
+        AceExplorerTab::Evals,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             AceExplorerTab::Variables => "Variables",
             AceExplorerTab::Policies => "Policies",
+            AceExplorerTab::Evals => "Evals",
         }
     }
 }
@@ -39,6 +44,7 @@ impl AceExplorerTab {
 pub struct AceExplorerState {
     pub agent_name: String,
     pub ace: AceConfig,
+    pub evals: EvalsConfig,
     pub active_tab: usize,
     pub selected_item: usize,
     pub search: String,
@@ -63,10 +69,11 @@ pub struct AceExplorerState {
 }
 
 impl AceExplorerState {
-    pub fn new(agent_name: String, ace: AceConfig) -> Self {
+    pub fn new(agent_name: String, ace: AceConfig, evals: EvalsConfig) -> Self {
         Self {
             agent_name,
             ace,
+            evals,
             active_tab: 0,
             selected_item: 0,
             search: String::new(),
@@ -153,10 +160,41 @@ impl AceExplorerState {
             .collect()
     }
 
+    /// Flatten all eval cases from all files into a single list.
+    pub fn flattened_evals(&self) -> Vec<(&str, &EvalCase)> {
+        self.evals
+            .files
+            .iter()
+            .flat_map(|(file, cases)| cases.iter().map(move |c| (file.as_str(), c)))
+            .collect()
+    }
+
+    pub fn filtered_evals(&self) -> Vec<(&str, &EvalCase)> {
+        let query = self.search.to_lowercase();
+        self.flattened_evals()
+            .into_iter()
+            .filter(|(file, eval)| {
+                if query.is_empty() {
+                    return true;
+                }
+                eval.name.to_lowercase().contains(&query)
+                    || eval
+                        .description
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&query)
+                    || eval.tags.iter().any(|t| t.to_lowercase().contains(&query))
+                    || file.to_lowercase().contains(&query)
+            })
+            .collect()
+    }
+
     pub fn current_item_count(&self) -> usize {
         match self.current_tab() {
             AceExplorerTab::Variables => self.filtered_variables().len(),
             AceExplorerTab::Policies => self.filtered_policies().len(),
+            AceExplorerTab::Evals => self.filtered_evals().len(),
         }
     }
 
@@ -200,6 +238,7 @@ impl AceExplorerState {
         match self.current_tab() {
             AceExplorerTab::Variables => 2, // description, allowed_values
             AceExplorerTab::Policies => 3,  // condition, action, provides
+            AceExplorerTab::Evals => 0,     // read-only
         }
     }
 
@@ -243,6 +282,7 @@ impl AceExplorerState {
                     pol.updated_at = Some(now);
                     pol.updated_by = Some(who);
                 }
+                AceExplorerTab::Evals => {} // read-only
             }
         }
     }
@@ -311,6 +351,7 @@ impl AceExplorerState {
                 .iter()
                 .map(|(n, _)| n.as_str())
                 .collect(),
+            AceExplorerTab::Evals => return None, // read-only, no original index needed
         };
         let selected_name = filtered_names.get(self.selected_item)?;
         match self.current_tab() {
@@ -324,6 +365,7 @@ impl AceExplorerState {
                 .policies
                 .iter()
                 .position(|(n, _)| n == selected_name),
+            AceExplorerTab::Evals => None,
         }
     }
 
@@ -364,6 +406,7 @@ impl AceExplorerState {
                     _ => String::new(),
                 }
             }
+            AceExplorerTab::Evals => String::new(), // read-only
         }
     }
 
@@ -414,6 +457,7 @@ impl AceExplorerState {
                     _ => {}
                 }
             }
+            AceExplorerTab::Evals => {} // read-only
         }
     }
 }
@@ -461,6 +505,7 @@ pub fn render_full(app: &mut App, frame: &mut Frame, area: Rect) {
     let (left_lines, right_lines) = match state.current_tab() {
         AceExplorerTab::Variables => build_variables_content(state, visible),
         AceExplorerTab::Policies => build_policies_content(state, visible),
+        AceExplorerTab::Evals => build_evals_content(state, visible),
     };
 
     frame.render_widget(Paragraph::new(left_lines), horiz[0]);
@@ -473,6 +518,7 @@ pub fn render_full(app: &mut App, frame: &mut Frame, area: Rect) {
     let total_items = match state.current_tab() {
         AceExplorerTab::Variables => state.filtered_variables().len(),
         AceExplorerTab::Policies => state.filtered_policies().len(),
+        AceExplorerTab::Evals => state.filtered_evals().len(),
     };
     let range_str = if total_items > 0 {
         let start = state.scroll_offset + 1;
@@ -487,6 +533,8 @@ pub fn render_full(app: &mut App, frame: &mut Frame, area: Rect) {
         "↑/↓ fields  ·  Enter edit  ·  Esc back to list"
     } else if state.search_focused {
         "Type to filter  ·  Esc to clear"
+    } else if state.current_tab() == AceExplorerTab::Evals {
+        "↑/↓ navigate  ·  / search  ·  Esc back"
     } else {
         "↑/↓ navigate  ·  Enter edit  ·  / search  ·  Esc back"
     };
@@ -524,6 +572,7 @@ fn render_tab_bar(state: &AceExplorerState, frame: &mut Frame, area: Rect) {
             let bg = match tab {
                 AceExplorerTab::Variables => theme::FOAM,
                 AceExplorerTab::Policies => theme::IRIS,
+                AceExplorerTab::Evals => theme::ROSE,
             };
             tab_bar.push(Span::styled(
                 format!(" {} ", tab.label()),
@@ -551,6 +600,7 @@ fn render_search_box(state: &AceExplorerState, frame: &mut Frame, area: Rect) {
     let placeholder = match state.current_tab() {
         AceExplorerTab::Variables => "Search variables...",
         AceExplorerTab::Policies => "Search policies...",
+        AceExplorerTab::Evals => "Search evals...",
     };
     let box_color = if state.search_focused {
         theme::IRIS
@@ -807,6 +857,266 @@ fn build_policies_content(
     }
 
     (left, right)
+}
+
+fn build_evals_content(
+    state: &AceExplorerState,
+    max_visible: usize,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let bold = Modifier::BOLD;
+    let filtered = state.filtered_evals();
+    let mut left: Vec<Line<'static>> = Vec::new();
+    let mut right: Vec<Line<'static>> = Vec::new();
+
+    if filtered.is_empty() {
+        let msg = if state.search.is_empty() {
+            "  No evals defined"
+        } else {
+            "  No matching evals"
+        };
+        left.push(Line::from(Span::styled(
+            msg,
+            Style::default().fg(theme::SUBTLE),
+        )));
+        return (left, right);
+    }
+
+    let total = filtered.len();
+    let end = (state.scroll_offset + max_visible).min(total);
+    let visible_slice = &filtered[state.scroll_offset..end];
+
+    // Left panel: list of eval names.
+    for (row, (_, eval)) in visible_slice.iter().enumerate() {
+        let abs_idx = state.scroll_offset + row;
+        let is_selected = abs_idx == state.selected_item;
+        let indicator = if is_selected { "  > " } else { "    " };
+        let ind_style = if is_selected {
+            Style::default().fg(theme::IRIS).add_modifier(bold)
+        } else {
+            Style::default()
+        };
+        let name_style = if is_selected {
+            Style::default().fg(theme::ROSE).add_modifier(bold)
+        } else {
+            Style::default().fg(theme::ROSE)
+        };
+        left.push(Line::from(vec![
+            Span::styled(indicator, ind_style),
+            Span::styled(eval.name.clone(), name_style),
+        ]));
+    }
+
+    // Right panel: detail view of selected eval.
+    if let Some((file, eval)) = filtered.get(state.selected_item) {
+        // Name.
+        right.push(Line::from(Span::styled(
+            eval.name.clone(),
+            Style::default().fg(theme::ROSE).add_modifier(bold),
+        )));
+        right.push(Line::from(""));
+
+        // Source file.
+        right.push(Line::from(vec![
+            Span::styled(
+                "FILE  ",
+                Style::default().fg(theme::SUBTLE).add_modifier(bold),
+            ),
+            Span::styled(file.to_string(), Style::default().fg(theme::TEXT)),
+        ]));
+        right.push(Line::from(""));
+
+        // Description.
+        if let Some(desc) = &eval.description {
+            right.push(Line::from(Span::styled(
+                "DESCRIPTION",
+                Style::default().fg(theme::SUBTLE).add_modifier(bold),
+            )));
+            right.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(desc.clone(), Style::default().fg(theme::TEXT)),
+            ]));
+            right.push(Line::from(""));
+        }
+
+        // Tags.
+        if !eval.tags.is_empty() {
+            let mut tag_spans: Vec<Span<'static>> = vec![Span::styled(
+                "TAGS  ",
+                Style::default().fg(theme::SUBTLE).add_modifier(bold),
+            )];
+            for (i, tag) in eval.tags.iter().enumerate() {
+                if i > 0 {
+                    tag_spans.push(Span::styled("  ", Style::default()));
+                }
+                tag_spans.push(Span::styled("[", Style::default().fg(theme::MUTED)));
+                tag_spans.push(Span::styled(tag.clone(), Style::default().fg(theme::FOAM)));
+                tag_spans.push(Span::styled("]", Style::default().fg(theme::MUTED)));
+            }
+            right.push(Line::from(tag_spans));
+            right.push(Line::from(""));
+        }
+
+        // Timeout.
+        if let Some(timeout) = eval.timeout {
+            right.push(Line::from(vec![
+                Span::styled(
+                    "TIMEOUT  ",
+                    Style::default().fg(theme::SUBTLE).add_modifier(bold),
+                ),
+                Span::styled(format!("{timeout}ms"), Style::default().fg(theme::TEXT)),
+            ]));
+            right.push(Line::from(""));
+        }
+
+        // Runnable.
+        if let Some(runnable) = &eval.runnable {
+            right.push(Line::from(vec![
+                Span::styled(
+                    "RUNNABLE  ",
+                    Style::default().fg(theme::SUBTLE).add_modifier(bold),
+                ),
+                Span::styled(runnable.clone(), Style::default().fg(theme::PINE)),
+            ]));
+            right.push(Line::from(""));
+        }
+
+        // Params.
+        if let Some(params) = &eval.params {
+            right.push(Line::from(Span::styled(
+                "PARAMS",
+                Style::default().fg(theme::SUBTLE).add_modifier(bold),
+            )));
+            render_yaml_value(&mut right, params, 1);
+            right.push(Line::from(""));
+        }
+
+        // Extra fields (output, seq!, validators, etc.).
+        if !eval.extra.is_empty() {
+            let mut keys: Vec<&String> = eval.extra.keys().collect();
+            keys.sort_by(|a, b| {
+                let order = |k: &str| -> u8 {
+                    match k {
+                        "output" => 0,
+                        k if k.ends_with('!') => 1,
+                        _ => 2,
+                    }
+                };
+                order(a).cmp(&order(b)).then(a.cmp(b))
+            });
+
+            for key in keys {
+                let value = &eval.extra[key];
+                let key_color = if key.ends_with('!') {
+                    theme::FOAM
+                } else if key == "output" {
+                    theme::GOLD
+                } else {
+                    theme::SUBTLE
+                };
+                right.push(Line::from(Span::styled(
+                    key.to_uppercase(),
+                    Style::default().fg(key_color).add_modifier(bold),
+                )));
+                render_yaml_value(&mut right, value, 1);
+                right.push(Line::from(""));
+            }
+        }
+    }
+
+    (left, right)
+}
+
+/// Recursively render a serde_yaml::Value as styled lines with indentation.
+fn render_yaml_value(lines: &mut Vec<Line<'static>>, value: &serde_yaml::Value, indent: usize) {
+    let prefix = "  ".repeat(indent);
+    match value {
+        serde_yaml::Value::Null => {
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}null"),
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        serde_yaml::Value::Bool(b) => {
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{b}"),
+                Style::default().fg(theme::GOLD),
+            )));
+        }
+        serde_yaml::Value::Number(n) => {
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{n}"),
+                Style::default().fg(theme::GOLD),
+            )));
+        }
+        serde_yaml::Value::String(s) => {
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{s}"),
+                Style::default().fg(theme::TEXT),
+            )));
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for item in seq {
+                match item {
+                    serde_yaml::Value::String(s) => {
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("{prefix}- "), Style::default().fg(theme::MUTED)),
+                            Span::styled(s.clone(), Style::default().fg(theme::TEXT)),
+                        ]));
+                    }
+                    serde_yaml::Value::Mapping(_) => {
+                        lines.push(Line::from(Span::styled(
+                            format!("{prefix}-"),
+                            Style::default().fg(theme::MUTED),
+                        )));
+                        render_yaml_value(lines, item, indent + 1);
+                    }
+                    _ => {
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("{prefix}- "), Style::default().fg(theme::MUTED)),
+                            Span::styled(
+                                yaml_value_str(item),
+                                Style::default().fg(theme::TEXT),
+                            ),
+                        ]));
+                    }
+                }
+            }
+        }
+        serde_yaml::Value::Mapping(map) => {
+            for (k, v) in map {
+                let key_str = yaml_value_str(k);
+                let key_color = if key_str.ends_with('!') {
+                    theme::FOAM
+                } else {
+                    theme::IRIS
+                };
+                match v {
+                    serde_yaml::Value::String(_)
+                    | serde_yaml::Value::Number(_)
+                    | serde_yaml::Value::Bool(_)
+                    | serde_yaml::Value::Null => {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("{prefix}{key_str}: "),
+                                Style::default().fg(key_color),
+                            ),
+                            Span::styled(yaml_value_str(v), Style::default().fg(theme::TEXT)),
+                        ]));
+                    }
+                    _ => {
+                        lines.push(Line::from(Span::styled(
+                            format!("{prefix}{key_str}:"),
+                            Style::default().fg(key_color),
+                        )));
+                        render_yaml_value(lines, v, indent + 1);
+                    }
+                }
+            }
+        }
+        serde_yaml::Value::Tagged(tagged) => {
+            render_yaml_value(lines, &tagged.value, indent);
+        }
+    }
 }
 
 /// Render read-only metadata at the bottom of the right panel.
