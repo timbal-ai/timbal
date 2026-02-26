@@ -212,10 +212,69 @@ impl App {
         // If ace explorer is open, route input there (highest priority).
         if self.ace_explorer_open {
             if let Some(ref mut state) = self.ace_explorer_state {
-                if state.search_focused {
+                if state.field_editing {
+                    // Mode: typing into a field.
+                    match action {
+                        Action::Submit => {
+                            state.confirm_field_edit();
+                        }
+                        Action::Cancel => {
+                            state.cancel_field_edit();
+                        }
+                        Action::Left => {
+                            state.field_cursor_left();
+                        }
+                        Action::Right => {
+                            state.field_cursor_right();
+                        }
+                        Action::Type(c) => {
+                            state.field_insert(c);
+                        }
+                        Action::Backspace => {
+                            state.field_backspace();
+                        }
+                        Action::Quit => self.running = false,
+                        _ => {}
+                    }
+                } else if state.editing_right {
+                    // Mode: navigating fields in the right panel.
+                    match action {
+                        Action::Cancel => {
+                            // Leave right panel, save if dirty.
+                            state.editing_right = false;
+                            if state.dirty {
+                                let name = state.agent_name.clone();
+                                let ace = state.ace.clone();
+                                if let Err(e) =
+                                    crate::model::project::save_ace(&name, &ace)
+                                {
+                                    // TODO: show error to user
+                                    eprintln!("Failed to save ace: {e}");
+                                }
+                                state.dirty = false;
+                            }
+                        }
+                        Action::PaletteDown | Action::Type('j') => {
+                            let max = state.field_count();
+                            if max > 0 {
+                                state.editing_field =
+                                    (state.editing_field + 1).min(max - 1);
+                            }
+                        }
+                        Action::PaletteUp | Action::Type('k') => {
+                            state.editing_field =
+                                state.editing_field.saturating_sub(1);
+                        }
+                        Action::Submit => {
+                            state.start_field_edit();
+                        }
+                        Action::Quit => self.running = false,
+                        _ => {}
+                    }
+                } else if state.search_focused {
+                    // Mode: typing into search bar.
                     match action {
                         Action::Cancel | Action::Submit => {
-                            // Unfocus search but keep filter text.
                             state.search_focused = false;
                         }
                         Action::Type(c) => {
@@ -230,12 +289,19 @@ impl App {
                         _ => {}
                     }
                 } else {
+                    // Mode: list navigation (default).
                     match action {
                         Action::Cancel => {
                             self.ace_explorer_open = false;
                             self.ace_explorer_state = None;
                             self.project_open = true;
                             self.scroll = u16::MAX;
+                        }
+                        Action::Submit => {
+                            // Enter editing mode for the selected item.
+                            if state.current_item_count() > 0 {
+                                state.enter_right();
+                            }
                         }
                         Action::PaletteDown | Action::Type('j') => {
                             state.move_down();

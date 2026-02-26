@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -19,19 +19,37 @@ struct TimbalYaml {
 // ---------------------------------------------------------------------------
 
 /// A single context variable from variables.yaml.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AceVariable {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_values: Option<Vec<serde_yaml::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>,
 }
 
 /// A single policy from policies.yaml.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AcePolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub context_variables: Option<serde_yaml::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provides: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>,
 }
 
 /// ACE configuration found in a workforce member's .ace/ directory.
@@ -205,4 +223,70 @@ fn load_yaml_map<T: for<'de> Deserialize<'de>>(dir: &Path, base: &str) -> Vec<(S
     }
 
     Vec::new()
+}
+
+// ---------------------------------------------------------------------------
+// ACE saving
+// ---------------------------------------------------------------------------
+
+/// Save an AceConfig back to disk for the given agent name.
+/// Writes dict-style YAML to workforce/<agent>/.ace/variables.yaml and policies.yaml.
+pub fn save_ace(agent_name: &str, ace: &AceConfig) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let ace_dir = cwd.join("workforce").join(agent_name).join(".ace");
+
+    if !ace_dir.is_dir() {
+        return Err(format!("ACE directory not found: {}", ace_dir.display()));
+    }
+
+    // Save variables.
+    let var_map: HashMap<&str, &AceVariable> = ace
+        .variables
+        .iter()
+        .map(|(name, var)| (name.as_str(), var))
+        .collect();
+    let var_yaml = serde_yaml::to_string(&var_map).map_err(|e| e.to_string())?;
+    fs::write(ace_dir.join("variables.yaml"), var_yaml).map_err(|e| e.to_string())?;
+
+    // Save policies.
+    let pol_map: HashMap<&str, &AcePolicy> = ace
+        .policies
+        .iter()
+        .map(|(name, pol)| (name.as_str(), pol))
+        .collect();
+    let pol_yaml = serde_yaml::to_string(&pol_map).map_err(|e| e.to_string())?;
+    fs::write(ace_dir.join("policies.yaml"), pol_yaml).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Get the current git identity as "Name <email>".
+pub fn git_identity() -> String {
+    let name = std::process::Command::new("git")
+        .args(["config", "user.name"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let email = std::process::Command::new("git")
+        .args(["config", "user.email"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    match (name.is_empty(), email.is_empty()) {
+        (false, false) => format!("{name} <{email}>"),
+        (false, true) => name,
+        (true, false) => email,
+        (true, true) => "unknown".to_string(),
+    }
+}
+
+/// Get the current UTC timestamp as ISO 8601.
+pub fn now_utc() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }

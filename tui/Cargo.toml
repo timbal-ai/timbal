@@ -20,6 +20,7 @@ name = "precompute-frames"
 path = "src/bin/precompute_frames.rs"
 
 [dependencies]
+chrono = "0.4.44"
 color-eyre = "0.6.5"
 crossterm = "0.28"
 dirs = "6.0.0"
