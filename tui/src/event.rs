@@ -10,8 +10,8 @@ pub enum Action {
     Cancel,
     PaletteUp,
     PaletteDown,
-    ScrollUp,
-    ScrollDown,
+    ScrollUp(u16),
+    ScrollDown(u16),
     Tab,
     Left,
     Right,
@@ -34,10 +34,10 @@ pub fn poll_blocking() -> Result<Option<Action>> {
                     return Ok(Some(Action::Click(mouse.column, mouse.row)));
                 }
                 MouseEventKind::ScrollUp => {
-                    return Ok(Some(Action::ScrollUp));
+                    return Ok(Some(Action::ScrollUp(mouse.column)));
                 }
                 MouseEventKind::ScrollDown => {
-                    return Ok(Some(Action::ScrollDown));
+                    return Ok(Some(Action::ScrollDown(mouse.column)));
                 }
                 MouseEventKind::Moved => {
                     return Ok(Some(Action::MouseMove(mouse.row)));
@@ -64,8 +64,8 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         KeyCode::Backspace => Some(Action::Backspace),
         KeyCode::Up => Some(Action::PaletteUp),
         KeyCode::Down => Some(Action::PaletteDown),
-        KeyCode::PageUp => Some(Action::ScrollUp),
-        KeyCode::PageDown => Some(Action::ScrollDown),
+        KeyCode::PageUp => Some(Action::ScrollUp(0)),
+        KeyCode::PageDown => Some(Action::ScrollDown(0)),
         KeyCode::Tab => Some(Action::Tab),
         KeyCode::Left => Some(Action::Left),
         KeyCode::Right => Some(Action::Right),

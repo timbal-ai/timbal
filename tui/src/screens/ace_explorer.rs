@@ -51,6 +51,12 @@ pub struct AceExplorerState {
     pub search_focused: bool,
     pub scroll_offset: usize,
     pub visible_count: usize,
+    /// Vertical scroll offset for the right panel (used on read-only Evals tab).
+    pub right_scroll: u16,
+    /// X coordinate where the right panel starts (set during render).
+    pub right_panel_x: u16,
+    /// Maximum value for right_scroll (set during render).
+    pub right_max_scroll: u16,
     // --- Editing state ---
     /// Focus is on the right detail panel.
     pub editing_right: bool,
@@ -80,6 +86,9 @@ impl AceExplorerState {
             search_focused: false,
             scroll_offset: 0,
             visible_count: 20,
+            right_scroll: 0,
+            right_panel_x: 0,
+            right_max_scroll: 0,
             editing_right: false,
             editing_field: 0,
             field_editing: false,
@@ -98,6 +107,7 @@ impl AceExplorerState {
         self.active_tab = (self.active_tab + 1) % AceExplorerTab::ALL.len();
         self.selected_item = 0;
         self.scroll_offset = 0;
+        self.right_scroll = 0;
         self.editing_right = false;
         self.field_editing = false;
     }
@@ -110,6 +120,7 @@ impl AceExplorerState {
         }
         self.selected_item = 0;
         self.scroll_offset = 0;
+        self.right_scroll = 0;
         self.editing_right = false;
         self.field_editing = false;
     }
@@ -205,6 +216,7 @@ impl AceExplorerState {
             if self.selected_item >= self.scroll_offset + self.visible_count {
                 self.scroll_offset = self.selected_item + 1 - self.visible_count;
             }
+            self.right_scroll = 0;
         }
     }
 
@@ -213,6 +225,7 @@ impl AceExplorerState {
         if self.selected_item < self.scroll_offset {
             self.scroll_offset = self.selected_item;
         }
+        self.right_scroll = 0;
     }
 
     pub fn clamp_selection(&mut self) {
@@ -501,6 +514,8 @@ pub fn render_full(app: &mut App, frame: &mut Frame, area: Rect) {
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
         .split(content_area);
 
+    state.right_panel_x = horiz[1].x;
+
     let visible = state.visible_count;
     let (left_lines, right_lines) = match state.current_tab() {
         AceExplorerTab::Variables => build_variables_content(state, visible),
@@ -508,9 +523,17 @@ pub fn render_full(app: &mut App, frame: &mut Frame, area: Rect) {
         AceExplorerTab::Evals => build_evals_content(state, visible),
     };
 
+    // Compute max scroll for the right panel.
+    let right_panel_height = horiz[1].height as u16;
+    let right_line_count = right_lines.len() as u16;
+    state.right_max_scroll = right_line_count.saturating_sub(right_panel_height);
+    state.right_scroll = state.right_scroll.min(state.right_max_scroll);
+
     frame.render_widget(Paragraph::new(left_lines), horiz[0]);
     frame.render_widget(
-        Paragraph::new(right_lines).wrap(Wrap { trim: false }),
+        Paragraph::new(right_lines)
+            .wrap(Wrap { trim: false })
+            .scroll((state.right_scroll, 0)),
         horiz[1],
     );
 
@@ -529,12 +552,14 @@ pub fn render_full(app: &mut App, frame: &mut Frame, area: Rect) {
     };
     let controls = if state.field_editing {
         "Type to edit  ·  Enter confirm  ·  Esc cancel"
+    } else if state.editing_right && state.current_tab() == AceExplorerTab::Evals {
+        "↑/↓ scroll  ·  Esc back to list"
     } else if state.editing_right {
         "↑/↓ fields  ·  Enter edit  ·  Esc back to list"
     } else if state.search_focused {
         "Type to filter  ·  Esc to clear"
     } else if state.current_tab() == AceExplorerTab::Evals {
-        "↑/↓ navigate  ·  / search  ·  Esc back"
+        "↑/↓ navigate  ·  Enter view  ·  / search  ·  Esc back"
     } else {
         "↑/↓ navigate  ·  Enter edit  ·  / search  ·  Esc back"
     };

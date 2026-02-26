@@ -239,37 +239,73 @@ impl App {
                         _ => {}
                     }
                 } else if state.editing_right {
-                    // Mode: navigating fields in the right panel.
-                    match action {
-                        Action::Cancel => {
-                            // Leave right panel, save if dirty.
-                            state.editing_right = false;
-                            if state.dirty {
-                                let name = state.agent_name.clone();
-                                let ace = state.ace.clone();
-                                if let Err(e) = crate::model::project::save_ace(&name, &ace) {
-                                    // TODO: show error to user
-                                    eprintln!("Failed to save ace: {e}");
+                    if state.current_tab() == AceExplorerTab::Evals {
+                        // Mode: scrolling the right detail panel (read-only).
+                        match action {
+                            Action::Cancel => {
+                                state.editing_right = false;
+                                state.right_scroll = 0;
+                            }
+                            Action::PaletteDown | Action::Type('j') => {
+                                state.right_scroll = state.right_scroll.saturating_add(1);
+                            }
+                            Action::PaletteUp | Action::Type('k') => {
+                                state.right_scroll = state.right_scroll.saturating_sub(1);
+                            }
+                            Action::ScrollDown(col) => {
+                                if col < state.right_panel_x {
+                                    state.move_down();
+                                } else {
+                                    state.right_scroll =
+                                        state.right_scroll.saturating_add(3);
                                 }
-                                state.dirty = false;
                             }
-                        }
-                        Action::PaletteDown | Action::Type('j') => {
-                            let max = state.field_count();
-                            if max > 0 {
-                                state.editing_field = (state.editing_field + 1).min(max - 1);
+                            Action::ScrollUp(col) => {
+                                if col < state.right_panel_x {
+                                    state.move_up();
+                                } else {
+                                    state.right_scroll =
+                                        state.right_scroll.saturating_sub(3);
+                                }
                             }
+                            Action::Quit => self.running = false,
+                            _ => {}
                         }
-                        Action::PaletteUp | Action::Type('k') => {
-                            state.editing_field = state.editing_field.saturating_sub(1);
-                        }
-                        Action::Submit => {
-                            if state.current_tab() != AceExplorerTab::Evals {
+                    } else {
+                        // Mode: navigating fields in the right panel.
+                        match action {
+                            Action::Cancel => {
+                                // Leave right panel, save if dirty.
+                                state.editing_right = false;
+                                if state.dirty {
+                                    let name = state.agent_name.clone();
+                                    let ace = state.ace.clone();
+                                    if let Err(e) =
+                                        crate::model::project::save_ace(&name, &ace)
+                                    {
+                                        // TODO: show error to user
+                                        eprintln!("Failed to save ace: {e}");
+                                    }
+                                    state.dirty = false;
+                                }
+                            }
+                            Action::PaletteDown | Action::Type('j') => {
+                                let max = state.field_count();
+                                if max > 0 {
+                                    state.editing_field =
+                                        (state.editing_field + 1).min(max - 1);
+                                }
+                            }
+                            Action::PaletteUp | Action::Type('k') => {
+                                state.editing_field =
+                                    state.editing_field.saturating_sub(1);
+                            }
+                            Action::Submit => {
                                 state.start_field_edit();
                             }
+                            Action::Quit => self.running = false,
+                            _ => {}
                         }
-                        Action::Quit => self.running = false,
-                        _ => {}
                     }
                 } else if state.search_focused {
                     // Mode: typing into search bar.
@@ -300,10 +336,7 @@ impl App {
                             self.scroll = u16::MAX;
                         }
                         Action::Submit => {
-                            // Enter editing mode for the selected item (skip for read-only Evals tab).
-                            if state.current_item_count() > 0
-                                && state.current_tab() != AceExplorerTab::Evals
-                            {
+                            if state.current_item_count() > 0 {
                                 state.enter_right();
                             }
                         }
@@ -321,6 +354,22 @@ impl App {
                         }
                         Action::Type('/') => {
                             state.search_focused = true;
+                        }
+                        Action::ScrollDown(col) => {
+                            if col >= state.right_panel_x {
+                                state.right_scroll =
+                                    state.right_scroll.saturating_add(3);
+                            } else {
+                                state.move_down();
+                            }
+                        }
+                        Action::ScrollUp(col) => {
+                            if col >= state.right_panel_x {
+                                state.right_scroll =
+                                    state.right_scroll.saturating_sub(3);
+                            } else {
+                                state.move_up();
+                            }
                         }
                         Action::Quit => self.running = false,
                         _ => {}
@@ -465,11 +514,11 @@ impl App {
                 }
             }
 
-            Action::ScrollUp => {
+            Action::ScrollUp(_) => {
                 self.scroll = self.scroll.saturating_sub(10);
             }
 
-            Action::ScrollDown => {
+            Action::ScrollDown(_) => {
                 self.scroll = self.scroll.saturating_add(10);
             }
 
