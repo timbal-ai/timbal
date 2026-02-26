@@ -572,6 +572,12 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     });
     let width = padded.width;
 
+    // Ace explorer takes over the full screen when open.
+    if app.ace_explorer_open {
+        crate::screens::ace_explorer::render_full(app, frame, padded);
+        return;
+    }
+
     let mut doc: Vec<Line<'static>> = Vec::new();
 
     // Logo.
@@ -606,7 +612,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
 
     // Input (hidden when a dialog is open).
-    if !app.config_open && !app.help_open && !app.project_open {
+    if !app.config_open && !app.help_open && !app.project_open && !app.ace_explorer_open {
         doc.push(separator_line(app, width));
         doc.push(input_line(app));
         doc.push(separator_line(app, width));

@@ -1,5 +1,49 @@
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+
+// ---------------------------------------------------------------------------
+// timbal.yaml schema
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+struct TimbalYaml {
+    _id: Option<String>,
+    _type: Option<String>,
+    fqn: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// ACE config schemas (variables.yaml / policies.yaml)
+// ---------------------------------------------------------------------------
+
+/// A single context variable from variables.yaml.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AceVariable {
+    pub description: Option<String>,
+    pub allowed_values: Option<Vec<serde_yaml::Value>>,
+}
+
+/// A single policy from policies.yaml.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcePolicy {
+    pub condition: Option<String>,
+    pub action: Option<String>,
+    pub context_variables: Option<serde_yaml::Value>,
+    pub provides: Option<Vec<String>>,
+}
+
+/// ACE configuration found in a workforce member's .ace/ directory.
+#[derive(Debug, Clone, Default)]
+pub struct AceConfig {
+    pub variables: Vec<(String, AceVariable)>,
+    pub policies: Vec<(String, AcePolicy)>,
+}
+
+// ---------------------------------------------------------------------------
+// Public models
+// ---------------------------------------------------------------------------
 
 /// A workforce member parsed from workforce/<name>/timbal.yaml.
 #[derive(Debug, Clone)]
@@ -12,6 +56,8 @@ pub struct WorkforceMember {
     pub kind: String,
     /// The fqn field (e.g. "agent.py::agent").
     pub fqn: Option<String>,
+    /// ACE configuration, if .ace/ directory exists.
+    pub ace: Option<AceConfig>,
 }
 
 /// Context about the current directory as a Timbal project.
@@ -59,24 +105,23 @@ impl ProjectContext {
                     continue;
                 }
 
-                let dir_name = entry
-                    .file_name()
-                    .to_string_lossy()
-                    .to_string();
+                let dir_name = entry.file_name().to_string_lossy().to_string();
 
-                let content = fs::read_to_string(&timbal_yaml).unwrap_or_default();
+                let cfg: TimbalYaml = fs::read_to_string(&timbal_yaml)
+                    .ok()
+                    .and_then(|s| serde_yaml::from_str(&s).ok())
+                    .unwrap_or_default();
 
-                let id = yaml_value(&content, "_id");
-                let kind = yaml_value(&content, "_type");
-                let fqn = yaml_value(&content, "fqn");
+                let ace = detect_ace(&path);
 
-                match (id, kind) {
+                match (cfg._id, cfg._type) {
                     (Some(id), Some(kind)) => {
                         members.push(WorkforceMember {
                             name: dir_name,
                             id,
                             kind,
-                            fqn,
+                            fqn: cfg.fqn,
+                            ace,
                         });
                     }
                     _ => {
@@ -86,7 +131,6 @@ impl ProjectContext {
             }
         }
 
-        // Sort members by name for deterministic display.
         members.sort_by(|a, b| a.name.cmp(&b.name));
         legacy_members.sort();
 
@@ -104,27 +148,61 @@ impl ProjectContext {
     }
 }
 
-/// Extract a top-level YAML value by key.
-/// Handles: `key: "value"` and `key: value` (strips quotes).
-fn yaml_value(content: &str, key: &str) -> Option<String> {
-    let prefix = format!("{}:", key);
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix(&prefix) {
-            let val = rest.trim();
-            if val.is_empty() {
-                return None;
-            }
-            // Strip surrounding quotes if present.
-            let val = val
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .unwrap_or(val);
-            if val.is_empty() {
-                return None;
-            }
-            return Some(val.to_string());
-        }
+// ---------------------------------------------------------------------------
+// ACE detection
+// ---------------------------------------------------------------------------
+
+/// Detect ACE configuration in a workforce member's .ace/ directory.
+fn detect_ace(member_dir: &Path) -> Option<AceConfig> {
+    let ace_dir = member_dir.join(".ace");
+    if !ace_dir.is_dir() {
+        return None;
     }
-    None
+
+    let variables = load_yaml_map::<AceVariable>(&ace_dir, "variables");
+    let policies = load_yaml_map::<AcePolicy>(&ace_dir, "policies");
+
+    Some(AceConfig {
+        variables,
+        policies,
+    })
+}
+
+/// Load a YAML file as a map of name -> T. Tries .yaml then .yml.
+/// Supports both dict-style (top-level keys) and array-style (items with `name` field).
+fn load_yaml_map<T: for<'de> Deserialize<'de>>(dir: &Path, base: &str) -> Vec<(String, T)> {
+    let yaml_path = dir.join(format!("{base}.yaml"));
+    let yml_path = dir.join(format!("{base}.yml"));
+    let path = if yaml_path.is_file() {
+        yaml_path
+    } else if yml_path.is_file() {
+        yml_path
+    } else {
+        return Vec::new();
+    };
+
+    let content = match fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => return Vec::new(),
+    };
+
+    // Try dict-style first (most common).
+    if let Ok(map) = serde_yaml::from_str::<HashMap<String, T>>(&content) {
+        let mut entries: Vec<_> = map.into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        return entries;
+    }
+
+    // Try array-style: each item has a "name" field.
+    #[derive(Deserialize)]
+    struct Named<V> {
+        name: String,
+        #[serde(flatten)]
+        value: V,
+    }
+    if let Ok(arr) = serde_yaml::from_str::<Vec<Named<T>>>(&content) {
+        return arr.into_iter().map(|n| (n.name, n.value)).collect();
+    }
+
+    Vec::new()
 }
