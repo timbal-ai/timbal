@@ -1,3 +1,4 @@
+pub mod ace;
 pub mod clear;
 pub mod configure;
 pub mod help;
@@ -33,6 +34,7 @@ impl CommandRegistry {
         let mut reg = Self {
             handlers: Vec::new(),
         };
+        reg.register(Box::new(ace::AceCommand));
         reg.register(Box::new(clear::ClearCommand));
         reg.register(Box::new(configure::ConfigureCommand));
         reg.register(Box::new(help::HelpCommand));

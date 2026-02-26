@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
-    Frame,
 };
 
 use crate::app::App;
@@ -21,10 +21,8 @@ pub enum AceExplorerTab {
 }
 
 impl AceExplorerTab {
-    pub const ALL: &'static [AceExplorerTab] = &[
-        AceExplorerTab::Variables,
-        AceExplorerTab::Policies,
-    ];
+    pub const ALL: &'static [AceExplorerTab] =
+        &[AceExplorerTab::Variables, AceExplorerTab::Policies];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -303,12 +301,16 @@ impl AceExplorerState {
     /// Get the selected item's index in the original (unfiltered) ace list.
     fn selected_original_index(&self) -> Option<usize> {
         let filtered_names: Vec<&str> = match self.current_tab() {
-            AceExplorerTab::Variables => {
-                self.filtered_variables().iter().map(|(n, _)| n.as_str()).collect()
-            }
-            AceExplorerTab::Policies => {
-                self.filtered_policies().iter().map(|(n, _)| n.as_str()).collect()
-            }
+            AceExplorerTab::Variables => self
+                .filtered_variables()
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect(),
+            AceExplorerTab::Policies => self
+                .filtered_policies()
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect(),
         };
         let selected_name = filtered_names.get(self.selected_item)?;
         match self.current_tab() {
@@ -340,7 +342,10 @@ impl AceExplorerState {
                         .allowed_values
                         .as_ref()
                         .map(|vals| {
-                            vals.iter().map(|v| yaml_value_str(v)).collect::<Vec<_>>().join(", ")
+                            vals.iter()
+                                .map(|v| yaml_value_str(v))
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         })
                         .unwrap_or_default(),
                     _ => String::new(),
@@ -402,9 +407,8 @@ impl AceExplorerState {
                         if val.trim().is_empty() {
                             pol.provides = None;
                         } else {
-                            pol.provides = Some(
-                                val.split(',').map(|s| s.trim().to_string()).collect(),
-                            );
+                            pol.provides =
+                                Some(val.split(',').map(|s| s.trim().to_string()).collect());
                         }
                     }
                     _ => {}
@@ -523,10 +527,7 @@ fn render_tab_bar(state: &AceExplorerState, frame: &mut Frame, area: Rect) {
             };
             tab_bar.push(Span::styled(
                 format!(" {} ", tab.label()),
-                Style::default()
-                    .fg(theme::BASE)
-                    .bg(bg)
-                    .add_modifier(bold),
+                Style::default().fg(theme::BASE).bg(bg).add_modifier(bold),
             ));
         } else {
             tab_bar.push(Span::styled(
@@ -564,10 +565,7 @@ fn render_search_box(state: &AceExplorerState, frame: &mut Frame, area: Rect) {
         Span::styled(format!("┌{}┐", "─".repeat(inner_w + 2)), box_style),
     ]);
 
-    let mut row: Vec<Span<'static>> = vec![
-        Span::raw("  "),
-        Span::styled("│ ⌕ ", box_style),
-    ];
+    let mut row: Vec<Span<'static>> = vec![Span::raw("  "), Span::styled("│ ⌕ ", box_style)];
     let icon_len = 2;
     let cursor_style = Style::default().fg(theme::BASE).bg(theme::TEXT);
     if state.search_focused {
@@ -576,19 +574,28 @@ fn render_search_box(state: &AceExplorerState, frame: &mut Frame, area: Rect) {
             row.push(Span::raw(" ".repeat(inner_w.saturating_sub(icon_len + 1))));
         } else {
             // Cursor at end of search text — highlight trailing space.
-            row.push(Span::styled(state.search.clone(), Style::default().fg(theme::TEXT)));
-            row.push(Span::styled(" ", cursor_style));
-            row.push(Span::raw(
-                " ".repeat(inner_w.saturating_sub(icon_len + state.search.len() + 1)),
+            row.push(Span::styled(
+                state.search.clone(),
+                Style::default().fg(theme::TEXT),
             ));
+            row.push(Span::styled(" ", cursor_style));
+            row.push(Span::raw(" ".repeat(
+                inner_w.saturating_sub(icon_len + state.search.len() + 1),
+            )));
         }
     } else if !state.search.is_empty() {
-        row.push(Span::styled(state.search.clone(), Style::default().fg(theme::TEXT)));
+        row.push(Span::styled(
+            state.search.clone(),
+            Style::default().fg(theme::TEXT),
+        ));
         row.push(Span::raw(
             " ".repeat(inner_w.saturating_sub(icon_len + state.search.len())),
         ));
     } else {
-        row.push(Span::styled(placeholder.to_string(), Style::default().fg(theme::SUBTLE)));
+        row.push(Span::styled(
+            placeholder.to_string(),
+            Style::default().fg(theme::SUBTLE),
+        ));
         row.push(Span::raw(
             " ".repeat(inner_w.saturating_sub(icon_len + placeholder.len())),
         ));
@@ -624,7 +631,10 @@ fn build_variables_content(
         } else {
             "  No matching variables"
         };
-        left.push(Line::from(Span::styled(msg, Style::default().fg(theme::SUBTLE))));
+        left.push(Line::from(Span::styled(
+            msg,
+            Style::default().fg(theme::SUBTLE),
+        )));
         return (left, right);
     }
 
@@ -682,7 +692,12 @@ fn build_variables_content(
         let allowed_val = var
             .allowed_values
             .as_ref()
-            .map(|vals| vals.iter().map(|v| yaml_value_str(v)).collect::<Vec<_>>().join(", "))
+            .map(|vals| {
+                vals.iter()
+                    .map(|v| yaml_value_str(v))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .unwrap_or_default();
         build_field_lines(state, &mut right, 1, "ALLOWED VALUES", &allowed_val);
 
@@ -690,6 +705,7 @@ fn build_variables_content(
         build_metadata_lines(
             &mut right,
             var.created_at.as_deref(),
+            var.created_by.as_deref(),
             var.updated_at.as_deref(),
             var.updated_by.as_deref(),
         );
@@ -714,7 +730,10 @@ fn build_policies_content(
         } else {
             "  No matching policies"
         };
-        left.push(Line::from(Span::styled(msg, Style::default().fg(theme::SUBTLE))));
+        left.push(Line::from(Span::styled(
+            msg,
+            Style::default().fg(theme::SUBTLE),
+        )));
         return (left, right);
     }
 
@@ -781,6 +800,7 @@ fn build_policies_content(
         build_metadata_lines(
             &mut right,
             pol.created_at.as_deref(),
+            pol.created_by.as_deref(),
             pol.updated_at.as_deref(),
             pol.updated_by.as_deref(),
         );
@@ -793,11 +813,13 @@ fn build_policies_content(
 fn build_metadata_lines(
     lines: &mut Vec<Line<'static>>,
     created_at: Option<&str>,
+    created_by: Option<&str>,
     updated_at: Option<&str>,
     updated_by: Option<&str>,
 ) {
     // Only show if at least one field exists.
-    if created_at.is_none() && updated_at.is_none() && updated_by.is_none() {
+    if created_at.is_none() && created_by.is_none() && updated_at.is_none() && updated_by.is_none()
+    {
         return;
     }
 
@@ -807,19 +829,25 @@ fn build_metadata_lines(
 
     if let Some(at) = created_at {
         lines.push(Line::from(vec![
-            Span::styled("created  ", meta),
+            Span::styled("created_at  ", meta),
             Span::styled(at.to_string(), meta),
+        ]));
+    }
+    if let Some(by) = created_by {
+        lines.push(Line::from(vec![
+            Span::styled("created_by  ", meta),
+            Span::styled(by.to_string(), meta),
         ]));
     }
     if let Some(at) = updated_at {
         lines.push(Line::from(vec![
-            Span::styled("updated  ", meta),
+            Span::styled("updated_at  ", meta),
             Span::styled(at.to_string(), meta),
         ]));
     }
     if let Some(by) = updated_by {
         lines.push(Line::from(vec![
-            Span::styled("by       ", meta),
+            Span::styled("updated_by  ", meta),
             Span::styled(by.to_string(), meta),
         ]));
     }

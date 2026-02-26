@@ -12,7 +12,6 @@ use crate::model::project::ProjectContext;
 use crate::screens::ace_explorer::AceExplorerState;
 use crate::screens::configure::ConfigureState;
 use crate::screens::help::HelpState;
-use crate::screens::project::ProjectState;
 use crate::ui;
 
 /// Events that mutate app state. Produced by commands, background tasks, or user input.
@@ -41,6 +40,8 @@ pub enum AppEvent {
     TurnCompleteWith(String),
     /// Re-detect project structure from the filesystem.
     RefreshProject,
+    /// Open the ace explorer for the first available agent with an ACE config.
+    OpenAceExplorer,
 }
 
 pub struct App {
@@ -52,7 +53,6 @@ pub struct App {
     pub help_state: HelpState,
     pub help_open: bool,
     pub project_open: bool,
-    pub project_state: ProjectState,
     pub ace_explorer_open: bool,
     pub ace_explorer_state: Option<AceExplorerState>,
     pub shortcuts_open: bool,
@@ -106,7 +106,6 @@ impl App {
             help_state: HelpState::new(),
             help_open: false,
             project_open: false,
-            project_state: ProjectState::new(),
             ace_explorer_open: false,
             ace_explorer_state: None,
             shortcuts_open: false,
@@ -138,7 +137,10 @@ impl App {
     }
 
     pub fn palette_open(&self) -> bool {
-        !self.config_open && !self.help_open && !self.ace_explorer_open && self.input.starts_with('/')
+        !self.config_open
+            && !self.help_open
+            && !self.ace_explorer_open
+            && self.input.starts_with('/')
     }
 
     pub fn bash_mode(&self) -> bool {
@@ -245,9 +247,7 @@ impl App {
                             if state.dirty {
                                 let name = state.agent_name.clone();
                                 let ace = state.ace.clone();
-                                if let Err(e) =
-                                    crate::model::project::save_ace(&name, &ace)
-                                {
+                                if let Err(e) = crate::model::project::save_ace(&name, &ace) {
                                     // TODO: show error to user
                                     eprintln!("Failed to save ace: {e}");
                                 }
@@ -257,13 +257,11 @@ impl App {
                         Action::PaletteDown | Action::Type('j') => {
                             let max = state.field_count();
                             if max > 0 {
-                                state.editing_field =
-                                    (state.editing_field + 1).min(max - 1);
+                                state.editing_field = (state.editing_field + 1).min(max - 1);
                             }
                         }
                         Action::PaletteUp | Action::Type('k') => {
-                            state.editing_field =
-                                state.editing_field.saturating_sub(1);
+                            state.editing_field = state.editing_field.saturating_sub(1);
                         }
                         Action::Submit => {
                             state.start_field_edit();
@@ -294,7 +292,9 @@ impl App {
                         Action::Cancel => {
                             self.ace_explorer_open = false;
                             self.ace_explorer_state = None;
-                            self.project_open = true;
+                            if let Some(turn) = self.conversation.turns.last_mut() {
+                                turn.complete_with("ACE explorer dismissed".to_string());
+                            }
                             self.scroll = u16::MAX;
                         }
                         Action::Submit => {
@@ -334,16 +334,6 @@ impl App {
                     if let Some(turn) = self.conversation.turns.last_mut() {
                         turn.complete_with("Project info dismissed".to_string());
                     }
-                }
-                Action::PaletteDown | Action::Type('j') => {
-                    let count = self.project.members.len();
-                    self.project_state.move_down(count);
-                }
-                Action::PaletteUp | Action::Type('k') => {
-                    self.project_state.move_up();
-                }
-                Action::Submit => {
-                    self.handle_project_submit();
                 }
                 Action::Quit => self.running = false,
                 _ => {}
@@ -595,27 +585,20 @@ impl App {
                         }
                         text.push_str(&String::from_utf8_lossy(&output.stderr));
                     }
-                    let lines: Vec<String> = text
-                        .lines()
-                        .map(|l| l.to_string())
-                        .collect();
+                    let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
                     let _ = tx.send(AppEvent::PushOutput(OutputBlock::ShellOutput(lines)));
 
                     let code = output.status.code().unwrap_or(-1);
                     if output.status.success() {
-                        let _ = tx.send(AppEvent::TurnCompleteWith(
-                            format!("✓ exit {code}"),
-                        ));
+                        let _ = tx.send(AppEvent::TurnCompleteWith(format!("✓ exit {code}")));
                     } else {
-                        let _ = tx.send(AppEvent::TurnCompleteWith(
-                            format!("✗ exit {code}"),
-                        ));
+                        let _ = tx.send(AppEvent::TurnCompleteWith(format!("✗ exit {code}")));
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Error(
-                        format!("Failed to run command: {e}"),
-                    )));
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Error(format!(
+                        "Failed to run command: {e}"
+                    ))));
                     let _ = tx.send(AppEvent::TurnComplete);
                 }
             }
@@ -658,8 +641,8 @@ asyncio.run(main())
 "#;
 
         tokio::spawn(async move {
-            use tokio::process::Command;
             use tokio::io::{AsyncBufReadExt, BufReader};
+            use tokio::process::Command;
 
             let mut child = match Command::new("uv")
                 .args(["run", "python", "-c", python_code])
@@ -669,9 +652,9 @@ asyncio.run(main())
             {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Error(
-                        format!("Failed to spawn: {e}"),
-                    )));
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Error(format!(
+                        "Failed to spawn: {e}"
+                    ))));
                     let _ = tx.send(AppEvent::TurnComplete);
                     return;
                 }
@@ -680,9 +663,7 @@ asyncio.run(main())
             if let Some(stdout) = child.stdout.take() {
                 let mut reader = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Text(
-                        format!("  {line}"),
-                    )));
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Text(format!("  {line}"))));
                 }
             }
 
@@ -698,13 +679,9 @@ asyncio.run(main())
                 Ok(status) => {
                     let code = status.code().unwrap_or(-1);
                     if status.success() {
-                        let _ = tx.send(AppEvent::TurnCompleteWith(
-                            format!("✓ exit {code}"),
-                        ));
+                        let _ = tx.send(AppEvent::TurnCompleteWith(format!("✓ exit {code}")));
                     } else {
-                        let _ = tx.send(AppEvent::TurnCompleteWith(
-                            format!("✗ exit {code}"),
-                        ));
+                        let _ = tx.send(AppEvent::TurnCompleteWith(format!("✗ exit {code}")));
                     }
                 }
                 Err(_) => {
@@ -736,8 +713,7 @@ asyncio.run(main())
                 self.running = false;
             }
             AppEvent::OpenConfigure => {
-                self.configure_state =
-                    ConfigureState::for_profile(self.profile.clone());
+                self.configure_state = ConfigureState::for_profile(self.profile.clone());
                 self.config_open = true;
             }
             AppEvent::ClearConversation => {
@@ -750,7 +726,6 @@ asyncio.run(main())
                 self.scroll = u16::MAX;
             }
             AppEvent::ShowProject => {
-                self.project_state = ProjectState::new();
                 self.project_open = true;
                 self.scroll = u16::MAX;
             }
@@ -784,88 +759,28 @@ asyncio.run(main())
                 let cwd = std::env::current_dir().unwrap_or_default();
                 self.project = ProjectContext::detect(&cwd);
             }
-        }
-    }
-
-    /// Handle Enter on a selected workforce member in the project panel.
-    fn handle_project_submit(&mut self) {
-        let idx = self.project_state.selected_member;
-        let member = match self.project.members.get(idx) {
-            Some(m) => m.clone(),
-            None => return,
-        };
-
-        if member.kind != "agent" {
-            return;
-        }
-
-        match &member.ace {
-            None => {
-                // No ace — run `timbal ace init <name>`.
-                self.project_open = false;
-                let cmd = format!("timbal ace init {}", member.name);
-
-                self.log(EntryKind::Command(format!("!{}", cmd)));
-                let turn = Turn::shell(cmd.clone());
-                self.conversation.push(turn);
-                self.scroll = u16::MAX;
-
-                let tx = self.event_tx.clone();
-                let shell =
-                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-
-                tokio::spawn(async move {
-                    let result = tokio::process::Command::new(&shell)
-                        .arg("-c")
-                        .arg(&cmd)
-                        .output()
-                        .await;
-
-                    match result {
-                        Ok(output) => {
-                            let mut text =
-                                String::from_utf8_lossy(&output.stdout).to_string();
-                            if !output.stderr.is_empty() {
-                                if !text.is_empty() && !text.ends_with('\n') {
-                                    text.push('\n');
-                                }
-                                text.push_str(
-                                    &String::from_utf8_lossy(&output.stderr),
-                                );
-                            }
-                            let lines: Vec<String> =
-                                text.lines().map(|l| l.to_string()).collect();
-                            let _ = tx.send(AppEvent::PushOutput(
-                                OutputBlock::ShellOutput(lines),
-                            ));
-
-                            let code = output.status.code().unwrap_or(-1);
-                            if output.status.success() {
-                                let _ = tx.send(AppEvent::TurnCompleteWith(
-                                    format!("✓ exit {code}"),
-                                ));
-                            } else {
-                                let _ = tx.send(AppEvent::TurnCompleteWith(
-                                    format!("✗ exit {code}"),
-                                ));
-                            }
-                            // Refresh project context so ace shows up.
-                            let _ = tx.send(AppEvent::RefreshProject);
-                        }
-                        Err(e) => {
-                            let _ = tx.send(AppEvent::PushOutput(
-                                OutputBlock::Error(format!(
-                                    "Failed to run command: {e}"
-                                )),
-                            ));
-                            let _ = tx.send(AppEvent::TurnComplete);
-                        }
+            AppEvent::OpenAceExplorer => {
+                if let Some(idx) = self
+                    .project
+                    .members
+                    .iter()
+                    .position(|m| m.kind == "agent" && m.ace.is_some())
+                {
+                    self.open_ace_explorer(idx);
+                } else {
+                    // No agent with ACE — show a message in the conversation.
+                    let msg = if self.project.members.iter().any(|m| m.kind == "agent") {
+                        "No ACE configured for any agent. Run `timbal ace init <name>` first."
+                            .to_string()
+                    } else if self.project.is_timbal_project {
+                        "No agents found in the workforce.".to_string()
+                    } else {
+                        "Not a Timbal project. Run `timbal create` to get started.".to_string()
+                    };
+                    if let Some(turn) = self.conversation.turns.last_mut() {
+                        turn.push_output(OutputBlock::Error(msg));
                     }
-                });
-            }
-            Some(_) => {
-                // Ace configured — open the ace explorer.
-                self.open_ace_explorer(idx);
+                }
             }
         }
     }
@@ -874,10 +789,8 @@ asyncio.run(main())
     fn open_ace_explorer(&mut self, member_idx: usize) {
         if let Some(member) = self.project.members.get(member_idx) {
             if let Some(ace) = &member.ace {
-                self.ace_explorer_state = Some(AceExplorerState::new(
-                    member.name.clone(),
-                    ace.clone(),
-                ));
+                self.ace_explorer_state =
+                    Some(AceExplorerState::new(member.name.clone(), ace.clone()));
                 self.ace_explorer_open = true;
                 self.project_open = false;
                 self.scroll = u16::MAX;

@@ -6,35 +6,6 @@ use ratatui::{
 use crate::app::App;
 use crate::theme;
 
-// ---------------------------------------------------------------------------
-// Project state (cursor on workforce members)
-// ---------------------------------------------------------------------------
-
-pub struct ProjectState {
-    /// Index of the currently selected workforce member.
-    pub selected_member: usize,
-}
-
-impl ProjectState {
-    pub fn new() -> Self {
-        Self { selected_member: 0 }
-    }
-
-    pub fn move_up(&mut self) {
-        self.selected_member = self.selected_member.saturating_sub(1);
-    }
-
-    pub fn move_down(&mut self, member_count: usize) {
-        if member_count > 0 {
-            self.selected_member = (self.selected_member + 1).min(member_count - 1);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------------
-
 pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let bold = Modifier::BOLD;
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -62,14 +33,12 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         return lines;
     }
 
-    // --- Interfaces ---
     lines.push(Line::from(Span::styled(
         "  Interfaces",
         Style::default().fg(theme::TEXT).add_modifier(bold),
     )));
     lines.push(Line::from(""));
 
-    // ui
     if app.project.has_ui {
         lines.push(Line::from(vec![
             Span::styled("    ui  ", Style::default().fg(theme::FOAM)),
@@ -88,7 +57,6 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     }
     lines.push(Line::from(""));
 
-    // api
     if app.project.has_api {
         lines.push(Line::from(vec![
             Span::styled("    api  ", Style::default().fg(theme::FOAM)),
@@ -112,8 +80,6 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     )));
     lines.push(Line::from(""));
 
-    let selected = app.project_state.selected_member;
-
     if app.project.members.is_empty() && app.project.legacy_members.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("    ", Style::default()),
@@ -121,30 +87,16 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         ]));
         lines.push(Line::from(""));
     } else {
-        for (idx, m) in app.project.members.iter().enumerate() {
-            let is_selected = idx == selected;
+        for m in app.project.members.iter() {
             let kind_color = match m.kind.as_str() {
                 "agent" => theme::IRIS,
                 "workflow" => theme::FOAM,
                 _ => theme::SUBTLE,
             };
 
-            // Selection indicator + member name + kind + fqn.
-            let indicator = if is_selected { "  > " } else { "    " };
-            let indicator_style = if is_selected {
-                Style::default().fg(theme::IRIS).add_modifier(bold)
-            } else {
-                Style::default()
-            };
-            let name_style = if is_selected {
-                Style::default().fg(theme::TEXT).add_modifier(bold)
-            } else {
-                Style::default().fg(theme::TEXT)
-            };
-
             let mut member_line = vec![
-                Span::styled(indicator, indicator_style),
-                Span::styled(m.name.clone(), name_style),
+                Span::styled("    ", Style::default()),
+                Span::styled(m.name.clone(), Style::default().fg(theme::TEXT)),
                 Span::styled("  ", Style::default()),
                 Span::styled(m.kind.clone(), Style::default().fg(kind_color)),
             ];
@@ -191,14 +143,17 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             lines.push(Line::from(vec![
                 Span::styled("    ", Style::default()),
                 Span::styled(name.clone(), Style::default().fg(theme::GOLD)),
-                Span::styled("  legacy, needs migration", Style::default().fg(theme::GOLD)),
+                Span::styled(
+                    "  legacy, needs migration",
+                    Style::default().fg(theme::GOLD),
+                ),
             ]));
             lines.push(Line::from(""));
         }
     }
 
     lines.push(Line::from(Span::styled(
-        "  ↑/↓ navigate  ·  Enter select  ·  Esc dismiss",
+        "  Esc dismiss",
         Style::default().fg(theme::MUTED),
     )));
     lines.push(Line::from(""));
