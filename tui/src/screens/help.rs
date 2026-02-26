@@ -3,6 +3,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use crate::app::App;
 use crate::theme;
 
 // ---------------------------------------------------------------------------
@@ -60,7 +61,8 @@ impl HelpState {
 // Build lines for embedding in the scrollable document
 // ---------------------------------------------------------------------------
 
-pub fn build_lines(state: &HelpState, width: u16) -> Vec<Line<'static>> {
+pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let state = &app.help_state;
     let bold = Modifier::BOLD;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -108,7 +110,7 @@ pub fn build_lines(state: &HelpState, width: u16) -> Vec<Line<'static>> {
     // Tab content
     match state.current_tab() {
         HelpTab::General => build_general(&mut lines),
-        HelpTab::Commands => build_commands(&mut lines),
+        HelpTab::Commands => build_commands(app, &mut lines),
     }
 
     // Esc to cancel
@@ -130,33 +132,18 @@ fn build_general(lines: &mut Vec<Line<'static>>) {
     let bold = Modifier::BOLD;
 
     lines.push(Line::from(Span::styled(
-        "  Timbal understands your codebase, orchestrates AI agents, and executes",
-        Style::default().fg(theme::TEXT),
+        "  Build, deploy, and manage your AI workforce — right from the terminal.",
+        Style::default().fg(theme::FOAM),
     )));
     lines.push(Line::from(Span::styled(
-        "  commands — right from your terminal.",
-        Style::default().fg(theme::TEXT),
+        "  Powered by ACE \u{2014} deterministic control for AI agents.",
+        Style::default().fg(theme::SUBTLE),
     )));
     lines.push(Line::from(""));
-
-    lines.push(Line::from(Span::styled(
-        "  What I can help with:",
-        Style::default().fg(theme::TEXT).add_modifier(bold),
-    )));
-    for item in [
-        "Building and running AI agents",
-        "Debugging and fixing bugs",
-        "Adding new features",
-        "Refactoring and code review",
-        "Explaining code",
-        "Running tests and builds",
-        "Git operations",
-    ] {
-        lines.push(Line::from(vec![
-            Span::styled("  - ", Style::default().fg(theme::MUTED)),
-            Span::styled(item, Style::default().fg(theme::TEXT)),
-        ]));
-    }
+    lines.push(Line::from(vec![
+        Span::styled("  Software lovingly crafted by ", Style::default().fg(theme::SUBTLE)),
+        Span::styled("Timbal", Style::default().fg(theme::GOLD)),
+    ]));
     lines.push(Line::from(""));
 
     // Shortcuts (inline in general tab)
@@ -182,7 +169,11 @@ fn build_general(lines: &mut Vec<Line<'static>>) {
     lines.push(Line::from(""));
 
     lines.push(Line::from(Span::styled(
-        "  For more help: https://docs.timbal.ai",
+        "  Docs: https://docs.timbal.ai",
+        Style::default().fg(theme::MUTED),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Issues: https://github.com/timbal-ai/timbal/issues",
         Style::default().fg(theme::MUTED),
     )));
 }
@@ -191,7 +182,7 @@ fn build_general(lines: &mut Vec<Line<'static>>) {
 // Tab: Commands
 // ---------------------------------------------------------------------------
 
-fn build_commands(lines: &mut Vec<Line<'static>>) {
+fn build_commands(app: &App, lines: &mut Vec<Line<'static>>) {
     let bold = Modifier::BOLD;
 
     lines.push(Line::from(Span::styled(
@@ -200,16 +191,13 @@ fn build_commands(lines: &mut Vec<Line<'static>>) {
     )));
     lines.push(Line::from(""));
 
-    let commands: &[(&str, &str)] = &[
-        ("/configure", "Set up API key and credentials"),
-        ("/clear", "Clear conversation history"),
-        ("/help", "Show this help panel"),
-        ("/quit", "Exit Timbal"),
-    ];
-    for (cmd, desc) in commands {
+    // Pull commands from the registry so this list stays in sync automatically.
+    let all = app.filter_commands_all();
+    for cmd in &all {
+        let meta = cmd.meta();
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<26}", cmd), Style::default().fg(theme::IRIS)),
-            Span::styled(*desc, Style::default().fg(theme::SUBTLE)),
+            Span::styled(format!("  {:<26}", meta.name), Style::default().fg(theme::IRIS)),
+            Span::styled(meta.description, Style::default().fg(theme::SUBTLE)),
         ]));
     }
     lines.push(Line::from(""));

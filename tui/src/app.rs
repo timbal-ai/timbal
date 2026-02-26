@@ -156,6 +156,11 @@ impl App {
         self.commands.filter(&self.input)
     }
 
+    /// Return all registered commands (for help screen).
+    pub fn filter_commands_all(&self) -> Vec<&dyn commands::CommandHandler> {
+        self.commands.all()
+    }
+
     /// The async main loop. Uses tokio::select! to multiplex between:
     /// - Terminal input events
     /// - AppEvent channel (from commands, background tasks)
@@ -221,9 +226,11 @@ impl App {
                 }
                 Action::Tab | Action::Right => {
                     self.help_state.next_tab();
+                    self.scroll = u16::MAX;
                 }
                 Action::Left => {
                     self.help_state.prev_tab();
+                    self.scroll = u16::MAX;
                 }
                 Action::Quit => self.running = false,
                 _ => {}

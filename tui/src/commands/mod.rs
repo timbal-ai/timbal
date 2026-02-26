@@ -33,17 +33,22 @@ impl CommandRegistry {
         let mut reg = Self {
             handlers: Vec::new(),
         };
-        reg.register(Box::new(configure::ConfigureCommand));
-        reg.register(Box::new(quit::QuitCommand));
         reg.register(Box::new(clear::ClearCommand));
+        reg.register(Box::new(configure::ConfigureCommand));
         reg.register(Box::new(help::HelpCommand));
         reg.register(Box::new(project::ProjectCommand));
+        reg.register(Box::new(quit::QuitCommand));
         reg.register(Box::new(test::TestCommand));
         reg
     }
 
     fn register(&mut self, handler: Box<dyn CommandHandler>) {
         self.handlers.push(handler);
+    }
+
+    /// Return all registered commands.
+    pub fn all(&self) -> Vec<&dyn CommandHandler> {
+        self.handlers.iter().map(|h| h.as_ref()).collect()
     }
 
     /// Return commands whose name starts with the input prefix,

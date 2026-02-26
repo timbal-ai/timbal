@@ -650,7 +650,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     // Help panel.
     if app.help_open {
-        doc.extend(crate::screens::help::build_lines(&app.help_state, width));
+        doc.extend(crate::screens::help::build_lines(app, width));
     }
 
     // Project panel.
