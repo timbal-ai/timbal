@@ -1,4 +1,18 @@
+import argparse
+
 import libcst as cst
+
+
+def register(subparsers: argparse._SubParsersAction) -> None:
+    sp = subparsers.add_parser(
+        "set-system-prompt",
+        help="Set the agent system prompt. Omit or pass empty string to remove it.",
+    )
+    sp.add_argument("value", nargs="?", default="", help="The system prompt text.")
+
+
+def run(entry_point: str, args: argparse.Namespace) -> cst.CSTTransformer:
+    return SystemPromptSetter(entry_point, args.value)
 
 
 class SystemPromptSetter(cst.CSTTransformer):

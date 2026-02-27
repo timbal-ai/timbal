@@ -5,7 +5,7 @@ from pathlib import Path
 import libcst as cst
 
 from timbal.codegen.format import format_code
-from timbal.codegen.transformers import SystemPromptSetter
+from timbal.codegen.transformers import load_modules
 
 
 def main() -> None:
@@ -25,10 +25,9 @@ def main() -> None:
 
     subparsers = parser.add_subparsers(dest="operation", required=True)
 
-    sp = subparsers.add_parser(
-        "set-system-prompt", help="Set the agent system prompt. Omit or pass empty string to remove it."
-    )
-    sp.add_argument("value", nargs="?", default="", help="The system prompt text.")
+    transformer_modules = load_modules()
+    for mod in transformer_modules.values():
+        mod.register(subparsers)
 
     args = parser.parse_args()
 
@@ -45,12 +44,14 @@ def main() -> None:
     source = source_path.read_text()
     tree = cst.parse_module(source)
 
-    if args.operation == "set-system-prompt":
-        transformer = SystemPromptSetter(entry_point, args.value)
-    else:
+    # Map CLI operation name (e.g. "set-model") to module name (e.g. "set_model").
+    module_name = args.operation.replace("-", "_")
+    mod = transformer_modules.get(module_name)
+    if mod is None:
         print(f"error: unknown operation: {args.operation}", file=sys.stderr)
         sys.exit(1)
 
+    transformer = mod.run(entry_point, args)
     new_tree = tree.visit(transformer)
     formatted = format_code(new_tree.code, source_path)
 
