@@ -365,6 +365,19 @@ class Runnable(ABC, BaseModel):
         return_model_schema = TypeAdapter(self.return_model).json_schema()
         return return_model_schema
 
+    @computed_field
+    @cached_property
+    def config_schema(self) -> dict[str, Any] | None:
+        """Schema for configuration fields specific to this runnable (e.g. integration accounts).
+
+        Automatically derived from the config model when provided.
+        Returns None when no config is set.
+        """
+        config = getattr(self, "config", None)
+        if config is None:
+            return None
+        return type(config).model_json_schema()
+
     def format_params_model_schema(self) -> dict[str, Any]:
         """Format the parameter schema based on filtering rules.
 
@@ -411,9 +424,13 @@ class Runnable(ABC, BaseModel):
                 "description": "Run in the background",
             }
 
+        # Strip excluded params from required
+        required = [r for r in self.params_model_schema.get("required", []) if r in selected_params]
+
         return {
             **self.params_model_schema,
             "properties": properties,
+            "required": required,
         }
 
     @computed_field
