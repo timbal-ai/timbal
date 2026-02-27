@@ -46,6 +46,8 @@ class WebSearch(Tool):
         allowed_domains: list[str] | None = None,
         blocked_domains: list[str] | None = None,
         user_location: dict[str, Any] | None = None,
+        name: str = "web_search",
+        description: str | None = None,
         # ? anthropic's max_uses
         **kwargs: Any,
     ) -> None:
@@ -61,7 +63,7 @@ class WebSearch(Tool):
         def _unreachable_handler():
             raise NotImplementedError("This is a specification-only tool")
 
-        super().__init__(name="web_search", handler=_unreachable_handler, **kwargs)
+        super().__init__(name=name, description=description, handler=_unreachable_handler, **kwargs)
 
     @override
     @computed_field

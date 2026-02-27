@@ -26,7 +26,15 @@ class CalaConfig(BaseModel):
 class CalaSearch(Tool):
     config: CalaConfig = Field(default_factory=CalaConfig)
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        name: str = "cala_search",
+        description: str = (
+            "Search for verified knowledge using natural language queries. "
+            "Returns trustworthy, verified knowledge with relevant context, sources, and matching entities."
+        ),
+        **kwargs: Any,
+    ) -> None:
         async def _cala_search(input: str) -> dict:
             if self.config.integration:
                 assert isinstance(self.config.integration, Integration)
@@ -50,11 +58,8 @@ class CalaSearch(Tool):
         metadata["type"] = "Cala/Search"
 
         super().__init__(
-            name="cala_search",
-            description=(
-                "Search for verified knowledge using natural language queries. "
-                "Returns trustworthy, verified knowledge with relevant context, sources, and matching entities."
-            ),
+            name=name,
+            description=description,
             handler=_cala_search,
             metadata=metadata,
             **kwargs,
