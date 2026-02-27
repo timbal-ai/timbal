@@ -1,12 +1,8 @@
 import argparse
-import importlib
-import io
-import json
-import sys
 
 import libcst as cst
 
-from ..utils import FRAMEWORK_TOOL_NAMES, build_cst_value, resolve_runnable_name
+from ..utils import FRAMEWORK_TOOL_NAMES, collect_assignments, has_import, resolve_runnable_name
 
 # Framework tools: class name -> module path
 FRAMEWORK_TOOLS = {
@@ -16,12 +12,6 @@ FRAMEWORK_TOOLS = {
     "Read": "timbal.tools",
     "WebSearch": "timbal.tools",
     "Write": "timbal.tools",
-}
-
-# Framework tools that accept a config model: class name -> (module, config class name)
-FRAMEWORK_TOOL_CONFIGS: dict[str, tuple[str, str]] = {
-    "WebSearch": ("timbal.tools.web_search", "WebSearchConfig"),
-    "CalaSearch": ("timbal.tools.cala", "CalaConfig"),
 }
 
 TOOL_TYPES = [*FRAMEWORK_TOOLS.keys(), "Custom"]
@@ -38,56 +28,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Full function definition for custom tools. E.g. 'def my_tool(query: str) -> str:\\n    return query'",
     )
-    sp.add_argument(
-        "--config",
-        default=None,
-        help='Tool configuration as a JSON object. E.g. \'{"allowed_domains": ["example.com"]}\'.',
-    )
-    sp.add_argument(
-        "--name",
-        default=None,
-        help="Variable name (and runtime name for custom tools). Defaults to snake_case of tool type.",
-    )
-    sp.add_argument(
-        "--description",
-        default=None,
-        dest="tool_description",
-        help="Tool description string.",
-    )
-
-
-def _validate_config(tool_type: str, config: dict) -> None:
-    """Validate config keys against the tool's config model fields."""
-    config_ref = FRAMEWORK_TOOL_CONFIGS.get(tool_type)
-    if config_ref is None:
-        raise ValueError(f"--config is not supported for {tool_type}.")
-    module_path, class_name = config_ref
-    # Suppress stdout/stderr during import to avoid side-effect logs from
-    # the tool modules (e.g. structlog warnings) leaking into codegen output.
-    old_stdout, old_stderr = sys.stdout, sys.stderr
-    sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
-    try:
-        mod = importlib.import_module(module_path)
-    finally:
-        sys.stdout, sys.stderr = old_stdout, old_stderr
-    config_cls = getattr(mod, class_name)
-    valid_fields = set(config_cls.model_fields.keys())
-    unknown = set(config.keys()) - valid_fields
-    if unknown:
-        raise ValueError(
-            f"Unknown config field(s) for {tool_type}: {', '.join(sorted(unknown))}. "
-            f"Valid fields: {', '.join(sorted(valid_fields))}."
-        )
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
-    assignments = _collect_assignments(tree) if tree else {}
+    assignments = collect_assignments(tree) if tree else {}
     tool_type = args.tool_type
-    config = json.loads(args.config) if args.config else None
-    description = args.tool_description
-
-    if config is not None:
-        _validate_config(tool_type, config)
 
     if tool_type == "Custom":
         if not args.definition:
@@ -101,22 +46,18 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         if func_def is None:
             raise ValueError("--definition must contain a function definition.")
         func_name = func_def.name.value
-        # --name sets both the variable name and the runtime name for custom tools.
-        var_name = args.name or func_name
-        runtime_name = var_name
         return ToolAdder(
             entry_point, assignments,
             tool_type="Custom",
             class_name=None,
             func_name=func_name,
-            var_name=var_name,
-            runtime_name=runtime_name,
+            var_name=func_name,
+            runtime_name=func_name,
             definition=args.definition,
-            description=description,
         )
 
     # Framework tool.
-    var_name = args.name or FRAMEWORK_TOOL_NAMES[tool_type]
+    var_name = FRAMEWORK_TOOL_NAMES[tool_type]
     runtime_name = FRAMEWORK_TOOL_NAMES[tool_type]
     return ToolAdder(
         entry_point, assignments,
@@ -125,46 +66,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         func_name=None,
         var_name=var_name,
         runtime_name=runtime_name,
-        config=config,
-        description=description,
     )
-
-
-def _collect_assignments(tree: cst.Module) -> dict[str, cst.Call]:
-    """Build a map of variable_name -> Call node for all top-level assignments."""
-    result = {}
-    for stmt in tree.body:
-        if isinstance(stmt, cst.SimpleStatementLine):
-            for item in stmt.body:
-                if isinstance(item, cst.Assign) and isinstance(item.value, cst.Call):
-                    for target in item.targets:
-                        if isinstance(target.target, cst.Name):
-                            result[target.target.value] = item.value
-    return result
-
-
-def _has_import(tree: cst.Module, module: str, name: str) -> bool:
-    """Check if `from <module> import <name>` already exists."""
-    for stmt in tree.body:
-        if isinstance(stmt, cst.SimpleStatementLine):
-            for item in stmt.body:
-                if isinstance(item, cst.ImportFrom) and not isinstance(item.names, cst.ImportStar):
-                    parts = []
-                    node = item.module
-                    while isinstance(node, cst.Attribute):
-                        parts.append(node.attr.value)
-                        node = node.value
-                    if isinstance(node, cst.Name):
-                        parts.append(node.value)
-                    mod = ".".join(reversed(parts))
-
-                    if mod == module:
-                        for alias in item.names:
-                            if isinstance(alias, cst.ImportAlias):
-                                imported = alias.name.value if isinstance(alias.name, cst.Name) else ""
-                                if imported == name:
-                                    return True
-    return False
 
 
 class ToolAdder(cst.CSTTransformer):
@@ -179,8 +81,6 @@ class ToolAdder(cst.CSTTransformer):
         var_name: str,
         runtime_name: str,
         definition: str | None = None,
-        config: dict | None = None,
-        description: str | None = None,
     ):
         self.entry_point = entry_point
         self.assignments = assignments
@@ -190,8 +90,6 @@ class ToolAdder(cst.CSTTransformer):
         self.var_name = var_name  # variable name for the assignment
         self.runtime_name = runtime_name  # name used by remove-tool
         self.definition = definition
-        self.config = config
-        self.description = description
         # Track whether an existing variable assignment was found and updated.
         self._assignment_updated = False
 
@@ -241,11 +139,11 @@ class ToolAdder(cst.CSTTransformer):
         # --- Imports ---
         if self.tool_type != "Custom":
             module = FRAMEWORK_TOOLS[self.class_name]
-            if not _has_import(original_node, module, self.class_name):
+            if not has_import(original_node, module, self.class_name):
                 imports_to_add.append(cst.parse_statement(f"from {module} import {self.class_name}\n"))
         else:
             # Custom tools need `from timbal.core import Tool` for the wrapper.
-            if not _has_import(original_node, "timbal.core", "Tool"):
+            if not has_import(original_node, "timbal.core", "Tool"):
                 imports_to_add.append(cst.parse_statement("from timbal.core import Tool\n"))
 
         # --- Function definition (custom tools) ---
@@ -302,42 +200,20 @@ class ToolAdder(cst.CSTTransformer):
     def _build_assignment_call(self) -> cst.Call:
         """Build the CST Call node for the variable assignment RHS."""
         if self.tool_type != "Custom":
-            # Framework tool: WebSearch(name=..., description=..., config_kwargs...)
-            args: list[cst.Arg] = []
-            if self.description is not None:
-                args.append(cst.Arg(keyword=cst.Name("description"), value=build_cst_value(self.description)))
-            if self.config:
-                for key, value in self.config.items():
-                    args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
-            return cst.Call(func=cst.Name(self.class_name), args=args)
+            return cst.Call(func=cst.Name(self.class_name), args=[])
         else:
-            # Custom tool: Tool(name="...", description="...", handler=func_name)
             args = [
-                cst.Arg(keyword=cst.Name("name"), value=build_cst_value(self.runtime_name)),
+                cst.Arg(keyword=cst.Name("name"), value=cst.SimpleString(f'"{self.runtime_name}"')),
+                cst.Arg(keyword=cst.Name("handler"), value=cst.Name(self.func_name)),
             ]
-            if self.description is not None:
-                args.append(cst.Arg(keyword=cst.Name("description"), value=build_cst_value(self.description)))
-            args.append(cst.Arg(keyword=cst.Name("handler"), value=cst.Name(self.func_name)))
             return cst.Call(func=cst.Name("Tool"), args=args)
 
     def _build_assignment_code(self) -> str:
         """Build the source code string for the variable assignment RHS."""
         if self.tool_type != "Custom":
-            parts = []
-            if self.description is not None:
-                parts.append(f'description="{self.description}"')
-            if self.config:
-                for key, value in self.config.items():
-                    parts.append(f"{key}={repr(value)}")
-            args_str = ", ".join(parts)
-            return f"{self.class_name}({args_str})"
+            return f"{self.class_name}()"
         else:
-            parts = [f'name="{self.runtime_name}"']
-            if self.description is not None:
-                parts.append(f'description="{self.description}"')
-            parts.append(f"handler={self.func_name}")
-            args_str = ", ".join(parts)
-            return f"Tool({args_str})"
+            return f'Tool(name="{self.runtime_name}", handler={self.func_name})'
 
     def _add_to_tools(self, call: cst.Call) -> cst.Call:
         """Add or update the tool reference in the tools=[...] list."""

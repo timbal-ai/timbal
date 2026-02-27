@@ -2,8 +2,7 @@ import argparse
 
 import libcst as cst
 
-from ..utils import resolve_runnable_name
-from .add_tool import _collect_assignments
+from ..utils import collect_assignments, resolve_runnable_name
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -15,7 +14,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
-    assignments = _collect_assignments(tree) if tree else {}
+    assignments = collect_assignments(tree) if tree else {}
     return ToolRemover(entry_point, args.value, assignments)
 
 
