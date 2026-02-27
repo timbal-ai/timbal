@@ -51,9 +51,9 @@ def main() -> None:
         print(f"error: unknown operation: {args.operation}", file=sys.stderr)
         sys.exit(1)
 
-    transformer = mod.run(entry_point, args)
+    transformer = mod.run(entry_point, args, tree=tree)
     new_tree = tree.visit(transformer)
-    formatted = format_code(new_tree.code, source_path)
+    formatted = format_code(new_tree.code, source_path, entry_point=entry_point)
 
     if args.dry_run:
         print(formatted)

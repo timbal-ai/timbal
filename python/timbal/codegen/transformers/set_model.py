@@ -11,7 +11,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sm.add_argument("value", nargs="?", default="", help="The model name. E.g. claude-sonnet-4-6.")
 
 
-def run(entry_point: str, args: argparse.Namespace) -> cst.CSTTransformer:
+def run(entry_point: str, args: argparse.Namespace, **kwargs) -> cst.CSTTransformer:
     return ModelSetter(entry_point, args.value)
 
 

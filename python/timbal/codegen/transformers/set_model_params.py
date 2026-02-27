@@ -17,7 +17,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
 
 
-def run(entry_point: str, args: argparse.Namespace) -> cst.CSTTransformer:
+def run(entry_point: str, args: argparse.Namespace, **kwargs) -> cst.CSTTransformer:
     params = json.loads(args.value) if args.value else {}
     return ModelParamsSetter(entry_point, params)
 

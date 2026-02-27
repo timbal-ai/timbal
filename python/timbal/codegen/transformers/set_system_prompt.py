@@ -11,7 +11,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sp.add_argument("value", nargs="?", default="", help="The system prompt text.")
 
 
-def run(entry_point: str, args: argparse.Namespace) -> cst.CSTTransformer:
+def run(entry_point: str, args: argparse.Namespace, **kwargs) -> cst.CSTTransformer:
     return SystemPromptSetter(entry_point, args.value)
 
 
