@@ -574,7 +574,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     // Ace explorer takes over the full screen when open.
     if app.ace_explorer_open {
-        crate::screens::ace_explorer::render_full(app, frame, padded);
+        crate::screens::ace::render_full(app, frame, padded);
         return;
     }
 

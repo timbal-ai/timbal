@@ -9,7 +9,7 @@ use crate::model::config::TimbalConfig;
 use crate::model::conversation::{Conversation, OutputBlock, Turn};
 use crate::model::history::{self, Entry, EntryKind};
 use crate::model::project::ProjectContext;
-use crate::screens::ace_explorer::{AceExplorerState, AceExplorerTab};
+use crate::screens::ace::{AceExplorerState, AceExplorerTab};
 use crate::screens::configure::ConfigureState;
 use crate::screens::help::HelpState;
 use crate::ui;
@@ -30,6 +30,8 @@ pub enum AppEvent {
     ShowProject,
     /// Run the streaming test command.
     RunStreamingTest,
+    /// Run a Timbal runnable by import spec (e.g. "path/to/agent.py::agent").
+    RunRunnable(String),
     /// A command produced output to display inline.
     CommandOutput(OutputBlock),
     /// An output block from a background task (streaming response, tool output, etc.).
@@ -42,6 +44,10 @@ pub enum AppEvent {
     RefreshProject,
     /// Open the ace explorer for the first available agent with an ACE config.
     OpenAceExplorer,
+    /// A line of output from the playground process.
+    PlaygroundOutput(crate::screens::ace::PlaygroundLine),
+    /// The playground process finished.
+    PlaygroundComplete(String),
 }
 
 pub struct App {
@@ -199,8 +205,9 @@ impl App {
                 Some(event) = self.event_rx.recv() => {
                     self.apply(event);
                 }
-                // Animation tick — only runs when a turn is streaming.
-                _ = anim_interval.tick(), if self.conversation.is_busy() => {
+                // Animation tick — only runs when a turn is streaming or playground is running.
+                _ = anim_interval.tick(), if self.conversation.is_busy()
+                    || self.ace_explorer_state.as_ref().is_some_and(|s| s.playground_running) => {
                     self.advance_animation();
                 }
             }
@@ -324,6 +331,279 @@ impl App {
                         Action::Quit => self.running = false,
                         _ => {}
                     }
+                } else if state.current_tab() == AceExplorerTab::Playground {
+                    // Mode: playground tab.
+                    use crate::screens::ace::PlaygroundPanel;
+                    use crate::screens::ace::state::PLAYGROUND_CFG_FIELD_COUNT;
+
+                    if state.playground_cfg_editing {
+                        // Editing a config field.
+                        match action {
+                            Action::Submit => {
+                                let field = state.playground_cfg_field;
+                                let value = state.playground_cfg_input.clone();
+                                let fqn = state.import_spec.clone();
+                                state.playground_confirm_cfg_edit();
+                                // System prompt field (index 1): persist via codegen.
+                                if field == 1 {
+                                    if let Some(spec) = fqn {
+                                        self.spawn_codegen_set_system_prompt(spec, value);
+                                    }
+                                }
+                            }
+                            Action::Cancel => {
+                                state.playground_cancel_cfg_edit();
+                            }
+                            Action::Left => {
+                                if state.playground_cfg_cursor > 0 {
+                                    let prev = state.playground_cfg_input
+                                        [..state.playground_cfg_cursor]
+                                        .char_indices()
+                                        .next_back()
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(0);
+                                    state.playground_cfg_cursor = prev;
+                                }
+                            }
+                            Action::Right => {
+                                if state.playground_cfg_cursor
+                                    < state.playground_cfg_input.len()
+                                {
+                                    let next = state.playground_cfg_input
+                                        [state.playground_cfg_cursor..]
+                                        .char_indices()
+                                        .nth(1)
+                                        .map(|(i, _)| state.playground_cfg_cursor + i)
+                                        .unwrap_or(state.playground_cfg_input.len());
+                                    state.playground_cfg_cursor = next;
+                                }
+                            }
+                            Action::Type(c) => {
+                                state
+                                    .playground_cfg_input
+                                    .insert(state.playground_cfg_cursor, c);
+                                state.playground_cfg_cursor += c.len_utf8();
+                            }
+                            Action::Backspace => {
+                                if state.playground_cfg_cursor > 0 {
+                                    let prev = state.playground_cfg_input
+                                        [..state.playground_cfg_cursor]
+                                        .char_indices()
+                                        .next_back()
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(0);
+                                    state
+                                        .playground_cfg_input
+                                        .drain(prev..state.playground_cfg_cursor);
+                                    state.playground_cfg_cursor = prev;
+                                }
+                            }
+                            Action::Quit => self.running = false,
+                            _ => {}
+                        }
+                    } else if state.playground_focused {
+                        // Typing into the playground input box.
+                        match action {
+                            Action::Submit => {
+                                if !state.playground_input.trim().is_empty()
+                                    && !state.playground_running
+                                {
+                                    let raw_prompt =
+                                        std::mem::take(&mut state.playground_input);
+                                    state.playground_cursor = 0;
+                                    if let Some(chat) = state.playground_chats.get_mut(
+                                        state.playground_active_chat,
+                                    ) {
+                                        chat.output.clear();
+                                        chat.output.push(
+                                            crate::screens::ace::PlaygroundLine::User(
+                                                raw_prompt.clone(),
+                                            ),
+                                        );
+                                        chat.output.push(
+                                            crate::screens::ace::PlaygroundLine::Thinking,
+                                        );
+                                    }
+                                    state.playground_running = true;
+                                    state.playground_feed_scroll = 0;
+
+                                    let input_json = serde_json::json!({
+                                        "prompt": raw_prompt
+                                    })
+                                    .to_string();
+
+                                    let spec = state.import_spec.clone();
+                                    let tx = self.event_tx.clone();
+                                    self.spawn_playground_run(
+                                        spec,
+                                        input_json,
+                                        tx,
+                                    );
+                                }
+                            }
+                            Action::Cancel => {
+                                state.playground_focused = false;
+                            }
+                            Action::Left => {
+                                if state.playground_cursor > 0 {
+                                    let prev = state.playground_input
+                                        [..state.playground_cursor]
+                                        .char_indices()
+                                        .next_back()
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(0);
+                                    state.playground_cursor = prev;
+                                }
+                            }
+                            Action::Right => {
+                                if state.playground_cursor
+                                    < state.playground_input.len()
+                                {
+                                    let next = state.playground_input
+                                        [state.playground_cursor..]
+                                        .char_indices()
+                                        .nth(1)
+                                        .map(|(i, _)| state.playground_cursor + i)
+                                        .unwrap_or(state.playground_input.len());
+                                    state.playground_cursor = next;
+                                }
+                            }
+                            Action::Type(c) => {
+                                state
+                                    .playground_input
+                                    .insert(state.playground_cursor, c);
+                                state.playground_cursor += c.len_utf8();
+                            }
+                            Action::Backspace => {
+                                if state.playground_cursor > 0 {
+                                    let prev = state.playground_input
+                                        [..state.playground_cursor]
+                                        .char_indices()
+                                        .next_back()
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(0);
+                                    state
+                                        .playground_input
+                                        .drain(prev..state.playground_cursor);
+                                    state.playground_cursor = prev;
+                                }
+                            }
+                            Action::ScrollDown(col) => {
+                                self.playground_scroll_down(col, 3);
+                            }
+                            Action::ScrollUp(col) => {
+                                self.playground_scroll_up(col, 3);
+                            }
+                            Action::Quit => self.running = false,
+                            _ => {}
+                        }
+                    } else {
+                        // Playground: panel navigation (not focused on input/config).
+                        match action {
+                            Action::Cancel => {
+                                self.ace_explorer_open = false;
+                                self.ace_explorer_state = None;
+                                if let Some(turn) =
+                                    self.conversation.turns.last_mut()
+                                {
+                                    turn.complete_with(
+                                        "ACE explorer dismissed".to_string(),
+                                    );
+                                }
+                                self.scroll = u16::MAX;
+                            }
+                            // Tab/Shift+Tab: cycle ACE tabs (like Chrome).
+                            Action::Tab => {
+                                state.next_tab();
+                            }
+                            Action::BackTab => {
+                                state.prev_tab();
+                            }
+                            // h/l or Left/Right: cycle playground panels.
+                            Action::Type('l') | Action::Right => {
+                                state.playground_panel =
+                                    state.playground_panel.next();
+                            }
+                            Action::Type('h') | Action::Left => {
+                                state.playground_panel =
+                                    state.playground_panel.prev();
+                            }
+                            Action::Submit => {
+                                match state.playground_panel {
+                                    PlaygroundPanel::Feed => {
+                                        state.playground_focused = true;
+                                    }
+                                    PlaygroundPanel::Chats => {
+                                        // Enter switches to selected chat
+                                        // (already active by selection)
+                                    }
+                                    PlaygroundPanel::Config => {
+                                        state.playground_start_cfg_edit();
+                                    }
+                                }
+                            }
+                            Action::PaletteDown | Action::Type('j') => {
+                                match state.playground_panel {
+                                    PlaygroundPanel::Chats => {
+                                        let count = state.playground_chats.len();
+                                        if count > 0 {
+                                            state.playground_active_chat =
+                                                (state.playground_active_chat + 1)
+                                                    .min(count - 1);
+                                            state.playground_feed_scroll = 0;
+                                        }
+                                    }
+                                    PlaygroundPanel::Feed => {
+                                        state.playground_feed_scroll =
+                                            state
+                                                .playground_feed_scroll
+                                                .saturating_add(1);
+                                    }
+                                    PlaygroundPanel::Config => {
+                                        state.playground_cfg_field =
+                                            (state.playground_cfg_field + 1)
+                                                .min(PLAYGROUND_CFG_FIELD_COUNT - 1);
+                                    }
+                                }
+                            }
+                            Action::PaletteUp | Action::Type('k') => {
+                                match state.playground_panel {
+                                    PlaygroundPanel::Chats => {
+                                        state.playground_active_chat =
+                                            state
+                                                .playground_active_chat
+                                                .saturating_sub(1);
+                                        state.playground_feed_scroll = 0;
+                                    }
+                                    PlaygroundPanel::Feed => {
+                                        state.playground_feed_scroll =
+                                            state
+                                                .playground_feed_scroll
+                                                .saturating_sub(1);
+                                    }
+                                    PlaygroundPanel::Config => {
+                                        state.playground_cfg_field =
+                                            state
+                                                .playground_cfg_field
+                                                .saturating_sub(1);
+                                    }
+                                }
+                            }
+                            Action::Type('n') => {
+                                if state.playground_panel == PlaygroundPanel::Chats {
+                                    state.playground_new_chat();
+                                }
+                            }
+                            Action::ScrollDown(col) => {
+                                self.playground_scroll_down(col, 3);
+                            }
+                            Action::ScrollUp(col) => {
+                                self.playground_scroll_up(col, 3);
+                            }
+                            Action::Quit => self.running = false,
+                            _ => {}
+                        }
+                    }
                 } else {
                     // Mode: list navigation (default).
                     match action {
@@ -349,7 +629,7 @@ impl App {
                         Action::Tab | Action::Right => {
                             state.next_tab();
                         }
-                        Action::Left => {
+                        Action::BackTab | Action::Left => {
                             state.prev_tab();
                         }
                         Action::Type('/') => {
@@ -408,7 +688,7 @@ impl App {
                     self.help_state.next_tab();
                     self.scroll = u16::MAX;
                 }
-                Action::Left => {
+                Action::BackTab | Action::Left => {
                     self.help_state.prev_tab();
                     self.scroll = u16::MAX;
                 }
@@ -565,8 +845,8 @@ impl App {
                 }
             }
 
-            // Tab/Left/Right are only meaningful inside the help panel (handled above).
-            Action::Tab | Action::Left | Action::Right => {}
+            // Tab/Left/Right are only meaningful inside the help/ace panels (handled above).
+            Action::Tab | Action::BackTab | Action::Left | Action::Right => {}
         }
     }
 
@@ -659,7 +939,6 @@ impl App {
     }
 
     /// Run the streaming test: spawns a Python process that prints lines with delays.
-    /// Reuses the command turn already created by submit_command — just makes it streaming.
     fn run_streaming_test(&mut self) {
         if let Some(turn) = self.conversation.turns.last_mut() {
             turn.status = crate::model::conversation::TurnStatus::Streaming;
@@ -720,7 +999,6 @@ asyncio.run(main())
                 }
             }
 
-            // Check for stderr after stdout is done.
             if let Some(stderr) = child.stderr.take() {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
@@ -739,6 +1017,351 @@ asyncio.run(main())
                 }
                 Err(_) => {
                     let _ = tx.send(AppEvent::TurnComplete);
+                }
+            }
+        });
+    }
+
+    /// Run a Timbal runnable via `python -m timbal.server.run` with streaming.
+    fn run_runnable(&mut self, import_spec: &str) {
+        if let Some(turn) = self.conversation.turns.last_mut() {
+            turn.status = crate::model::conversation::TurnStatus::Streaming;
+        }
+        self.scroll = u16::MAX;
+
+        let tx = self.event_tx.clone();
+        let spec = import_spec.to_string();
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            use tokio::process::Command;
+
+            let mut child = match Command::new("uv")
+                .args(["run", "python", "-m", "timbal.server.run", &spec, "--stream"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Error(format!(
+                        "Failed to spawn: {e}"
+                    ))));
+                    let _ = tx.send(AppEvent::TurnComplete);
+                    return;
+                }
+            };
+
+            if let Some(stdout) = child.stdout.take() {
+                let mut reader = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Text(format!("  {line}"))));
+                }
+            }
+
+            if let Some(stderr) = child.stderr.take() {
+                let mut reader = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let _ = tx.send(AppEvent::PushOutput(OutputBlock::Error(line)));
+                }
+            }
+
+            match child.wait().await {
+                Ok(status) => {
+                    let code = status.code().unwrap_or(-1);
+                    if status.success() {
+                        let _ = tx.send(AppEvent::TurnCompleteWith(format!("✓ exit {code}")));
+                    } else {
+                        let _ = tx.send(AppEvent::TurnCompleteWith(format!("✗ exit {code}")));
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::TurnComplete);
+                }
+            }
+        });
+    }
+
+    /// Spawn a playground run: calls `python -m timbal.server.run` with streaming,
+    /// sending output to PlaygroundOutput/PlaygroundComplete events.
+    /// Route mouse scroll to the correct playground panel based on column.
+    fn playground_scroll_down(&mut self, col: u16, amount: u16) {
+        if let Some(ref mut state) = self.ace_explorer_state {
+            if col >= state.playground_config_x {
+                state.playground_config_scroll =
+                    state.playground_config_scroll.saturating_add(amount);
+            } else if col >= state.playground_feed_x {
+                state.playground_feed_scroll =
+                    state.playground_feed_scroll.saturating_add(amount);
+            }
+            // Chats panel: no scroll for now (list is small).
+        }
+    }
+
+    fn playground_scroll_up(&mut self, col: u16, amount: u16) {
+        if let Some(ref mut state) = self.ace_explorer_state {
+            if col >= state.playground_config_x {
+                state.playground_config_scroll =
+                    state.playground_config_scroll.saturating_sub(amount);
+            } else if col >= state.playground_feed_x {
+                state.playground_feed_scroll =
+                    state.playground_feed_scroll.saturating_sub(amount);
+            }
+        }
+    }
+
+    /// Persist a system prompt change via `python -m timbal.codegen <fqn> set-system-prompt <value>`.
+    fn spawn_codegen_set_system_prompt(&self, fqn: String, value: String) {
+        tokio::spawn(async move {
+            use tokio::process::Command;
+            let _ = Command::new("uv")
+                .args([
+                    "run",
+                    "python",
+                    "-m",
+                    "timbal.codegen",
+                    &fqn,
+                    "set-system-prompt",
+                    &value,
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+        });
+    }
+
+    fn spawn_playground_run(
+        &self,
+        import_spec: Option<String>,
+        input_json: String,
+        tx: mpsc::UnboundedSender<AppEvent>,
+    ) {
+        use crate::screens::ace::PlaygroundLine;
+
+        let spec = match import_spec {
+            Some(s) => s,
+            None => {
+                let _ = tx.send(AppEvent::PlaygroundOutput(PlaygroundLine::Error(
+                    "No import spec (fqn) configured for this agent.".to_string(),
+                )));
+                let _ = tx.send(AppEvent::PlaygroundComplete("No runnable".to_string()));
+                return;
+            }
+        };
+
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            use tokio::process::Command;
+
+            let mut child = match Command::new("uv")
+                .args([
+                    "run",
+                    "python",
+                    "-m",
+                    "timbal.server.run",
+                    &spec,
+                    "--stream",
+                    "--input",
+                    &input_json,
+                ])
+                .env("TIMBAL_DELTA_EVENTS", "true")
+                .env("PYTHONUNBUFFERED", "1")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::PlaygroundOutput(PlaygroundLine::Error(
+                        format!("Failed to spawn: {e}"),
+                    )));
+                    let _ = tx.send(AppEvent::PlaygroundComplete("Failed".to_string()));
+                    return;
+                }
+            };
+
+            // Read stdout and stderr concurrently.
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+
+            let tx2 = tx.clone();
+            let stdout_handle = tokio::spawn(async move {
+                if let Some(out) = stdout {
+                    let mut reader = BufReader::new(out).lines();
+                    while let Ok(Some(line)) = reader.next_line().await {
+                        // Try to parse as a Timbal event JSON.
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+                            let event_type = event
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            match event_type {
+                                "DELTA" => {
+                                    if let Some(item) = event.get("item") {
+                                        let item_type = item
+                                            .get("type")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        match item_type {
+                                            "text_delta" => {
+                                                if let Some(delta) =
+                                                    item.get("text_delta").and_then(|v| v.as_str())
+                                                {
+                                                    let _ = tx2.send(
+                                                        AppEvent::PlaygroundOutput(
+                                                            PlaygroundLine::TextDelta(
+                                                                delta.to_string(),
+                                                            ),
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                            "text" => {
+                                                // Initial text block — ignore (deltas follow).
+                                            }
+                                            "tool_use" => {
+                                                let name = item
+                                                    .get("name")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("unknown");
+                                                let _ = tx2.send(
+                                                    AppEvent::PlaygroundOutput(
+                                                        PlaygroundLine::Status(format!(
+                                                            "+ {name}"
+                                                        )),
+                                                    ),
+                                                );
+                                            }
+                                            "tool_use_delta" => {
+                                                // Tool input streaming — skip for now.
+                                            }
+                                            "thinking_delta" => {
+                                                // Show a thinking indicator (not the content).
+                                                let _ = tx2.send(
+                                                    AppEvent::PlaygroundOutput(
+                                                        PlaygroundLine::Thinking,
+                                                    ),
+                                                );
+                                            }
+                                            "content_block_stop" => {
+                                                // End of a content block — start new line.
+                                                let _ = tx2.send(
+                                                    AppEvent::PlaygroundOutput(
+                                                        PlaygroundLine::Text(String::new()),
+                                                    ),
+                                                );
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                "OUTPUT" => {
+                                    let status_code = event
+                                        .pointer("/status/code")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    let path = event
+                                        .get("path")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if status_code == "error" {
+                                        let msg = event
+                                            .pointer("/status/message")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("Unknown error");
+                                        let _ = tx2.send(AppEvent::PlaygroundOutput(
+                                            PlaygroundLine::Error(msg.to_string()),
+                                        ));
+                                    }
+                                    // Extract stats from the top-level agent OUTPUT.
+                                    if path == "agent" || path.is_empty() {
+                                        let t0 = event.get("t0").and_then(|v| v.as_u64()).unwrap_or(0);
+                                        let t1 = event.get("t1").and_then(|v| v.as_u64()).unwrap_or(0);
+                                        let duration_ms = t1.saturating_sub(t0);
+
+                                        // Build usage summary from the usage dict.
+                                        let mut usage_parts: Vec<String> = Vec::new();
+                                        if let Some(usage_obj) = event.get("usage").and_then(|v| v.as_object()) {
+                                            // Aggregate by metric type across models.
+                                            let mut input_tokens: u64 = 0;
+                                            let mut output_tokens: u64 = 0;
+                                            for (key, val) in usage_obj {
+                                                let count = val.as_u64().unwrap_or(0);
+                                                if key.ends_with(":input_tokens") || key.ends_with(":input_text_tokens") {
+                                                    input_tokens += count;
+                                                } else if key.ends_with(":output_tokens") || key.ends_with(":output_text_tokens") {
+                                                    output_tokens += count;
+                                                }
+                                            }
+                                            if input_tokens > 0 {
+                                                usage_parts.push(format!("{input_tokens} in"));
+                                            }
+                                            if output_tokens > 0 {
+                                                usage_parts.push(format!("{output_tokens} out"));
+                                            }
+                                        }
+
+                                        let usage_str = if usage_parts.is_empty() {
+                                            String::new()
+                                        } else {
+                                            usage_parts.join(" / ")
+                                        };
+
+                                        if duration_ms > 0 || !usage_str.is_empty() {
+                                            let _ = tx2.send(AppEvent::PlaygroundOutput(
+                                                PlaygroundLine::Stats {
+                                                    duration_ms,
+                                                    usage: usage_str,
+                                                },
+                                            ));
+                                        }
+                                    }
+                                }
+                                "START" => {
+                                    // Ignore start events.
+                                }
+                                _ => {
+                                    // Unknown event — show raw.
+                                    let _ = tx2.send(AppEvent::PlaygroundOutput(
+                                        PlaygroundLine::Text(line),
+                                    ));
+                                }
+                            }
+                        } else {
+                            // Not JSON — show raw line.
+                            let _ = tx2.send(AppEvent::PlaygroundOutput(
+                                PlaygroundLine::Text(line),
+                            ));
+                        }
+                    }
+                }
+            });
+
+            let tx3 = tx.clone();
+            let stderr_handle = tokio::spawn(async move {
+                if let Some(err) = stderr {
+                    let mut reader = BufReader::new(err).lines();
+                    while let Ok(Some(line)) = reader.next_line().await {
+                        let _ = tx3.send(AppEvent::PlaygroundOutput(PlaygroundLine::Error(line)));
+                    }
+                }
+            });
+
+            let _ = stdout_handle.await;
+            let _ = stderr_handle.await;
+
+            match child.wait().await {
+                Ok(status) => {
+                    let code = status.code().unwrap_or(-1);
+                    if status.success() {
+                        let _ = tx.send(AppEvent::PlaygroundComplete(format!("exit {code}")));
+                    } else {
+                        let _ = tx.send(AppEvent::PlaygroundComplete(format!("exit {code}")));
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::PlaygroundComplete("Process error".to_string()));
                 }
             }
         });
@@ -784,6 +1407,9 @@ asyncio.run(main())
             }
             AppEvent::RunStreamingTest => {
                 self.run_streaming_test();
+            }
+            AppEvent::RunRunnable(spec) => {
+                self.run_runnable(&spec);
             }
             AppEvent::CommandOutput(block) => {
                 // Attach output to the last turn (the command turn we just created).
@@ -835,6 +1461,19 @@ asyncio.run(main())
                     }
                 }
             }
+            AppEvent::PlaygroundOutput(line) => {
+                if let Some(ref mut state) = self.ace_explorer_state {
+                    state.playground_push_output(line);
+                    // Auto-scroll feed to bottom.
+                    state.playground_feed_scroll = u16::MAX;
+                }
+            }
+            AppEvent::PlaygroundComplete(_msg) => {
+                if let Some(ref mut state) = self.ace_explorer_state {
+                    state.playground_running = false;
+                    state.playground_feed_scroll = u16::MAX;
+                }
+            }
         }
     }
 
@@ -843,10 +1482,14 @@ asyncio.run(main())
         if let Some(member) = self.project.members.get(member_idx) {
             if let Some(ace) = &member.ace {
                 let evals = member.evals.clone().unwrap_or_default();
+                let import_spec = member.fqn.as_ref().map(|fqn| {
+                    format!("workforce/{}/{}", member.name, fqn)
+                });
                 self.ace_explorer_state = Some(AceExplorerState::new(
                     member.name.clone(),
                     ace.clone(),
                     evals,
+                    import_spec,
                 ));
                 self.ace_explorer_open = true;
                 self.project_open = false;

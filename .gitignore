@@ -34,7 +34,8 @@ node_modules/
 .docusaurus/
 
 **/ace/
+!/tui/src/screens/ace/
+
 **/target/
 
 **/*lancedb*/
-

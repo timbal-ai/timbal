@@ -13,6 +13,7 @@ pub enum Action {
     ScrollUp(u16),
     ScrollDown(u16),
     Tab,
+    BackTab,
     Left,
     Right,
     /// Mouse click at (column, row) in terminal coordinates.
@@ -67,6 +68,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
         KeyCode::PageUp => Some(Action::ScrollUp(0)),
         KeyCode::PageDown => Some(Action::ScrollDown(0)),
         KeyCode::Tab => Some(Action::Tab),
+        KeyCode::BackTab => Some(Action::BackTab),
         KeyCode::Left => Some(Action::Left),
         KeyCode::Right => Some(Action::Right),
         KeyCode::Char(c) => Some(Action::Type(c)),
