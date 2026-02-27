@@ -3,6 +3,8 @@ import json
 
 import libcst as cst
 
+from ..utils import build_cst_value
+
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     smp = subparsers.add_parser(
@@ -22,30 +24,6 @@ def run(entry_point: str, args: argparse.Namespace, **kwargs) -> cst.CSTTransfor
     return ModelParamsSetter(entry_point, params)
 
 
-def _build_cst_value(value: object) -> cst.BaseExpression:
-    """Recursively convert a Python value into a CST expression."""
-    if isinstance(value, bool):
-        return cst.Name("True" if value else "False")
-    if isinstance(value, int):
-        return cst.Integer(str(value))
-    if isinstance(value, float):
-        return cst.Float(str(value))
-    if isinstance(value, str):
-        return cst.SimpleString(f'"{value}"')
-    if value is None:
-        return cst.Name("None")
-    if isinstance(value, list):
-        elements = [cst.Element(value=_build_cst_value(v)) for v in value]
-        return cst.List(elements=elements)
-    if isinstance(value, dict):
-        elements = [
-            cst.DictElement(key=_build_cst_value(k), value=_build_cst_value(v))
-            for k, v in value.items()
-        ]
-        return cst.Dict(elements=elements)
-    raise TypeError(f"Unsupported type for CST conversion: {type(value)}")
-
-
 class ModelParamsSetter(cst.CSTTransformer):
     def __init__(self, entry_point: str, params: dict):
         self.entry_point = entry_point
@@ -61,7 +39,7 @@ class ModelParamsSetter(cst.CSTTransformer):
                     if self.params:
                         args = [*args, cst.Arg(
                             keyword=cst.Name("model_params"),
-                            value=_build_cst_value(self.params),
+                            value=build_cst_value(self.params),
                         )]
 
                     return updated_node.with_changes(value=updated_node.value.with_changes(args=args))

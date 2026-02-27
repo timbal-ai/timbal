@@ -2,7 +2,7 @@ import os
 from typing import Annotated, Any
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
@@ -24,7 +24,7 @@ class CalaConfig(BaseModel):
 
 
 class CalaSearch(Tool):
-    config: CalaConfig = CalaConfig()
+    config: CalaConfig = Field(default_factory=CalaConfig)
 
     def __init__(self, **kwargs: Any) -> None:
         async def _cala_search(input: str) -> dict:

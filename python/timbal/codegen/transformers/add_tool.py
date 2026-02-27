@@ -1,8 +1,12 @@
 import argparse
+import importlib
+import io
+import json
+import sys
 
 import libcst as cst
 
-from ..utils import FRAMEWORK_TOOL_NAMES, resolve_runnable_name
+from ..utils import FRAMEWORK_TOOL_NAMES, build_cst_value, resolve_runnable_name
 
 # Framework tools: class name -> module path
 FRAMEWORK_TOOLS = {
@@ -12,6 +16,12 @@ FRAMEWORK_TOOLS = {
     "Read": "timbal.tools",
     "WebSearch": "timbal.tools",
     "Write": "timbal.tools",
+}
+
+# Framework tools that accept a config model: class name -> (module, config class name)
+FRAMEWORK_TOOL_CONFIGS: dict[str, tuple[str, str]] = {
+    "WebSearch": ("timbal.tools.web_search", "WebSearchConfig"),
+    "CalaSearch": ("timbal.tools.cala", "CalaConfig"),
 }
 
 TOOL_TYPES = [*FRAMEWORK_TOOLS.keys(), "Custom"]
@@ -28,11 +38,44 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Full function definition for custom tools. E.g. 'def my_tool(query: str) -> str:\\n    return query'",
     )
+    sp.add_argument(
+        "--config",
+        default=None,
+        help='Tool configuration as a JSON object. E.g. \'{"allowed_domains": ["example.com"]}\'.',
+    )
+
+
+def _validate_config(tool_type: str, config: dict) -> None:
+    """Validate config keys against the tool's config model fields."""
+    config_ref = FRAMEWORK_TOOL_CONFIGS.get(tool_type)
+    if config_ref is None:
+        raise ValueError(f"--config is not supported for {tool_type}.")
+    module_path, class_name = config_ref
+    # Suppress stdout/stderr during import to avoid side-effect logs from
+    # the tool modules (e.g. structlog warnings) leaking into codegen output.
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+    try:
+        mod = importlib.import_module(module_path)
+    finally:
+        sys.stdout, sys.stderr = old_stdout, old_stderr
+    config_cls = getattr(mod, class_name)
+    valid_fields = set(config_cls.model_fields.keys())
+    unknown = set(config.keys()) - valid_fields
+    if unknown:
+        raise ValueError(
+            f"Unknown config field(s) for {tool_type}: {', '.join(sorted(unknown))}. "
+            f"Valid fields: {', '.join(sorted(valid_fields))}."
+        )
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
     assignments = _collect_assignments(tree) if tree else {}
     tool_type = args.tool_type
+    config = json.loads(args.config) if args.config else None
+
+    if config is not None:
+        _validate_config(tool_type, config)
 
     if tool_type == "Custom":
         if not args.definition:
@@ -49,7 +92,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         tool_name = func_def.name.value
         return ToolAdder(entry_point, tool_name, assignments, tool_type="Custom", definition=args.definition)
 
-    return ToolAdder(entry_point, tool_type, assignments, tool_type=tool_type)
+    return ToolAdder(entry_point, tool_type, assignments, tool_type=tool_type, config=config)
 
 
 def _collect_assignments(tree: cst.Module) -> dict[str, cst.Call]:
@@ -99,6 +142,7 @@ class ToolAdder(cst.CSTTransformer):
         *,
         tool_type: str,
         definition: str | None = None,
+        config: dict | None = None,
     ):
         self.entry_point = entry_point
         self.tool_name = tool_name
@@ -106,6 +150,7 @@ class ToolAdder(cst.CSTTransformer):
         self.assignments = assignments
         self.tool_type = tool_type
         self.definition = definition
+        self.config = config
 
     def leave_FunctionDef(
         self,
@@ -197,9 +242,17 @@ class ToolAdder(cst.CSTTransformer):
 
         return updated_node.with_changes(body=body)
 
+    def _build_tool_call(self) -> cst.Call:
+        """Build a CST Call node for a framework tool, including config kwargs."""
+        config_args = []
+        if self.config:
+            for key, value in self.config.items():
+                config_args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
+        return cst.Call(func=cst.Name(self.tool_name), args=config_args)
+
     def _add_to_tools(self, call: cst.Call) -> cst.Call:
         if self.tool_type != "Custom":
-            new_value = cst.Call(func=cst.Name(self.tool_name))
+            new_value = self._build_tool_call()
         else:
             new_value = cst.Name(self.tool_name)
 
@@ -207,9 +260,17 @@ class ToolAdder(cst.CSTTransformer):
             if isinstance(arg.keyword, cst.Name) and arg.keyword.value == "tools":
                 if isinstance(arg.value, cst.List):
                     # Check if already present.
-                    for el in arg.value.elements:
+                    for j, el in enumerate(arg.value.elements):
                         name = resolve_runnable_name(el.value, self.assignments)
                         if name == self.runtime_name:
+                            if self.tool_type != "Custom" and isinstance(el.value, cst.Call):
+                                # Replace existing tool call with fresh one (applies config or clears it).
+                                updated_el = el.with_changes(value=self._build_tool_call())
+                                new_elements = [*arg.value.elements[:j], updated_el, *arg.value.elements[j + 1 :]]
+                                new_list = arg.value.with_changes(elements=new_elements)
+                                new_arg = arg.with_changes(value=new_list)
+                                new_args = [*call.args[:i], new_arg, *call.args[i + 1 :]]
+                                return call.with_changes(args=new_args)
                             return call
 
                     new_element = cst.Element(value=new_value)

@@ -1,7 +1,7 @@
 import libcst as cst
 
 # Class name -> runtime name for framework tools.
-FRAMEWORK_TOOL_NAMES = {
+FRAMEWORK_TOOL_NAMES: dict[str, str] = {
     "Bash": "bash",
     "CalaSearch": "cala_search",
     "Edit": "edit",
@@ -82,3 +82,27 @@ def resolve_runnable_name(
         return _name_from_call(element)
 
     return None
+
+
+def build_cst_value(value: object) -> cst.BaseExpression:
+    """Recursively convert a Python value into a CST expression."""
+    if isinstance(value, bool):
+        return cst.Name("True" if value else "False")
+    if isinstance(value, int):
+        return cst.Integer(str(value))
+    if isinstance(value, float):
+        return cst.Float(str(value))
+    if isinstance(value, str):
+        return cst.SimpleString(f'"{value}"')
+    if value is None:
+        return cst.Name("None")
+    if isinstance(value, list):
+        elements = [cst.Element(value=build_cst_value(v)) for v in value]
+        return cst.List(elements=elements)
+    if isinstance(value, dict):
+        elements = [
+            cst.DictElement(key=build_cst_value(k), value=build_cst_value(v))
+            for k, v in value.items()
+        ]
+        return cst.Dict(elements=elements)
+    raise TypeError(f"Unsupported type for CST conversion: {type(value)}")
