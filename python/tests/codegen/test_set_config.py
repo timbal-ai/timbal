@@ -198,8 +198,8 @@ class TestToolConfig:
         output = _run_dry(ws, "web_search", "--config", config)
         ns = _exec_agent(output)
         ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
-        assert ws_tool.config.allowed_domains == ["example.com"]
-        assert ws_tool.config.blocked_domains == ["spam.com"]
+        assert ws_tool.allowed_domains == ["example.com"]
+        assert ws_tool.blocked_domains == ["spam.com"]
 
     def test_updates_existing_config(self, workspace):
         ws = workspace("""\
@@ -214,10 +214,10 @@ class TestToolConfig:
         output = _run_dry(ws, "web_search", "--config", config)
         ns = _exec_agent(output)
         ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
-        assert ws_tool.config.allowed_domains == ["new.com"]
+        assert ws_tool.allowed_domains == ["new.com"]
 
-    def test_full_replace_semantics(self, workspace):
-        """Config fully replaces — old fields not in new config are removed."""
+    def test_omitted_fields_unchanged(self, workspace):
+        """Fields not in the config JSON are left unchanged (partial update semantics)."""
         ws = workspace("""\
         from timbal.core import Agent
         from timbal.tools import WebSearch
@@ -230,8 +230,8 @@ class TestToolConfig:
         output = _run_dry(ws, "web_search", "--config", config)
         ns = _exec_agent(output)
         ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
-        assert ws_tool.config.allowed_domains == ["new.com"]
-        assert ws_tool.config.blocked_domains is None
+        assert ws_tool.allowed_domains == ["new.com"]
+        assert ws_tool.blocked_domains == ["spam.com"]
 
     def test_rejects_unknown_config_fields(self, workspace):
         ws = workspace("""\
@@ -285,4 +285,120 @@ class TestToolConfig:
         assert "tools=[web_search]" in output
         ns = _exec_agent(output)
         ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
-        assert ws_tool.config.allowed_domains == ["example.com"]
+        assert ws_tool.allowed_domains == ["example.com"]
+
+
+# ---------------------------------------------------------------------------
+# Tool name and description
+# ---------------------------------------------------------------------------
+
+
+class TestToolNameAndDescription:
+    def test_set_web_search_name(self, workspace):
+        """Setting name on WebSearch preserves other config."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch(allowed_domains=["example.com"])
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        config = json.dumps({"name": "my_search"})
+        output = _run_dry(ws, "web_search", "--config", config)
+        ns = _exec_agent(output)
+        ws_tool = ns["web_search"]
+        assert ws_tool.name == "my_search"
+        assert ws_tool.allowed_domains == ["example.com"]
+
+    def test_set_web_search_description(self, workspace):
+        """Setting description on WebSearch preserves other config."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch(allowed_domains=["example.com"])
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        config = json.dumps({"description": "Custom search tool"})
+        output = _run_dry(ws, "web_search", "--config", config)
+        ns = _exec_agent(output)
+        ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
+        assert ws_tool.description == "Custom search tool"
+        assert ws_tool.allowed_domains == ["example.com"]
+
+    def test_set_cala_search_name(self, workspace):
+        """Setting name on CalaSearch preserves other config."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import CalaSearch
+
+        cala_search = CalaSearch(api_key="test-key", base_url="https://custom.api/v1")
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[cala_search])
+        """)
+        config = json.dumps({"name": "my_cala"})
+        output = _run_dry(ws, "cala_search", "--config", config)
+        ns = _exec_agent(output)
+        cs_tool = ns["cala_search"]
+        assert cs_tool.name == "my_cala"
+        assert cs_tool.api_key == "test-key"
+        assert cs_tool.base_url == "https://custom.api/v1"
+
+    def test_set_cala_search_description(self, workspace):
+        """Setting description on CalaSearch preserves other config."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import CalaSearch
+
+        cala_search = CalaSearch(api_key="test-key")
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[cala_search])
+        """)
+        config = json.dumps({"description": "Custom knowledge search"})
+        output = _run_dry(ws, "cala_search", "--config", config)
+        ns = _exec_agent(output)
+        cs_tool = next(t for t in ns["agent"].tools if t.name == "cala_search")
+        assert cs_tool.description == "Custom knowledge search"
+        assert cs_tool.api_key == "test-key"
+
+    def test_set_custom_tool_name(self, workspace):
+        """Setting name on a custom Tool preserves handler and description."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.core.tool import Tool
+
+        def my_func():
+            return "hello"
+
+        my_tool = Tool(handler=my_func, name="my_tool", description="Original desc")
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[my_tool])
+        """)
+        config = json.dumps({"name": "renamed_tool"})
+        output = _run_dry(ws, "my_tool", "--config", config)
+        ns = _exec_agent(output)
+        tool = ns["my_tool"]
+        assert tool.name == "renamed_tool"
+        assert tool.description == "Original desc"
+
+    def test_set_custom_tool_description(self, workspace):
+        """Setting description on a custom Tool preserves handler and name."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.core.tool import Tool
+
+        def my_func():
+            return "hello"
+
+        my_tool = Tool(handler=my_func, name="my_tool")
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[my_tool])
+        """)
+        config = json.dumps({"description": "Does something useful"})
+        output = _run_dry(ws, "my_tool", "--config", config)
+        ns = _exec_agent(output)
+        tool = ns["my_tool"]
+        assert tool.name == "my_tool"
+        assert tool.description == "Does something useful"

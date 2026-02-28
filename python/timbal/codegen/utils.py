@@ -14,10 +14,11 @@ FRAMEWORK_TOOL_NAMES: dict[str, str] = {
     "Write": "write",
 }
 
-# Framework tools that accept a config model: class name -> (module, config class name)
+# Framework tools that accept config: class name -> (module, class name)
 FRAMEWORK_TOOL_CONFIGS: dict[str, tuple[str, str]] = {
-    "WebSearch": ("timbal.tools.web_search", "WebSearchConfig"),
-    "CalaSearch": ("timbal.tools.cala", "CalaConfig"),
+    "Tool": ("timbal.core.tool", "Tool"),
+    "WebSearch": ("timbal.tools.web_search", "WebSearch"),
+    "CalaSearch": ("timbal.tools.cala", "CalaSearch"),
 }
 
 

@@ -28,6 +28,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Full function definition for custom tools. E.g. 'def my_tool(query: str) -> str:\\n    return query'",
     )
+    sp.add_argument(
+        "--name",
+        default=None,
+        dest="tool_name",
+        help="Explicit name for the tool. When omitted, the tool uses its default name.",
+    )
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
@@ -46,19 +52,22 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         if func_def is None:
             raise ValueError("--definition must contain a function definition.")
         func_name = func_def.name.value
+        var_name = args.tool_name if args.tool_name else func_name
+        runtime_name = args.tool_name if args.tool_name else func_name
         return ToolAdder(
             entry_point, assignments,
             tool_type="Custom",
             class_name=None,
             func_name=func_name,
-            var_name=func_name,
-            runtime_name=func_name,
+            var_name=var_name,
+            runtime_name=runtime_name,
             definition=args.definition,
+            tool_name=args.tool_name,
         )
 
     # Framework tool.
-    var_name = FRAMEWORK_TOOL_NAMES[tool_type]
-    runtime_name = FRAMEWORK_TOOL_NAMES[tool_type]
+    var_name = args.tool_name if args.tool_name else FRAMEWORK_TOOL_NAMES[tool_type]
+    runtime_name = args.tool_name if args.tool_name else FRAMEWORK_TOOL_NAMES[tool_type]
     return ToolAdder(
         entry_point, assignments,
         tool_type=tool_type,
@@ -66,6 +75,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         func_name=None,
         var_name=var_name,
         runtime_name=runtime_name,
+        tool_name=args.tool_name,
     )
 
 
@@ -81,6 +91,7 @@ class ToolAdder(cst.CSTTransformer):
         var_name: str,
         runtime_name: str,
         definition: str | None = None,
+        tool_name: str | None = None,
     ):
         self.entry_point = entry_point
         self.assignments = assignments
@@ -90,6 +101,7 @@ class ToolAdder(cst.CSTTransformer):
         self.var_name = var_name  # variable name for the assignment
         self.runtime_name = runtime_name  # name used by remove-tool
         self.definition = definition
+        self.tool_name = tool_name  # explicit --name override (None = use default)
         # Track whether an existing variable assignment was found and updated.
         self._assignment_updated = False
 
@@ -199,21 +211,22 @@ class ToolAdder(cst.CSTTransformer):
 
     def _build_assignment_call(self) -> cst.Call:
         """Build the CST Call node for the variable assignment RHS."""
+        args: list[cst.Arg] = []
+        if self.tool_name:
+            args.append(cst.Arg(keyword=cst.Name("name"), value=cst.SimpleString(f'"{self.tool_name}"')))
         if self.tool_type != "Custom":
-            return cst.Call(func=cst.Name(self.class_name), args=[])
+            return cst.Call(func=cst.Name(self.class_name), args=args)
         else:
-            args = [
-                cst.Arg(keyword=cst.Name("name"), value=cst.SimpleString(f'"{self.runtime_name}"')),
-                cst.Arg(keyword=cst.Name("handler"), value=cst.Name(self.func_name)),
-            ]
+            args.append(cst.Arg(keyword=cst.Name("handler"), value=cst.Name(self.func_name)))
             return cst.Call(func=cst.Name("Tool"), args=args)
 
     def _build_assignment_code(self) -> str:
         """Build the source code string for the variable assignment RHS."""
+        name_part = f'name="{self.tool_name}", ' if self.tool_name else ""
         if self.tool_type != "Custom":
-            return f"{self.class_name}()"
+            return f"{self.class_name}({name_part.rstrip(', ')})"
         else:
-            return f'Tool(name="{self.runtime_name}", handler={self.func_name})'
+            return f"Tool({name_part}handler={self.func_name})"
 
     def _add_to_tools(self, call: cst.Call) -> cst.Call:
         """Add or update the tool reference in the tools=[...] list."""

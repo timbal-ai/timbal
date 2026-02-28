@@ -162,6 +162,7 @@ class ToolConfigSetter(cst.CSTTransformer):
         self.var_name = var_name  # e.g. "web_search"
         self._var_updated = False
         self._needs_migration = False
+        self._inline_call: cst.Call | None = None  # original inline call args for migration
 
     def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
         for target in updated_node.targets:
@@ -181,7 +182,7 @@ class ToolConfigSetter(cst.CSTTransformer):
                 if resolved == self.tool_name:
                     self._var_updated = True
                     return updated_node.with_changes(
-                        value=self._build_configured_call(),
+                        value=self._build_configured_call(updated_node.value),
                     )
         return updated_node
 
@@ -191,10 +192,9 @@ class ToolConfigSetter(cst.CSTTransformer):
 
         stmts_to_add: list[cst.BaseStatement] = []
 
-        # Build the variable assignment with config.
-        config_parts = [f"{k}={repr(v)}" for k, v in self.config.items()]
-        args_str = ", ".join(config_parts)
-        assignment_code = f"{self.var_name} = {self.tool_class}({args_str})\n"
+        # Build the variable assignment merging existing inline args with new config.
+        new_call = self._build_configured_call(self._inline_call)
+        assignment_code = f"{self.var_name} = {cst.parse_module('').code_for_node(new_call)}\n"
         stmts_to_add.append(cst.parse_statement(assignment_code))
 
         if not stmts_to_add:
@@ -226,6 +226,7 @@ class ToolConfigSetter(cst.CSTTransformer):
                         resolved = resolve_runnable_name(el.value, self.assignments)
                         if resolved == self.tool_name and isinstance(el.value, cst.Call):
                             self._needs_migration = True
+                            self._inline_call = el.value
                             new_ref = cst.Name(self.var_name)
                             updated_el = el.with_changes(value=new_ref)
                             new_elements = [*arg.value.elements[:j], updated_el, *arg.value.elements[j + 1:]]
@@ -235,9 +236,15 @@ class ToolConfigSetter(cst.CSTTransformer):
                             return call.with_changes(args=new_args)
         return call
 
-    def _build_configured_call(self) -> cst.Call:
-        """Build a Call node with the new config kwargs."""
-        args: list[cst.Arg] = []
+    def _build_configured_call(self, existing_call: cst.Call) -> cst.Call:
+        """Merge new config kwargs into an existing Call, preserving all other args."""
+        # Keep existing args except those being overridden or removed.
+        args = [
+            a for a in existing_call.args
+            if not (isinstance(a.keyword, cst.Name) and a.keyword.value in self.config)
+        ]
+        # Append new/updated config kwargs (None = remove, already dropped above).
         for key, value in self.config.items():
-            args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
-        return cst.Call(func=cst.Name(self.tool_class), args=args)
+            if value is not None:
+                args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
+        return existing_call.with_changes(args=args)

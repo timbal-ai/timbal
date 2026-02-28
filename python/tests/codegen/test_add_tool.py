@@ -100,8 +100,8 @@ class TestCustomTool:
         """)
         definition = "def my_search(query: str) -> str:\n    return query.upper()"
         output = _run_dry(ws, "--type", "Custom", "--definition", definition)
-        assert "from timbal.core import Tool" in output
-        assert 'Tool(name="my_search", handler=my_search)' in output
+        assert "import Agent, Tool" in output or "import Tool" in output
+        assert "Tool(handler=my_search)" in output
         ns = _exec_agent(output)
         assert "my_search" in [t.name for t in ns["agent"].tools]
 
@@ -140,6 +140,19 @@ class TestCustomTool:
         ns = _exec_agent(output)
         assert "my_search" in [t.name for t in ns["agent"].tools]
 
+    def test_adds_custom_function_with_explicit_name(self, workspace):
+        """Custom tool with --name includes name= kwarg."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        definition = "def my_search(query: str) -> str:\n    return query.upper()"
+        output = _run_dry(ws, "--type", "Custom", "--definition", definition, "--name", "custom_search")
+        assert 'Tool(name="custom_search", handler=my_search)' in output
+        ns = _exec_agent(output)
+        assert "custom_search" in [t.name for t in ns["agent"].tools]
+
     def test_definition_required(self, workspace):
         ws = workspace("""\
         from timbal.core import Agent
@@ -152,3 +165,84 @@ class TestCustomTool:
             text=True,
         )
         assert result.returncode != 0
+
+
+# ---------------------------------------------------------------------------
+# Explicit --name flag
+# ---------------------------------------------------------------------------
+
+
+class TestExplicitName:
+    def test_framework_tool_with_name(self, workspace):
+        """Framework tool with --name includes name= kwarg."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        output = _run_dry(ws, "--type", "WebSearch", "--name", "my_search")
+        assert 'WebSearch(name="my_search")' in output
+        ns = _exec_agent(output)
+        assert "my_search" in [t.name for t in ns["agent"].tools]
+
+    def test_framework_tool_without_name(self, workspace):
+        """Framework tool without --name uses class default."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        output = _run_dry(ws, "--type", "WebSearch")
+        assert "WebSearch()" in output
+        ns = _exec_agent(output)
+        assert "web_search" in [t.name for t in ns["agent"].tools]
+
+    def test_custom_tool_without_name(self, workspace):
+        """Custom tool without --name derives name from handler."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        definition = "def my_func():\n    return 42"
+        output = _run_dry(ws, "--type", "Custom", "--definition", definition)
+        assert "Tool(handler=my_func)" in output
+        ns = _exec_agent(output)
+        assert "my_func" in [t.name for t in ns["agent"].tools]
+
+    def test_two_custom_tools_same_handler_different_names(self, workspace):
+        """Two custom tools from the same handler get distinct variables when using --name."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.core import Tool
+
+        def hello():
+            print("hello")
+
+        hello_v1 = Tool(name="hello_v1", handler=hello)
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[hello_v1])
+        """)
+        definition = "def hello():\n    print('hello')"
+        output = _run_dry(ws, "--type", "Custom", "--definition", definition, "--name", "hello_v2")
+        assert 'Tool(name="hello_v2", handler=hello)' in output
+        ns = _exec_agent(output)
+        tool_names = [t.name for t in ns["agent"].tools]
+        assert "hello_v1" in tool_names
+        assert "hello_v2" in tool_names
+
+    def test_two_web_search_tools_different_names(self, workspace):
+        """Two WebSearch tools with different --name coexist."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch()
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        output = _run_dry(ws, "--type", "WebSearch", "--name", "second_search")
+        ns = _exec_agent(output)
+        tool_names = [t.name for t in ns["agent"].tools]
+        assert "web_search" in tool_names
+        assert "second_search" in tool_names

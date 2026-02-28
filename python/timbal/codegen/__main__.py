@@ -39,6 +39,108 @@ def _parse_fqn(workspace_path: Path) -> tuple[Path, str]:
     return source_path, entry_point
 
 
+class _NameCounter(cst.CSTTransformer):
+    """Count every occurrence of each Name node in the module."""
+
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {}
+
+    def visit_Name(self, node: cst.Name) -> None:
+        self.counts[node.value] = self.counts.get(node.value, 0) + 1
+
+
+def _count_name_in_subtree(node: cst.CSTNode, name: str) -> int:
+    """Count occurrences of a Name node with the given value in a CST subtree."""
+    count = 0
+    if isinstance(node, cst.Name) and node.value == name:
+        count += 1
+    for child in node.children:
+        count += _count_name_in_subtree(child, name)
+    return count
+
+
+def _remove_unused_code(code: str, protected: set[str]) -> str:
+    """Iteratively remove unused top-level variables and functions.
+
+    A definition is considered unused when its name has no references outside
+    its own definition statements. The loop repeats until no more removals
+    are possible, so cascading dead code is handled.
+    """
+    while True:
+        tree = cst.parse_module(code)
+
+        # Collect top-level definition names.
+        var_defs: set[str] = set()
+        func_defs: set[str] = set()
+        for stmt in tree.body:
+            if isinstance(stmt, cst.FunctionDef):
+                func_defs.add(stmt.name.value)
+            elif isinstance(stmt, cst.SimpleStatementLine):
+                for item in stmt.body:
+                    if isinstance(item, cst.Assign):
+                        for target in item.targets:
+                            if isinstance(target.target, cst.Name):
+                                var_defs.add(target.target.value)
+
+        candidates = (var_defs | func_defs) - protected
+        if not candidates:
+            return code
+
+        # Count every Name occurrence in the tree.
+        counter = _NameCounter()
+        tree.visit(counter)
+
+        # Compute "definition weight" — how many times each candidate name
+        # appears within its own definition statements. A name is unused if
+        # all its occurrences are within its own definitions (no external refs).
+        def_weight: dict[str, int] = {}
+        for stmt in tree.body:
+            if isinstance(stmt, cst.FunctionDef) and stmt.name.value in candidates:
+                name = stmt.name.value
+                def_weight[name] = def_weight.get(name, 0) + _count_name_in_subtree(stmt, name)
+            elif isinstance(stmt, cst.SimpleStatementLine):
+                for item in stmt.body:
+                    if isinstance(item, cst.Assign):
+                        for target in item.targets:
+                            if isinstance(target.target, cst.Name) and target.target.value in candidates:
+                                name = target.target.value
+                                def_weight[name] = def_weight.get(name, 0) + _count_name_in_subtree(stmt, name)
+
+        unused = {
+            name for name in candidates
+            if counter.counts.get(name, 0) <= def_weight.get(name, 1)
+        }
+        if not unused:
+            return code
+
+        unused_vars = unused & var_defs
+        unused_funcs = unused & func_defs
+
+        class _Remover(cst.CSTTransformer):
+            def leave_FunctionDef(
+                self,
+                original_node: cst.FunctionDef,
+                updated_node: cst.FunctionDef,
+            ) -> cst.FunctionDef | cst.RemovalSentinel:
+                if updated_node.name.value in unused_funcs:
+                    return cst.RemovalSentinel.REMOVE
+                return updated_node
+
+            def leave_SimpleStatementLine(
+                self,
+                original_node: cst.SimpleStatementLine,
+                updated_node: cst.SimpleStatementLine,
+            ) -> cst.SimpleStatementLine | cst.RemovalSentinel:
+                for item in updated_node.body:
+                    if isinstance(item, cst.Assign):
+                        for target in item.targets:
+                            if isinstance(target.target, cst.Name) and target.target.value in unused_vars:
+                                return cst.RemovalSentinel.REMOVE
+                return updated_node
+
+        code = tree.visit(_Remover()).code
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="python -m timbal.codegen",
@@ -82,7 +184,10 @@ def main() -> None:
 
     transformer = mod.run(entry_point, args, tree=tree)
     new_tree = tree.visit(transformer)
-    formatted = format_code(new_tree.code, source_path, entry_point=entry_point)
+
+    # Clean up unused code, then format.
+    code = _remove_unused_code(new_tree.code, protected={entry_point})
+    formatted = format_code(code, source_path)
 
     if args.dry_run:
         print(formatted)

@@ -136,33 +136,19 @@ class Runnable(ABC, BaseModel):
     """
 
     _path: str = PrivateAttr()
-    """The full path of the Runnable in the run context."""
     _is_orchestrator: bool = PrivateAttr()
-    """Whether the Runnable is an orchestrator, i.e. it calls other Runnables."""
     _is_coroutine: bool = PrivateAttr()
-    """Whether the Runnable handler is a coroutine."""
     _is_gen: bool = PrivateAttr()
-    """Whether the Runnable handler is a generator."""
     _is_async_gen: bool = PrivateAttr()
-    """Whether the Runnable handler is an async generator."""
     _dependencies: list[str] = PrivateAttr(default_factory=list)
-    """List of sibling node names that the handler depends on via step_span() calls."""
     _default_fixed_params: dict[str, Any] = PrivateAttr(default_factory=dict)
-    """Dictionary of static default parameters."""
     _default_runtime_params: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
-    """Dictionary mapping parameter names to their callable functions and metadata."""
     _pre_hook_is_coroutine: bool | None = PrivateAttr()
-    """Whether the pre_hook is a coroutine."""
     _pre_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
-    # ? Can we store all pre_hook related stuff together?
     _post_hook_is_coroutine: bool | None = PrivateAttr()
-    """Whether the post_hook is a coroutine."""
     _post_hook_dependencies: list[str] = PrivateAttr(default_factory=list)
-    # ? Can we store all post_hook related stuff together?
     _log_events: set[str] = PrivateAttr()
-    """Which timbal events to log."""
     _bg_tasks: dict[str, Any] = PrivateAttr(default_factory=dict)
-    """Background tasks running for this runnable."""
 
     @classmethod
     def _inspect_callable(
@@ -364,19 +350,6 @@ class Runnable(ABC, BaseModel):
         """
         return_model_schema = TypeAdapter(self.return_model).json_schema()
         return return_model_schema
-
-    @computed_field
-    @cached_property
-    def config_schema(self) -> dict[str, Any] | None:
-        """Schema for configuration fields specific to this runnable (e.g. integration accounts).
-
-        Automatically derived from the config model when provided.
-        Returns None when no config is set.
-        """
-        config = getattr(self, "config", None)
-        if config is None:
-            return None
-        return type(config).model_json_schema()
 
     def format_params_model_schema(self) -> dict[str, Any]:
         """Format the parameter schema based on filtering rules.
