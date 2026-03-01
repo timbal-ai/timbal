@@ -2,7 +2,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from timbal.codegen.pipeline import get_flow
+from timbal.codegen.flow import get_flow
 
 TIMBAL_YAML = 'fqn: "agent.py::agent"\n'
 

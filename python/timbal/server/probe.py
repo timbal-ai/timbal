@@ -44,22 +44,17 @@ if __name__ == "__main__":
         print("No import spec provided. Set TIMBAL_RUNNABLE env variable or use --import_spec to specify a module to load.", file=sys.stderr) # noqa: T201
         sys.exit(1)
 
-    import_parts = import_spec.split("::")
-    if len(import_parts) != 2:
-        print("Invalid import spec format. Use 'path/to/file.py::object_name' or 'path/to/file.py'", file=sys.stderr) # noqa: T201
-        sys.exit(1)
-    import_path, import_target = import_parts
-
     redirect = io.StringIO()
     with contextlib.redirect_stdout(redirect):
         from .. import __version__
         from ..core.runnable import Runnable
         from ..utils import ImportSpec
-        import_spec = ImportSpec(
-            path=Path(import_path).expanduser().resolve(), 
-            target=import_target,
-        )
-        runnable = import_spec.load()
+        try:
+            spec = ImportSpec.from_fqn(import_spec)
+        except ValueError:
+            print("Invalid import spec format. Use 'path/to/file.py::object_name'", file=sys.stderr)  # noqa: T201
+            sys.exit(1)
+        runnable = spec.load()
 
     if not isinstance(runnable, Runnable):
         raise ValueError("The loaded module is not a valid Runnable instance.")

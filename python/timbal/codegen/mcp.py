@@ -2,7 +2,9 @@ import json
 
 from mcp.server.fastmcp import FastMCP
 
-from timbal.codegen.pipeline import apply_operation, get_flow, parse_fqn
+from timbal.codegen import parse_fqn
+from timbal.codegen.flow import get_flow
+from timbal.codegen.transformers import apply_operation
 from timbal.codegen.transformers.add_tool import FRAMEWORK_TOOLS
 
 mcp = FastMCP(
@@ -37,8 +39,7 @@ def add_tool(
     if tool_type not in TOOL_TYPES:
         return f"Error: tool_type must be one of {TOOL_TYPES}"
     result = apply_operation(path, "add_tool", tool_type=tool_type, definition=definition, tool_name=name)
-    source_path, _ = parse_fqn(path)
-    source_path.write_text(result)
+    parse_fqn(path).path.write_text(result)
     return f"Tool '{name or tool_type}' added successfully."
 
 
@@ -51,8 +52,7 @@ def remove_tool(path: str, tool_name: str) -> str:
         tool_name: The runtime name of the tool to remove (e.g. 'web_search', 'my_custom_tool').
     """
     result = apply_operation(path, "remove_tool", value=tool_name)
-    source_path, _ = parse_fqn(path)
-    source_path.write_text(result)
+    parse_fqn(path).path.write_text(result)
     return f"Tool '{tool_name}' removed successfully."
 
 
@@ -70,8 +70,7 @@ def set_config(path: str, config: str, tool_name: str | None = None) -> str:
     except json.JSONDecodeError as e:
         return f"Error: invalid JSON in config: {e}"
     result = apply_operation(path, "set_config", tool_name=tool_name, config=config)
-    source_path, _ = parse_fqn(path)
-    source_path.write_text(result)
+    parse_fqn(path).path.write_text(result)
     target = f"tool '{tool_name}'" if tool_name else "agent"
     return f"Configuration updated on {target}."
 
@@ -85,6 +84,46 @@ def get_flow_tool(path: str) -> str:
     """
     flow = get_flow(path)
     return json.dumps(flow, indent=2)
+
+
+@mcp.tool()
+async def test_run(path: str, input: str | None = None, context: str | None = None) -> str:
+    """Execute a single test run of the workspace entry point and return the output event.
+
+    Args:
+        path: Absolute path to the directory containing timbal.yaml (the workforce member directory).
+        input: JSON string of input params (e.g. '{"prompt": "hello"}').
+        context: JSON string of RunContext fields (e.g. '{"id": "my-run-id"}').
+    """
+    import os
+
+    from timbal.codegen.test import run_test
+    from timbal.state import RunContext
+
+    os.environ.setdefault("TIMBAL_LOG_LEVEL", "CRITICAL")
+
+    try:
+        import_spec = parse_fqn(path)
+    except (FileNotFoundError, ValueError) as e:
+        return f"Error: {e}"
+
+    try:
+        params = json.loads(input) if input else {}
+    except json.JSONDecodeError as e:
+        return f"Error: invalid JSON input: {e}"
+
+    run_context = None
+    if context is not None:
+        try:
+            run_context = RunContext.model_validate(json.loads(context))
+        except (json.JSONDecodeError, Exception) as e:
+            return f"Error: invalid JSON context: {e}"
+
+    _, output_event = await run_test(import_spec, params, run_context=run_context)
+
+    if output_event is None:
+        return "Error: no output event received."
+    return json.dumps(output_event, indent=2)
 
 
 def main() -> None:

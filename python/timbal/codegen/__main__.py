@@ -3,8 +3,9 @@ import json
 import sys
 from pathlib import Path
 
-from timbal.codegen.pipeline import apply_operation, get_flow, parse_fqn
-from timbal.codegen.transformers import load_modules
+from timbal.codegen import parse_fqn
+from timbal.codegen.flow import get_flow
+from timbal.codegen.transformers import apply_operation, load_modules
 
 
 def main() -> None:
@@ -32,6 +33,16 @@ def main() -> None:
     # Read-only operations (not CST transformers)
     subparsers.add_parser("get-flow", help="Print the graph for the workspace entry point.")
 
+    # Test run operation
+    test_parser = subparsers.add_parser("test", help="Execute a single test run of the workspace entry point.")
+    test_parser.add_argument("--input", "-i", default=None, help="JSON string of input params.")
+    test_parser.add_argument(
+        "--context", "-c", default=None, help='JSON string of RunContext fields (e.g. \'{"id": "my-run-id"}\').'
+    )
+    test_parser.add_argument(
+        "--stream", "-s", action="store_true", help="Print every event instead of only the final output event."
+    )
+
     args = parser.parse_args()
 
     workspace_path = Path(args.path)
@@ -44,6 +55,47 @@ def main() -> None:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(1)
         print(json.dumps(flow, indent=2))
+        return
+
+    if operation == "test":
+        import asyncio
+        import os
+
+        from timbal.codegen.test import run_test
+        from timbal.state import RunContext
+
+        os.environ.setdefault("TIMBAL_LOG_LEVEL", "CRITICAL")
+
+        try:
+            import_spec = parse_fqn(workspace_path)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            params = json.loads(args.input) if args.input else {}
+        except json.JSONDecodeError as e:
+            print(f"error: invalid JSON input: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        run_context = None
+        if args.context is not None:
+            try:
+                run_context = RunContext.model_validate(json.loads(args.context))
+            except (json.JSONDecodeError, Exception) as e:
+                print(f"error: invalid JSON context: {e}", file=sys.stderr)
+                sys.exit(1)
+
+        all_events, output_event = asyncio.run(run_test(import_spec, params, run_context=run_context))
+
+        if args.stream:
+            for event_dict in all_events:
+                print(json.dumps(event_dict))
+        elif output_event is not None:
+            print(json.dumps(output_event))
+
+        if output_event is None or output_event.get("status", {}).get("code") != "success":
+            sys.exit(1)
         return
 
     module_name = operation.replace("-", "_")
@@ -61,8 +113,7 @@ def main() -> None:
     if args.dry_run:
         print(formatted)
     else:
-        source_path, _ = parse_fqn(workspace_path)
-        source_path.write_text(formatted)
+        parse_fqn(workspace_path).path.write_text(formatted)
 
 
 if __name__ == "__main__":

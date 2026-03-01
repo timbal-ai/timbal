@@ -45,13 +45,7 @@ def create_app() -> FastAPI:
     raw = os.environ.get("TIMBAL_RUNNABLE")
     if not raw:
         raise RuntimeError("TIMBAL_RUNNABLE environment variable is not set.")
-    parts = raw.split("::")
-    if len(parts) != 2:
-        raise RuntimeError(f"Invalid TIMBAL_RUNNABLE format: {raw}")
-    import_spec = ImportSpec(
-        path=Path(parts[0]).expanduser().resolve(),
-        target=parts[1],
-    )
+    import_spec = ImportSpec.from_fqn(raw)
 
     app = FastAPI(lifespan=lambda app: lifespan(app, import_spec))
 
