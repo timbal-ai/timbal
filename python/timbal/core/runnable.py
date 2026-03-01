@@ -281,6 +281,89 @@ class Runnable(ABC, BaseModel):
         if "type" not in self.metadata:
             self.metadata["type"] = self.__class__.__name__
 
+    @staticmethod
+    def _partial_schema(annotation: Any) -> dict[str, Any]:
+        """Build a JSON schema for a type annotation, marking non-serialisable
+        variants (e.g. Callable) instead of failing entirely.
+        """
+        import typing
+
+        args = typing.get_args(annotation)
+        if not args:
+            return {}
+
+        seen: set[str] = set()
+        variants: list[dict[str, Any]] = []
+        for arg in args:
+            if arg is type(None):
+                if "null" not in seen:
+                    seen.add("null")
+                    variants.append({"type": "null"})
+                continue
+            try:
+                schema = TypeAdapter(arg).json_schema()
+                schema.pop("title", None)
+                variants.append(schema)
+            except Exception:
+                if "callable" not in seen:
+                    seen.add("callable")
+                    variants.append({"type": "callable"})
+
+        if len(variants) == 1:
+            return variants[0]
+        return {"anyOf": variants}
+
+    def _annotate_config(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Annotate config values with their JSON schema from Pydantic model fields.
+
+        For each key in *values*, generates the full JSON schema from the
+        field's ``FieldInfo`` (type + default + validators + description)
+        using ``TypeAdapter`` and merges it with the current value. For union
+        types with non-serialisable variants (e.g. ``str | Callable | None``),
+        serialisable variants get their JSON schema and non-serialisable ones
+        are marked with ``{"_type": "callable"}``.
+        """
+        import typing
+        from typing import Annotated
+
+        model_fields = self.__class__.model_fields
+
+        result: dict[str, Any] = {}
+        for key, value in values.items():
+            field_info = model_fields.get(key)
+            field_schema: dict[str, Any] = {}
+            if field_info is not None and field_info.annotation is not None:
+                try:
+                    field_schema = TypeAdapter(Annotated[field_info.annotation, field_info]).json_schema()
+                    field_schema.pop("title", None)
+                except Exception:
+                    pass
+
+                # TypeAdapter silently drops non-serialisable union variants
+                # (e.g. Callable). Use _partial_schema to get the full picture.
+                union_args = typing.get_args(field_info.annotation)
+                if union_args:
+                    full = self._partial_schema(field_info.annotation)
+                    full_variants = full.get("anyOf", [full] if full else [])
+                    schema_variants = field_schema.get("anyOf", [field_schema] if field_schema else [])
+                    if len(full_variants) > len(schema_variants):
+                        # Preserve FieldInfo metadata (default, description, etc.)
+                        # from the TypeAdapter result, but use the full anyOf.
+                        field_schema["anyOf"] = full_variants
+
+            field_schema["value"] = value
+            result[key] = field_schema
+        return result
+
+    def get_config(self) -> dict[str, Any]:
+        """Return the configurable parameters for this runnable.
+
+        Each field is a dict with JSON schema properties (type, anyOf, etc.)
+        plus a ``value`` key holding the current value. Override in subclasses
+        to expose additional construction-time settings.
+        """
+        return self._annotate_config({"name": self.name, "description": self.description})
+
     @abstractmethod
     def nest(self, parent_path: str) -> None:
         """Set the nested path for this runnable within a parent context.

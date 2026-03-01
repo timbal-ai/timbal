@@ -1,8 +1,9 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 
-from timbal.codegen.pipeline import apply_operation, parse_fqn
+from timbal.codegen.pipeline import apply_operation, get_flow, parse_fqn
 from timbal.codegen.transformers import load_modules
 
 
@@ -28,10 +29,24 @@ def main() -> None:
     for mod in transformer_modules.values():
         mod.register(subparsers)
 
+    # Read-only operations (not CST transformers)
+    subparsers.add_parser("get-flow", help="Print the graph for the workspace entry point.")
+
     args = parser.parse_args()
 
     workspace_path = Path(args.path)
-    module_name = args.operation.replace("-", "_")
+    operation = args.operation
+
+    if operation == "get-flow":
+        try:
+            flow = get_flow(workspace_path)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(flow, indent=2))
+        return
+
+    module_name = operation.replace("-", "_")
 
     # Collect operation-specific kwargs from the parsed args.
     skip = {"path", "dry_run", "operation"}

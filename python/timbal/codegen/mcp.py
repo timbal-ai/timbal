@@ -2,7 +2,7 @@ import json
 
 from mcp.server.fastmcp import FastMCP
 
-from timbal.codegen.pipeline import apply_operation, parse_fqn
+from timbal.codegen.pipeline import apply_operation, get_flow, parse_fqn
 from timbal.codegen.transformers.add_tool import FRAMEWORK_TOOLS
 
 mcp = FastMCP(
@@ -74,6 +74,17 @@ def set_config(path: str, config: str, tool_name: str | None = None) -> str:
     source_path.write_text(result)
     target = f"tool '{tool_name}'" if tool_name else "agent"
     return f"Configuration updated on {target}."
+
+
+@mcp.tool()
+def get_flow_tool(path: str) -> str:
+    """Get the ReactFlow-compatible graph for a workspace entry point. Returns a JSON object with _version, nodes, and edges.
+
+    Args:
+        path: Absolute path to the directory containing timbal.yaml (the workforce member directory).
+    """
+    flow = get_flow(path)
+    return json.dumps(flow, indent=2)
 
 
 def main() -> None:

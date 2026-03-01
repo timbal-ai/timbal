@@ -29,6 +29,19 @@ class CalaSearch(Tool):
             )
         return self
 
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config(
+                {
+                    "integration": self.integration,
+                    "api_key": self.api_key,
+                    "base_url": self.base_url,
+                }
+            ),
+        }
+
     def __init__(self, **kwargs: Any) -> None:
         async def _cala_search(input: str) -> dict:
             if self.integration:

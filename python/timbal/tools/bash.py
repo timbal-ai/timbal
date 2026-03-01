@@ -42,12 +42,14 @@ Warning:
     bypass validation. Please submit issues or pull requests if you encounter
     commands that behave unexpectedly with the pattern matching system.
 """
+
 import asyncio
 import re
 from pathlib import Path
 from typing import Any
 
 import structlog
+from pydantic import PrivateAttr, model_validator
 
 from ..core.tool import Tool
 from ..state import get_run_context
@@ -56,18 +58,20 @@ logger = structlog.get_logger("timbal.tools.bash")
 
 
 class Bash(Tool):
+    allowed_patterns: str | list[str]
 
-    def __init__(self, allowed_patterns: str | list[str], **kwargs: Any):
-        # Validate and normalize patterns
-        if isinstance(allowed_patterns, str):
-            allowed_patterns = [allowed_patterns]
+    _compiled_patterns: list[re.Pattern] = PrivateAttr(default_factory=list)
 
-        if not allowed_patterns:
+    @model_validator(mode="after")
+    def _compile_patterns(self) -> "Bash":
+        if isinstance(self.allowed_patterns, str):
+            self.allowed_patterns = [self.allowed_patterns]
+
+        if not self.allowed_patterns:
             raise ValueError("At least one allowed pattern must be provided")
 
-        # Convert shell patterns to regex patterns
         compiled_patterns = []
-        for pattern in allowed_patterns:
+        for pattern in self.allowed_patterns:
             if not isinstance(pattern, str):
                 raise TypeError(f"Pattern must be a string, got {type(pattern)}")
             regex_pattern = pattern.strip()
@@ -80,7 +84,7 @@ class Bash(Tool):
                 continue
 
             parts = regex_pattern.split()
-            
+
             # Build regex by processing each part
             regex_parts = []
             for i, part in enumerate(parts):
@@ -99,37 +103,43 @@ class Bash(Tool):
                     # Add word boundary after if the part ends with alphanumeric
                     if part[-1].isalnum():
                         escaped = escaped + r"\b"
-                    
+
                     if i > 0:
                         regex_parts.append(r"\s+" + escaped)
                     else:
                         regex_parts.append(escaped)
-            
+
             regex_pattern = "".join(regex_parts)
             regex_pattern = f"^{regex_pattern}$"
             compiled_patterns.append(re.compile(regex_pattern))
 
+        self._compiled_patterns = compiled_patterns
+        return self
+
+    def __init__(self, allowed_patterns: str | list[str], **kwargs: Any):
         async def _execute_command(command: str) -> dict[str, Any]:
             command = command.strip()
 
             # Check if command matches any allowed pattern
             command_allowed = False
-            for compiled_pattern in compiled_patterns:
+            for compiled_pattern in self._compiled_patterns:
                 if compiled_pattern.match(command):
                     command_allowed = True
                     break
 
             if not command_allowed:
                 # Split by multiple operators: &&, ||, |, ;
-                chain_parts = re.split(r'\s*(?:\|\||\&\&|\||\;)\s*', command)
+                chain_parts = re.split(r"\s*(?:\|\||\&\&|\||\;)\s*", command)
                 for part in chain_parts:
                     part_allowed = False
-                    for compiled_pattern in compiled_patterns:
+                    for compiled_pattern in self._compiled_patterns:
                         if compiled_pattern.match(part):
                             part_allowed = True
                             break
                     if not part_allowed:
-                        raise ValueError(f"Command '{command}' does not match any allowed patterns: {allowed_patterns}")
+                        raise ValueError(
+                            f"Command '{command}' does not match any allowed patterns: {self.allowed_patterns}"
+                        )
 
             # Resolve working directory
             run_context = get_run_context()
@@ -159,9 +169,14 @@ class Bash(Tool):
             name="bash",
             description=f"Execute a bash command. Allowed patterns: {allowed_patterns}",
             handler=_execute_command,
+            allowed_patterns=allowed_patterns,
             background_mode="auto",
-            **kwargs
+            **kwargs,
         )
 
-        self.allowed_patterns = allowed_patterns
-        self.compiled_patterns = compiled_patterns
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"allowed_patterns": self.allowed_patterns}),
+        }

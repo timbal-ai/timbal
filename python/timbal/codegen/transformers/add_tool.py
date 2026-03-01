@@ -52,7 +52,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         if func_def is None:
             raise ValueError("--definition must contain a function definition.")
         func_name = func_def.name.value
-        var_name = args.tool_name if args.tool_name else func_name
+        var_name = args.tool_name if args.tool_name else f"{func_name}_tool"
         runtime_name = args.tool_name if args.tool_name else func_name
         return ToolAdder(
             entry_point, assignments,

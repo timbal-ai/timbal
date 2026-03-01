@@ -40,6 +40,20 @@ class WebSearch(Tool):
     # }
     user_location: dict[str, Any] | None = None
 
+    @override
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config(
+                {
+                    "allowed_domains": self.allowed_domains,
+                    "blocked_domains": self.blocked_domains,
+                    "user_location": self.user_location,
+                }
+            ),
+        }
+
     def __init__(self, **kwargs: Any) -> None:
         if "handler" not in kwargs:
 

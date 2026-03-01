@@ -314,6 +314,26 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         self._is_async_gen = True
 
     @override
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        if self._system_prompt_fn is not None:
+            system_prompt = f"<{self._system_prompt_fn.__name__}>"
+        elif self._system_prompt_templates:
+            system_prompt = self.system_prompt
+        else:
+            system_prompt = self.system_prompt
+
+        config = self._annotate_config(
+            {
+                "model": self.model,
+                "system_prompt": system_prompt,
+                "max_iter": self.max_iter,
+            }
+        )
+
+        return {**super().get_config(), **config}
+
+    @override
     def nest(self, parent_path: str) -> None:
         """See base class."""
         self._path = f"{parent_path}.{self.name}"

@@ -15,6 +15,13 @@ class GmailConfig(BaseModel):
 class SendEmail(Tool):
     config: GmailConfig
 
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            "integration": {"type": "string", "value": self.config.integration},
+        }
+
     def __init__(self, **kwargs: Any) -> None:
         async def _send_email(to: str, subject: str, body: str) -> Any:
             assert isinstance(self.config.integration, Integration)
