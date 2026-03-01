@@ -10,7 +10,7 @@ from timbal import Agent
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
-from .conftest import assert_has_output_event, skip_if_agent_error
+from ..conftest import assert_has_output_event, skip_if_agent_error
 
 
 class TestParallelSubagentExecution:

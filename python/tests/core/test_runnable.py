@@ -5,9 +5,7 @@ from timbal import Tool
 from timbal.collectors.base import BaseCollector
 from timbal.types.events import OutputEvent
 
-from .conftest import (
-    Timer,
-)
+from ..conftest import Timer
 
 
 class TestRunnableBase:

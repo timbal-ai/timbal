@@ -39,8 +39,7 @@ dependencies = [
     "pandas>=2.2.3",
     "pillow>=12.1.0",
     "pydantic[email]>=2.10.6",
-    # PyMuPDF 1.26.1 does not have a wheel for aarch64 (2025-06-12) and would try to build from source otherwise.
-    "pymupdf==1.26.0",
+    "pymupdf>=1.27.1",
     "python-docx>=1.1.2",
     "python-dotenv>=1.0.1",
     "pytz>=2025.2",

@@ -9,11 +9,7 @@ from timbal import Agent, Tool, Workflow
 from timbal.types.events import OutputEvent, StartEvent
 from timbal.types.message import Message
 
-from .conftest import (
-    assert_has_output_event,
-    assert_no_errors,
-    skip_if_agent_error,
-)
+from ..conftest import assert_has_output_event, assert_no_errors, skip_if_agent_error
 
 
 class TestCommandsWithTools:

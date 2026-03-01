@@ -7,11 +7,7 @@ from timbal import Agent, Tool, Workflow
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
-from .conftest import (
-    Timer,
-    assert_has_output_event,
-    assert_no_errors,
-)
+from ..conftest import Timer, assert_has_output_event, assert_no_errors
 
 # ==============================================================================
 # Test Handler Functions for Interruption Testing

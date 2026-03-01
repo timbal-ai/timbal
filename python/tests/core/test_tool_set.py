@@ -8,10 +8,7 @@ from timbal import Agent, Tool
 from timbal.core.tool_set import ToolSet
 from timbal.types.message import Message
 
-from .conftest import (
-    assert_has_output_event,
-    skip_if_agent_error,
-)
+from ..conftest import assert_has_output_event, skip_if_agent_error
 
 # ==============================================================================
 # Test ToolSet Implementations

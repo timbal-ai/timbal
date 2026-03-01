@@ -11,7 +11,7 @@ from timbal.tools import WebSearch
 from timbal.types.content.tool_use import ToolUseContent
 from timbal.types.message import Message
 
-from .conftest import assert_has_output_event
+from ..conftest import assert_has_output_event
 
 MODELS_TO_TEST = [
     pytest.param("anthropic/claude-haiku-4-5", 8092, id="anthropic-claude-haiku-4-5"),  # messages

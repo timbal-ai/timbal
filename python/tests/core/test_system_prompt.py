@@ -6,7 +6,7 @@ import pytest
 from timbal import Agent
 from timbal.types.message import Message
 
-from .conftest import assert_has_output_event, skip_if_agent_error
+from ..conftest import assert_has_output_event, skip_if_agent_error
 
 # ==============================================================================
 # Test Utility Functions for System Prompts

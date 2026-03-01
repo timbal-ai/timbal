@@ -7,7 +7,7 @@ from timbal.state import get_run_context
 from timbal.tools import Bash
 from timbal.types.events.output import OutputEvent
 
-from .conftest import assert_has_output_event, skip_if_agent_error
+from ..conftest import assert_has_output_event, skip_if_agent_error
 
 
 class TestBackgroundTasks:
