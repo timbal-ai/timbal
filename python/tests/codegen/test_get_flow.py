@@ -44,7 +44,7 @@ class TestTopLevel:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         flow = _flow(ws)
         assert "_version" in flow
@@ -56,7 +56,7 @@ class TestTopLevel:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         flow = _flow(ws)
         assert len(flow["nodes"]) == 1
@@ -73,7 +73,7 @@ class TestAgentNode:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="my_agent", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="my_agent", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         node = _single_node(_flow(ws))
         assert node["type"] == "agent"
@@ -87,7 +87,7 @@ class TestAgentNode:
             name="my_agent",
             description="A test agent",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 128},
+            max_tokens=128,
         )
         """)
         config = _single_node(_flow(ws))["data"]["config"]
@@ -102,7 +102,7 @@ class TestAgentNode:
         agent = Agent(
             name="a",
             model="anthropic/claude-haiku-4-5",
-            model_params={"max_tokens": 512},
+            max_tokens=512,
             system_prompt="You are helpful.",
             max_iter=5,
         )
@@ -112,6 +112,7 @@ class TestAgentNode:
         assert config["system_prompt"]["value"] == "You are helpful."
         assert config["max_iter"]["value"] == 5
         assert config["max_iter"]["type"] == "integer"
+        assert config["max_tokens"]["value"] == 512
 
     def test_system_prompt_callable(self, workspace):
         ws = workspace("""\
@@ -123,7 +124,7 @@ class TestAgentNode:
         agent = Agent(
             name="a",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 128},
+            max_tokens=128,
             system_prompt=get_prompt,
         )
         """)
@@ -138,7 +139,7 @@ class TestAgentNode:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         config = _single_node(_flow(ws))["data"]["config"]
         assert config["system_prompt"]["value"] is None
@@ -147,7 +148,7 @@ class TestAgentNode:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         data = _single_node(_flow(ws))["data"]
         assert "params" in data
@@ -158,7 +159,7 @@ class TestAgentNode:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         data = _single_node(_flow(ws))["data"]
         assert data["metadata"]["type"] == "Agent"
@@ -179,7 +180,7 @@ class TestAgentTools:
         agent = Agent(
             name="a",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 128},
+            max_tokens=128,
             tools=[web_search],
         )
         """)
@@ -196,7 +197,7 @@ class TestAgentTools:
         agent = Agent(
             name="a",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 128},
+            max_tokens=128,
             tools=[web_search],
         )
         """)
@@ -214,7 +215,7 @@ class TestAgentTools:
         agent = Agent(
             name="a",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 128},
+            max_tokens=128,
             tools=[web_search],
         )
         """)
@@ -233,7 +234,7 @@ class TestAgentTools:
         agent = Agent(
             name="a",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 128},
+            max_tokens=128,
             tools=[greet_tool],
         )
         """)
@@ -256,7 +257,7 @@ class TestAgentTools:
         agent = Agent(
             name="a",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 128},
+            max_tokens=128,
             tools=[my_func_tool, web_search],
         )
         """)
@@ -275,13 +276,13 @@ class TestAgentTools:
         inner = Agent(
             name="inner",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 128},
+            max_tokens=128,
             tools=[],
         )
         agent = Agent(
             name="outer",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 128},
+            max_tokens=128,
             tools=[inner],
         )
         """)
@@ -297,7 +298,7 @@ class TestAgentTools:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         tools = _single_node(_flow(ws))["data"]["config"]["tools"]
         assert tools == []
@@ -365,7 +366,7 @@ class TestWorkflow:
         inner_agent = Agent(
             name="summarizer",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 128},
+            max_tokens=128,
             tools=[web_search],
         )
 
@@ -414,7 +415,7 @@ class TestConfigSchema:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         config = _single_node(_flow(ws))["data"]["config"]
         assert config["name"]["type"] == "string"
@@ -423,7 +424,7 @@ class TestConfigSchema:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         config = _single_node(_flow(ws))["data"]["config"]
         # description is str | None
@@ -436,7 +437,7 @@ class TestConfigSchema:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128}, max_iter=7)
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128, max_iter=7)
         """)
         config = _single_node(_flow(ws))["data"]["config"]
         assert config["max_iter"]["type"] == "integer"
@@ -446,7 +447,7 @@ class TestConfigSchema:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         config = _single_node(_flow(ws))["data"]["config"]
         assert config["max_iter"]["default"] == 10
@@ -455,7 +456,7 @@ class TestConfigSchema:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         config = _single_node(_flow(ws))["data"]["config"]
         # model is Model | str — should have anyOf with an enum variant
@@ -467,7 +468,7 @@ class TestConfigSchema:
         ws = workspace("""\
         from timbal.core import Agent
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini", model_params={"max_tokens": 128})
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         config = _single_node(_flow(ws))["data"]["config"]
         any_of_types = [v.get("type") for v in config["system_prompt"]["anyOf"]]

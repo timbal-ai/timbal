@@ -46,7 +46,7 @@ agent = Agent(
     name="agent",
     model="anthropic/claude-haiku-4-5",
     tools=[get_datetime],
-    model_params={"max_tokens": 8192},
+    max_tokens=8192,
 )
 
 # Agent with multiple tools for testing parallel execution
@@ -54,7 +54,7 @@ multi_tool_agent = Agent(
     name="multi_tool_agent",
     model="anthropic/claude-haiku-4-5",
     tools=[get_datetime, get_weather, get_stock_price],
-    model_params={"max_tokens": 8192},
+    max_tokens=8192,
 )
 
 # Agent with async tools that can run in parallel
@@ -62,7 +62,7 @@ parallel_agent = Agent(
     name="parallel_agent",
     model="anthropic/claude-haiku-4-5",
     tools=[fetch_user_data, fetch_user_orders],
-    model_params={"max_tokens": 8192},
+    max_tokens=8192,
 )
 
 # Agent with search capability
@@ -70,7 +70,7 @@ search_agent = Agent(
     name="search_agent",
     model="anthropic/claude-haiku-4-5",
     tools=[search_products, get_stock_price],
-    model_params={"max_tokens": 8192},
+    max_tokens=8192,
 )
 
 
@@ -100,7 +100,7 @@ research_subagent = Agent(
     model="anthropic/claude-haiku-4-5",
     tools=[analyze_sentiment, summarize_text],
     system_prompt="You are a research assistant. Use the tools to analyze and summarize text.",
-    model_params={"max_tokens": 4096},
+    max_tokens=4096,
 )
 
 # Main agent that uses the research subagent as a tool
@@ -109,7 +109,7 @@ main_agent_with_subagent = Agent(
     model="anthropic/claude-haiku-4-5",
     tools=[get_datetime, research_subagent],
     system_prompt="You are a helpful assistant. Use the research_subagent for text analysis tasks.",
-    model_params={"max_tokens": 8192},
+    max_tokens=8192,
 )
 
 

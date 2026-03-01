@@ -88,19 +88,18 @@ Model = Literal[
     "togetherai/deepseek-ai/DeepSeek-V3.1",
     "togetherai/deepseek-ai/DeepSeek-R1",
     "togetherai/moonshotai/Kimi-K2.5",
-    "togetherai/moonshotai/Kimi-K2-Instruct",
+    "togetherai/moonshotai/Kimi-K2-Instruct-0905",
+    "togetherai/moonshotai/Kimi-K2-Thinking",
     "togetherai/MiniMaxAI/MiniMax-M2.5",
     "togetherai/zai-org/GLM-5",
     "togetherai/zai-org/GLM-4.7",
     "togetherai/openai/gpt-oss-120b",
     "togetherai/google/gemma-3n-E4B-it",
     "togetherai/google/gemma-3-27b-it",
-    "togetherai/nvidia/NVIDIA-Nemotron-Nano-9B-v2",
     "togetherai/deepcogito/cogito-v2-1-671b",
     "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",
-    "togetherai/mistralai/Ministral-3-14B-Instruct-2512",
     # Gemini models
-    "google/gemini-3-pro-preview",
+    "google/gemini-3.1-pro-preview",
     "google/gemini-3-flash-preview",
     "google/gemini-2.5-pro",
     "google/gemini-2.5-flash",
@@ -233,13 +232,13 @@ async def _llm_router(
     messages: list[Message] | None = None,
     tools: list[Runnable] | None = None,
     max_tokens: int | None = None,
-    thinking: Any = None,
-    max_retries: int = 0,
-    retry_delay: float = 1.0,
-    cache_control: Any = None,
+    temperature: float | None = None,
     output_model: type[BaseModel] | None = None,
     base_url: str | SecretStr | None = None,
     api_key: str | SecretStr | None = None,
+    max_retries: int = 0,
+    retry_delay: float = 1.0,
+    provider_params: dict[str, Any] | None = None,
 ) -> Message:  # type: ignore[misc]  # Declared as Message for framework schema generation; runtime is an async generator of provider-specific chunks.
     """
     Internal LLM router function.
@@ -248,6 +247,7 @@ async def _llm_router(
     as LLM providers update their APIs. Use the stable Agent/Workflow APIs instead.
     """
     messages = messages or []
+    provider_params = provider_params or {}
 
     # Convert SecretStr to str if needed
     if isinstance(base_url, SecretStr):
@@ -375,10 +375,7 @@ async def _llm_router(
         }
 
         if system_prompt:
-            if cache_control:
-                anthropic_kwargs["system"] = [{"type": "text", "text": system_prompt, "cache_control": cache_control}]
-            else:
-                anthropic_kwargs["system"] = system_prompt
+            anthropic_kwargs["system"] = system_prompt
 
         if tools:
             anthropic_tools = []
@@ -387,10 +384,11 @@ async def _llm_router(
             if anthropic_tools:
                 anthropic_kwargs["tools"] = anthropic_tools
 
-        if thinking:
-            # {"type": "enabled", "budget_tokens": int}
-            # budget_tokens must be >= 1024
-            anthropic_kwargs["thinking"] = thinking
+        if temperature is not None:
+            anthropic_kwargs["temperature"] = temperature
+
+        # Forward any extra provider-specific params (e.g. top_p, top_k, stop_sequences)
+        anthropic_kwargs.update(provider_params)
 
         async def _create_stream():
             if output_model is not None:
@@ -433,9 +431,8 @@ async def _llm_router(
         if max_tokens:
             responses_kwargs["max_output_tokens"] = max_tokens
 
-        if thinking:
-            # {"effort": enum["minimal", "low", "medium", "high"], "summary": enum["auto", "concise", "detailed"]}
-            responses_kwargs["reasoning"] = thinking
+        if temperature is not None:
+            responses_kwargs["temperature"] = temperature
 
         if output_model is not None:
             responses_kwargs["text"] = {
@@ -446,6 +443,9 @@ async def _llm_router(
                     "strict": True,
                 }
             }
+
+        # Forward any extra provider-specific params (e.g. top_p, service_tier)
+        responses_kwargs.update(provider_params)
 
         async def _create_stream():
             res = await client.responses.create(**responses_kwargs)  # type: ignore[attr-defined]
@@ -481,6 +481,9 @@ async def _llm_router(
         if max_tokens:
             chat_completions_kwargs["max_completion_tokens"] = max_tokens
 
+        if temperature is not None:
+            chat_completions_kwargs["temperature"] = temperature
+
         if output_model is not None:
             chat_completions_kwargs["response_format"] = {
                 "type": "json_schema",
@@ -490,6 +493,9 @@ async def _llm_router(
                     "strict": True,
                 },
             }
+
+        # Forward any extra provider-specific params (e.g. top_p, frequency_penalty, logprobs, stop)
+        chat_completions_kwargs.update(provider_params)
 
         async def _create_stream():
             res = await client.chat.completions.create(**chat_completions_kwargs)  # type: ignore[attr-defined]

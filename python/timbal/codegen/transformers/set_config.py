@@ -19,7 +19,11 @@ AGENT_FIELDS = {
     "model",
     "system_prompt",
     "max_iter",
-    "model_params",
+    "max_tokens",
+    "temperature",
+    "base_url",
+    "api_key",
+    "model_params",  # Deprecated, kept for backward compatibility
     "skills_path",
 }
 

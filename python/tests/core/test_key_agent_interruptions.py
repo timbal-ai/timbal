@@ -14,9 +14,9 @@ from timbal.types.message import Message
 from .conftest import assert_has_output_event
 
 MODELS_TO_TEST = [
-    pytest.param("anthropic/claude-haiku-4-5", {"max_tokens": 8092}, id="anthropic-claude-haiku-4-5"),  # messages
-    pytest.param("openai/gpt-5.2", {}, id="openai-gpt-5.2"),  # responses
-    pytest.param("google/gemini-2.5-flash-lite", {}, id="google-gemini-2.5-flash-lite"),  # chat completions
+    pytest.param("anthropic/claude-haiku-4-5", 8092, id="anthropic-claude-haiku-4-5"),  # messages
+    pytest.param("openai/gpt-5.2", None, id="openai-gpt-5.2"),  # responses
+    pytest.param("google/gemini-2.5-flash-lite", None, id="google-gemini-2.5-flash-lite"),  # chat completions
 ]
 
 
@@ -24,8 +24,8 @@ class TestKeyAgentInterruptions:
     """Test interrupting agents at key points during LLM generation."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("model,model_params", MODELS_TO_TEST)
-    async def test_llm_interrupt_and_continue(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS_TO_TEST)
+    async def test_llm_interrupt_and_continue(self, model: str, max_tokens: int | None):
         """
         Test interrupting an agent mid-LLM step and then continuing the conversation.
 
@@ -40,8 +40,8 @@ class TestKeyAgentInterruptions:
             "name": f"continuable_agent_{model.replace('/', '_')}",
             "model": model,
         }
-        if model_params:
-            agent_kwargs["model_params"] = model_params
+        if max_tokens:
+            agent_kwargs["max_tokens"] = max_tokens
 
         agent = Agent(**agent_kwargs)
 
@@ -76,8 +76,8 @@ class TestKeyAgentInterruptions:
         assert isinstance(result2.output, Message), f"Expected Message output, got {type(result2.output)}"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("model,model_params", MODELS_TO_TEST)
-    async def test_server_tool_interrupt_and_continue(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS_TO_TEST)
+    async def test_server_tool_interrupt_and_continue(self, model: str, max_tokens: int | None):
         """
         Test interrupting an agent while a server-side tool (WebSearch) is running.
 
@@ -97,8 +97,8 @@ class TestKeyAgentInterruptions:
             "model": model,
             "tools": [WebSearch()],
         }
-        if model_params:
-            agent_kwargs["model_params"] = model_params
+        if max_tokens:
+            agent_kwargs["max_tokens"] = max_tokens
 
         agent = Agent(**agent_kwargs)
 
@@ -139,8 +139,8 @@ class TestKeyAgentInterruptions:
         assert isinstance(result2.output, Message), f"Expected Message output, got {type(result2.output)}"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("model,model_params", MODELS_TO_TEST)
-    async def test_immediate_interrupt_and_continue(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS_TO_TEST)
+    async def test_immediate_interrupt_and_continue(self, model: str, max_tokens: int | None):
         """
         Test interrupting an agent almost immediately and then continuing the conversation.
 
@@ -156,8 +156,8 @@ class TestKeyAgentInterruptions:
             "name": f"immediate_agent_{model.replace('/', '_')}",
             "model": model,
         }
-        if model_params:
-            agent_kwargs["model_params"] = model_params
+        if max_tokens:
+            agent_kwargs["max_tokens"] = max_tokens
 
         agent = Agent(**agent_kwargs)
 
@@ -189,8 +189,8 @@ class TestKeyAgentInterruptions:
         assert isinstance(result2.output, Message), f"Expected Message output, got {type(result2.output)}"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("model,model_params", MODELS_TO_TEST)
-    async def test_tool_interrupt_and_continue(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS_TO_TEST)
+    async def test_tool_interrupt_and_continue(self, model: str, max_tokens: int | None):
         """
         Test interrupting an agent mid-tool execution and then continuing the conversation.
 
@@ -219,8 +219,8 @@ class TestKeyAgentInterruptions:
             "model": model,
             "tools": [internal_search_tool],
         }
-        if model_params:
-            agent_kwargs["model_params"] = model_params
+        if max_tokens:
+            agent_kwargs["max_tokens"] = max_tokens
 
         agent = Agent(**agent_kwargs)
 

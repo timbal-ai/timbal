@@ -6,26 +6,26 @@ from pydantic import BaseModel, Field
 from timbal import Agent
 
 # Models to test across multiple providers
-# Format: (model_name, model_params)
+# Format: (model_name, max_tokens)
 MODELS = [
-    pytest.param("openai/gpt-4o-mini", {}, id="openai"),
-    pytest.param("anthropic/claude-haiku-4-5", {"max_tokens": 1024}, id="anthropic"),
-    pytest.param("google/gemini-2.5-flash-lite", {}, id="google"),
+    pytest.param("openai/gpt-4o-mini", None, id="openai"),
+    pytest.param("anthropic/claude-haiku-4-5", 1024, id="anthropic"),
+    pytest.param("google/gemini-2.5-flash-lite", None, id="google"),
 ]
 
 
 class TestOutputModel:
     """Test Output Model functionality across multiple LLM providers."""
 
-    @pytest.mark.parametrize("model,model_params", MODELS)
-    async def test_simple_output_model(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_simple_output_model(self, model: str, max_tokens: int | None):
         """Test that the force_output_model tool is properly created and used."""
 
         class SimpleResponse(BaseModel):
             answer: str = Field(..., description="The answer to the question")
             confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence level from 0.0 to 1.0")
 
-        agent = Agent(name="agent", model=model, output_model=SimpleResponse, model_params=model_params)
+        agent = Agent(name="agent", model=model, output_model=SimpleResponse, max_tokens=max_tokens)
 
         user_input = "What is the capital of France?"
         response = await agent(prompt=user_input).collect()
@@ -37,8 +37,8 @@ class TestOutputModel:
         assert isinstance(response_obj.confidence, float)
         assert 0.0 <= response_obj.confidence <= 1.0
 
-    @pytest.mark.parametrize("model,model_params", MODELS)
-    async def test_output_model_with_optional_fields(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_output_model_with_optional_fields(self, model: str, max_tokens: int | None):
         """Test output model with optional fields that can be None."""
 
         class DataWithOptionals(BaseModel):
@@ -47,7 +47,7 @@ class TestOutputModel:
             optional_number: int | None = Field(None, description="An optional number that can be None")
             optional_list: list[str] | None = Field(None, description="An optional list that can be None")
 
-        agent = Agent(name="optional_agent", model=model, output_model=DataWithOptionals, model_params=model_params)
+        agent = Agent(name="optional_agent", model=model, output_model=DataWithOptionals, max_tokens=max_tokens)
 
         # Test with minimal data - should fill required field and leave optionals as None
         user_input = "Generate data with only required_field set to 'test'. Leave all optional fields empty."
@@ -70,8 +70,8 @@ class TestOutputModel:
         assert obj2.required_field == "complete"
         # LLM should populate the optional fields as requested
 
-    @pytest.mark.parametrize("model,model_params", MODELS)
-    async def test_complex_nested_model_with_validation(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_complex_nested_model_with_validation(self, model: str, max_tokens: int | None):
         """Test complex nested model with multiple validation constraints."""
 
         class Priority(str, Enum):
@@ -94,7 +94,7 @@ class TestOutputModel:
             tags: list[str] = Field(..., min_length=1, max_length=10, description="1-10 tags for categorization")
             dependencies: Optional[list[str]] = Field(None, description="Optional task IDs this depends on")
 
-        agent = Agent(name="task_agent", model=model, output_model=Task, model_params=model_params)
+        agent = Agent(name="task_agent", model=model, output_model=Task, max_tokens=max_tokens)
 
         user_input = (
             "Create a critical task titled 'Implement user authentication' "
@@ -115,8 +115,8 @@ class TestOutputModel:
         assert all(isinstance(a, Assignee) for a in task.assignees)
         assert 1 <= len(task.tags) <= 10
 
-    @pytest.mark.parametrize("model,model_params", MODELS)
-    async def test_forced_output_despite_off_topic_prompt(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_forced_output_despite_off_topic_prompt(self, model: str, max_tokens: int | None):
         """Test that output model is ALWAYS returned, even when prompted to do something else entirely."""
 
         class AnalysisResult(BaseModel):
@@ -124,7 +124,7 @@ class TestOutputModel:
             sentiment: str = Field(..., description="Overall sentiment: positive, negative, or neutral")
             key_points: list[str] = Field(..., description="Key points extracted from the input")
 
-        agent = Agent(name="analysis_agent", model=model, output_model=AnalysisResult, model_params=model_params)
+        agent = Agent(name="analysis_agent", model=model, output_model=AnalysisResult, max_tokens=max_tokens)
 
         # Try to trick the agent into not using the structured output
         user_input = (
@@ -140,15 +140,15 @@ class TestOutputModel:
         assert isinstance(result.sentiment, str)
         assert isinstance(result.key_points, list)
 
-    @pytest.mark.parametrize("model,model_params", MODELS)
-    async def test_output_model_with_contradictory_instructions(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_output_model_with_contradictory_instructions(self, model: str, max_tokens: int | None):
         """Test that structured output is always returned even with contradictory instructions."""
 
         class SummaryOutput(BaseModel):
             summary: str = Field(..., description="A brief summary of the input")
             word_count: int = Field(..., ge=0, description="Number of words in the summary")
 
-        agent = Agent(name="summary_agent", model=model, output_model=SummaryOutput, model_params=model_params)
+        agent = Agent(name="summary_agent", model=model, output_model=SummaryOutput, max_tokens=max_tokens)
 
         # Ask for something completely different from the output model
         user_input = (
@@ -164,8 +164,8 @@ class TestOutputModel:
         assert isinstance(result.word_count, int)
         assert result.word_count >= 0
 
-    @pytest.mark.parametrize("model,model_params", MODELS)
-    async def test_deeply_nested_optional_model(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_deeply_nested_optional_model(self, model: str, max_tokens: int | None):
         """Test deeply nested model with optional fields at various levels."""
 
         class Address(BaseModel):
@@ -193,7 +193,7 @@ class TestOutputModel:
             company: Optional[Company] = Field(None, description="Current employer (optional)")
             hobbies: Optional[list[str]] = Field(None, description="List of hobbies (optional)")
 
-        agent = Agent(name="person_agent", model=model, output_model=Person, model_params=model_params)
+        agent = Agent(name="person_agent", model=model, output_model=Person, max_tokens=max_tokens)
 
         user_input = (
             "Create a person profile: John Smith, age 35. "
@@ -216,8 +216,8 @@ class TestOutputModel:
         if person.company:
             assert isinstance(person.company, Company)
 
-    @pytest.mark.parametrize("model,model_params", MODELS)
-    async def test_output_model_with_defaults(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_output_model_with_defaults(self, model: str, max_tokens: int | None):
         """Test output model with default values for optional fields."""
 
         class ConfigWithDefaults(BaseModel):
@@ -227,7 +227,7 @@ class TestOutputModel:
             enabled: bool = Field(True, description="Whether this config is enabled")
             tags: list[str] = Field(default_factory=list, description="Optional tags")
 
-        agent = Agent(name="config_agent", model=model, output_model=ConfigWithDefaults, model_params=model_params)
+        agent = Agent(name="config_agent", model=model, output_model=ConfigWithDefaults, max_tokens=max_tokens)
 
         # Request minimal info - defaults should apply
         user_input = "Create a config named 'production' with default settings"
@@ -242,8 +242,8 @@ class TestOutputModel:
         assert isinstance(config.enabled, bool)
         assert isinstance(config.tags, list)
 
-    @pytest.mark.parametrize("model,model_params", MODELS)
-    async def test_output_model_with_completely_unrelated_prompt(self, model: str, model_params: dict):
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_output_model_with_completely_unrelated_prompt(self, model: str, max_tokens: int | None):
         """Test that structured output is returned even when prompt has zero relation to the model.
 
         This tests the case where the user asks something completely unrelated to
@@ -259,7 +259,7 @@ class TestOutputModel:
             humidity_percent: int = Field(..., ge=0, le=100, description="Humidity percentage")
             wind_speed_kmh: float = Field(..., ge=0, description="Wind speed in km/h")
 
-        agent = Agent(name="weather_agent", model=model, output_model=WeatherForecast, model_params=model_params)
+        agent = Agent(name="weather_agent", model=model, output_model=WeatherForecast, max_tokens=max_tokens)
 
         # Ask something completely unrelated - a math question has nothing to do with weather
         user_input = "What is 2 + 2?"

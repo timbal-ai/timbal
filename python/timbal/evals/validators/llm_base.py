@@ -64,10 +64,8 @@ class LLMValidator(BaseValidator):
             system_prompt=self.system_prompt,
             model=self.model,
             output_model=LLMValidationResult,  # Force structured output
-            model_params={
-                "temperature": 0.0,
-                "max_tokens": 2048,
-            },
+            max_tokens=2048,
+            temperature=0.0,
         )
 
         output_event = await agent(prompt=user_prompt).collect()  # type: ignore

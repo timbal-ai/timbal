@@ -108,16 +108,29 @@ class TestAgentConfig:
         ns = _exec_agent(output)
         assert ns["agent"].max_iter == 5
 
-    def test_set_model_params(self, workspace):
+    def test_set_max_tokens(self, workspace):
         ws = workspace("""\
         from timbal.core import Agent
 
         agent = Agent(name="a", model="openai/gpt-4o-mini")
         """)
-        config = json.dumps({"model_params": {"temperature": 0.7, "max_tokens": 1024}})
+        config = json.dumps({"max_tokens": 1024})
         output = _run_dry(ws, "--config", config)
         ns = _exec_agent(output)
-        assert ns["agent"].model_params == {"temperature": 0.7, "max_tokens": 1024}
+        assert ns["agent"].max_tokens == 1024
+
+    def test_set_model_params_backward_compat(self, workspace):
+        """model_params still works but values get denormalized into individual fields."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"model_params": {"cache_control": {"type": "ephemeral"}, "max_tokens": 1024}})
+        output = _run_dry(ws, "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].max_tokens == 1024
+        assert ns["agent"].model_params == {"cache_control": {"type": "ephemeral"}}
 
     def test_set_skills_path(self, workspace):
         """skills_path kwarg is set in the generated source."""
@@ -343,7 +356,7 @@ class TestToolNameAndDescription:
         ns = _exec_agent(output)
         cs_tool = ns["cala_search"]
         assert cs_tool.name == "my_cala"
-        assert cs_tool.api_key == "test-key"
+        assert cs_tool.api_key.get_secret_value() == "test-key"
         assert cs_tool.base_url == "https://custom.api/v1"
 
     def test_set_cala_search_description(self, workspace):
@@ -361,7 +374,7 @@ class TestToolNameAndDescription:
         ns = _exec_agent(output)
         cs_tool = next(t for t in ns["agent"].tools if t.name == "cala_search")
         assert cs_tool.description == "Custom knowledge search"
-        assert cs_tool.api_key == "test-key"
+        assert cs_tool.api_key.get_secret_value() == "test-key"
 
     def test_set_custom_tool_name(self, workspace):
         """Setting name on a custom Tool preserves handler and description."""

@@ -21,6 +21,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    SecretStr,
     SkipValidation,
     ValidationError,
     computed_field,
@@ -107,21 +108,26 @@ class Agent(Runnable):
     """Path to the skills directory."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
-    model_params: dict[str, Any] = {}
-    """Model parameters to pass to the agent."""
+    max_tokens: int | None = None
+    """Maximum tokens for the LLM response. Required for Anthropic models."""
+    temperature: float | None = None
+    """Sampling temperature for the LLM response."""
     output_model: type[BaseModel] | None = None
     """BaseModel to generate a structured output."""
+    output_model_context: Any = None
+    """Validation context passed to Pydantic's model_validate when validating output_model responses."""
+    model_params: dict[str, Any] = {}
+    """Additional provider-specific LLM parameters (e.g. thinking, service_tier, logprobs, top_p, stop)."""
+    base_url: str | None = None
+    """Custom base URL for the LLM API."""
+    api_key: SecretStr | None = None
+    """Custom API key for the LLM API."""
 
     _llm: Tool = PrivateAttr()
-    """Internal LLM tool instance."""
     _system_prompt_templates: dict[str, Any] = PrivateAttr(default_factory=dict)
-    """Template patterns {module::func} mapped to their callables."""
     _system_prompt_fn: Callable | None = PrivateAttr(default=None)
-    """Callable passed as system_prompt."""
     _system_prompt_fn_is_async: bool = PrivateAttr(default=False)
-    """Whether _system_prompt_fn is async."""
     _system_prompt_skills: str | None = PrivateAttr(default=None)
-    """System prompt modifier for skills."""
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize agent after Pydantic model creation."""
@@ -234,9 +240,26 @@ class Agent(Runnable):
                         "is_coroutine": inspect_result["is_coroutine"],
                     }
 
+        # Backward compat: silently promote known keys from model_params to individual fields
+        if self.model_params:
+            _promoted = {"max_tokens", "temperature", "base_url", "api_key"}
+            _renamed = {"validation_context": "output_model_context"}
+            for old_key, new_key in _renamed.items():
+                if old_key in self.model_params:
+                    if getattr(self, new_key) is None:
+                        setattr(self, new_key, self.model_params.pop(old_key))
+                    else:
+                        self.model_params.pop(old_key)
+            for key in list(self.model_params.keys()):
+                if key in _promoted:
+                    if getattr(self, key) is None:
+                        setattr(self, key, self.model_params.pop(key))
+                    else:
+                        self.model_params.pop(key)
+
         model_provider, model_name = self.model.split("/", 1)
         if model_provider == "anthropic":
-            if not self.model_params.get("max_tokens"):
+            if not self.max_tokens:
                 raise ValueError("'max_tokens' is required for claude models.")
             if self.output_model is not None:
                 logger.warning(
@@ -251,10 +274,24 @@ class Agent(Runnable):
                 "Consider using one or the other."
             )
 
+        # Build default params for the internal LLM tool from individual fields
+        _llm_default_params = {}
+        if self.max_tokens is not None:
+            _llm_default_params["max_tokens"] = self.max_tokens
+        if self.temperature is not None:
+            _llm_default_params["temperature"] = self.temperature
+        if self.base_url is not None:
+            _llm_default_params["base_url"] = self.base_url
+        if self.api_key is not None:
+            _llm_default_params["api_key"] = self.api_key
+        # Forward provider-specific params (e.g. thinking, cache_control, top_p, stop_sequences)
+        if self.model_params:
+            _llm_default_params["provider_params"] = self.model_params
+
         self._llm = Tool(
             name="llm",
             handler=_llm_router,
-            default_params=self.model_params,
+            default_params=_llm_default_params,
             metadata={
                 "type": "LLM",
                 "model_provider": model_provider,
@@ -328,6 +365,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 "model": self.model,
                 "system_prompt": system_prompt,
                 "max_iter": self.max_iter,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "base_url": self.base_url,
+                "api_key": self.api_key,
             }
         )
 
@@ -709,7 +750,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
                     if self.output_model is not None:
                         validation_error_msg = None
-                        validation_context = self.model_params.get("validation_context")
+                        validation_context = self.output_model_context
                         for content in event.output.content:
                             # TODO Refactor this. If the llm should return a fixed output model, we should error if it doesn't return it
                             if isinstance(content, TextContent):

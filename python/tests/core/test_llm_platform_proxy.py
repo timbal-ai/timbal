@@ -78,7 +78,7 @@ class TestPlatformProxy:
 
         run_context = RunContext()
         set_run_context(run_context)
-        agent = Agent(name="test", model="anthropic/claude-haiku-4-5", model_params={"max_tokens": 1024})
+        agent = Agent(name="test", model="anthropic/claude-haiku-4-5", max_tokens=1024)
         await agent(prompt="hello").collect()
 
     @pytest.mark.asyncio

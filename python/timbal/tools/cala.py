@@ -2,7 +2,7 @@ import os
 from typing import Annotated, Any
 
 import httpx
-from pydantic import model_validator
+from pydantic import SecretStr, model_validator
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
@@ -15,13 +15,15 @@ class CalaSearch(Tool):
         "Returns trustworthy, verified knowledge with relevant context, sources, and matching entities."
     )
     integration: Annotated[str, Integration("cala")] | None = None
-    api_key: str | None = None
+    api_key: SecretStr | None = None
     base_url: str = "https://api.cala.ai/v1"
 
     @model_validator(mode="after")
     def _resolve_credentials(self) -> "CalaSearch":
         if self.integration is None and self.api_key is None:
-            self.api_key = os.getenv("CALA_API_KEY")
+            env_key = os.getenv("CALA_API_KEY")
+            if env_key:
+                self.api_key = SecretStr(env_key)
         if self.integration is None and not self.api_key:
             raise ValueError(
                 "Cala API key not found. Set CALA_API_KEY environment variable, "
@@ -50,7 +52,7 @@ class CalaSearch(Tool):
                 api_key = credential.token
             else:
                 assert self.api_key is not None  # Validated in _resolve_credentials
-                api_key = self.api_key
+                api_key = self.api_key.get_secret_value()
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(

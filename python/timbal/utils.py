@@ -306,7 +306,8 @@ def create_model_from_handler(name: str, handler: Callable[..., Any]) -> BaseMod
             field_info = Field(field_info)
         field_type = argspec.annotations.get(field_name, Any)
         fields[field_name] = (field_type, field_info)
-    return create_model(name, __config__=ConfigDict(extra="ignore"), **fields)
+    extra_mode = "allow" if argspec.varkw else "ignore"
+    return create_model(name, __config__=ConfigDict(extra=extra_mode), **fields)
 
 
 def issubclass_safe(candidate: Any, base_class: type[Any]) -> bool:

@@ -1278,7 +1278,7 @@ class TestComplexNestedExecution:
         superagent = Agent(
             name="super_agent",
             model="openai/gpt-4o-mini",
-            model_params={"max_tokens": 2048},
+            max_tokens=2048,
             pre_hook=superagent_pre_hook,
             post_hook=superagent_post_hook,
             tools=[secret_agent],
