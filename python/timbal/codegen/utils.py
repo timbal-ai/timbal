@@ -22,6 +22,28 @@ FRAMEWORK_TOOL_CONFIGS: dict[str, tuple[str, str]] = {
 }
 
 
+ENTRY_POINT_TYPES = {"Agent", "Workflow"}
+
+
+def resolve_entry_point_type(tree: cst.Module, entry_point: str) -> str | None:
+    """Return the constructor class name ('Agent' or 'Workflow') for the entry point variable.
+
+    Inspects top-level assignments to find `entry_point = ClassName(...)` and returns
+    the class name if it's a known entry point type. Returns None if not found.
+    """
+    for stmt in tree.body:
+        if isinstance(stmt, cst.SimpleStatementLine):
+            for item in stmt.body:
+                if isinstance(item, cst.Assign):
+                    for target in item.targets:
+                        if isinstance(target.target, cst.Name) and target.target.value == entry_point:
+                            if isinstance(item.value, cst.Call) and isinstance(item.value.func, cst.Name):
+                                cls_name = item.value.func.value
+                                if cls_name in ENTRY_POINT_TYPES:
+                                    return cls_name
+    return None
+
+
 def _get_string_value(node: cst.BaseExpression) -> str | None:
     """Extract the string value from a CST string node."""
     if isinstance(node, cst.SimpleString):
