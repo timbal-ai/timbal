@@ -19,13 +19,13 @@ class SendEmail(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.config.integration},
+            "integration": {"type": "string", "value": self.integration},
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _send_email(to: str, subject: str, body: str) -> Any:
-            assert isinstance(self.config.integration, Integration)
-            credential = await self.config.integration.resolve()
+            assert isinstance(self.integration, Integration)
+            credential = await self.integration.resolve()
             token = credential.token
 
             message = f"To: {to}\r\nSubject: {subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}"
