@@ -78,6 +78,7 @@ exclude = [
     "/.git",
     "/.github",
     "/cli",
+    "/tui",
     "/dist",
     "/docs",
     "/examples",

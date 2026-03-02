@@ -9,13 +9,16 @@ try:
 except ImportError:
     from typing_extensions import override
 
+import structlog
 import yaml
-from pydantic import Field, model_validator
+from pydantic import Field, PrivateAttr, model_validator
 
 from ..state import get_or_create_run_context
 from .runnable import Runnable
 from .tool import Tool
 from .tool_set import ToolSet
+
+logger = structlog.get_logger("timbal.core.skill")
 
 
 class Skill(ToolSet):
@@ -24,6 +27,8 @@ class Skill(ToolSet):
     path: Path
     tools: list[Runnable] = []
     references: dict[str, str] = {}
+
+    _agent_path: str = PrivateAttr()
 
     @model_validator(mode="after")
     def validate_skill_structure(self) -> "Skill":
@@ -86,6 +91,7 @@ class Skill(ToolSet):
                 attr = getattr(module, attr_name)
                 if isinstance(attr, Runnable):
                     self.tools.append(attr)
+                    logger.info(f"Loaded tool {attr_name} from {tool_path}")
 
         return self
 
@@ -103,9 +109,11 @@ class Skill(ToolSet):
     @override
     async def resolve(self) -> list[Runnable]:
         """See base class."""
-        session = await get_or_create_run_context().get_session()
-        if self.name in session.get("__in_context_skills", []):
-            return self.tools
+        if self._agent_path:
+            session = await get_or_create_run_context().get_session()
+            in_context_skills = session.get("__in_context_skills", {})
+            if self.name in in_context_skills.get(self._agent_path, []):
+                return self.tools
         return []
 
 

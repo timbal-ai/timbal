@@ -308,6 +308,7 @@ class Agent(Runnable):
                 )
             for skill_path in self.skills_path.iterdir():
                 skill = Skill(path=skill_path)
+                skill._agent_path = self._path
                 self.tools.append(skill)
 
         # Normalize tools and prevent duplicate names
