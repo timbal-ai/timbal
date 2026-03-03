@@ -8,6 +8,47 @@ from ..platform.integrations import Integration
 _AIRTABLE_API_BASE = "https://api.airtable.com/v0"
 _AIRTABLE_META_BASE = "https://api.airtable.com/v0/meta"
 
+_BATCH_SIZE = 10  # Airtable hard limit per request
+
+
+def _validate_airtable_id(value: str, expected_prefix: str, param_name: str) -> None:
+    """Raise ValueError early when a human-readable name is passed instead of an Airtable ID."""
+    if not value.startswith(expected_prefix):
+        hint = "Use airtable_list_bases to look up the correct ID." if expected_prefix == "app" else ""
+        raise ValueError(
+            f"'{param_name}' must be an Airtable ID starting with '{expected_prefix}' "
+            f"(e.g. '{expected_prefix}xxxxxxxxxxxxx'), got: '{value}'. {hint}".strip()
+        )
+
+
+def _normalize_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Normalize field values so {\"name\": \"...\"}  single-key dicts become plain strings.
+
+    Airtable's singleSelect field expects a bare string, not an object with a 'name' key.
+    This handles both formats transparently so callers never need to know the difference.
+    """
+    result: dict[str, Any] = {}
+    for k, v in fields.items():
+        if isinstance(v, dict) and tuple(v.keys()) == ("name",):
+            result[k] = v["name"]
+        else:
+            result[k] = v
+    return result
+
+
+async def _raise_for_status(response: httpx.Response) -> None:
+    """Like response.raise_for_status() but always includes the response body in the message."""
+    if response.is_error:
+        try:
+            body: Any = response.json()
+        except Exception:
+            body = response.text
+        raise httpx.HTTPStatusError(
+            f"HTTP {response.status_code} {response.request.method} {response.url} — {body}",
+            request=response.request,
+            response=response,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Records
@@ -39,8 +80,10 @@ class ListRecords(Tool):
             offset: str | None = None,
         ) -> Any:
             """
+            base_id: Airtable base ID starting with 'app' (not the base name).
             sort: list of {"field": "Name", "direction": "asc" | "desc"}
             """
+            _validate_airtable_id(base_id, "app", "base_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
@@ -67,7 +110,7 @@ class ListRecords(Tool):
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -94,6 +137,12 @@ class GetRecord(Tool):
             table_id_or_name: str,
             record_id: str,
         ) -> Any:
+            """
+            base_id: Airtable base ID starting with 'app' (not the base name).
+            record_id: Airtable record ID starting with 'rec'.
+            """
+            _validate_airtable_id(base_id, "app", "base_id")
+            _validate_airtable_id(record_id, "rec", "record_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
@@ -103,7 +152,7 @@ class GetRecord(Tool):
                     f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}/{record_id}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -132,21 +181,33 @@ class CreateRecords(Tool):
             typecast: bool = False,
         ) -> Any:
             """
-            records: list of {"fields": {"FieldName": value, ...}}
+            base_id: Airtable base ID starting with 'app' (not the base name).
+            records: list of {"fields": {"FieldName": value, ...}}.
+                     singleSelect values can be passed as a plain string or {"name": "..."} — both are accepted.
             typecast: if True, Airtable will attempt to convert string values to the correct type.
+
+            Automatically splits the request into batches of 10 (Airtable's hard limit).
             """
+            _validate_airtable_id(base_id, "app", "base_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
 
+            normalized = [{"fields": _normalize_fields(r["fields"])} for r in records]
+            all_created: list[Any] = []
+
             async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}",
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={"records": records, "typecast": typecast},
-                )
-                response.raise_for_status()
-                return response.json()
+                for i in range(0, len(normalized), _BATCH_SIZE):
+                    batch = normalized[i : i + _BATCH_SIZE]
+                    response = await client.post(
+                        f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"records": batch, "typecast": typecast},
+                    )
+                    await _raise_for_status(response)
+                    all_created.extend(response.json().get("records", []))
+
+            return {"records": all_created}
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "Airtable/CreateRecords"
@@ -175,22 +236,26 @@ class UpdateRecords(Tool):
             destructive: bool = False,
         ) -> Any:
             """
-            records: list of {"id": "recXXX", "fields": {"FieldName": value, ...}}
+            base_id: Airtable base ID starting with 'app' (not the base name).
+            records: list of {"id": "recXXX", "fields": {"FieldName": value, ...}}.
+                     singleSelect values can be passed as a plain string or {"name": "..."} — both are accepted.
             destructive: if True, uses PUT (replaces all fields); if False, uses PATCH (merges fields).
             """
+            _validate_airtable_id(base_id, "app", "base_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
 
+            normalized = [{"id": r["id"], "fields": _normalize_fields(r["fields"])} for r in records]
             method = "put" if destructive else "patch"
 
             async with httpx.AsyncClient() as client:
                 response = await getattr(client, method)(
                     f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"records": records, "typecast": typecast},
+                    json={"records": normalized, "typecast": typecast},
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -217,6 +282,11 @@ class DeleteRecords(Tool):
             table_id_or_name: str,
             record_ids: list[str],
         ) -> Any:
+            """
+            base_id: Airtable base ID starting with 'app' (not the base name).
+            record_ids: list of record IDs to delete (each starting with 'rec').
+            """
+            _validate_airtable_id(base_id, "app", "base_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
@@ -227,7 +297,7 @@ class DeleteRecords(Tool):
                     headers={"Authorization": f"Bearer {token}"},
                     params=[("records[]", rid) for rid in record_ids],
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -256,6 +326,8 @@ class ListComments(Tool):
             page_size: int = 100,
             offset: str | None = None,
         ) -> Any:
+            _validate_airtable_id(base_id, "app", "base_id")
+            _validate_airtable_id(record_id, "rec", "record_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
@@ -270,7 +342,7 @@ class ListComments(Tool):
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -312,7 +384,7 @@ class ListBases(Tool):
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -340,6 +412,11 @@ class ListTables(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_tables(base_id: str) -> Any:
+            """
+            base_id: Airtable base ID starting with 'app' (not the base name).
+                     Use airtable_list_bases first if you only have the base name.
+            """
+            _validate_airtable_id(base_id, "app", "base_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
@@ -350,7 +427,7 @@ class ListTables(Tool):
                     headers={"Authorization": f"Bearer {token}"},
                     params={"include[]": "visibleFieldIds"},
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 data = response.json()
                 return [
                     {"id": t["id"], "name": t["name"], "description": t.get("description")}
@@ -377,6 +454,7 @@ class BaseSchema(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _base_schema(base_id: str) -> Any:
+            _validate_airtable_id(base_id, "app", "base_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
@@ -386,7 +464,7 @@ class BaseSchema(Tool):
                     f"{_AIRTABLE_META_BASE}/bases/{base_id}/tables",
                     headers={"Authorization": f"Bearer {token}"},
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -415,11 +493,13 @@ class CreateTable(Tool):
             description: str | None = None,
         ) -> Any:
             """
+            base_id: Airtable base ID starting with 'app' (not the base name).
             fields: list of field definitions, e.g.:
               [{"name": "Name", "type": "singleLineText"},
                {"name": "Status", "type": "singleSelect", "options": {"choices": [{"name": "Todo"}]}}]
             The first field must be the primary field and cannot be a computed type.
             """
+            _validate_airtable_id(base_id, "app", "base_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
@@ -434,7 +514,7 @@ class CreateTable(Tool):
                     headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -462,6 +542,8 @@ class UpdateTable(Tool):
             name: str | None = None,
             description: str | None = None,
         ) -> Any:
+            _validate_airtable_id(base_id, "app", "base_id")
+            _validate_airtable_id(table_id, "tbl", "table_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
@@ -478,7 +560,7 @@ class UpdateTable(Tool):
                     headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -514,11 +596,15 @@ class CreateField(Tool):
             options: dict[str, Any] | None = None,
         ) -> Any:
             """
+            base_id: Airtable base ID starting with 'app'.
+            table_id: Airtable table ID starting with 'tbl'.
             type: Airtable field type, e.g. "singleLineText", "number", "singleSelect",
                   "multipleSelects", "date", "checkbox", "url", "email", "phoneNumber",
                   "currency", "percent", "duration", "rating", "multilineText", etc.
             options: type-specific options, e.g. {"choices": [{"name": "Option A"}]} for singleSelect.
             """
+            _validate_airtable_id(base_id, "app", "base_id")
+            _validate_airtable_id(table_id, "tbl", "table_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
@@ -535,7 +621,7 @@ class CreateField(Tool):
                     headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -565,6 +651,8 @@ class UpdateField(Tool):
             description: str | None = None,
             options: dict[str, Any] | None = None,
         ) -> Any:
+            _validate_airtable_id(base_id, "app", "base_id")
+            _validate_airtable_id(table_id, "tbl", "table_id")
             assert isinstance(self.integration, Integration)
             credential = await self.integration.resolve()
             token = credential.token
@@ -583,7 +671,7 @@ class UpdateField(Tool):
                     headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
-                response.raise_for_status()
+                await _raise_for_status(response)
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
