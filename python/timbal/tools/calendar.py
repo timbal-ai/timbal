@@ -9,6 +9,8 @@ from ..platform.integrations import Integration
 _CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3"
 
 class ListEvents(Tool):
+    name: str = "google_calendar_list_events"
+    description: str | None = "List events from Google Calendar for a specified time range."
     integration: Annotated[str, Integration("google_calendar")]
 
     def get_config(self) -> dict[str, Any]:
@@ -54,16 +56,12 @@ class ListEvents(Tool):
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GoogleCalendar/ListEvents"
 
-        super().__init__(
-            name="google_calendar_list_events",
-            description="List events from Google Calendar for a specified time range.",
-            handler=_list_events,
-            metadata=metadata,
-            **kwargs,
-        )
+        super().__init__(handler=_list_events, metadata=metadata, **kwargs)
 
 
 class CreateEvent(Tool):
+    name: str = "google_calendar_create_event"
+    description: str | None = "Create a new event in Google Calendar."
     integration: Annotated[str, Integration("google_calendar")]
 
     def get_config(self) -> dict[str, Any]:
@@ -112,16 +110,12 @@ class CreateEvent(Tool):
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GoogleCalendar/CreateEvent"
 
-        super().__init__(
-            name="google_calendar_create_event",
-            description="Create a new event in Google Calendar.",
-            handler=_create_event,
-            metadata=metadata,
-            **kwargs,
-        )
+        super().__init__(handler=_create_event, metadata=metadata, **kwargs)
 
 
 class UpdateEvent(Tool):
+    name: str = "google_calendar_update_event"
+    description: str | None = "Update an existing event in Google Calendar."
     integration: Annotated[str, Integration("google_calendar")]
 
     def get_config(self) -> dict[str, Any]:
@@ -170,16 +164,12 @@ class UpdateEvent(Tool):
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GoogleCalendar/UpdateEvent"
 
-        super().__init__(
-            name="google_calendar_update_event",
-            description="Update an existing event in Google Calendar.",
-            handler=_update_event,
-            metadata=metadata,
-            **kwargs,
-        )
+        super().__init__(handler=_update_event, metadata=metadata, **kwargs)
 
 
 class DeleteEvent(Tool):
+    name: str = "google_calendar_delete_event"
+    description: str | None = "Delete an event from Google Calendar."
     integration: Annotated[str, Integration("google_calendar")]
 
     def get_config(self) -> dict[str, Any]:
@@ -209,16 +199,12 @@ class DeleteEvent(Tool):
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GoogleCalendar/DeleteEvent"
 
-        super().__init__(
-            name="google_calendar_delete_event",
-            description="Delete an event from Google Calendar.",
-            handler=_delete_event,
-            metadata=metadata,
-            **kwargs,
-        )
+        super().__init__(handler=_delete_event, metadata=metadata, **kwargs)
 
 
 class UpdateAttendeeStatus(Tool):
+    name: str = "google_calendar_update_attendee_status"
+    description: str | None = "Update an attendee's response status for a Google Calendar event."
     integration: Annotated[str, Integration("google_calendar")]
 
     def get_config(self) -> dict[str, Any]:
@@ -269,16 +255,12 @@ class UpdateAttendeeStatus(Tool):
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GoogleCalendar/UpdateAttendeeStatus"
 
-        super().__init__(
-            name="google_calendar_update_attendee_status",
-            description="Update an attendee's response status for a Google Calendar event.",
-            handler=_update_attendee_status,
-            metadata=metadata,
-            **kwargs,
-        )
+        super().__init__(handler=_update_attendee_status, metadata=metadata, **kwargs)
 
 
 class CheckFreeSlots(Tool):
+    name: str = "google_calendar_check_free_slots"
+    description: str | None = "Check for available (free) time slots across one or more Google Calendars."
     integration: Annotated[str, Integration("google_calendar")]
 
     def get_config(self) -> dict[str, Any]:
@@ -320,10 +302,4 @@ class CheckFreeSlots(Tool):
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GoogleCalendar/CheckFreeSlots"
 
-        super().__init__(
-            name="google_calendar_check_free_slots",
-            description="Check for available (free) time slots across one or more Google Calendars.",
-            handler=_check_free_slots,
-            metadata=metadata,
-            **kwargs,
-        )
+        super().__init__(handler=_check_free_slots, metadata=metadata, **kwargs)
