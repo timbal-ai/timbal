@@ -3,24 +3,13 @@ import argparse
 import libcst as cst
 
 from ..utils import (
-    FRAMEWORK_TOOL_NAMES,
     collect_assignments,
+    get_framework_tool_names,
+    get_framework_tools,
     has_import,
     resolve_entry_point_type,
     resolve_runnable_name,
 )
-
-# Framework tools: class name -> module path
-FRAMEWORK_TOOLS = {
-    "Bash": "timbal.tools",
-    "CalaSearch": "timbal.tools",
-    "Edit": "timbal.tools",
-    "Read": "timbal.tools",
-    "WebSearch": "timbal.tools",
-    "Write": "timbal.tools",
-}
-
-TOOL_TYPES = [*FRAMEWORK_TOOLS.keys(), "Custom"]
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -28,7 +17,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "add-tool",
         help="Add a tool to the agent's tools list.",
     )
-    sp.add_argument("--type", choices=TOOL_TYPES, required=True, dest="tool_type", help="Type of tool to add.")
+    sp.add_argument("--type", required=True, dest="tool_type", help="Type of tool to add.")
     sp.add_argument(
         "--definition",
         default=None,
@@ -61,6 +50,10 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     target = step if step else entry_point
     assignments = collect_assignments(tree) if tree else {}
     tool_type = args.tool_type
+    valid_types = [*get_framework_tools().keys(), "Custom"]
+
+    if tool_type not in valid_types:
+        raise ValueError(f"--type must be one of {valid_types}, got '{tool_type}'.")
 
     if tool_type == "Custom":
         if not args.definition:
@@ -89,8 +82,9 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         )
 
     # Framework tool.
-    var_name = args.tool_name if args.tool_name else FRAMEWORK_TOOL_NAMES[tool_type]
-    runtime_name = args.tool_name if args.tool_name else FRAMEWORK_TOOL_NAMES[tool_type]
+    framework_names = get_framework_tool_names()
+    var_name = args.tool_name if args.tool_name else framework_names[tool_type]
+    runtime_name = args.tool_name if args.tool_name else framework_names[tool_type]
     return ToolAdder(
         entry_point, assignments,
         target=target,
@@ -176,7 +170,7 @@ class ToolAdder(cst.CSTTransformer):
 
         # --- Imports ---
         if self.tool_type != "Custom":
-            module = FRAMEWORK_TOOLS[self.class_name]
+            module = get_framework_tools()[self.class_name].module
             if not has_import(original_node, module, self.class_name):
                 imports_to_add.append(cst.parse_statement(f"from {module} import {self.class_name}\n"))
         else:

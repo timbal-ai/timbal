@@ -32,6 +32,7 @@ def main() -> None:
 
     # Read-only operations (not CST transformers)
     subparsers.add_parser("get-flow", help="Print the graph for the workspace entry point.")
+    subparsers.add_parser("list-tools", help="List available framework tool types.")
 
     # Test run operation
     test_parser = subparsers.add_parser("test", help="Execute a single test run of the workspace entry point.")
@@ -47,6 +48,16 @@ def main() -> None:
 
     workspace_path = Path(args.path)
     operation = args.operation
+
+    if operation == "list-tools":
+        from timbal.codegen.utils import get_framework_tools
+
+        tools = [
+            {"type": cls, "module": ft.module, "name": ft.name, "description": ft.description}
+            for cls, ft in sorted(get_framework_tools().items())
+        ]
+        print(json.dumps(tools, indent=2))
+        return
 
     if operation == "get-flow":
         try:

@@ -4,25 +4,14 @@ import json
 import libcst as cst
 
 from ..utils import (
-    FRAMEWORK_TOOL_NAMES,
     collect_assignments,
+    get_framework_tool_names,
+    get_framework_tools,
     has_import,
     resolve_entry_point_type,
     resolve_runnable_name,
 )
 from .set_config import AGENT_FIELDS
-
-# Framework tools: class name -> module path (same as add_tool)
-FRAMEWORK_TOOLS = {
-    "Bash": "timbal.tools",
-    "CalaSearch": "timbal.tools",
-    "Edit": "timbal.tools",
-    "Read": "timbal.tools",
-    "WebSearch": "timbal.tools",
-    "Write": "timbal.tools",
-}
-
-STEP_TYPES = [*FRAMEWORK_TOOLS.keys(), "Agent", "Custom"]
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -30,7 +19,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "add-step",
         help="Add a step to the workflow.",
     )
-    sp.add_argument("--type", choices=STEP_TYPES, required=True, dest="step_type", help="Type of step to add.")
+    sp.add_argument("--type", required=True, dest="step_type", help="Type of step to add.")
     sp.add_argument(
         "--definition",
         default=None,
@@ -58,6 +47,10 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     assignments = collect_assignments(tree) if tree else {}
     step_type = args.step_type
     config = json.loads(args.config) if args.config else {}
+    valid_types = [*get_framework_tools().keys(), "Agent", "Custom"]
+
+    if step_type not in valid_types:
+        raise ValueError(f"--type must be one of {valid_types}, got '{step_type}'.")
 
     if step_type == "Custom":
         if not args.definition:
@@ -108,8 +101,9 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         )
 
     # Framework tool step.
-    var_name = args.step_name if args.step_name else FRAMEWORK_TOOL_NAMES[step_type]
-    runtime_name = args.step_name if args.step_name else FRAMEWORK_TOOL_NAMES[step_type]
+    framework_names = get_framework_tool_names()
+    var_name = args.step_name if args.step_name else framework_names[step_type]
+    runtime_name = args.step_name if args.step_name else framework_names[step_type]
     return StepAdder(
         entry_point, assignments,
         step_type=step_type,
@@ -215,7 +209,7 @@ class StepAdder(cst.CSTTransformer):
             if not has_import(original_node, "timbal", "Agent"):
                 imports_to_add.append(cst.parse_statement("from timbal import Agent\n"))
         elif self.step_type != "Custom":
-            module = FRAMEWORK_TOOLS[self.class_name]
+            module = get_framework_tools()[self.class_name].module
             if not has_import(original_node, module, self.class_name):
                 imports_to_add.append(cst.parse_statement(f"from {module} import {self.class_name}\n"))
 

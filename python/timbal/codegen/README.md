@@ -296,6 +296,24 @@ python -m timbal.codegen rename web_search --to my_search
 
 ---
 
+### `list-tools` — List available framework tool types
+
+```bash
+python -m timbal.codegen list-tools
+```
+
+Outputs a JSON array of framework tools discovered from `timbal.tools`:
+
+```json
+[
+  {"type": "Bash", "module": "timbal.tools", "name": "bash", "description": null},
+  {"type": "CalaSearch", "module": "timbal.tools", "name": "cala_search", "description": "Search for verified knowledge..."},
+  ...
+]
+```
+
+---
+
 ### `get-flow` — Print the execution graph
 
 ```bash

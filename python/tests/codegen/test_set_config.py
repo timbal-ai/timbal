@@ -260,7 +260,7 @@ class TestToolConfig:
         assert result.returncode != 0
         assert "Unknown config field(s)" in result.stderr
 
-    def test_rejects_config_for_unconfigurable_tool(self, workspace):
+    def test_rejects_unknown_config_field_for_tool(self, workspace):
         ws = workspace("""\
         from timbal.core import Agent
         from timbal.tools import Edit
@@ -272,7 +272,7 @@ class TestToolConfig:
         config = json.dumps({"some_param": "value"})
         result = _run_dry_fail(ws, "edit", "--config", config)
         assert result.returncode != 0
-        assert "not supported" in result.stderr
+        assert "Unknown config field(s)" in result.stderr
 
     def test_tool_not_found(self, workspace):
         ws = workspace("""\

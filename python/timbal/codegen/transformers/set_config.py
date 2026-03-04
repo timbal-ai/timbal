@@ -4,9 +4,9 @@ import json
 import libcst as cst
 
 from ..utils import (
-    FRAMEWORK_TOOL_NAMES,
     build_cst_value,
     collect_assignments,
+    get_framework_tool_names,
     has_import,
     resolve_entry_point_type,
     resolve_runnable_name,
@@ -129,7 +129,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         if tool_class is None:
             raise ValueError(f"Tool '{args.tool_name}' not found in agent tools list.")
         validate_tool_config(tool_class, config)
-        var_name = FRAMEWORK_TOOL_NAMES.get(tool_class, args.tool_name)
+        var_name = get_framework_tool_names().get(tool_class, args.tool_name)
         return ToolConfigSetter(entry_point, args.tool_name, config, assignments, tool_class, var_name)
 
     if not config:
