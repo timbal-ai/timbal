@@ -263,3 +263,88 @@ class TestRemoveEdgeCases:
         ns = _exec_agent(result.stdout)
         tool_names = [t.name for t in ns["agent"].tools]
         assert tool_names == ["edit"]
+
+
+# ---------------------------------------------------------------------------
+# --step flag (Workflow entry point)
+# ---------------------------------------------------------------------------
+
+WORKFLOW_YAML = 'fqn: "workflow.py::workflow"\n'
+
+
+@pytest.fixture
+def wf_workspace(tmp_path):
+    """Write a workflow source file + timbal.yaml and return the workspace directory."""
+
+    def _write(source: str) -> Path:
+        (tmp_path / "workflow.py").write_text(textwrap.dedent(source))
+        (tmp_path / "timbal.yaml").write_text(WORKFLOW_YAML)
+        return tmp_path
+
+    return _write
+
+
+def _run_dry_wf(workspace_path: Path, tool_name: str, *extra_args: str) -> str:
+    """Run codegen remove-tool with --dry-run on a workflow workspace."""
+    result = subprocess.run(
+        [
+            "python", "-m", "timbal.codegen", "--path", str(workspace_path),
+            "--dry-run", "remove-tool", tool_name, *extra_args,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"codegen failed:\n{result.stderr}"
+    return result.stdout
+
+
+class TestRemoveToolStep:
+    def test_removes_tool_from_workflow_step(self, wf_workspace):
+        """Remove a tool from a specific Agent step in a Workflow."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch()
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", tools=[web_search])
+
+        workflow = Workflow(name="workflow")
+        workflow.step(agent_a)
+        """)
+        output = _run_dry_wf(ws, "web_search", "--step", "agent_a")
+        assert "tools=[]" in output or "tools" not in output
+
+    def test_removes_one_tool_keeps_others_on_step(self, wf_workspace):
+        """Remove one tool from a step that has multiple tools."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.tools import WebSearch, Edit
+
+        web_search = WebSearch()
+        edit = Edit()
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", tools=[web_search, edit])
+
+        workflow = Workflow(name="workflow")
+        workflow.step(agent_a)
+        """)
+        output = _run_dry_wf(ws, "web_search", "--step", "agent_a")
+        assert "edit" in output
+        assert "tools=[edit]" in output
+
+    def test_rejects_step_on_agent_entry_point(self, workspace):
+        """--step should fail when the entry point is an Agent."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "remove-tool", "web_search", "--step", "agent_a",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "--step requires a Workflow" in result.stderr

@@ -41,6 +41,9 @@ python -m timbal.codegen add-tool --type WebSearch --name my_search
 # Custom tool from a function definition
 python -m timbal.codegen add-tool --type Custom \
   --definition "def search(query: str) -> str:\n    return results"
+
+# Add a tool to a specific step in a Workflow
+python -m timbal.codegen add-tool --type WebSearch --step agent_a
 ```
 
 | Argument | Required | Description |
@@ -48,8 +51,9 @@ python -m timbal.codegen add-tool --type Custom \
 | `--type` | yes | `Bash`, `CalaSearch`, `Edit`, `Read`, `WebSearch`, `Write`, or `Custom` |
 | `--definition` | Custom only | Full function definition as a string |
 | `--name` | no | Override the default tool name |
+| `--step` | no | Target step name within a Workflow (adds tool to that step's tools list) |
 
-**Requires**: Agent entry point.
+**Requires**: Agent entry point, or Workflow entry point when using `--step`.
 
 **What it does**:
 - Adds the import (`from timbal.tools import WebSearch` or `from timbal.core import Tool`)
@@ -63,13 +67,17 @@ python -m timbal.codegen add-tool --type Custom \
 
 ```bash
 python -m timbal.codegen remove-tool web_search
+
+# Remove a tool from a specific step in a Workflow
+python -m timbal.codegen remove-tool web_search --step agent_a
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
 | `<tool_name>` | yes | Name of the tool variable or runtime name to remove |
+| `--step` | no | Target step name within a Workflow (removes tool from that step's tools list) |
 
-**Requires**: Agent entry point.
+**Requires**: Agent entry point, or Workflow entry point when using `--step`.
 
 Removes the tool reference from the Agent's `tools=[...]` list. Unused variables, functions, and imports are cleaned up automatically.
 
@@ -174,6 +182,8 @@ python -m timbal.codegen set-config agent_b \
 | `--params` | no | JSON object mapping input params to source steps (Workflow only) |
 | `--depends-on` | no | Step dependency name, repeatable (Workflow only) |
 
+**Removing params or dependencies**: To remove a `--params` mapping or `--depends-on` entry, re-send the full set without the one you want to remove. The provided values replace the existing ones entirely — there is no separate "remove" operation.
+
 ---
 
 ### `add-step` — Add a step to a Workflow
@@ -260,6 +270,29 @@ agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
 workflow = Workflow(name="workflow")
 workflow.step(agent_a)
 ```
+
+---
+
+### `rename` — Rename a step or tool
+
+```bash
+# Rename a workflow step
+python -m timbal.codegen rename agent_a --to agent_b
+
+# Rename a tool
+python -m timbal.codegen rename web_search --to my_search
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `<old_name>` | yes | Current runtime name of the step or tool |
+| `--to` | yes | New name |
+
+**What it does**:
+- Renames the variable and updates the `name=` kwarg in the constructor
+- Updates all references: `tools=[...]` list entries, `.step()` call arguments
+- Updates string references in `depends_on=["..."]` and `step_span("...")` calls
+- Cannot rename the entry point variable (referenced by `timbal.yaml`)
 
 ---
 

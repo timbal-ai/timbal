@@ -11,16 +11,27 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Remove a tool from the agent's tools list by name.",
     )
     sp.add_argument("value", help="The tool name to remove. E.g. my_search_tool.")
+    sp.add_argument(
+        "--step",
+        default=None,
+        help="Target step name within a Workflow. When provided, the tool is removed from the step's tools list.",
+    )
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
+    step = getattr(args, "step", None)
     if tree is not None:
         ep_type = resolve_entry_point_type(tree, entry_point)
-        if ep_type is not None and ep_type != "Agent":
-            raise ValueError(f"remove-tool requires an Agent entry point, but '{entry_point}' is a {ep_type}.")
+        if step:
+            if ep_type is not None and ep_type != "Workflow":
+                raise ValueError(f"--step requires a Workflow entry point, but '{entry_point}' is a {ep_type}.")
+        else:
+            if ep_type is not None and ep_type != "Agent":
+                raise ValueError(f"remove-tool requires an Agent entry point, but '{entry_point}' is a {ep_type}.")
 
+    target = step if step else entry_point
     assignments = collect_assignments(tree) if tree else {}
-    return ToolRemover(entry_point, args.value, assignments)
+    return ToolRemover(target, args.value, assignments)
 
 
 class ToolRemover(cst.CSTTransformer):
