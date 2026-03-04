@@ -1,8 +1,8 @@
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Literal
+from typing import Any
 
 import structlog
-from pydantic import BaseModel, Discriminator, GetCoreSchemaHandler, GetJsonSchemaHandler, TypeAdapter
+from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema, core_schema
 
@@ -12,26 +12,7 @@ logger = structlog.get_logger("timbal.platform.integrations")
 
 _EXPIRY_BUFFER = timedelta(seconds=60)
 
-_credential_cache: dict[tuple[str, str, str], "IntegrationCredential"] = {}
-
-
-class BearerIntegrationCredential(BaseModel):
-    token_type: Literal["bearer"]
-    token: str
-    expires_at: datetime | None = None
-
-
-class ApiKeyIntegrationCredential(BaseModel):
-    token_type: Literal["api_key"]
-    token: str
-
-
-IntegrationCredential = Annotated[
-    BearerIntegrationCredential | ApiKeyIntegrationCredential,
-    Discriminator("token_type"),
-]
-
-IntegrationCredentialAdapter = TypeAdapter(IntegrationCredential)
+_credential_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 
 class Integration:
@@ -66,7 +47,7 @@ class Integration:
             "x-timbal-integration": {"provider": self.provider},
         }
 
-    async def resolve(self) -> BearerIntegrationCredential | ApiKeyIntegrationCredential:
+    async def resolve(self) -> dict[str, Any]:
         if self._org_integration_id is None:
             raise ValueError("Cannot resolve an Integration without an org_integration_id.")
 
@@ -84,17 +65,14 @@ class Integration:
         cache_key = (platform_config.host, subject.org_id, self._org_integration_id)
         cached = _credential_cache.get(cache_key)
         if cached is not None:
-            if isinstance(cached, BearerIntegrationCredential):
-                if cached.expires_at is None or cached.expires_at > datetime.now(UTC) + _EXPIRY_BUFFER:
-                    return cached
-            else:
+            expires_at = cached.get("expires_at")
+            if expires_at is None or expires_at > datetime.now(UTC) + _EXPIRY_BUFFER:
                 return cached
 
         path = f"orgs/{subject.org_id}/integrations/{self._org_integration_id}"
         response = await _request("GET", path)
-        data = response.json()
+        credential = response.json()
 
-        credential = IntegrationCredentialAdapter.validate_python(data)
         _credential_cache[cache_key] = credential
         return credential
 
