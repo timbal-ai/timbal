@@ -165,8 +165,8 @@ class GmailSendEmail(Tool):
             if self.integration:
                 assert isinstance(self.integration, Integration)
                 credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+                assert "token" in credentials
+                api_key = credentials["token"]
 
             if isinstance(to, list):
                 to_str = ", ".join(to)
@@ -187,7 +187,7 @@ class GmailSendEmail(Tool):
 
             if attachment_urls or message_format == "html" or email_signature:
                 boundary = "----=_NextPart_" + base64.urlsafe_b64encode(str(hash(body)).encode()).decode()[:16]
-                message_parts.append(f"MIME-Version: 1.0")
+                message_parts.append("MIME-Version: 1.0")
                 message_parts.append(f'Content-Type: multipart/mixed; boundary="{boundary}"')
                 message_parts.append("")
                 
@@ -309,8 +309,8 @@ class GmailReplyToEmail(Tool):
             if self.integration:
                 assert isinstance(self.integration, Integration)
                 credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+                assert "token" in credentials
+                api_key = credentials["token"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -547,8 +547,8 @@ class GmailSearchEmails(Tool):
             if self.integration:
                 assert isinstance(self.integration, Integration)
                 credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+                assert "token" in credentials
+                api_key = credentials["token"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -666,8 +666,8 @@ class GmailAddLabelToEmail(Tool):
             if self.integration:
                 assert isinstance(self.integration, Integration)
                 credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+                assert "token" in credentials
+                api_key = credentials["token"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -751,8 +751,8 @@ class GmailListLabels(Tool):
             if self.integration:
                 assert isinstance(self.integration, Integration)
                 credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+                assert "token" in credentials
+                api_key = credentials["token"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -836,8 +836,8 @@ class GmailRemoveLabelFromEmail(Tool):
             if self.integration:
                 assert isinstance(self.integration, Integration)
                 credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+                assert "token" in credentials
+                api_key = credentials["token"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -863,7 +863,7 @@ class GmailRemoveLabelFromEmail(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{self.base_url}/messages/{email_to_update}/modify",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "removeLabelIds": label_ids_to_remove
                     },

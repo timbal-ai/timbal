@@ -23,13 +23,14 @@ class ListIndexes(Tool):
     def __init__(self, **kwargs: Any) -> None:
         async def _list_indexes() -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_PINECONE_CONTROL_PLANE}/indexes",
-                    headers={"Api-Key": token},
+                    headers={"Api-Key": api_key},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -67,8 +68,9 @@ class CreateIndex(Tool):
             deletion_protection: "enabled" or "disabled".
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             body: dict[str, Any] = {
                 "name": name,
@@ -81,7 +83,7 @@ class CreateIndex(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_PINECONE_CONTROL_PLANE}/indexes",
-                    headers={"Api-Key": token, "Content-Type": "application/json"},
+                    headers={"Api-Key": api_key, "Content-Type": "application/json"},
                     json=body,
                 )
                 response.raise_for_status()
@@ -111,12 +113,13 @@ class DescribeIndexStats(Tool):
             metadata_filter: dict[str, Any] | None = None,
         ) -> Any:
             """
-            index_host: the host URL for the index, e.g. "https://my-index-xyz.svc.pinecone.io"
+            index_host: the host name for the index (without protocol), e.g. "my-index-xyz.svc.pinecone.io"
             metadata_filter: optional metadata filter to count only matching vectors.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             body: dict[str, Any] = {}
             if metadata_filter:
@@ -124,8 +127,8 @@ class DescribeIndexStats(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{index_host}/describe_index_stats",
-                    headers={"Api-Key": token},
+                    f"https://{index_host}/describe_index_stats",
+                    headers={"Api-Key": api_key},
                     json=body,
                 )
                 response.raise_for_status()
@@ -156,7 +159,7 @@ class UpsertVectors(Tool):
             namespace: str = "",
         ) -> Any:
             """
-            index_host: the host URL for the index, e.g. "https://my-index-xyz.svc.pinecone.io"
+            index_host: the host name for the index (without protocol), e.g. "my-index-xyz.svc.pinecone.io"
             vectors: list of vector objects, each with:
               - "id": unique string ID
               - "values": list of floats (the embedding)
@@ -165,13 +168,14 @@ class UpsertVectors(Tool):
             namespace: partition within the index (default "" = default namespace).
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{index_host}/vectors/upsert",
-                    headers={"Api-Key": token},
+                    f"https://{index_host}/vectors/upsert",
+                    headers={"Api-Key": api_key},
                     json={"vectors": vectors, "namespace": namespace},
                 )
                 response.raise_for_status()
@@ -206,7 +210,7 @@ class VectorSearch(Tool):
             include_metadata: bool = True,
         ) -> Any:
             """
-            index_host: the host URL for the index, e.g. "https://my-index-xyz.svc.pinecone.io"
+            index_host: the host name for the index (without protocol), e.g. "my-index-xyz.svc.pinecone.io"
             vector: query embedding as a list of floats.
             top_k: number of nearest neighbors to return.
             namespace: partition to search within (default "" = default namespace).
@@ -215,8 +219,9 @@ class VectorSearch(Tool):
             include_metadata: whether to return metadata in results.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             body: dict[str, Any] = {
                 "vector": vector,
@@ -230,8 +235,8 @@ class VectorSearch(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{index_host}/query",
-                    headers={"Api-Key": token},
+                    f"https://{index_host}/query",
+                    headers={"Api-Key": api_key},
                     json=body,
                 )
                 response.raise_for_status()
@@ -261,9 +266,15 @@ class FetchVectors(Tool):
             ids: list[str],
             namespace: str = "",
         ) -> Any:
+            """
+            index_host: the host name for the index (without protocol), e.g. "my-index-xyz.svc.pinecone.io"
+            ids: list of vector IDs to fetch.
+            namespace: partition to fetch from (default "" = default namespace).
+            """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             params: list[tuple[str, str]] = [("ids", id_) for id_ in ids]
             if namespace:
@@ -271,8 +282,8 @@ class FetchVectors(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{index_host}/vectors/fetch",
-                    headers={"Api-Key": token},
+                    f"https://{index_host}/vectors/fetch",
+                    headers={"Api-Key": api_key},
                     params=params,
                 )
                 response.raise_for_status()
@@ -305,13 +316,16 @@ class DeleteVectors(Tool):
             metadata_filter: dict[str, Any] | None = None,
         ) -> Any:
             """
+            index_host: the host name for the index (without protocol), e.g. "my-index-xyz.svc.pinecone.io"
             ids: list of vector IDs to delete. Provide either ids, metadata_filter, or delete_all=True.
             delete_all: if True, deletes all vectors in the namespace.
+            namespace: partition to delete from (default "" = default namespace).
             metadata_filter: metadata filter to select vectors for deletion.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             body: dict[str, Any] = {"namespace": namespace}
             if ids:
@@ -323,8 +337,8 @@ class DeleteVectors(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{index_host}/vectors/delete",
-                    headers={"Api-Key": token},
+                    f"https://{index_host}/vectors/delete",
+                    headers={"Api-Key": api_key},
                     json=body,
                 )
                 response.raise_for_status()

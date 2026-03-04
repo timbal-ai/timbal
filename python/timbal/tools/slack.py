@@ -1,3 +1,4 @@
+import asyncio
 from typing import Annotated, Any
 
 import httpx
@@ -10,7 +11,7 @@ _SLACK_API_BASE = "https://slack.com/api"
 
 class ReadMessages(Tool):
     name: str = "slack_read_messages"
-    description: str | None = "Read messages from a Slack channel."
+    description: str | None = "Read messages from a Slack channel. If no channel is specified, uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -22,7 +23,7 @@ class ReadMessages(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _read_messages(
-            channel: str,
+            channel: str | None = None,
             limit: int = 20,
             cursor: str | None = None,
             oldest: str | None = None,
@@ -30,16 +31,23 @@ class ReadMessages(Tool):
             inclusive: bool = False,
         ) -> Any:
             """
-            channel: channel ID (e.g. "C1234567890").
+            channel: channel ID (e.g. "C1234567890"). If not provided, uses channel_id from integration.
             cursor: pagination cursor from a previous response's response_metadata.next_cursor.
             oldest / latest: Unix timestamps to bound the time range.
             inclusive: include messages at the oldest/latest boundaries.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
-            params: dict[str, Any] = {"channel": channel, "limit": limit, "inclusive": inclusive}
+            params: dict[str, Any] = {"channel": target_channel, "limit": limit, "inclusive": inclusive}
             if cursor:
                 params["cursor"] = cursor
             if oldest:
@@ -65,7 +73,8 @@ class ReadMessages(Tool):
 class SendMessage(Tool):
     name: str = "slack_send_message"
     description: str | None = (
-        "Send a message to a Slack channel or user. "
+        "Send a message to a Slack channel. "
+        "If no channel is specified, uses the integration's default channel. "
         "Supports plain text and Block Kit UI elements. Either 'text' or 'blocks' must be provided."
     )
     integration: Annotated[str, Integration("slack")]
@@ -79,7 +88,7 @@ class SendMessage(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _send_message(
-            channel: str,
+            channel: str | None = None,
             text: str | None = None,
             blocks: list[dict[str, Any]] | None = None,
             thread_ts: str | None = None,
@@ -91,18 +100,25 @@ class SendMessage(Tool):
             icon_url: str | None = None,
         ) -> Any:
             """
-            channel: channel ID or user ID for a DM (e.g. "C1234567890" or "U1234567890").
+            channel: Slack channel ID or name (e.g., C1234567890 or general). If not provided, uses the channel_id from the integration configuration.
             text: plain text fallback (required if blocks not provided).
             blocks: Block Kit layout elements array.
             thread_ts: timestamp of parent message to reply in a thread.
             reply_broadcast: also send reply to the channel when threading.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             body: dict[str, Any] = {
-                "channel": channel,
+                "channel": target_channel,
                 "unfurl_links": unfurl_links,
                 "unfurl_media": unfurl_media,
                 "reply_broadcast": reply_broadcast,
@@ -137,7 +153,7 @@ class SendMessage(Tool):
 
 class SendEphemeralMessage(Tool):
     name: str = "slack_send_ephemeral_message"
-    description: str | None = "Send an ephemeral message to a user in a channel (only visible to that user)."
+    description: str | None = "Send an ephemeral message to a user in a channel (only visible to that user). Uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -149,8 +165,8 @@ class SendEphemeralMessage(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _send_ephemeral_message(
-            channel: str,
             user: str,
+            channel: str | None = None,
             text: str | None = None,
             blocks: list[dict[str, Any]] | None = None,
             thread_ts: str | None = None,
@@ -159,10 +175,17 @@ class SendEphemeralMessage(Tool):
             user: Slack user ID who will see the ephemeral message.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
-            body: dict[str, Any] = {"channel": channel, "user": user}
+            body: dict[str, Any] = {"channel": target_channel, "user": user}
             if text:
                 body["text"] = text
             if blocks:
@@ -210,14 +233,21 @@ class CreateCanvas(Tool):
             channel_id: if provided, associates the canvas with a channel.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+
+            if channel_id:
+                target_channel_id = channel_id
+            else:
+                assert "channel_id" in credentials
+                target_channel_id = credentials["channel_id"]
 
             body: dict[str, Any] = {"title": title}
             if document_content:
                 body["document_content"] = document_content
-            if channel_id:
-                body["channel_id"] = channel_id
+            if target_channel_id:
+                body["channel_id"] = target_channel_id
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -236,7 +266,7 @@ class CreateCanvas(Tool):
 
 class DeleteMessage(Tool):
     name: str = "slack_delete_message"
-    description: str | None = "Delete a Slack message."
+    description: str | None = "Delete a Slack message. Uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -247,19 +277,29 @@ class DeleteMessage(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_message(channel: str, ts: str) -> Any:
+        async def _delete_message(
+            ts: str,
+            channel: str | None = None,
+        ) -> Any:
             """
             ts: timestamp of the message to delete (the message's unique ID).
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/chat.delete",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "ts": ts},
+                    json={"channel": target_channel, "ts": ts},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -272,7 +312,7 @@ class DeleteMessage(Tool):
 
 class GetMessageThread(Tool):
     name: str = "slack_get_message_thread"
-    description: str | None = "Retrieve a message and all its replies in a thread."
+    description: str | None = "Retrieve a message and all its replies in a thread. Uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -284,19 +324,26 @@ class GetMessageThread(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_message_thread(
-            channel: str,
             ts: str,
             limit: int = 200,
+            channel: str | None = None,
             cursor: str | None = None,
         ) -> Any:
             """
             ts: timestamp of the parent message (thread root).
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
-            params: dict[str, Any] = {"channel": channel, "ts": ts, "limit": limit}
+            params: dict[str, Any] = {"channel": target_channel, "ts": ts, "limit": limit}
             if cursor:
                 params["cursor"] = cursor
 
@@ -317,7 +364,7 @@ class GetMessageThread(Tool):
 
 class PinMessage(Tool):
     name: str = "slack_pin_message"
-    description: str | None = "Pin a message in a Slack channel."
+    description: str | None = "Pin a message in a Slack channel. Uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -328,16 +375,26 @@ class PinMessage(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _pin_message(channel: str, timestamp: str) -> Any:
+        async def _pin_message(
+            timestamp: str,
+            channel: str | None = None,
+        ) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/pins.add",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "timestamp": timestamp},
+                    json={"channel": target_channel, "timestamp": timestamp},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -350,7 +407,7 @@ class PinMessage(Tool):
 
 class UnpinMessage(Tool):
     name: str = "slack_unpin_message"
-    description: str | None = "Unpin a message from a Slack channel."
+    description: str | None = "Unpin a message from a Slack channel. Uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -361,16 +418,26 @@ class UnpinMessage(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _unpin_message(channel: str, timestamp: str) -> Any:
+        async def _unpin_message(
+            timestamp: str,
+            channel: str | None = None,
+        ) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/pins.remove",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "timestamp": timestamp},
+                    json={"channel": target_channel, "timestamp": timestamp},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -383,7 +450,7 @@ class UnpinMessage(Tool):
 
 class ListPinnedItems(Tool):
     name: str = "slack_list_pinned_items"
-    description: str | None = "List all pinned items in a Slack channel."
+    description: str | None = "List all pinned items in a Slack channel. Uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -394,16 +461,23 @@ class ListPinnedItems(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _list_pinned_items(channel: str) -> Any:
+        async def _list_pinned_items(channel: str | None = None) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_SLACK_API_BASE}/pins.list",
                     headers={"Authorization": f"Bearer {token}"},
-                    params={"channel": channel},
+                    params={"channel": target_channel},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -432,8 +506,9 @@ class GetUserPresence(Tool):
             user: Slack user ID (e.g. "U1234567890").
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -476,8 +551,9 @@ class SearchUsers(Tool):
             Provide one of: email (exact match), user_id (exact lookup), or name (fuzzy list search).
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
 
             async with httpx.AsyncClient() as client:
                 if email:
@@ -514,7 +590,7 @@ class SearchUsers(Tool):
 
 class AddUserToChannel(Tool):
     name: str = "slack_add_user_to_channel"
-    description: str | None = "Add one or more users to a Slack channel."
+    description: str | None = "Add one or more users to a Slack channel. If no channel is specified, uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -525,19 +601,27 @@ class AddUserToChannel(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _add_user_to_channel(channel: str, users: list[str]) -> Any:
+        async def _add_user_to_channel(users: list[str], channel: str | None = None) -> Any:
             """
             users: list of Slack user IDs to invite (up to 1000).
+            channel: optional channel ID. If not provided, uses channel_id from integration.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/conversations.invite",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "users": ",".join(users)},
+                    json={"channel": target_channel, "users": ",".join(users)},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -550,7 +634,7 @@ class AddUserToChannel(Tool):
 
 class RemoveFromChannel(Tool):
     name: str = "slack_remove_from_channel"
-    description: str | None = "Remove a user from a Slack channel."
+    description: str | None = "Remove a user from a Slack channel. Uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -561,16 +645,26 @@ class RemoveFromChannel(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _remove_from_channel(channel: str, user: str) -> Any:
+        async def _remove_from_channel(
+            user: str,
+            channel: str | None = None
+        ) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/conversations.kick",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "user": user},
+                    json={"channel": target_channel, "user": user},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -583,7 +677,7 @@ class RemoveFromChannel(Tool):
 
 class ListUsersInChannel(Tool):
     name: str = "slack_list_users_in_channel"
-    description: str | None = "List all users (member IDs) in a Slack channel."
+    description: str | None = "List all users (member IDs) in a Slack channel. Uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -595,15 +689,22 @@ class ListUsersInChannel(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_users_in_channel(
-            channel: str,
             limit: int = 200,
+            channel: str | None = None,
             cursor: str | None = None,
         ) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
-            params: dict[str, Any] = {"channel": channel, "limit": limit}
+            params: dict[str, Any] = {"channel": target_channel, "limit": limit}
             if cursor:
                 params["cursor"] = cursor
 
@@ -646,8 +747,9 @@ class CreateChannel(Tool):
             team_id: required for Enterprise Grid to specify the workspace.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
 
             body: dict[str, Any] = {"name": name, "is_private": is_private}
             if team_id:
@@ -670,7 +772,7 @@ class CreateChannel(Tool):
 
 class UpdateChannelTopic(Tool):
     name: str = "slack_update_channel_topic"
-    description: str | None = "Update the topic of a Slack channel."
+    description: str | None = "Set the topic for a Slack channel. If no channel is specified, uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -681,16 +783,26 @@ class UpdateChannelTopic(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _update_channel_topic(channel: str, topic: str) -> Any:
+        async def _update_channel_topic(
+            topic: str,
+            channel: str | None = None
+        ) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+                
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/conversations.setTopic",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "topic": topic},
+                    json={"channel": target_channel, "topic": topic},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -703,7 +815,7 @@ class UpdateChannelTopic(Tool):
 
 class UpdateChannelPurpose(Tool):
     name: str = "slack_update_channel_purpose"
-    description: str | None = "Update the purpose of a Slack channel."
+    description: str | None = "Set the purpose for a Slack channel. If no channel is specified, uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -714,16 +826,26 @@ class UpdateChannelPurpose(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _update_channel_purpose(channel: str, purpose: str) -> Any:
+        async def _update_channel_purpose(
+            purpose: str,
+            channel: str | None = None
+        ) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/conversations.setPurpose",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "purpose": purpose},
+                    json={"channel": target_channel, "purpose": purpose},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -736,7 +858,7 @@ class UpdateChannelPurpose(Tool):
 
 class ArchiveChannel(Tool):
     name: str = "slack_archive_channel"
-    description: str | None = "Archive a Slack channel."
+    description: str | None = "Archive a Slack channel. If no channel is specified, uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -747,16 +869,23 @@ class ArchiveChannel(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _archive_channel(channel: str) -> Any:
+        async def _archive_channel(channel: str | None = None) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/conversations.archive",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel},
+                    json={"channel": target_channel},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -769,7 +898,7 @@ class ArchiveChannel(Tool):
 
 class UnarchiveChannel(Tool):
     name: str = "slack_unarchive_channel"
-    description: str | None = "Unarchive a Slack channel."
+    description: str | None = "Unarchive a Slack channel. If no channel is specified, uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -780,16 +909,23 @@ class UnarchiveChannel(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _unarchive_channel(channel: str) -> Any:
+        async def _unarchive_channel(channel: str | None = None) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/conversations.unarchive",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel},
+                    json={"channel": target_channel},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -802,7 +938,7 @@ class UnarchiveChannel(Tool):
 
 class GetConversationInfo(Tool):
     name: str = "slack_get_conversation_info"
-    description: str | None = "Retrieve detailed information about a Slack conversation (channel, DM, or group DM)."
+    description: str | None = "Retrieve detailed information about a Slack conversation (channel, DM, or group DM). If no channel is specified, uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -814,20 +950,27 @@ class GetConversationInfo(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_conversation_info(
-            channel: str,
             include_locale: bool = False,
             include_num_members: bool = True,
+            channel: str | None = None
         ) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_SLACK_API_BASE}/conversations.info",
                     headers={"Authorization": f"Bearer {token}"},
                     params={
-                        "channel": channel,
+                        "channel": target_channel,
                         "include_locale": include_locale,
                         "include_num_members": include_num_members,
                     },
@@ -866,8 +1009,9 @@ class ListChannels(Tool):
             exclude_archived: whether to exclude archived channels.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
 
             params: dict[str, Any] = {
                 "types": types,
@@ -928,8 +1072,9 @@ class Search(Tool):
             highlight: wrap matched terms in highlight markers in results.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
 
             params: dict[str, Any] = {
                 "query": query,
@@ -988,8 +1133,9 @@ class SearchMessages(Tool):
             sort: "score" (relevance) or "timestamp".
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1020,7 +1166,7 @@ class SearchMessages(Tool):
 
 class AddReaction(Tool):
     name: str = "slack_add_reaction"
-    description: str | None = "Add an emoji reaction to a Slack message."
+    description: str | None = "Add an emoji reaction to a Slack message. If no channel is specified, uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -1031,20 +1177,32 @@ class AddReaction(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _add_reaction(channel: str, timestamp: str, name: str) -> Any:
+        async def _add_reaction(
+            timestamp: str,
+            name: str,
+            channel: str | None = None
+        ) -> Any:
             """
             name: emoji name without colons, e.g. "thumbsup", "white_check_mark".
             timestamp: timestamp of the message to react to.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
+                
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/reactions.add",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "timestamp": timestamp, "name": name},
+                    json={"channel": target_channel, "timestamp": timestamp, "name": name},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -1057,7 +1215,7 @@ class AddReaction(Tool):
 
 class RemoveReaction(Tool):
     name: str = "slack_remove_reaction"
-    description: str | None = "Remove an emoji reaction from a Slack message."
+    description: str | None = "Remove an emoji reaction from a Slack message. If no channel is specified, uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -1068,16 +1226,27 @@ class RemoveReaction(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _remove_reaction(channel: str, timestamp: str, name: str) -> Any:
+        async def _remove_reaction(
+            timestamp: str,
+            name: str,
+            channel: str | None = None
+        ) -> Any:
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_SLACK_API_BASE}/reactions.remove",
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"channel": channel, "timestamp": timestamp, "name": name},
+                    json={"channel": target_channel, "timestamp": timestamp, "name": name},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -1095,7 +1264,7 @@ class RemoveReaction(Tool):
 
 class ListFiles(Tool):
     name: str = "slack_list_files"
-    description: str | None = "List files shared in the Slack workspace with optional filtering."
+    description: str | None = "List files shared in the Slack workspace with optional filtering. If no channel is specified, uses the integration's default channel."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -1122,12 +1291,19 @@ class ListFiles(Tool):
             ts_from / ts_to: Unix timestamps to bound the upload date range.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             params: dict[str, Any] = {"count": count, "page": page}
-            if channel:
-                params["channel"] = channel
+            if target_channel:
+                params["channel"] = target_channel
             if user:
                 params["user"] = user
             if types:
@@ -1170,8 +1346,9 @@ class GetFileInfo(Tool):
             file: Slack file ID (e.g. "F1234567890").
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1211,8 +1388,9 @@ class DownloadFile(Tool):
             import base64
 
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1265,12 +1443,19 @@ class UploadFile(Tool):
             thread_ts: post the file as a reply in this thread.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+
+            if channels:
+                target_channels = channels
+            else:
+                assert "channel_id" in credentials
+                target_channels = [credentials["channel_id"]]
 
             data: dict[str, Any] = {"filename": filename, "content": content}
-            if channels:
-                data["channels"] = ",".join(channels)
+            if target_channels:
+                data["channels"] = ",".join(target_channels)
             if title:
                 data["title"] = title
             if initial_comment:
@@ -1313,8 +1498,9 @@ class DeleteFile(Tool):
             file: Slack file ID (e.g. "F1234567890").
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -1338,11 +1524,7 @@ class DeleteFile(Tool):
 
 class SendAndWaitForResponse(Tool):
     name: str = "slack_send_and_wait_for_response"
-    description: str | None = (
-        "Send a message to a Slack channel or user and wait for a reply. "
-        "Returns the first reply received within the timeout window. "
-        "Use this for human-in-the-loop approval, confirmation, or input flows."
-    )
+    description: str | None = "Send a message to a Slack channel or user and wait for a reply. If no channel is specified, uses the integration's default channel. Returns the first reply received within the timeout window. Use this for human-in-the-loop approval, confirmation, or input flows."
     integration: Annotated[str, Integration("slack")]
 
     def get_config(self) -> dict[str, Any]:
@@ -1354,11 +1536,11 @@ class SendAndWaitForResponse(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _send_and_wait_for_response(
-            channel: str,
             text: str,
             timeout_seconds: int = 300,
             poll_interval_seconds: int = 5,
-            blocks: list[dict[str, Any]] | None = None,
+            channel: str | None = None,
+            blocks: list[dict[str, Any]] | None = None
         ) -> Any:
             """
             Sends a message and polls the thread for a reply from any user other than the bot.
@@ -1366,16 +1548,22 @@ class SendAndWaitForResponse(Tool):
             poll_interval_seconds: how often to check for new replies (default 5 s).
             Returns the reply message on success, or {"timed_out": True} if no reply arrived in time.
             """
-            import asyncio
 
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "api_token" in credentials
+            token = credentials["api_token"]
+            
+            if channel:
+                target_channel = channel
+            else:
+                assert "channel_id" in credentials
+                target_channel = credentials["channel_id"]
 
             headers = {"Authorization": f"Bearer {token}"}
 
             async with httpx.AsyncClient() as client:
-                send_body: dict[str, Any] = {"channel": channel, "text": text}
+                send_body: dict[str, Any] = {"channel": target_channel, "text": text}
                 if blocks:
                     send_body["blocks"] = blocks
 
@@ -1401,7 +1589,7 @@ class SendAndWaitForResponse(Tool):
                     replies_resp = await client.get(
                         f"{_SLACK_API_BASE}/conversations.replies",
                         headers=headers,
-                        params={"channel": channel, "ts": thread_ts, "limit": 10},
+                        params={"channel": target_channel, "ts": thread_ts, "limit": 10},
                     )
                     replies_resp.raise_for_status()
                     replies = replies_resp.json()
