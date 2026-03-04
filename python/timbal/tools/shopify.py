@@ -30,13 +30,17 @@ class GetShopDetails(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_shop_details(shop: str) -> Any:
+        async def _get_shop_details() -> Any:
             """
-            shop: myshopify domain, e.g. "mystore.myshopify.com"
+            Gets shop details using the shop_url and token from integration credentials.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "token" in credentials
+            assert "shop_url" in credentials
+            
+            token = credentials["token"]
+            shop = credentials["shop_url"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -71,7 +75,6 @@ class GetProducts(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_products(
-            shop: str,
             limit: int = 50,
             page_info: str | None = None,
             title: str | None = None,
@@ -81,13 +84,17 @@ class GetProducts(Tool):
             ids: list[str] | None = None,
         ) -> Any:
             """
-            shop: myshopify domain, e.g. "mystore.myshopify.com"
+            Gets products using shop_url and token from integration credentials.
             status: "active", "archived", or "draft"
             page_info: cursor for pagination from a previous response's Link header.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "token" in credentials
+            assert "shop_url" in credentials
+            
+            token = credentials["token"]
+            shop = credentials["shop_url"]
 
             params: dict[str, Any] = {"limit": limit}
             if page_info:
@@ -131,10 +138,17 @@ class GetProduct(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_product(shop: str, product_id: str) -> Any:
+        async def _get_product(product_id: str) -> Any:
+            """
+            Gets a single product using shop_url and token from integration credentials.
+            """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "token" in credentials
+            assert "shop_url" in credentials
+            
+            token = credentials["token"]
+            shop = credentials["shop_url"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -164,7 +178,6 @@ class CreateProduct(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_product(
-            shop: str,
             title: str,
             body_html: str | None = None,
             vendor: str | None = None,
@@ -176,14 +189,19 @@ class CreateProduct(Tool):
             images: list[dict[str, Any]] | None = None,
         ) -> Any:
             """
+            Creates a product using shop_url and token from integration credentials.
             status: "active", "archived", or "draft"
             variants: list of variant objects, e.g. [{"price": "9.99", "sku": "SKU-001"}]
             options: list of option objects, e.g. [{"name": "Size", "values": ["S", "M", "L"]}]
             images: list of image objects, e.g. [{"src": "https://..."}]
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "token" in credentials
+            assert "shop_url" in credentials
+            
+            token = credentials["token"]
+            shop = credentials["shop_url"]
 
             product: dict[str, Any] = {"title": title, "status": status}
             if body_html:
@@ -229,10 +247,17 @@ class DeleteProduct(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_product(shop: str, product_id: str) -> Any:
+        async def _delete_product(product_id: str) -> Any:
+            """
+            Deletes a product using shop_url and token from integration credentials.
+            """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "token" in credentials
+            assert "shop_url" in credentials
+            
+            token = credentials["token"]
+            shop = credentials["shop_url"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -267,13 +292,19 @@ class GetInventoryLevel(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_inventory_level(
-            shop: str,
             inventory_item_ids: list[str],
             location_ids: list[str] | None = None,
         ) -> Any:
+            """
+            Gets inventory levels using shop_url and token from integration credentials.
+            """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "token" in credentials
+            assert "shop_url" in credentials
+            
+            token = credentials["token"]
+            shop = credentials["shop_url"]
 
             params: dict[str, Any] = {
                 "inventory_item_ids": ",".join(inventory_item_ids),
@@ -310,17 +341,21 @@ class AdjustInventory(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _adjust_inventory(
-            shop: str,
             inventory_item_id: str,
             location_id: str,
             adjustment: int,
         ) -> Any:
             """
+            Adjusts inventory using shop_url and token from integration credentials.
             adjustment: positive to increase stock, negative to decrease.
             """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "token" in credentials
+            assert "shop_url" in credentials
+            
+            token = credentials["token"]
+            shop = credentials["shop_url"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -355,13 +390,19 @@ class UpdateInventoryTracking(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_inventory_tracking(
-            shop: str,
             inventory_item_id: str,
             tracked: bool,
         ) -> Any:
+            """
+            Updates inventory tracking using shop_url and token from integration credentials.
+            """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "token" in credentials
+            assert "shop_url" in credentials
+            
+            token = credentials["token"]
+            shop = credentials["shop_url"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.put(
@@ -391,10 +432,17 @@ class GetVariantInventoryItem(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_variant_inventory_item(shop: str, variant_id: str) -> Any:
+        async def _get_variant_inventory_item(variant_id: str) -> Any:
+            """
+            Gets variant inventory item using shop_url and token from integration credentials.
+            """
             assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            credentials = await self.integration.resolve()
+            assert "token" in credentials
+            assert "shop_url" in credentials
+            
+            token = credentials["token"]
+            shop = credentials["shop_url"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
