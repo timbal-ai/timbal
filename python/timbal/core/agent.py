@@ -395,6 +395,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
     @cached_property
     def return_model(self) -> Any:
         """See base class."""
+        if self.output_model is not None:
+            return self.output_model
         return Message
 
     async def _resolve_system_prompt(self) -> str | None:

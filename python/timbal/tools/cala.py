@@ -48,8 +48,9 @@ class CalaSearch(Tool):
         async def _cala_search(input: str) -> dict:
             if self.integration:
                 assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                api_key = credential.token
+                credentials = await self.integration.resolve()
+                assert "api_key" in credentials
+                api_key = credentials["api_key"]
             else:
                 assert self.api_key is not None  # Validated in _resolve_credentials
                 api_key = self.api_key.get_secret_value()

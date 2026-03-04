@@ -9,6 +9,7 @@ from ..utils import (
     build_cst_value,
     collect_assignments,
     has_import,
+    resolve_entry_point_type,
     resolve_runnable_name,
     validate_tool_config,
 )
@@ -47,6 +48,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
+    if tree is not None:
+        ep_type = resolve_entry_point_type(tree, entry_point)
+        if ep_type is not None and ep_type != "Agent":
+            raise ValueError(f"set-config requires an Agent entry point, but '{entry_point}' is a {ep_type}.")
+
     config = json.loads(args.config)
 
     if args.tool_name:

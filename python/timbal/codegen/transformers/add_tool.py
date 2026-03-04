@@ -2,7 +2,13 @@ import argparse
 
 import libcst as cst
 
-from ..utils import FRAMEWORK_TOOL_NAMES, collect_assignments, has_import, resolve_runnable_name
+from ..utils import (
+    FRAMEWORK_TOOL_NAMES,
+    collect_assignments,
+    has_import,
+    resolve_entry_point_type,
+    resolve_runnable_name,
+)
 
 # Framework tools: class name -> module path
 FRAMEWORK_TOOLS = {
@@ -37,6 +43,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
+    if tree is not None:
+        ep_type = resolve_entry_point_type(tree, entry_point)
+        if ep_type is not None and ep_type != "Agent":
+            raise ValueError(f"add-tool requires an Agent entry point, but '{entry_point}' is a {ep_type}.")
+
     assignments = collect_assignments(tree) if tree else {}
     tool_type = args.tool_type
 

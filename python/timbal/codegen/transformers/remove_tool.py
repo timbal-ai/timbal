@@ -2,7 +2,7 @@ import argparse
 
 import libcst as cst
 
-from ..utils import collect_assignments, resolve_runnable_name
+from ..utils import collect_assignments, resolve_entry_point_type, resolve_runnable_name
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -14,6 +14,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
+    if tree is not None:
+        ep_type = resolve_entry_point_type(tree, entry_point)
+        if ep_type is not None and ep_type != "Agent":
+            raise ValueError(f"remove-tool requires an Agent entry point, but '{entry_point}' is a {ep_type}.")
+
     assignments = collect_assignments(tree) if tree else {}
     return ToolRemover(entry_point, args.value, assignments)
 

@@ -4,6 +4,7 @@ from typing import Optional
 import pytest
 from pydantic import BaseModel, Field
 from timbal import Agent
+from timbal.types.message import Message
 
 # Models to test across multiple providers
 # Format: (model_name, max_tokens)
@@ -16,6 +17,20 @@ MODELS = [
 
 class TestOutputModel:
     """Test Output Model functionality across multiple LLM providers."""
+
+    def test_return_model_without_output_model(self):
+        """Agent.return_model should be Message when output_model is not set."""
+        agent = Agent(name="agent", model="openai/gpt-4o-mini")
+        assert agent.return_model is Message
+
+    def test_return_model_with_output_model(self):
+        """Agent.return_model should be the output_model class when output_model is set."""
+
+        class MyOutput(BaseModel):
+            answer: str
+
+        agent = Agent(name="agent", model="openai/gpt-4o-mini", output_model=MyOutput)
+        assert agent.return_model is MyOutput
 
     @pytest.mark.parametrize("model,max_tokens", MODELS)
     async def test_simple_output_model(self, model: str, max_tokens: int | None):
