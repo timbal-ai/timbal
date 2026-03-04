@@ -332,6 +332,105 @@ class TestTracing:
             assert any(p == "tool_trace_wf.tool_trace_agent.add" for p in tool_paths)
 
 
+    @pytest.mark.asyncio
+    async def test_skill_tool_trace_paths_in_workflow(self, tmp_path):
+        """Skill tools inside a workflow-wrapped agent should have correct nested trace paths."""
+        # Create a skill directory structure following the docs pattern:
+        # skills/payment_processing/SKILL.md, tools/process_refund.py, fraud_detection.md
+        skill_dir = tmp_path / "skills" / "payment_processing"
+        tools_dir = skill_dir / "tools"
+        tools_dir.mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: payment_processing\n"
+            "description: Complete payment processing including payments, refunds, and fraud detection\n"
+            "---\n\n"
+            "## Overview\n"
+            "There are different operations for e-commerce orders.\n\n"
+            "### Payment Policy\n"
+            "- Payments must be made within 30 days of order placement\n"
+            "- See `fraud_detection.md` for security guidelines\n\n"
+            "### Usage Guidelines\n"
+            "Always verify the order exists before processing payments or refunds.\n"
+        )
+        (skill_dir / "fraud_detection.md").write_text(
+            "# Fraud Detection\n\nFlag orders over $10,000 for manual review.\n"
+        )
+        (tools_dir / "process_refund.py").write_text(
+            "from timbal import Tool\n\n"
+            'async def process_refund(order_id: str, amount: float, reason: str) -> str:\n'
+            '    """Process a customer refund."""\n'
+            '    return f"Refund of ${amount} processed for order {order_id}"\n\n'
+            "process_refund_tool = Tool(\n"
+            '    name="process_refund",\n'
+            '    description="Process a refund for a customer order",\n'
+            "    handler=process_refund,\n"
+            ")\n"
+        )
+        (tools_dir / "check_status.py").write_text(
+            "from timbal import Tool\n\n"
+            'async def check_status(order_id: str) -> str:\n'
+            '    """Check the status of an order."""\n'
+            '    return f"Order {order_id} status: delivered"\n\n'
+            "check_status_tool = Tool(\n"
+            '    name="check_status",\n'
+            '    description="Check the status of a customer order",\n'
+            "    handler=check_status,\n"
+            ")\n"
+        )
+
+        agent = Agent(
+            name="support_agent",
+            model="openai/gpt-4o-mini",
+            skills_path=str(tmp_path / "skills"),
+            system_prompt=(
+                "You are a customer support agent. "
+                "First call read_skill with name='payment_processing' to load the skill, "
+                "then use check_status to check the order and process_refund to issue the refund."
+            ),
+        )
+
+        # Standalone: verify trace paths for skill tools.
+        prompt = Message.validate({
+            "role": "user",
+            "content": "Check order ORD-123 and refund $50 for a damaged item.",
+        })
+        output = await agent(prompt=prompt).collect()
+        skip_if_agent_error(output, "skill_standalone")
+
+        records = get_run_context()._trace.as_records()
+        read_skill_paths = [r.path for r in records if "read_skill" in r.path]
+        if read_skill_paths:
+            assert any(p == "support_agent.read_skill" for p in read_skill_paths)
+
+        refund_paths = [r.path for r in records if "process_refund" in r.path]
+        if refund_paths:
+            assert any(p == "support_agent.process_refund" for p in refund_paths)
+
+        status_paths = [r.path for r in records if "check_status" in r.path]
+        if status_paths:
+            assert any(p == "support_agent.check_status" for p in status_paths)
+
+        # Workflow-wrapped: paths should be prefixed with workflow name.
+        wf = Workflow(name="support_wf").step(agent)
+        output = await wf(prompt=prompt).collect()
+        skip_if_agent_error(output, "skill_workflow")
+
+        records = get_run_context()._trace.as_records()
+        read_skill_paths = [r.path for r in records if "read_skill" in r.path]
+        if read_skill_paths:
+            assert any(p == "support_wf.support_agent.read_skill" for p in read_skill_paths)
+
+        refund_paths = [r.path for r in records if "process_refund" in r.path]
+        if refund_paths:
+            assert any(p == "support_wf.support_agent.process_refund" for p in refund_paths)
+
+        status_paths = [r.path for r in records if "check_status" in r.path]
+        if status_paths:
+            assert any(p == "support_wf.support_agent.check_status" for p in status_paths)
+
+
 class TestEdgeCases:
     """Edge cases and error handling should be consistent."""
 
