@@ -164,8 +164,9 @@ class GmailSendEmail(Tool):
         ) -> Any:
             if self.integration:
                 assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+                credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             if isinstance(to, list):
                 to_str = ", ".join(to)
@@ -252,7 +253,7 @@ class GmailSendEmail(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{self.base_url}/messages/send",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json={"raw": raw},
                     timeout=httpx.Timeout(10.0, read=None)
                 )
@@ -307,13 +308,14 @@ class GmailReplyToEmail(Tool):
         ) -> Any:
             if self.integration:
                 assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+                credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/messages/{email_conversation}",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     params={
                         "format": "full", 
                         "metadataHeaders": ["Subject", "From", "To", "Cc", "References", "Message-ID", "Thread-Id"]
@@ -495,7 +497,7 @@ class GmailReplyToEmail(Tool):
                 
                 response = await client.post(
                     f"{self.base_url}/messages/send",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json=send_data,
                     timeout=httpx.Timeout(10.0, read=None)
                 )
@@ -544,13 +546,14 @@ class GmailSearchEmails(Tool):
         ) -> Any:
             if self.integration:
                 assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+                credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/messages",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     params={
                         "q": search_in_gmail,
                         "maxResults": max_results
@@ -568,7 +571,7 @@ class GmailSearchEmails(Tool):
                     msg_id = msg["id"]
                     msg_response = await detail_client.get(
                         f"{self.base_url}/messages/{msg_id}",
-                        headers={"Authorization": f"Bearer {token}"},
+                        headers={"Authorization": f"Bearer {api_key}"},
                         params={"format": "full"},
                         timeout=httpx.Timeout(10.0, read=None)
                     )
@@ -662,13 +665,14 @@ class GmailAddLabelToEmail(Tool):
         ) -> Any:
             if self.integration:
                 assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+                credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/labels",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     timeout=httpx.Timeout(10.0, read=None)
                 )
                 response.raise_for_status()
@@ -689,7 +693,7 @@ class GmailAddLabelToEmail(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{self.base_url}/messages/{email_to_label}/modify",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "addLabelIds": label_ids
                     },
@@ -746,13 +750,14 @@ class GmailListLabels(Tool):
         ) -> Any:
             if self.integration:
                 assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+                credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/labels",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     timeout=httpx.Timeout(10.0, read=None)
                 )
                 response.raise_for_status()
@@ -830,13 +835,14 @@ class GmailRemoveLabelFromEmail(Tool):
         ) -> Any:
             if self.integration:
                 assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+                credentials = await self.integration.resolve()
+            assert "api_key" in credentials
+            api_key = credentials["api_key"]
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/labels",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     timeout=httpx.Timeout(10.0, read=None)
                 )
                 response.raise_for_status()
