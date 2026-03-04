@@ -226,6 +226,43 @@ Removes the `workflow.step(...)` call for the named step. Unused variables, func
 
 ---
 
+### `convert-to-workflow` — Convert an Agent into a Workflow
+
+```bash
+# Basic conversion
+python -m timbal.codegen convert-to-workflow
+
+# With a custom workflow name
+python -m timbal.codegen convert-to-workflow --name my_pipeline
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--name` | entry point variable name | The `name=` kwarg for the `Workflow()` constructor |
+
+**Requires**: Agent entry point.
+
+Converts an Agent entry point into a Workflow with the Agent as its single step. The entry point variable name stays the same (so `timbal.yaml` doesn't need updating). The Agent is moved to a new variable named after its `name` kwarg (or `"agent"` if none).
+
+**Before:**
+```python
+from timbal import Agent
+
+workflow = Agent(name="agent_a", model="openai/gpt-4o-mini")
+```
+
+**After:**
+```python
+from timbal import Agent, Workflow
+
+agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+workflow = Workflow(name="workflow")
+workflow.step(agent_a)
+```
+
+---
+
 ### `get-flow` — Print the execution graph
 
 ```bash
