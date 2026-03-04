@@ -66,7 +66,11 @@ class Integration:
         cached = _credential_cache.get(cache_key)
         if cached is not None:
             expires_at = cached.get("expires_at")
-            if expires_at is None or expires_at > datetime.now(UTC) + _EXPIRY_BUFFER:
+            if expires_at is None:
+                return cached
+            if isinstance(expires_at, str):
+                expires_at = datetime.fromisoformat(expires_at)
+            if expires_at > datetime.now(UTC) + _EXPIRY_BUFFER:
                 return cached
 
         path = f"orgs/{subject.org_id}/integrations/{self._org_integration_id}"

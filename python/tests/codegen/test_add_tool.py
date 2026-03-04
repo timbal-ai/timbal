@@ -246,3 +246,98 @@ class TestExplicitName:
         tool_names = [t.name for t in ns["agent"].tools]
         assert "web_search" in tool_names
         assert "second_search" in tool_names
+
+
+# ---------------------------------------------------------------------------
+# --step flag (Workflow entry point)
+# ---------------------------------------------------------------------------
+
+WORKFLOW_YAML = 'fqn: "workflow.py::workflow"\n'
+
+
+@pytest.fixture
+def wf_workspace(tmp_path):
+    """Write a workflow source file + timbal.yaml and return the workspace directory."""
+
+    def _write(source: str) -> Path:
+        (tmp_path / "workflow.py").write_text(textwrap.dedent(source))
+        (tmp_path / "timbal.yaml").write_text(WORKFLOW_YAML)
+        return tmp_path
+
+    return _write
+
+
+def _run_dry_wf(workspace_path: Path, *cli_args: str) -> str:
+    """Run codegen add-tool with --dry-run on a workflow workspace."""
+    result = subprocess.run(
+        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "add-tool", *cli_args],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"codegen failed:\n{result.stderr}"
+    return result.stdout
+
+
+class TestStepFlag:
+    def test_adds_tool_to_workflow_step(self, wf_workspace):
+        """Add a framework tool to a specific Agent step in a Workflow."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="workflow")
+        workflow.step(agent_a)
+        """)
+        output = _run_dry_wf(ws, "--type", "WebSearch", "--step", "agent_a")
+        assert "web_search = WebSearch()" in output
+        assert "tools=[web_search]" in output
+        # The tool should be on agent_a, not on the workflow
+        assert "agent_a = Agent(" in output
+
+    def test_adds_tool_to_step_no_existing_tools(self, wf_workspace):
+        """Add a tool to a step that has no tools kwarg yet."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="workflow")
+        workflow.step(agent_a)
+        """)
+        output = _run_dry_wf(ws, "--type", "WebSearch", "--step", "agent_a")
+        assert "tools=[web_search]" in output
+
+    def test_adds_tool_to_step_with_existing_tools(self, wf_workspace):
+        """Add a tool to a step that already has tools."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.tools import Edit
+
+        edit = Edit()
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", tools=[edit])
+
+        workflow = Workflow(name="workflow")
+        workflow.step(agent_a)
+        """)
+        output = _run_dry_wf(ws, "--type", "WebSearch", "--step", "agent_a")
+        assert "web_search" in output
+        assert "edit" in output
+
+    def test_rejects_step_on_agent_entry_point(self, workspace):
+        """--step should fail when the entry point is an Agent."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "WebSearch", "--step", "agent_a",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "--step requires a Workflow" in result.stderr

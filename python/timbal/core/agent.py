@@ -381,7 +381,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         self._path = f"{parent_path}.{self.name}"
         self._llm.nest(self._path)
         for tool in self.tools:
-            tool.nest(self._path)
+            if isinstance(tool, Runnable):
+                tool.nest(self._path)
 
     @override
     @computed_field

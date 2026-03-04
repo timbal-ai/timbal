@@ -5,7 +5,7 @@ from mcp.server.fastmcp import FastMCP
 from timbal.codegen import parse_fqn
 from timbal.codegen.flow import get_flow
 from timbal.codegen.transformers import apply_operation
-from timbal.codegen.transformers.add_tool import FRAMEWORK_TOOLS
+from timbal.codegen.utils import get_framework_tools
 
 mcp = FastMCP(
     "timbal-codegen",
@@ -17,9 +17,6 @@ mcp = FastMCP(
         "`timbal.yaml` (the workforce member directory). Always use full absolute paths, never relative."
     ),
 )
-
-TOOL_TYPES = [*FRAMEWORK_TOOLS.keys(), "Custom"]
-
 
 @mcp.tool()
 def add_tool(
@@ -36,8 +33,9 @@ def add_tool(
         definition: Full function definition as a Python code string (required for Custom tools). E.g. 'def my_tool(query: str) -> str:\\n    return query.upper()'.
         name: Explicit name for the tool. When omitted, the tool uses its default name (class default for framework tools, function name for custom tools).
     """
-    if tool_type not in TOOL_TYPES:
-        return f"Error: tool_type must be one of {TOOL_TYPES}"
+    valid_types = [*get_framework_tools().keys(), "Custom"]
+    if tool_type not in valid_types:
+        return f"Error: tool_type must be one of {valid_types}"
     result = apply_operation(path, "add_tool", tool_type=tool_type, definition=definition, tool_name=name)
     parse_fqn(path).path.write_text(result)
     return f"Tool '{name or tool_type}' added successfully."

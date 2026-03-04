@@ -3,24 +3,13 @@ import argparse
 import libcst as cst
 
 from ..utils import (
-    FRAMEWORK_TOOL_NAMES,
     collect_assignments,
+    get_framework_tool_names,
+    get_framework_tools,
     has_import,
     resolve_entry_point_type,
     resolve_runnable_name,
 )
-
-# Framework tools: class name -> module path
-FRAMEWORK_TOOLS = {
-    "Bash": "timbal.tools",
-    "CalaSearch": "timbal.tools",
-    "Edit": "timbal.tools",
-    "Read": "timbal.tools",
-    "WebSearch": "timbal.tools",
-    "Write": "timbal.tools",
-}
-
-TOOL_TYPES = [*FRAMEWORK_TOOLS.keys(), "Custom"]
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -28,7 +17,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "add-tool",
         help="Add a tool to the agent's tools list.",
     )
-    sp.add_argument("--type", choices=TOOL_TYPES, required=True, dest="tool_type", help="Type of tool to add.")
+    sp.add_argument("--type", required=True, dest="tool_type", help="Type of tool to add.")
     sp.add_argument(
         "--definition",
         default=None,
@@ -40,16 +29,31 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         dest="tool_name",
         help="Explicit name for the tool. When omitted, the tool uses its default name.",
     )
+    sp.add_argument(
+        "--step",
+        default=None,
+        help="Target step name within a Workflow. When provided, the tool is added to the step's tools list.",
+    )
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
+    step = getattr(args, "step", None)
     if tree is not None:
         ep_type = resolve_entry_point_type(tree, entry_point)
-        if ep_type is not None and ep_type != "Agent":
-            raise ValueError(f"add-tool requires an Agent entry point, but '{entry_point}' is a {ep_type}.")
+        if step:
+            if ep_type is not None and ep_type != "Workflow":
+                raise ValueError(f"--step requires a Workflow entry point, but '{entry_point}' is a {ep_type}.")
+        else:
+            if ep_type is not None and ep_type != "Agent":
+                raise ValueError(f"add-tool requires an Agent entry point, but '{entry_point}' is a {ep_type}.")
 
+    target = step if step else entry_point
     assignments = collect_assignments(tree) if tree else {}
     tool_type = args.tool_type
+    valid_types = [*get_framework_tools().keys(), "Custom"]
+
+    if tool_type not in valid_types:
+        raise ValueError(f"--type must be one of {valid_types}, got '{tool_type}'.")
 
     if tool_type == "Custom":
         if not args.definition:
@@ -67,6 +71,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         runtime_name = args.tool_name if args.tool_name else func_name
         return ToolAdder(
             entry_point, assignments,
+            target=target,
             tool_type="Custom",
             class_name=None,
             func_name=func_name,
@@ -77,10 +82,12 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         )
 
     # Framework tool.
-    var_name = args.tool_name if args.tool_name else FRAMEWORK_TOOL_NAMES[tool_type]
-    runtime_name = args.tool_name if args.tool_name else FRAMEWORK_TOOL_NAMES[tool_type]
+    framework_names = get_framework_tool_names()
+    var_name = args.tool_name if args.tool_name else framework_names[tool_type]
+    runtime_name = args.tool_name if args.tool_name else framework_names[tool_type]
     return ToolAdder(
         entry_point, assignments,
+        target=target,
         tool_type=tool_type,
         class_name=tool_type,
         func_name=None,
@@ -96,6 +103,7 @@ class ToolAdder(cst.CSTTransformer):
         entry_point: str,
         assignments: dict[str, cst.Call],
         *,
+        target: str,
         tool_type: str,
         class_name: str | None,
         func_name: str | None,
@@ -105,6 +113,7 @@ class ToolAdder(cst.CSTTransformer):
         tool_name: str | None = None,
     ):
         self.entry_point = entry_point
+        self.target = target  # variable to add tools to (entry_point or step var)
         self.assignments = assignments
         self.tool_type = tool_type
         self.class_name = class_name  # e.g. "WebSearch" (None for custom)
@@ -129,7 +138,7 @@ class ToolAdder(cst.CSTTransformer):
             return cst.parse_statement(self.definition + "\n")
         return updated_node
 
-    # -- Assign: update entry point tools list + existing variable assignments
+    # -- Assign: update target tools list + existing variable assignments
 
     def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
         for target in updated_node.targets:
@@ -137,14 +146,14 @@ class ToolAdder(cst.CSTTransformer):
                 continue
             target_name = target.target.value
 
-            # Entry point — update the tools list.
-            if target_name == self.entry_point and isinstance(updated_node.value, cst.Call):
+            # Target (entry point or step) — update the tools list.
+            if target_name == self.target and isinstance(updated_node.value, cst.Call):
                 return updated_node.with_changes(
                     value=self._add_to_tools(updated_node.value),
                 )
 
             # Existing variable assignment for this tool — update it.
-            if target_name != self.entry_point and isinstance(updated_node.value, cst.Call):
+            if target_name != self.target and isinstance(updated_node.value, cst.Call):
                 resolved = resolve_runnable_name(updated_node.value)
                 if resolved == self.runtime_name:
                     self._assignment_updated = True
@@ -161,7 +170,7 @@ class ToolAdder(cst.CSTTransformer):
 
         # --- Imports ---
         if self.tool_type != "Custom":
-            module = FRAMEWORK_TOOLS[self.class_name]
+            module = get_framework_tools()[self.class_name].module
             if not has_import(original_node, module, self.class_name):
                 imports_to_add.append(cst.parse_statement(f"from {module} import {self.class_name}\n"))
         else:
@@ -200,7 +209,7 @@ class ToolAdder(cst.CSTTransformer):
                 body.insert(import_insert_idx, stmt)
 
         # Insert statements before the earliest relevant assignment:
-        # either a tool wrapper assignment or the entry point.
+        # either a tool wrapper assignment or the target (entry point / step).
         if stmts_to_add:
             insert_idx = len(body)
             for i, stmt in enumerate(body):
@@ -211,7 +220,7 @@ class ToolAdder(cst.CSTTransformer):
                             if resolved == self.runtime_name:
                                 insert_idx = min(insert_idx, i)
                             for t in item.targets:
-                                if isinstance(t.target, cst.Name) and t.target.value == self.entry_point:
+                                if isinstance(t.target, cst.Name) and t.target.value == self.target:
                                     insert_idx = min(insert_idx, i)
             for stmt in reversed(stmts_to_add):
                 body.insert(insert_idx, stmt)
