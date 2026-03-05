@@ -2,14 +2,8 @@ import argparse
 
 import libcst as cst
 
-from ..utils import (
-    collect_assignments,
-    get_framework_tool_names,
-    get_framework_tools,
-    has_import,
-    resolve_entry_point_type,
-    resolve_runnable_name,
-)
+from ..cst_utils import collect_assignments, has_import, resolve_entry_point_type, resolve_runnable_name
+from ..tool_discovery import get_framework_tool_names, get_framework_tools
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:

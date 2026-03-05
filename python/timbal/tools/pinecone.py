@@ -1,76 +1,91 @@
+import os
 from typing import Annotated, Any
 
-import httpx
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
-_PINECONE_CONTROL_PLANE = "https://api.pinecone.io"
+_BASE_URL = "https://api.pinecone.io"
+
+_INDEX_HOST_DESC = 'Index host, e.g. "my-index-xyz.svc.pinecone.io"'
 
 
-class ListIndexes(Tool):
+async def _resolve_api_key(tool: Any) -> str:
+    """Resolve Pinecone API key from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["api_key"]
+    if tool.api_key is not None:
+        return tool.api_key.get_secret_value()
+    env_key = os.getenv("PINECONE_API_KEY")
+    if env_key:
+        return env_key
+    raise ValueError(
+        "Pinecone API key not found. Set PINECONE_API_KEY environment variable, "
+        "pass api_key in config, or configure an integration."
+    )
+
+
+class PineconeListIndexes(Tool):
     name: str = "pinecone_list_indexes"
-    description: str | None = "List all Pinecone indexes in the project."
-    integration: Annotated[str, Integration("pinecone")]
+    description: str | None = "List all indexes in a Pinecone project."
+    integration: Annotated[str, Integration("pinecone")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_indexes() -> Any:
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_PINECONE_CONTROL_PLANE}/indexes",
+                    f"{_BASE_URL}/indexes",
                     headers={"Api-Key": api_key},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Pinecone/ListIndexes"
-
-        super().__init__(handler=_list_indexes, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_indexes, **kwargs)
 
 
-class CreateIndex(Tool):
+class PineconeCreateIndex(Tool):
     name: str = "pinecone_create_index"
     description: str | None = "Create a new Pinecone index."
-    integration: Annotated[str, Integration("pinecone")]
+    integration: Annotated[str, Integration("pinecone")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_index(
             name: str,
             dimension: int,
-            metric: str = "cosine",
-            cloud: str = "aws",
-            region: str = "us-east-1",
-            deletion_protection: str = "disabled",
+            metric: str = Field("cosine", description='"cosine", "euclidean", or "dotproduct"'),
+            cloud: str = Field("aws", description='"aws", "gcp", or "azure"'),
+            region: str = Field("us-east-1", description="Cloud region for the index"),
+            deletion_protection: str = Field("disabled", description='"enabled" or "disabled"'),
         ) -> Any:
-            """
-            metric: "cosine", "euclidean", or "dotproduct".
-            cloud: "aws", "gcp", or "azure".
-            deletion_protection: "enabled" or "disabled".
-            """
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             body: dict[str, Any] = {
                 "name": name,
@@ -82,44 +97,39 @@ class CreateIndex(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_PINECONE_CONTROL_PLANE}/indexes",
+                    f"{_BASE_URL}/indexes",
                     headers={"Api-Key": api_key, "Content-Type": "application/json"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Pinecone/CreateIndex"
-
-        super().__init__(handler=_create_index, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_index, **kwargs)
 
 
-class DescribeIndexStats(Tool):
-    name: str = "pinecone_describe_index_stats"
-    description: str | None = "Get statistics about a Pinecone index: vector count, dimension, and namespace breakdown."
-    integration: Annotated[str, Integration("pinecone")]
+class PineconeIndexStats(Tool):
+    name: str = "pinecone_index_stats"
+    description: str | None = "Get statistics for a Pinecone index."
+    integration: Annotated[str, Integration("pinecone")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _describe_index_stats(
-            index_host: str,
-            metadata_filter: dict[str, Any] | None = None,
+        async def _index_stats(
+            index_host: str = Field(..., description=_INDEX_HOST_DESC),
+            metadata_filter: dict[str, Any] | None = Field(None, description="Filter to count only matching vectors"),
         ) -> Any:
-            """
-            index_host: the host name for the index (without protocol), e.g. "my-index-xyz.svc.pinecone.io"
-            metadata_filter: optional metadata filter to count only matching vectors.
-            """
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             body: dict[str, Any] = {}
             if metadata_filter:
@@ -134,43 +144,33 @@ class DescribeIndexStats(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Pinecone/DescribeIndexStats"
-
-        super().__init__(handler=_describe_index_stats, metadata=metadata, **kwargs)
+        super().__init__(handler=_index_stats, **kwargs)
 
 
-class UpsertVectors(Tool):
+class PineconeUpsertVectors(Tool):
     name: str = "pinecone_upsert_vectors"
-    description: str | None = "Upsert vectors into a Pinecone index namespace."
-    integration: Annotated[str, Integration("pinecone")]
+    description: str | None = "Upsert vectors into a Pinecone index."
+    integration: Annotated[str, Integration("pinecone")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _upsert_vectors(
-            index_host: str,
-            vectors: list[dict[str, Any]],
-            namespace: str = "",
+            index_host: str = Field(..., description=_INDEX_HOST_DESC),
+            vectors: list[dict[str, Any]] = Field(..., description="List of vectors with id, values, and optional metadata"),
+            namespace: str = Field("", description="Index partition"),
         ) -> Any:
-            """
-            index_host: the host name for the index (without protocol), e.g. "my-index-xyz.svc.pinecone.io"
-            vectors: list of vector objects, each with:
-              - "id": unique string ID
-              - "values": list of floats (the embedding)
-              - "metadata": optional dict of key-value pairs for filtering
-              - "sparse_values": optional sparse vector {"indices": [...], "values": [...]}
-            namespace: partition within the index (default "" = default namespace).
-            """
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -181,47 +181,37 @@ class UpsertVectors(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Pinecone/UpsertVectors"
-
-        super().__init__(handler=_upsert_vectors, metadata=metadata, **kwargs)
+        super().__init__(handler=_upsert_vectors, **kwargs)
 
 
-class VectorSearch(Tool):
-    name: str = "pinecone_vector_search"
-    description: str | None = "Search a Pinecone index for the nearest neighbors to a query vector."
-    integration: Annotated[str, Integration("pinecone")]
+class PineconeQuery(Tool):
+    name: str = "pinecone_query"
+    description: str | None = "Query a Pinecone index for nearest neighbors."
+    integration: Annotated[str, Integration("pinecone")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _vector_search(
-            index_host: str,
-            vector: list[float],
-            top_k: int = 10,
-            namespace: str = "",
-            metadata_filter: dict[str, Any] | None = None,
-            include_values: bool = False,
-            include_metadata: bool = True,
+        async def _query(
+            index_host: str = Field(..., description=_INDEX_HOST_DESC),
+            vector: list[float] = Field(..., description="Query embedding"),
+            top_k: int = Field(10, description="Number of nearest neighbors to return"),
+            namespace: str = Field("", description="Index partition to search"),
+            metadata_filter: dict[str, Any] | None = Field(None, description='Metadata filter, e.g. {"genre": {"$eq": "documentary"}}'),
+            include_values: bool = Field(False, description="Return vector values in results"),
+            include_metadata: bool = Field(True, description="Return metadata in results"),
         ) -> Any:
-            """
-            index_host: the host name for the index (without protocol), e.g. "my-index-xyz.svc.pinecone.io"
-            vector: query embedding as a list of floats.
-            top_k: number of nearest neighbors to return.
-            namespace: partition to search within (default "" = default namespace).
-            metadata_filter: metadata filter, e.g. {"genre": {"$eq": "documentary"}}
-            include_values: whether to return the vector values in results.
-            include_metadata: whether to return metadata in results.
-            """
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             body: dict[str, Any] = {
                 "vector": vector,
@@ -242,39 +232,33 @@ class VectorSearch(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Pinecone/VectorSearch"
-
-        super().__init__(handler=_vector_search, metadata=metadata, **kwargs)
+        super().__init__(handler=_query, **kwargs)
 
 
-class FetchVectors(Tool):
+class PineconeFetchVectors(Tool):
     name: str = "pinecone_fetch_vectors"
     description: str | None = "Fetch vectors by ID from a Pinecone index."
-    integration: Annotated[str, Integration("pinecone")]
+    integration: Annotated[str, Integration("pinecone")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _fetch_vectors(
-            index_host: str,
-            ids: list[str],
-            namespace: str = "",
+            index_host: str = Field(..., description=_INDEX_HOST_DESC),
+            ids: list[str] = Field(..., description="Vector IDs to fetch"),
+            namespace: str = Field("", description="Index partition to fetch from"),
         ) -> Any:
-            """
-            index_host: the host name for the index (without protocol), e.g. "my-index-xyz.svc.pinecone.io"
-            ids: list of vector IDs to fetch.
-            namespace: partition to fetch from (default "" = default namespace).
-            """
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             params: list[tuple[str, str]] = [("ids", id_) for id_ in ids]
             if namespace:
@@ -289,43 +273,35 @@ class FetchVectors(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Pinecone/FetchVectors"
-
-        super().__init__(handler=_fetch_vectors, metadata=metadata, **kwargs)
+        super().__init__(handler=_fetch_vectors, **kwargs)
 
 
-class DeleteVectors(Tool):
+class PineconeDeleteVectors(Tool):
     name: str = "pinecone_delete_vectors"
-    description: str | None = "Delete vectors from a Pinecone index by ID or metadata filter."
-    integration: Annotated[str, Integration("pinecone")]
+    description: str | None = "Delete vectors from a Pinecone index."
+    integration: Annotated[str, Integration("pinecone")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _delete_vectors(
-            index_host: str,
-            ids: list[str] | None = None,
-            delete_all: bool = False,
-            namespace: str = "",
-            metadata_filter: dict[str, Any] | None = None,
+            index_host: str = Field(..., description=_INDEX_HOST_DESC),
+            ids: list[str] | None = Field(None, description="Vector IDs to delete"),
+            delete_all: bool = Field(False, description="Delete all vectors in the namespace"),
+            namespace: str = Field("", description="Index partition to delete from"),
+            metadata_filter: dict[str, Any] | None = Field(None, description="Metadata filter to select vectors for deletion"),
         ) -> Any:
-            """
-            index_host: the host name for the index (without protocol), e.g. "my-index-xyz.svc.pinecone.io"
-            ids: list of vector IDs to delete. Provide either ids, metadata_filter, or delete_all=True.
-            delete_all: if True, deletes all vectors in the namespace.
-            namespace: partition to delete from (default "" = default namespace).
-            metadata_filter: metadata filter to select vectors for deletion.
-            """
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "api_key" in credentials
-            api_key = credentials["api_key"]
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             body: dict[str, Any] = {"namespace": namespace}
             if ids:
@@ -344,7 +320,4 @@ class DeleteVectors(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Pinecone/DeleteVectors"
-
-        super().__init__(handler=_delete_vectors, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_vectors, **kwargs)

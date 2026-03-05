@@ -3,10 +3,6 @@ import json
 import sys
 from pathlib import Path
 
-from timbal.codegen import parse_fqn
-from timbal.codegen.flow import get_flow
-from timbal.codegen.transformers import apply_operation, load_modules
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -26,10 +22,6 @@ def main() -> None:
 
     subparsers = parser.add_subparsers(dest="operation", required=True)
 
-    transformer_modules = load_modules()
-    for mod in transformer_modules.values():
-        mod.register(subparsers)
-
     # Read-only operations (not CST transformers)
     subparsers.add_parser("get-flow", help="Print the graph for the workspace entry point.")
     subparsers.add_parser("list-tools", help="List available framework tool types.")
@@ -44,13 +36,24 @@ def main() -> None:
         "--stream", "-s", action="store_true", help="Print every event instead of only the final output event."
     )
 
+    # Defer transformer module loading (pulls in libcst + timbal.codegen which
+    # are expensive) — only needed for transformer operations, not for
+    # list-tools, get-flow, or test.
+    _lightweight_ops = {"list-tools", "get-flow", "test"}
+    if not (_lightweight_ops & set(sys.argv[1:])):
+        from timbal.codegen.transformers import load_modules
+
+        transformer_modules = load_modules()
+        for mod in transformer_modules.values():
+            mod.register(subparsers)
+
     args = parser.parse_args()
 
     workspace_path = Path(args.path)
     operation = args.operation
 
     if operation == "list-tools":
-        from timbal.codegen.utils import get_framework_tools
+        from timbal.codegen.tool_discovery import get_framework_tools
 
         tools = [
             {"type": cls, "module": ft.module, "name": ft.name, "description": ft.description}
@@ -60,6 +63,8 @@ def main() -> None:
         return
 
     if operation == "get-flow":
+        from timbal.codegen.flow import get_flow
+
         try:
             flow = get_flow(workspace_path)
         except (FileNotFoundError, ValueError) as e:
@@ -72,6 +77,7 @@ def main() -> None:
         import asyncio
         import os
 
+        from timbal.codegen import parse_fqn
         from timbal.codegen.test import run_test
         from timbal.state import RunContext
 
@@ -108,6 +114,10 @@ def main() -> None:
         if output_event is None or output_event.get("status", {}).get("code") != "success":
             sys.exit(1)
         return
+
+    # Transformer operations — heavy imports already loaded above.
+    from timbal.codegen import parse_fqn
+    from timbal.codegen.transformers import apply_operation
 
     module_name = operation.replace("-", "_")
 

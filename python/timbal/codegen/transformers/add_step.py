@@ -3,14 +3,8 @@ import json
 
 import libcst as cst
 
-from ..utils import (
-    collect_assignments,
-    get_framework_tool_names,
-    get_framework_tools,
-    has_import,
-    resolve_entry_point_type,
-    resolve_runnable_name,
-)
+from ..cst_utils import collect_assignments, has_import, resolve_entry_point_type, resolve_runnable_name
+from ..tool_discovery import get_framework_tool_names, get_framework_tools
 from .set_config import AGENT_FIELDS
 
 
@@ -307,7 +301,7 @@ class StepAdder(cst.CSTTransformer):
     def _build_assignment_call(self) -> cst.Call:
         """Build the CST Call node for the variable assignment RHS."""
         if self.step_type == "Agent":
-            from ..utils import build_cst_value
+            from ..cst_utils import build_cst_value
 
             args: list[cst.Arg] = []
             for key, value in self.config.items():

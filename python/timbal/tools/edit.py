@@ -11,13 +11,9 @@ import hashlib
 import os
 from pathlib import Path
 
-import structlog
-
 from ..core.tool import Tool
 from ..errors import FileModifiedError, FileNotReadError
 from ..state import get_run_context
-
-logger = structlog.get_logger("timbal.tools.edit")
 
 
 class Edit(Tool):
