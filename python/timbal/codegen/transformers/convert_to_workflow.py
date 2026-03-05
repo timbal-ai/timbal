@@ -2,7 +2,7 @@ import argparse
 
 import libcst as cst
 
-from ..utils import has_import, resolve_entry_point_type
+from ..cst_utils import has_import, resolve_entry_point_type
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:

@@ -3,15 +3,14 @@ import json
 
 import libcst as cst
 
-from ..utils import (
+from ..cst_utils import (
     build_cst_value,
     collect_assignments,
-    get_framework_tool_names,
     has_import,
     resolve_entry_point_type,
     resolve_runnable_name,
-    validate_tool_config,
 )
+from ..tool_discovery import get_framework_tool_names, validate_tool_config
 
 AGENT_FIELDS = {
     "name",

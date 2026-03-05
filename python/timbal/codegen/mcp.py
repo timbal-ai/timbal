@@ -5,7 +5,7 @@ from mcp.server.fastmcp import FastMCP
 from timbal.codegen import parse_fqn
 from timbal.codegen.flow import get_flow
 from timbal.codegen.transformers import apply_operation
-from timbal.codegen.utils import get_framework_tools
+from timbal.codegen.tool_discovery import get_framework_tools
 
 mcp = FastMCP(
     "timbal-codegen",
