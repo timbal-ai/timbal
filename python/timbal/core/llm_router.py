@@ -43,24 +43,31 @@ if TIMBAL_OPENAI_API != "responses":
 
 # Model type with provider prefixes
 Model = Literal[
-    # OpenAI models
+    # OpenAI models — GPT series
+    "openai/gpt-5.4",
+    "openai/gpt-5.3-chat-latest",
+    "openai/gpt-5.2",
+    "openai/gpt-5.2-pro",
+    "openai/gpt-5.1",
+    "openai/gpt-5.1-mini",
+    "openai/gpt-5.1-codex",
     "openai/gpt-5",
     "openai/gpt-5-mini",
     "openai/gpt-5-nano",
-    "openai/gpt-5.1",
-    "openai/gpt-5.2",
     "openai/gpt-4.1",
     "openai/gpt-4.1-mini",
     "openai/gpt-4.1-nano",
     "openai/gpt-4o",
     "openai/gpt-4o-mini",
+    # OpenAI models — o-series reasoning
+    "openai/o4-mini",
+    "openai/o4-mini-deep-research",
     "openai/o3",
     "openai/o3-mini",
     "openai/o3-pro",
     "openai/o3-deep-research",
-    "openai/o4-mini",
-    "openai/o4-mini-deep-research",
-    "openai/gpt-4o-mini-audio-preview",
+    "openai/o1",
+    "openai/o1-mini",
     # Anthropic models
     "anthropic/claude-opus-4-6",
     "anthropic/claude-opus-4-5",
