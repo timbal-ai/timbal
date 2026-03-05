@@ -1,8 +1,11 @@
 import subprocess
+import sys
 from pathlib import Path
 
+_RUFF_CMD = [sys.executable, "-m", "ruff"]
+
 RUFF_FORMAT_ARGS = [
-    "ruff",
+    *_RUFF_CMD,
     "format",
     "--isolated",
     "--line-length",
@@ -18,7 +21,7 @@ RUFF_FORMAT_ARGS = [
 ]
 
 RUFF_FIX_ARGS = [
-    "ruff",
+    *_RUFF_CMD,
     "check",
     "--isolated",
     "--fix",
