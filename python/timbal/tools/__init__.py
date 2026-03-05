@@ -30,6 +30,10 @@ __all__ = [
     "PineconeQuery",
     "PineconeUpsertVectors",
     "Read",
+    "TavilyCrawl",
+    "TavilyExtract",
+    "TavilyMap",
+    "TavilySearch",
     "WebSearch",
     "Write",
 ]
@@ -64,6 +68,10 @@ _LAZY_IMPORTS = {
     "PineconeQuery": ".pinecone",
     "PineconeUpsertVectors": ".pinecone",
     "Read": ".read",
+    "TavilyCrawl": ".tavily",
+    "TavilyExtract": ".tavily",
+    "TavilyMap": ".tavily",
+    "TavilySearch": ".tavily",
     "WebSearch": ".web_search",
     "Write": ".write",
 }
