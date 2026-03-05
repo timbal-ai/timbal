@@ -1,11 +1,30 @@
 # pyright: reportUnsupportedDunderAll=false
 
-__all__ = ["Bash", "CalaSearch", "Edit", "Read", "WebSearch", "Write"]
+__all__ = [
+    "Bash",
+    "CalaSearch",
+    "Edit",
+    "GmailAddLabel",
+    "GmailListLabels",
+    "GmailRemoveLabel",
+    "GmailReply",
+    "GmailSearch",
+    "GmailSend",
+    "Read",
+    "WebSearch",
+    "Write",
+]
 
 _LAZY_IMPORTS = {
     "Bash": ".bash",
     "CalaSearch": ".cala",
     "Edit": ".edit",
+    "GmailAddLabel": ".gmail",
+    "GmailListLabels": ".gmail",
+    "GmailRemoveLabel": ".gmail",
+    "GmailReply": ".gmail",
+    "GmailSearch": ".gmail",
+    "GmailSend": ".gmail",
     "Read": ".read",
     "WebSearch": ".web_search",
     "Write": ".write",

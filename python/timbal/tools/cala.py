@@ -1,7 +1,6 @@
 import os
 from typing import Annotated, Any
 
-import httpx
 from pydantic import SecretStr, model_validator
 
 from ..core.tool import Tool
@@ -54,6 +53,8 @@ class CalaSearch(Tool):
             else:
                 assert self.api_key is not None  # Validated in _resolve_credentials
                 api_key = self.api_key.get_secret_value()
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
