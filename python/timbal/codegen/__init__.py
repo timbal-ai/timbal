@@ -1,14 +1,14 @@
 from pathlib import Path
 
-import yaml
-
-from timbal.utils import ImportSpec
-
 TIMBAL_YAML = "timbal.yaml"
 
 
-def parse_fqn(workspace_path: str | Path) -> ImportSpec:
+def parse_fqn(workspace_path: str | Path):
     """Read timbal.yaml from *workspace_path* and return an ImportSpec for the entry point."""
+    import yaml
+
+    from timbal.utils.import_spec import ImportSpec
+
     workspace_path = Path(workspace_path)
     yaml_path = workspace_path / TIMBAL_YAML
     if not yaml_path.exists():

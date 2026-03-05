@@ -1,7 +1,23 @@
-# ruff: noqa: F401
-from .bash import Bash
-from .cala import CalaSearch
-from .edit import Edit
-from .read import Read
-from .web_search import WebSearch
-from .write import Write
+# pyright: reportUnsupportedDunderAll=false
+
+__all__ = ["Bash", "CalaSearch", "Edit", "Read", "WebSearch", "Write"]
+
+_LAZY_IMPORTS = {
+    "Bash": ".bash",
+    "CalaSearch": ".cala",
+    "Edit": ".edit",
+    "Read": ".read",
+    "WebSearch": ".web_search",
+    "Write": ".write",
+}
+
+
+def __getattr__(name: str):
+    if name in _LAZY_IMPORTS:
+        import importlib
+
+        mod = importlib.import_module(_LAZY_IMPORTS[name], __name__)
+        val = getattr(mod, name)
+        globals()[name] = val  # cache to bypass __getattr__ on subsequent access
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
