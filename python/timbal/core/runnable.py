@@ -321,7 +321,11 @@ class Runnable(ABC, BaseModel):
             return variants[0]
         return {"anyOf": variants}
 
-    def _annotate_config(self, values: dict[str, Any]) -> dict[str, Any]:
+    def _annotate_config(
+        self,
+        values: dict[str, Any],
+        required: set[str] | None = None,
+    ) -> dict[str, Any]:
         """Annotate config values with their JSON schema from Pydantic model fields.
 
         For each key in *values*, generates the full JSON schema from the
@@ -330,10 +334,15 @@ class Runnable(ABC, BaseModel):
         types with non-serialisable variants (e.g. ``str | Callable | None``),
         serialisable variants get their JSON schema and non-serialisable ones
         are marked with ``{"_type": "callable"}``.
+
+        Fields listed in *required* are marked ``"required": True`` and their
+        ``None`` variant is stripped from ``anyOf`` unions so the schema
+        advertises only the concrete type.
         """
         import typing
         from typing import Annotated
 
+        required = required or set()
         model_fields = self.__class__.model_fields
 
         result: dict[str, Any] = {}
@@ -358,6 +367,15 @@ class Runnable(ABC, BaseModel):
                         # Preserve FieldInfo metadata (default, description, etc.)
                         # from the TypeAdapter result, but use the full anyOf.
                         field_schema["anyOf"] = full_variants
+
+            # For required fields, unwrap the anyOf to just the concrete type.
+            if key in required and "anyOf" in field_schema:
+                non_null = [v for v in field_schema["anyOf"] if v != {"type": "null"}]
+                if len(non_null) == 1:
+                    field_schema.pop("anyOf")
+                    field_schema.pop("default", None)
+                    field_schema.update(non_null[0])
+
 
             field_schema["value"] = value
             result[key] = field_schema
