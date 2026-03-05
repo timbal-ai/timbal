@@ -10,7 +10,6 @@ from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
 from typing import Any, Literal
 
-import structlog
 from nanoid import generate
 from pydantic import (
     BaseModel,
@@ -25,7 +24,6 @@ from pydantic import (
 from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
-from ..collectors.impl.timbal import TimbalCollector
 from ..errors import EarlyExit, InterruptError
 from ..state import (
     get_call_id,
@@ -50,7 +48,20 @@ from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import dump, sync_to_async_gen
 
-logger = structlog.get_logger("timbal.core.runnable")
+def _get_logger():
+    import structlog
+    return structlog.get_logger("timbal.core.runnable")
+
+
+def _timbal_collector_wrap(fn):
+    """Lazy wrapper for @TimbalCollector.wrap — avoids importing the collector at module load."""
+    from functools import wraps
+    @wraps(fn)
+    def wrapper(self, **kwargs):
+        from ..collectors.impl.timbal import TimbalCollector
+        return TimbalCollector(async_gen=fn(self, **kwargs))
+    return wrapper
+
 
 TIMBAL_DELTA_EVENTS = os.getenv("TIMBAL_DELTA_EVENTS", "false").lower() in [
     "true",
@@ -61,10 +72,7 @@ TIMBAL_DELTA_EVENTS = os.getenv("TIMBAL_DELTA_EVENTS", "false").lower() in [
     "enabled",
     "on",
 ]
-if not TIMBAL_DELTA_EVENTS:
-    logger.warning(
-        "ChunkEvents will be deprecated in a future release. Enable TIMBAL_DELTA_EVENTS=true to use the new structured DeltaEvents system."
-    )
+_DELTA_EVENTS_WARNING_SHOWN = False
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
@@ -234,7 +242,7 @@ class Runnable(ABC, BaseModel):
                 target_node_analyzer.visit(target_node)
                 dependencies = target_node_analyzer.dependencies
         except Exception as e:
-            logger.error("Could not determine step dependencies for runtime callable.", exc_info=e)
+            _get_logger().error("Could not determine step dependencies for runtime callable.", exc_info=e)
 
         return {
             "is_coroutine": is_coroutine,
@@ -683,6 +691,12 @@ class Runnable(ABC, BaseModel):
                             item=event,
                         )
                     else:
+                        global _DELTA_EVENTS_WARNING_SHOWN
+                        if not _DELTA_EVENTS_WARNING_SHOWN:
+                            _DELTA_EVENTS_WARNING_SHOWN = True
+                            _get_logger().warning(
+                                "ChunkEvents will be deprecated in a future release. Enable TIMBAL_DELTA_EVENTS=true to use the new structured DeltaEvents system."
+                            )
                         if isinstance(event, TextDelta):
                             event = event.text_delta
                         elif isinstance(event, DeltaItem):
@@ -697,7 +711,7 @@ class Runnable(ABC, BaseModel):
                             chunk=event,
                         )
                     if event.type in self._log_events:
-                        logger.info(event.type, **event.model_dump())
+                        _get_logger().info(event.type, **event.model_dump())
                     if event_queue:
                         event_queue.put_nowait(event)
                     return event
@@ -719,7 +733,7 @@ class Runnable(ABC, BaseModel):
         # Yield a final marker with the output and collector
         yield (None, output, collector)
 
-    @TimbalCollector.wrap
+    @_timbal_collector_wrap
     async def __call__(self, **kwargs: Any) -> AsyncGenerator[Event, None]:
         """Execute the runnable with the given parameters.
 
@@ -798,7 +812,7 @@ class Runnable(ABC, BaseModel):
                 parent_call_id=span.parent_call_id,
             )
             if start_event.type in self._log_events:
-                logger.info(start_event.type, **start_event.model_dump())
+                _get_logger().info(start_event.type, **start_event.model_dump())
             yield start_event
 
             # Resolve input params (merging fixed defaults, runtime defaults, and provided input)
@@ -903,7 +917,7 @@ class Runnable(ABC, BaseModel):
 
         except (asyncio.CancelledError, InterruptError) as e:
             if isinstance(e, InterruptError):
-                logger.warning(
+                _get_logger().warning(
                     "Interrupted",
                     run_id=run_context.id,
                     call_id=span.call_id,
@@ -913,7 +927,7 @@ class Runnable(ABC, BaseModel):
                 span.output = e.output
                 span._output_dump = await dump(e.output)
             else:
-                logger.warning(
+                _get_logger().warning(
                     "Interrupted",
                     run_id=run_context.id,
                     call_id=span.call_id,
@@ -965,7 +979,7 @@ class Runnable(ABC, BaseModel):
             set_parent_call_id(_parent_call_id)
             set_call_id(_call_id)
             if output_event.type in self._log_events:
-                logger.info(output_event.type, **output_event.model_dump())
+                _get_logger().info(output_event.type, **output_event.model_dump())
             yield output_event
 
 

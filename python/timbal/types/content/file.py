@@ -9,17 +9,15 @@ try:
 except ImportError:
     from typing_extensions import override
 
-import pandas as pd
-import structlog
-from docx import Document
-from PIL import Image
-
 from ...errors import ImageProcessingError, PDFProcessingError
 from ..file import File
 from .base import BaseContent
 from .text import TextContent
 
-logger = structlog.get_logger("timbal.types.content")
+
+def _get_logger():
+    import structlog
+    return structlog.get_logger("timbal.types.content")
 
 
 AVAILABLE_ENCODINGS = [
@@ -53,6 +51,8 @@ def validate_image(image: File) -> None:
     Raises:
         ImageProcessingError: If the image file is corrupted or cannot be opened.
     """
+    from PIL import Image
+
     image.seek(0)
     try:
         image_bytes = image.read()
@@ -94,6 +94,8 @@ def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
 
 
 def _extract_docx_content(docx: File) -> str:
+    from docx import Document
+
     doc = Document(io.BytesIO(docx.read()))
     text_content = []
     # Process document elements in order to maintain structure
@@ -225,6 +227,7 @@ class FileContent(BaseContent):
             self.file.seek(0)
 
         if self.file.__source_extension__ == ".xlsx":
+            import pandas as pd
             df = pd.read_excel(io.BytesIO(self.file.read()))
             openai_responses_input = {
                 "type": "input_text",
@@ -250,7 +253,7 @@ class FileContent(BaseContent):
             try:
                 validate_image(self.file)
             except ImageProcessingError as e:
-                logger.warning(
+                _get_logger().warning(
                     "image_validation_error",
                     error=str(e),
                     file=str(self.file),
@@ -275,7 +278,7 @@ class FileContent(BaseContent):
             try:
                 validate_pdf(self.file)
             except PDFProcessingError as e:
-                logger.warning(
+                _get_logger().warning(
                     "pdf_validation_error",
                     error=str(e),
                     file=str(self.file),
@@ -345,6 +348,7 @@ class FileContent(BaseContent):
             self.file.seek(0)
 
         if self.file.__source_extension__ == ".xlsx":
+            import pandas as pd
             df = pd.read_excel(io.BytesIO(self.file.read()))
             openai_input = {
                 "type": "text",
@@ -367,7 +371,7 @@ class FileContent(BaseContent):
             try:
                 validate_image(self.file)
             except ImageProcessingError as e:
-                logger.warning(
+                _get_logger().warning(
                     "image_validation_error",
                     error=str(e),
                     file=str(self.file),
@@ -393,7 +397,7 @@ class FileContent(BaseContent):
                 pages = pdf_to_images(self.file)
             except PDFProcessingError as e:
                 # Handle corrupted or invalid PDF files gracefully
-                logger.warning(
+                _get_logger().warning(
                     "pdf_processing_error",
                     error=str(e),
                     file=str(self.file),
@@ -405,7 +409,7 @@ class FileContent(BaseContent):
                 }
                 self._cached_openai_chat_completions_input = error_input
                 return error_input
-            logger.info(
+            _get_logger().info(
                 "pdf_to_images",
                 n_pages=len(pages),
                 description=".to_openai_chat_completions_input() implicitly converting input pdf to images...",
@@ -539,6 +543,7 @@ class FileContent(BaseContent):
             self.file.seek(0)
 
         if self.file.__source_extension__ == ".xlsx":
+            import pandas as pd
             df = pd.read_excel(io.BytesIO(self.file.read()))
             anthropic_input = {
                 "type": "text",
@@ -561,7 +566,7 @@ class FileContent(BaseContent):
             try:
                 validate_image(self.file)
             except ImageProcessingError as e:
-                logger.warning(
+                _get_logger().warning(
                     "image_validation_error",
                     error=str(e),
                     file=str(self.file),

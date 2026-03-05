@@ -8,7 +8,6 @@ from typing import Any
 from urllib.parse import quote, urlparse
 from urllib.request import urlopen
 
-import requests
 from pydantic import (
     GetCoreSchemaHandler,
     GetJsonSchemaHandler,
@@ -21,7 +20,6 @@ from uuid_extensions import uuid7
 
 from .. import __version__
 from ..platform.types import UploadFileResponse
-from ..platform.utils import _request
 from ..state import get_or_create_run_context
 
 
@@ -347,6 +345,7 @@ class File(io.IOBase):
         path = f"orgs/{org_id}/files"
         files = {"file": (self.name, content, self.__content_type__)}
 
+        from ..platform.utils import _request
         res = await _request("POST", path, files=files)
         upload_response = UploadFileResponse.model_validate(res.json())
         # Encode simply the name of the url (the remaining is will be always safe
@@ -395,6 +394,7 @@ class File(io.IOBase):
     @classmethod
     def _fetch_http_file(cls, url: str) -> io.IOBase:
         """Fetch a file from a HTTP/HTTPS URL."""
+        import requests
         headers = {"User-Agent": f"Timbal/{__version__}"}
         res = requests.get(url, stream=True, headers=headers)
         res.raise_for_status()

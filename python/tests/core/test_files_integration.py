@@ -11,7 +11,7 @@ from timbal.types import File
         "openai/gpt-4o-mini",
         "openai/gpt-4o-mini-responses",
         "google/gemini-2.5-flash-lite",
-        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-sonnet-4-6",
         # ? Add more tests for other models.
     ]
 )

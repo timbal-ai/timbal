@@ -10,13 +10,9 @@ import os
 from itertools import islice
 from pathlib import Path
 
-import structlog
-
 from ..core.tool import Tool
 from ..state import get_run_context
 from ..types.file import File
-
-logger = structlog.get_logger("timbal.tools.read")
 
 
 class Read(Tool):

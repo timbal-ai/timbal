@@ -8,13 +8,10 @@ try:
 except ImportError:
     from typing_extensions import override
 
-import structlog
 from pydantic import field_validator
 
 from ...utils import coerce_to_dict
 from .base import BaseContent
-
-logger = structlog.get_logger("timbal.types.content.tool_use")
 
 
 class ToolUseContent(BaseContent):
