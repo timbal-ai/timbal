@@ -1,15 +1,17 @@
 import os
 from typing import Annotated, Any
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 _BASE_URL = "https://api.pinecone.io"
 
+_INDEX_HOST_DESC = 'Index host, e.g. "my-index-xyz.svc.pinecone.io"'
 
-async def _resolve_api_key(tool: Tool) -> str:
+
+async def _resolve_api_key(tool: Any) -> str:
     """Resolve Pinecone API key from integration, explicit field, or env var."""
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
@@ -77,16 +79,11 @@ class PineconeCreateIndex(Tool):
         async def _create_index(
             name: str,
             dimension: int,
-            metric: str = "cosine",
-            cloud: str = "aws",
-            region: str = "us-east-1",
-            deletion_protection: str = "disabled",
+            metric: str = Field("cosine", description='"cosine", "euclidean", or "dotproduct"'),
+            cloud: str = Field("aws", description='"aws", "gcp", or "azure"'),
+            region: str = Field("us-east-1", description="Cloud region for the index"),
+            deletion_protection: str = Field("disabled", description='"enabled" or "disabled"'),
         ) -> Any:
-            """
-            metric: "cosine", "euclidean", or "dotproduct".
-            cloud: "aws", "gcp", or "azure".
-            deletion_protection: "enabled" or "disabled".
-            """
             api_key = await _resolve_api_key(self)
             import httpx
 
@@ -128,13 +125,9 @@ class PineconeIndexStats(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _index_stats(
-            index_host: str,
-            metadata_filter: dict[str, Any] | None = None,
+            index_host: str = Field(..., description=_INDEX_HOST_DESC),
+            metadata_filter: dict[str, Any] | None = Field(None, description="Filter to count only matching vectors"),
         ) -> Any:
-            """
-            index_host: the host for the index, e.g. "my-index-xyz.svc.pinecone.io"
-            metadata_filter: optional filter to count only matching vectors.
-            """
             api_key = await _resolve_api_key(self)
             import httpx
 
@@ -172,19 +165,10 @@ class PineconeUpsertVectors(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _upsert_vectors(
-            index_host: str,
-            vectors: list[dict[str, Any]],
-            namespace: str = "",
+            index_host: str = Field(..., description=_INDEX_HOST_DESC),
+            vectors: list[dict[str, Any]] = Field(..., description="List of vectors with id, values, and optional metadata"),
+            namespace: str = Field("", description="Index partition"),
         ) -> Any:
-            """
-            index_host: the host for the index, e.g. "my-index-xyz.svc.pinecone.io"
-            vectors: list of vector objects, each with:
-              - "id": unique string ID
-              - "values": list of floats (the embedding)
-              - "metadata": optional dict of key-value pairs for filtering
-              - "sparse_values": optional sparse vector {"indices": [...], "values": [...]}
-            namespace: partition within the index (default "" = default namespace).
-            """
             api_key = await _resolve_api_key(self)
             import httpx
 
@@ -218,23 +202,14 @@ class PineconeQuery(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _query(
-            index_host: str,
-            vector: list[float],
-            top_k: int = 10,
-            namespace: str = "",
-            metadata_filter: dict[str, Any] | None = None,
-            include_values: bool = False,
-            include_metadata: bool = True,
+            index_host: str = Field(..., description=_INDEX_HOST_DESC),
+            vector: list[float] = Field(..., description="Query embedding"),
+            top_k: int = Field(10, description="Number of nearest neighbors to return"),
+            namespace: str = Field("", description="Index partition to search"),
+            metadata_filter: dict[str, Any] | None = Field(None, description='Metadata filter, e.g. {"genre": {"$eq": "documentary"}}'),
+            include_values: bool = Field(False, description="Return vector values in results"),
+            include_metadata: bool = Field(True, description="Return metadata in results"),
         ) -> Any:
-            """
-            index_host: the host for the index, e.g. "my-index-xyz.svc.pinecone.io"
-            vector: query embedding as a list of floats.
-            top_k: number of nearest neighbors to return.
-            namespace: partition to search within (default "" = default namespace).
-            metadata_filter: metadata filter, e.g. {"genre": {"$eq": "documentary"}}
-            include_values: whether to return vector values in results.
-            include_metadata: whether to return metadata in results.
-            """
             api_key = await _resolve_api_key(self)
             import httpx
 
@@ -278,15 +253,10 @@ class PineconeFetchVectors(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _fetch_vectors(
-            index_host: str,
-            ids: list[str],
-            namespace: str = "",
+            index_host: str = Field(..., description=_INDEX_HOST_DESC),
+            ids: list[str] = Field(..., description="Vector IDs to fetch"),
+            namespace: str = Field("", description="Index partition to fetch from"),
         ) -> Any:
-            """
-            index_host: the host for the index, e.g. "my-index-xyz.svc.pinecone.io"
-            ids: list of vector IDs to fetch.
-            namespace: partition to fetch from (default "" = default namespace).
-            """
             api_key = await _resolve_api_key(self)
             import httpx
 
@@ -324,19 +294,12 @@ class PineconeDeleteVectors(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _delete_vectors(
-            index_host: str,
-            ids: list[str] | None = None,
-            delete_all: bool = False,
-            namespace: str = "",
-            metadata_filter: dict[str, Any] | None = None,
+            index_host: str = Field(..., description=_INDEX_HOST_DESC),
+            ids: list[str] | None = Field(None, description="Vector IDs to delete"),
+            delete_all: bool = Field(False, description="Delete all vectors in the namespace"),
+            namespace: str = Field("", description="Index partition to delete from"),
+            metadata_filter: dict[str, Any] | None = Field(None, description="Metadata filter to select vectors for deletion"),
         ) -> Any:
-            """
-            index_host: the host for the index, e.g. "my-index-xyz.svc.pinecone.io"
-            ids: list of vector IDs to delete.
-            delete_all: if True, deletes all vectors in the namespace.
-            namespace: partition to delete from (default "" = default namespace).
-            metadata_filter: metadata filter to select vectors for deletion.
-            """
             api_key = await _resolve_api_key(self)
             import httpx
 
