@@ -5,6 +5,8 @@ from datetime import datetime
 from html import escape as html_escape
 from typing import Annotated, Any, Literal
 
+from pydantic import Field
+
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
@@ -158,14 +160,14 @@ class GmailSend(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _send_email(
-            to: str | list[str],
-            subject: str,
-            body: str,
-            cc: str | list[str] | None = None,
-            bcc: str | list[str] | None = None,
-            attachment_urls: list[str] | None = None,
-            message_format: Literal["text", "html"] = "text",
-            email_signature: str | None = None,
+            to: str | list[str] = Field(..., description="Recipient email address(es)"),
+            subject: str = Field(..., description="Email subject"),
+            body: str = Field(..., description="Email body content"),
+            cc: str | list[str] | None = Field(None, description="CC recipient(s)"),
+            bcc: str | list[str] | None = Field(None, description="BCC recipient(s)"),
+            attachment_urls: list[str] | None = Field(None, description="URLs of files to attach"),
+            message_format: Literal["text", "html"] = Field("text", description='"text" or "html"'),
+            email_signature: str | None = Field(None, description="Email signature to append"),
         ) -> Any:
             if not isinstance(self.integration, Integration):
                 raise ValueError("Gmail integration not configured.")
@@ -288,14 +290,14 @@ class GmailReply(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _reply_to_email(
-            email_conversation: str,
-            reply_message: str,
-            reply_all: bool = False,
-            reply_to_specific_message: bool = False,
-            override_recipients: list[str] | None = None,
-            content_type: Literal["text", "html"] = "text",
-            email_signature: str | None = None,
-            attachments: list[str] | None = None,
+            email_conversation: str = Field(..., description="Message ID to reply to"),
+            reply_message: str = Field(..., description="Reply body content"),
+            reply_all: bool = Field(False, description="Reply to all recipients"),
+            reply_to_specific_message: bool = Field(False, description="Reply to specific message instead of thread"),
+            override_recipients: list[str] | None = Field(None, description="Override default recipients"),
+            content_type: Literal["text", "html"] = Field("text", description='"text" or "html"'),
+            email_signature: str | None = Field(None, description="Email signature to append"),
+            attachments: list[str] | None = Field(None, description="URLs of files to attach"),
         ) -> Any:
             if not isinstance(self.integration, Integration):
                 raise ValueError("Gmail integration not configured.")
@@ -489,9 +491,9 @@ class GmailSearch(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_emails(
-            search_in_gmail: str,
-            max_results: int = 10,
-            include_attachments: bool = False,
+            search_in_gmail: str = Field(..., description="Gmail search query"),
+            max_results: int = Field(10, description="Maximum number of results"),
+            include_attachments: bool = Field(False, description="Include attachment metadata"),
         ) -> Any:
             if not isinstance(self.integration, Integration):
                 raise ValueError("Gmail integration not configured.")
@@ -595,8 +597,8 @@ class GmailAddLabel(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _add_label_to_email(
-            email_to_label: str,
-            labels: list[str],
+            email_to_label: str = Field(..., description="Message ID to label"),
+            labels: list[str] = Field(..., description="Label names to add"),
         ) -> Any:
             if not isinstance(self.integration, Integration):
                 raise ValueError("Gmail integration not configured.")
@@ -662,7 +664,10 @@ class GmailListLabels(Tool):
         return config
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _list_labels(include_system_labels: bool = True, include_user_labels: bool = True) -> Any:
+        async def _list_labels(
+            include_system_labels: bool = Field(True, description="Include system labels"),
+            include_user_labels: bool = Field(True, description="Include user-created labels"),
+        ) -> Any:
             if not isinstance(self.integration, Integration):
                 raise ValueError("Gmail integration not configured.")
             credentials = await self.integration.resolve()
@@ -732,8 +737,8 @@ class GmailRemoveLabel(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _remove_label_from_email(
-            email_to_update: str,
-            labels: list[str],
+            email_to_update: str = Field(..., description="Message ID to update"),
+            labels: list[str] = Field(..., description="Label names to remove"),
         ) -> Any:
             if not isinstance(self.integration, Integration):
                 raise ValueError("Gmail integration not configured.")
