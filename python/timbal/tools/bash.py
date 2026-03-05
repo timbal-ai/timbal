@@ -48,13 +48,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-import structlog
 from pydantic import PrivateAttr, model_validator
 
 from ..core.tool import Tool
 from ..state import get_run_context
-
-logger = structlog.get_logger("timbal.tools.bash")
 
 
 class Bash(Tool):

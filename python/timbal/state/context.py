@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-import structlog
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from uuid_extensions import uuid7
 
@@ -12,7 +11,9 @@ from .tracing.providers import InMemoryTracingProvider, PlatformTracingProvider,
 from .tracing.span import Span
 from .tracing.trace import Trace
 
-logger = structlog.get_logger("timbal.state.context")
+def _get_logger():
+    import structlog
+    return structlog.get_logger("timbal.state.context")
 
 
 class _NoDefault:
@@ -90,7 +91,7 @@ class RunContext(BaseModel):
         self._trace = Trace()
         if self.platform_config:
             if self.platform_config.subject and self.platform_config.subject.app_id:
-                logger.info(
+                _get_logger().info(
                     f"Platform configuration found (subject: {self.platform_config.subject}). "
                     "Using platform tracing provider.",
                     event_name="tracing_setup",
@@ -98,13 +99,13 @@ class RunContext(BaseModel):
                 )
                 self._tracing_provider = PlatformTracingProvider
                 return
-            logger.warning(
+            _get_logger().warning(
                 "Platform configuration found but no valid subject. "
                 "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID environment variables to enable platform tracing.",
                 event_name="tracing_setup",
                 run_id=self.id,
             )
-        logger.info(
+        _get_logger().info(
             "Using in-memory tracing provider.",
             event_name="tracing_setup",
             run_id=self.id,
@@ -149,7 +150,7 @@ class RunContext(BaseModel):
             if self.parent_id:
                 trace = await self._tracing_provider.get(self)
                 if trace is None or trace._root_call_id is None:
-                    logger.error(
+                    _get_logger().error(
                         "Parent trace not found. Continuing without session data...",
                         parent_id=self.parent_id,
                         run_id=self.id,

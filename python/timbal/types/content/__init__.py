@@ -1,7 +1,5 @@
 from typing import Any
 
-import structlog
-
 from ..file import File
 from .base import BaseContent
 from .custom import CustomContent
@@ -10,8 +8,6 @@ from .text import TextContent
 from .thinking import ThinkingContent
 from .tool_result import ToolResultContent
 from .tool_use import ToolUseContent
-
-logger = structlog.get_logger("timbal.types.content")
 
 
 def content_factory(value: Any) -> BaseContent:

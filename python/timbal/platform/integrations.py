@@ -1,14 +1,10 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import structlog
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema, core_schema
 
-from .utils import _request
-
-logger = structlog.get_logger("timbal.platform.integrations")
 
 _EXPIRY_BUFFER = timedelta(seconds=60)
 
@@ -74,6 +70,7 @@ class Integration:
                 return cached
 
         path = f"orgs/{subject.org_id}/integrations/{self._org_integration_id}"
+        from .utils import _request
         response = await _request("GET", path)
         credential = response.json()
 

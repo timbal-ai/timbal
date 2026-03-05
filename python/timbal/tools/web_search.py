@@ -17,12 +17,14 @@ try:
 except ImportError:
     from typing_extensions import override
 
-import structlog
 from pydantic import computed_field
 
 from ..core.tool import Tool
 
-logger = structlog.get_logger("timbal.tools.web_search")
+
+def _get_logger():
+    import structlog
+    return structlog.get_logger("timbal.tools.web_search")
 
 
 class WebSearch(Tool):
@@ -75,7 +77,7 @@ class WebSearch(Tool):
         if self.allowed_domains:
             schema["filters"] = {"allowed_domains": self.allowed_domains}
         if self.blocked_domains:
-            logger.warning("Blocked domains are not supported by OpenAI.")
+            _get_logger().warning("Blocked domains are not supported by OpenAI.")
         if self.user_location:
             schema["user_location"] = self.user_location
 
