@@ -43,7 +43,6 @@ if TIMBAL_OPENAI_API != "responses":
 
 # Model type with provider prefixes
 Model = Literal[
-    # OpenAI models — GPT series
     "openai/gpt-5.4",
     "openai/gpt-5.3-chat-latest",
     "openai/gpt-5.2",
@@ -59,7 +58,6 @@ Model = Literal[
     "openai/gpt-4.1-nano",
     "openai/gpt-4o",
     "openai/gpt-4o-mini",
-    # OpenAI models — o-series reasoning
     "openai/o4-mini",
     "openai/o4-mini-deep-research",
     "openai/o3",
@@ -68,7 +66,6 @@ Model = Literal[
     "openai/o3-deep-research",
     "openai/o1",
     "openai/o1-mini",
-    # Anthropic models
     "anthropic/claude-opus-4-6",
     "anthropic/claude-opus-4-5",
     "anthropic/claude-opus-4-1",
@@ -81,7 +78,6 @@ Model = Literal[
     "anthropic/claude-3-5-haiku-latest",
     "anthropic/claude-3-opus-latest",
     "anthropic/claude-3-haiku-20240307",
-    # TogetherAI models
     "togetherai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
     "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
     "togetherai/meta-llama/Llama-3.2-3B-Instruct-Turbo",
@@ -105,23 +101,56 @@ Model = Literal[
     "togetherai/google/gemma-3-27b-it",
     "togetherai/deepcogito/cogito-v2-1-671b",
     "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",
-    # Gemini models
-    "google/gemini-3.1-flash-lite-preview",
     "google/gemini-3.1-pro-preview",
+    "google/gemini-3.1-flash-lite-preview",
     "google/gemini-3-flash-preview",
     "google/gemini-2.5-pro",
+    "google/gemini-2.5-pro-preview-tts",
     "google/gemini-2.5-flash",
     "google/gemini-2.5-flash-lite",
     "google/gemini-2.5-flash-native-audio-preview-12-2025",
     "google/gemini-2.5-flash-image",
     "google/gemini-2.5-flash-preview-tts",
-    "google/gemini-2.5-pro-preview-tts",
-    # x.ai/Grok models
     "xai/grok-4",
     "xai/grok-4-fast-reasoning",
     "xai/grok-4-fast-non-reasoning",
     "xai/grok-4-1-fast-reasoning",
     "xai/grok-4-1-fast-non-reasoning",
+    "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+    "groq/llama-3.3-70b-versatile",
+    "groq/llama-3.1-8b-instant",
+    "groq/qwen/qwen3-32b",
+    "groq/openai/gpt-oss-120b",
+    "groq/openai/gpt-oss-20b",
+    "groq/moonshotai/kimi-k2-instruct-0905",
+    "fireworks/accounts/fireworks/models/llama4-maverick-instruct-basic",
+    "fireworks/accounts/fireworks/models/llama4-scout-instruct-basic",
+    "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",
+    "fireworks/accounts/fireworks/models/llama-v3p1-405b-instruct",
+    "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
+    "fireworks/accounts/fireworks/models/llama-v3p1-8b-instruct",
+    "fireworks/accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
+    "fireworks/accounts/fireworks/models/qwen3-235b-a22b",
+    "fireworks/accounts/fireworks/models/qwen3-32b",
+    "fireworks/accounts/fireworks/models/qwen3-8b",
+    "fireworks/accounts/fireworks/models/qwen2p5-72b-instruct",
+    "fireworks/accounts/fireworks/models/deepseek-v3p2",
+    "fireworks/accounts/fireworks/models/deepseek-v3p1",
+    "fireworks/accounts/fireworks/models/deepseek-r1",
+    "fireworks/accounts/fireworks/models/deepseek-r1-0528",
+    "fireworks/accounts/fireworks/models/deepseek-r1-distill-llama-70b",
+    "fireworks/accounts/fireworks/models/kimi-k2p5",
+    "fireworks/accounts/fireworks/models/kimi-k2-instruct-0905",
+    "fireworks/accounts/fireworks/models/kimi-k2-thinking",
+    "fireworks/accounts/fireworks/models/minimax-m2p5",
+    "fireworks/accounts/fireworks/models/gpt-oss-120b",
+    "fireworks/accounts/fireworks/models/gpt-oss-20b",
+    "fireworks/accounts/fireworks/models/mistral-large-3-fp8",
+    "fireworks/accounts/fireworks/models/mistral-small-24b-instruct-2501",
+    "fireworks/accounts/fireworks/models/gemma-3-27b-it",
+    "fireworks/accounts/fireworks/models/glm-5",
+    "fireworks/accounts/fireworks/models/glm-4p5",
+    "fireworks/accounts/fireworks/models/qwq-32b",
 ]
 
 
@@ -365,6 +394,40 @@ async def _llm_router(
             client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
         else:
             client = AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1", default_headers=default_headers)
+
+    elif provider == "groq":
+        default_headers["x-provider"] = "groq"
+        if not api_key:
+            api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
+        if not api_key:
+            raise APIKeyNotFoundError("GROQ_API_KEY not found.")
+        if base_url is not None:
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
+        else:
+            client = AsyncOpenAI(
+                api_key=api_key, base_url="https://api.groq.com/openai/v1", default_headers=default_headers
+            )
+
+    elif provider == "fireworks":
+        default_headers["x-provider"] = "fireworks"
+        if not api_key:
+            api_key = os.getenv("FIREWORKS_API_KEY")
+        if not api_key:
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
+        if not api_key:
+            raise APIKeyNotFoundError("FIREWORKS_API_KEY not found.")
+        if base_url is not None:
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
+        else:
+            client = AsyncOpenAI(
+                api_key=api_key, base_url="https://api.fireworks.ai/inference/v1", default_headers=default_headers
+            )
 
     else:
         raise ValueError(f"Unsupported provider: {provider}")
