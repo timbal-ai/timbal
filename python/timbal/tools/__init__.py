@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from .bash import Bash
     from .cala import CalaSearch
     from .edit import Edit
+    from .firecrawl import FirecrawlCrawl, FirecrawlExtract, FirecrawlMap, FirecrawlScrape, FirecrawlSearch
     from .gmail import GmailAddLabel, GmailListLabels, GmailRemoveLabel, GmailReply, GmailSearch, GmailSend
     from .google_maps import (
         GoogleMapsNearbySearch,
@@ -43,6 +44,11 @@ __all__ = [
     "Bash",
     "CalaSearch",
     "Edit",
+    "FirecrawlCrawl",
+    "FirecrawlExtract",
+    "FirecrawlMap",
+    "FirecrawlScrape",
+    "FirecrawlSearch",
     "GmailAddLabel",
     "GmailListLabels",
     "GmailRemoveLabel",
@@ -81,6 +87,11 @@ _LAZY_IMPORTS = {
     "Bash": ".bash",
     "CalaSearch": ".cala",
     "Edit": ".edit",
+    "FirecrawlCrawl": ".firecrawl",
+    "FirecrawlExtract": ".firecrawl",
+    "FirecrawlMap": ".firecrawl",
+    "FirecrawlScrape": ".firecrawl",
+    "FirecrawlSearch": ".firecrawl",
     "GmailAddLabel": ".gmail",
     "GmailListLabels": ".gmail",
     "GmailRemoveLabel": ".gmail",
