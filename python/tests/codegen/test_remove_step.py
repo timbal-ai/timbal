@@ -22,7 +22,7 @@ def workspace(tmp_path):
 def _run_dry(workspace_path: Path, step_name: str) -> str:
     """Run codegen remove-step with --dry-run and return stdout."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "remove-step", step_name],
+        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "remove-step", "--name", step_name],
         capture_output=True,
         text=True,
     )
@@ -33,7 +33,7 @@ def _run_dry(workspace_path: Path, step_name: str) -> str:
 def _run_dry_expect_error(workspace_path: Path, step_name: str) -> str:
     """Run codegen remove-step with --dry-run, expecting failure. Returns stderr."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "remove-step", step_name],
+        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "remove-step", "--name", step_name],
         capture_output=True,
         text=True,
     )
@@ -178,7 +178,7 @@ class TestRemoveEdgeCases:
         """)
         # Remove agent_b (writes to file)
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-step", "agent_b"],
+            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-step", "--name", "agent_b"],
             capture_output=True,
             text=True,
         )

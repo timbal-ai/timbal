@@ -10,7 +10,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "remove-tool",
         help="Remove a tool from the agent's tools list by name.",
     )
-    sp.add_argument("value", help="The tool name to remove. E.g. my_search_tool.")
+    sp.add_argument("--name", required=True, help="The tool name to remove. E.g. my_search_tool.")
     sp.add_argument(
         "--step",
         default=None,
@@ -31,7 +31,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
     target = step if step else entry_point
     assignments = collect_assignments(tree) if tree else {}
-    return ToolRemover(target, args.value, assignments)
+    return ToolRemover(target, args.name, assignments)
 
 
 class ToolRemover(cst.CSTTransformer):

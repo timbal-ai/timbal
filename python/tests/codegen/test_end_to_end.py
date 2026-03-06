@@ -153,7 +153,7 @@ class TestFullLifecycle:
         # Step 5: Set config on a tool (WebSearch allowed_domains)
         # ---------------------------------------------------------------
         tool_config = json.dumps({"allowed_domains": ["example.com", "docs.python.org"]})
-        _run(ws, "set-config", "web_search", "--config", tool_config)
+        _run(ws, "set-config", "--name", "web_search", "--config", tool_config)
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -166,7 +166,7 @@ class TestFullLifecycle:
         # ---------------------------------------------------------------
         # Step 6: Remove the custom tool
         # ---------------------------------------------------------------
-        _run(ws, "remove-tool", "summarize")
+        _run(ws, "remove-tool", "--name", "summarize")
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -226,7 +226,7 @@ class TestFullLifecycle:
         # Step 11: Set config on the new step (model)
         # ---------------------------------------------------------------
         step_model_config = json.dumps({"model": "openai/gpt-4o"})
-        _run(ws, "set-config", "agent_b", "--config", step_model_config)
+        _run(ws, "set-config", "--name", "agent_b", "--config", step_model_config)
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -237,7 +237,7 @@ class TestFullLifecycle:
         # Step 12: Set step params (wire agent_b's prompt)
         # ---------------------------------------------------------------
         params = json.dumps({"prompt": {"step": "agent"}})
-        _run(ws, "set-config", "agent_b", "--params", params)
+        _run(ws, "set-config", "--name", "agent_b", "--params", params)
         source = _read_source(ws)
 
         assert 'step_span("agent")' in source
@@ -246,7 +246,7 @@ class TestFullLifecycle:
         # ---------------------------------------------------------------
         # Step 13: Remove the tool from the step
         # ---------------------------------------------------------------
-        _run(ws, "remove-tool", "edit", "--step", "agent_b")
+        _run(ws, "remove-tool", "--name", "edit", "--step", "agent_b")
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -256,7 +256,7 @@ class TestFullLifecycle:
         # ---------------------------------------------------------------
         # Step 14: Remove the step entirely
         # ---------------------------------------------------------------
-        _run(ws, "remove-step", "agent_b")
+        _run(ws, "remove-step", "--name", "agent_b")
         source = _read_source(ws)
 
         assert "agent_b" not in source
@@ -267,7 +267,7 @@ class TestFullLifecycle:
         # ---------------------------------------------------------------
         assert 'name="agent"' in source
 
-        _run(ws, "rename", "agent", "--to", "primary_agent")
+        _run(ws, "rename", "--old-name", "agent", "--to", "primary_agent")
         source = _read_source(ws)
 
         assert "agent_step" not in source
@@ -358,7 +358,7 @@ class TestComplexWorkflow:
         tool_config = json.dumps({
             "allowed_domains": ["wikipedia.org", "arxiv.org"],
         })
-        _run(ws, "set-config", "search", "--config", tool_config)
+        _run(ws, "set-config", "--name", "search", "--config", tool_config)
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -503,7 +503,7 @@ class TestComplexWorkflow:
 
         # -- 5a. Wire reviewer's prompt to preprocessor's output with key --
         params = json.dumps({"prompt": {"step": "preprocessor", "key": "cleaned"}})
-        _run(ws, "set-config", "reviewer", "--params", params)
+        _run(ws, "set-config", "--name", "reviewer", "--params", params)
         source = _read_source(ws)
 
         assert 'step_span("preprocessor")' in source
@@ -517,7 +517,7 @@ class TestComplexWorkflow:
             "context": {"step": "preprocessor", "key": "word_count"},
         })
         _run(
-            ws, "set-config", "summarizer_agent",
+            ws, "set-config", "--name", "summarizer_agent",
             "--params", multi_params,
             "--depends-on", "reviewer",
             "--depends-on", "preprocessor",
@@ -530,7 +530,7 @@ class TestComplexWorkflow:
         assert 'depends_on=["reviewer", "preprocessor"]' in normalized
 
         # -- 5c. Set postprocessor depends_on preprocessor (ordering only) --
-        _run(ws, "set-config", "postprocessor", "--depends-on", "preprocessor")
+        _run(ws, "set-config", "--name", "postprocessor", "--depends-on", "preprocessor")
         source = _read_source(ws)
         normalized = " ".join(source.split())
 
@@ -544,7 +544,7 @@ class TestComplexWorkflow:
         new_config = json.dumps({"model": "openai/gpt-4o", "max_iter": 5})
         new_params = json.dumps({"prompt": {"step": "preprocessor"}})
         _run(
-            ws, "set-config", "reviewer",
+            ws, "set-config", "--name", "reviewer",
             "--config", new_config,
             "--params", new_params,
         )
@@ -568,7 +568,7 @@ class TestComplexWorkflow:
 
         # -- 7a. Dry-run a rename and verify it doesn't write to disk --
         source_before = _read_source(ws)
-        dry_output = _dry_run(ws, "rename", "reviewer", "--to", "validator")
+        dry_output = _dry_run(ws, "rename", "--old-name", "reviewer", "--to", "validator")
         source_after = _read_source(ws)
 
         assert source_before == source_after, "dry-run should not modify files"
@@ -584,7 +584,7 @@ class TestComplexWorkflow:
         # - name= kwarg
         # - step_span("reviewer") references in summarizer_agent's params
         # - depends_on=["reviewer"] references in summarizer_agent
-        _run(ws, "rename", "reviewer", "--to", "validator")
+        _run(ws, "rename", "--old-name", "reviewer", "--to", "validator")
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -610,7 +610,7 @@ class TestComplexWorkflow:
         # ===============================================================
 
         # -- 9a. Remove WebSearch from validator, keep Read --
-        _run(ws, "remove-tool", "web_search", "--step", "validator")
+        _run(ws, "remove-tool", "--name", "web_search", "--step", "validator")
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -621,7 +621,7 @@ class TestComplexWorkflow:
         assert ns["validator"].model == "openai/gpt-4o"
 
         # -- 9b. Remove Read from validator --
-        _run(ws, "remove-tool", "read", "--step", "validator")
+        _run(ws, "remove-tool", "--name", "read", "--step", "validator")
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -643,7 +643,7 @@ class TestComplexWorkflow:
         assert _count_step_calls(source) == 5
 
         # -- 10a. Remove postprocessor --
-        _run(ws, "remove-step", "postprocessor")
+        _run(ws, "remove-step", "--name", "postprocessor")
         source = _read_source(ws)
 
         assert "postprocessor" not in source
@@ -657,7 +657,7 @@ class TestComplexWorkflow:
         assert "agent_step" in source
 
         # -- 10b. Remove summarizer_agent --
-        _run(ws, "remove-step", "summarizer_agent")
+        _run(ws, "remove-step", "--name", "summarizer_agent")
         source = _read_source(ws)
 
         assert "summarizer_agent" not in source
@@ -671,14 +671,14 @@ class TestComplexWorkflow:
         assert "write" in [t.name for t in ns["validator"].tools]
 
         # -- 10c. Remove preprocessor --
-        _run(ws, "remove-step", "preprocessor")
+        _run(ws, "remove-step", "--name", "preprocessor")
         source = _read_source(ws)
 
         assert "def preprocessor" not in source
         assert _count_step_calls(source) == 2
 
         # -- 10d. Remove validator --
-        _run(ws, "remove-step", "validator")
+        _run(ws, "remove-step", "--name", "validator")
         source = _read_source(ws)
 
         assert "validator" not in source
@@ -731,7 +731,7 @@ class TestComplexWorkflow:
             ws, "add-step", "--type", "Agent", "--config", final_config,
         )
         _run(
-            ws, "set-config", "final_agent",
+            ws, "set-config", "--name", "final_agent",
             "--params", final_params,
             "--depends-on", "agent",
             "--depends-on", "preprocessor",
@@ -750,7 +750,7 @@ class TestComplexWorkflow:
         # Phase 13: Rename the original agent step
         # ===============================================================
 
-        _run(ws, "rename", "agent", "--to", "intake_agent")
+        _run(ws, "rename", "--old-name", "agent", "--to", "intake_agent")
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -772,7 +772,7 @@ class TestComplexWorkflow:
         # ===============================================================
 
         # -- 14a. Cannot rename the entry point --
-        err = _run_err(ws, "rename", "pipeline", "--to", "new_pipeline")
+        err = _run_err(ws, "rename", "--old-name", "pipeline", "--to", "new_pipeline")
         assert "entry point" in err.lower() or "not found" in err.lower()
 
         # -- 14b. Cannot add-step on non-existent type --

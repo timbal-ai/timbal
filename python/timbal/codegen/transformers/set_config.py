@@ -33,8 +33,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Set configuration on the agent/step or on a specific tool.",
     )
     sp.add_argument(
-        "tool_name",
-        nargs="?",
+        "--name",
         default=None,
         help="Tool or step name to configure. Omit to configure the entry point itself.",
     )
@@ -83,7 +82,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
     # --- Workflow entry point ---
     if ep_type == "Workflow":
-        if not args.tool_name:
+        if not args.name:
             # Configuring the workflow itself — not supported yet.
             raise ValueError("set-config on a Workflow entry point requires a step name.")
 
@@ -92,7 +91,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             assignments = collect_assignments(tree) if tree else {}
             # Validate --config against AGENT_FIELDS if the step is an Agent.
             if config:
-                step_class = _resolve_step_class(args.tool_name, assignments)
+                step_class = _resolve_step_class(args.name, assignments)
                 if step_class == "Agent":
                     unknown = set(config.keys()) - AGENT_FIELDS
                     if unknown:
@@ -100,11 +99,11 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
                             f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
                             f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
                         )
-            return StepConfigSetter(entry_point, args.tool_name, config, param_map, depends_on, assignments)
+            return StepConfigSetter(entry_point, args.name, config, param_map, depends_on, assignments)
 
         # --config only, no --params or --depends-on: update the step's constructor kwargs.
         assignments = collect_assignments(tree) if tree else {}
-        step_class = _resolve_step_class(args.tool_name, assignments)
+        step_class = _resolve_step_class(args.name, assignments)
         if step_class == "Agent":
             unknown = set(config.keys()) - AGENT_FIELDS
             if unknown:
@@ -112,7 +111,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
                     f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
                     f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
                 )
-        return StepConstructorConfigSetter(entry_point, args.tool_name, config, assignments)
+        return StepConstructorConfigSetter(entry_point, args.name, config, assignments)
 
     # --- Agent entry point ---
     if ep_type is not None and ep_type != "Agent":
@@ -122,14 +121,14 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     if param_map or depends_on:
         raise ValueError("--params and --depends-on are only supported for Workflow steps.")
 
-    if args.tool_name:
+    if args.name:
         assignments = collect_assignments(tree) if tree else {}
-        tool_class = _resolve_tool_class(tree, entry_point, args.tool_name, assignments)
+        tool_class = _resolve_tool_class(tree, entry_point, args.name, assignments)
         if tool_class is None:
-            raise ValueError(f"Tool '{args.tool_name}' not found in agent tools list.")
+            raise ValueError(f"Tool '{args.name}' not found in agent tools list.")
         validate_tool_config(tool_class, config)
-        var_name = get_framework_tool_names().get(tool_class, args.tool_name)
-        return ToolConfigSetter(entry_point, args.tool_name, config, assignments, tool_class, var_name)
+        var_name = get_framework_tool_names().get(tool_class, args.name)
+        return ToolConfigSetter(entry_point, args.name, config, assignments, tool_class, var_name)
 
     if not config:
         raise ValueError("--config is required when not using --params or --depends-on.")

@@ -10,7 +10,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "remove-step",
         help="Remove a step from the workflow by name.",
     )
-    sp.add_argument("value", help="The step name to remove. E.g. agent_b.")
+    sp.add_argument("--name", required=True, help="The step name to remove. E.g. agent_b.")
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
@@ -20,7 +20,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             raise ValueError(f"remove-step requires a Workflow entry point, but '{entry_point}' is a {ep_type}.")
 
     assignments = collect_assignments(tree) if tree else {}
-    return StepRemover(entry_point, args.value, assignments)
+    return StepRemover(entry_point, args.name, assignments)
 
 
 class StepRemover(cst.CSTTransformer):

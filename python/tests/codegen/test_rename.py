@@ -65,7 +65,7 @@ class TestRenameStep:
         workflow = Workflow(name="workflow")
         workflow.step(agent_a)
         """)
-        output = _run_dry(ws, "agent_a", "--to", "agent_b")
+        output = _run_dry(ws, "--old-name", "agent_a", "--to", "agent_b")
         assert 'agent_b = Agent(name="agent_b"' in output
         assert "workflow.step(agent_b)" in output
         assert "agent_a" not in output
@@ -82,7 +82,7 @@ class TestRenameStep:
         workflow.step(agent_a)
         workflow.step(agent_b, depends_on=["agent_a"])
         """)
-        output = _run_dry(ws, "agent_a", "--to", "first_agent")
+        output = _run_dry(ws, "--old-name", "agent_a", "--to", "first_agent")
         assert 'first_agent = Agent(name="first_agent"' in output
         assert "workflow.step(first_agent)" in output
         assert 'depends_on=["first_agent"]' in output
@@ -101,7 +101,7 @@ class TestRenameStep:
         workflow.step(agent_a)
         workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
         """)
-        output = _run_dry(ws, "agent_a", "--to", "first_agent")
+        output = _run_dry(ws, "--old-name", "agent_a", "--to", "first_agent")
         assert 'step_span("first_agent")' in output
         assert 'step_span("agent_a")' not in output
 
@@ -117,7 +117,7 @@ class TestRenameTool:
 
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
         """)
-        output = _run_dry(ws, "web_search", "--to", "my_search")
+        output = _run_dry(ws, "--old-name", "web_search", "--to", "my_search")
         assert "my_search = WebSearch(" in output
         assert "tools=[my_search]" in output
         assert "web_search" not in output
@@ -134,7 +134,7 @@ class TestRenameEdgeCases:
         workflow = Workflow(name="workflow")
         workflow.step(agent_a)
         """)
-        stderr = _run_dry_expect_error(ws, "workflow", "--to", "my_workflow")
+        stderr = _run_dry_expect_error(ws, "--old-name", "workflow", "--to", "my_workflow")
         assert "entry point" in stderr.lower()
 
     def test_rejects_nonexistent_name(self, wf_workspace):
@@ -147,7 +147,7 @@ class TestRenameEdgeCases:
         workflow = Workflow(name="workflow")
         workflow.step(agent_a)
         """)
-        stderr = _run_dry_expect_error(ws, "nonexistent", "--to", "something")
+        stderr = _run_dry_expect_error(ws, "--old-name", "nonexistent", "--to", "something")
         assert "found" in stderr.lower()
 
     def test_rename_preserves_other_config(self, wf_workspace):
@@ -160,7 +160,7 @@ class TestRenameEdgeCases:
         workflow = Workflow(name="workflow")
         workflow.step(agent_a)
         """)
-        output = _run_dry(ws, "agent_a", "--to", "agent_b")
+        output = _run_dry(ws, "--old-name", "agent_a", "--to", "agent_b")
         assert 'name="agent_b"' in output
         assert 'model="openai/gpt-4o-mini"' in output
         assert 'system_prompt="Be helpful."' in output

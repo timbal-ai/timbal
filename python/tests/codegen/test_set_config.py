@@ -208,7 +208,7 @@ class TestToolConfig:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
         """)
         config = json.dumps({"allowed_domains": ["example.com"], "blocked_domains": ["spam.com"]})
-        output = _run_dry(ws, "web_search", "--config", config)
+        output = _run_dry(ws, "--name", "web_search", "--config", config)
         ns = _exec_agent(output)
         ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
         assert ws_tool.allowed_domains == ["example.com"]
@@ -224,7 +224,7 @@ class TestToolConfig:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
         """)
         config = json.dumps({"allowed_domains": ["new.com"]})
-        output = _run_dry(ws, "web_search", "--config", config)
+        output = _run_dry(ws, "--name", "web_search", "--config", config)
         ns = _exec_agent(output)
         ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
         assert ws_tool.allowed_domains == ["new.com"]
@@ -240,7 +240,7 @@ class TestToolConfig:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
         """)
         config = json.dumps({"allowed_domains": ["new.com"]})
-        output = _run_dry(ws, "web_search", "--config", config)
+        output = _run_dry(ws, "--name", "web_search", "--config", config)
         ns = _exec_agent(output)
         ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
         assert ws_tool.allowed_domains == ["new.com"]
@@ -256,7 +256,7 @@ class TestToolConfig:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
         """)
         config = json.dumps({"invalid_field": "value"})
-        result = _run_dry_fail(ws, "web_search", "--config", config)
+        result = _run_dry_fail(ws, "--name", "web_search", "--config", config)
         assert result.returncode != 0
         assert "Unknown config field(s)" in result.stderr
 
@@ -270,7 +270,7 @@ class TestToolConfig:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[edit])
         """)
         config = json.dumps({"some_param": "value"})
-        result = _run_dry_fail(ws, "edit", "--config", config)
+        result = _run_dry_fail(ws, "--name", "edit", "--config", config)
         assert result.returncode != 0
         assert "Unknown config field(s)" in result.stderr
 
@@ -281,7 +281,7 @@ class TestToolConfig:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
         """)
         config = json.dumps({"allowed_domains": ["example.com"]})
-        result = _run_dry_fail(ws, "web_search", "--config", config)
+        result = _run_dry_fail(ws, "--name", "web_search", "--config", config)
         assert result.returncode != 0
         assert "not found" in result.stderr
 
@@ -294,7 +294,7 @@ class TestToolConfig:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[WebSearch()])
         """)
         config = json.dumps({"allowed_domains": ["example.com"]})
-        output = _run_dry(ws, "web_search", "--config", config)
+        output = _run_dry(ws, "--name", "web_search", "--config", config)
         assert "tools=[web_search]" in output
         ns = _exec_agent(output)
         ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
@@ -318,7 +318,7 @@ class TestToolNameAndDescription:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
         """)
         config = json.dumps({"name": "my_search"})
-        output = _run_dry(ws, "web_search", "--config", config)
+        output = _run_dry(ws, "--name", "web_search", "--config", config)
         ns = _exec_agent(output)
         ws_tool = ns["web_search"]
         assert ws_tool.name == "my_search"
@@ -335,7 +335,7 @@ class TestToolNameAndDescription:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
         """)
         config = json.dumps({"description": "Custom search tool"})
-        output = _run_dry(ws, "web_search", "--config", config)
+        output = _run_dry(ws, "--name", "web_search", "--config", config)
         ns = _exec_agent(output)
         ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
         assert ws_tool.description == "Custom search tool"
@@ -352,7 +352,7 @@ class TestToolNameAndDescription:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[cala_search])
         """)
         config = json.dumps({"name": "my_cala"})
-        output = _run_dry(ws, "cala_search", "--config", config)
+        output = _run_dry(ws, "--name", "cala_search", "--config", config)
         ns = _exec_agent(output)
         cs_tool = ns["cala_search"]
         assert cs_tool.name == "my_cala"
@@ -370,7 +370,7 @@ class TestToolNameAndDescription:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[cala_search])
         """)
         config = json.dumps({"description": "Custom knowledge search"})
-        output = _run_dry(ws, "cala_search", "--config", config)
+        output = _run_dry(ws, "--name", "cala_search", "--config", config)
         ns = _exec_agent(output)
         cs_tool = next(t for t in ns["agent"].tools if t.name == "cala_search")
         assert cs_tool.description == "Custom knowledge search"
@@ -390,7 +390,7 @@ class TestToolNameAndDescription:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[my_tool])
         """)
         config = json.dumps({"name": "renamed_tool"})
-        output = _run_dry(ws, "my_tool", "--config", config)
+        output = _run_dry(ws, "--name", "my_tool", "--config", config)
         ns = _exec_agent(output)
         tool = ns["my_tool"]
         assert tool.name == "renamed_tool"
@@ -410,7 +410,7 @@ class TestToolNameAndDescription:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[my_tool])
         """)
         config = json.dumps({"description": "Does something useful"})
-        output = _run_dry(ws, "my_tool", "--config", config)
+        output = _run_dry(ws, "--name", "my_tool", "--config", config)
         ns = _exec_agent(output)
         tool = ns["my_tool"]
         assert tool.name == "my_tool"
@@ -470,7 +470,7 @@ class TestStepParams:
         workflow.step(agent_b)
         """)
         output = _run_dry_wf(
-            ws, "agent_b",
+            ws, "--name", "agent_b",
             "--params", '{"prompt": {"step": "agent_a"}}',
         )
         assert 'get_run_context().step_span("agent_a").output' in output
@@ -489,7 +489,7 @@ class TestStepParams:
         workflow.step(agent_b)
         """)
         output = _run_dry_wf(
-            ws, "agent_b",
+            ws, "--name", "agent_b",
             "--params", '{"prompt": {"step": "agent_a", "key": "valor"}}',
         )
         assert 'get_run_context().step_span("agent_a").output["valor"]' in output
@@ -509,7 +509,7 @@ class TestStepParams:
         workflow.step(agent_c)
         """)
         output = _run_dry_wf(
-            ws, "agent_c",
+            ws, "--name", "agent_c",
             "--params", '{"prompt": {"step": "agent_a"}, "context": {"step": "agent_b"}}',
         )
         assert 'get_run_context().step_span("agent_a").output' in output
@@ -528,7 +528,7 @@ class TestStepParams:
         workflow.step(agent_b)
         """)
         output = _run_dry_wf(
-            ws, "agent_b",
+            ws, "--name", "agent_b",
             "--depends-on", "agent_a",
         )
         normalized = " ".join(output.split())
@@ -549,7 +549,7 @@ class TestStepParams:
         workflow.step(agent_c)
         """)
         output = _run_dry_wf(
-            ws, "agent_c",
+            ws, "--name", "agent_c",
             "--depends-on", "agent_a",
             "--depends-on", "agent_b",
         )
@@ -569,7 +569,7 @@ class TestStepParams:
         workflow.step(agent_b)
         """)
         output = _run_dry_wf(
-            ws, "agent_b",
+            ws, "--name", "agent_b",
             "--params", '{"prompt": {"step": "agent_a"}}',
             "--depends-on", "agent_a",
         )
@@ -591,7 +591,7 @@ class TestStepParams:
         workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
         """)
         output = _run_dry_wf(
-            ws, "agent_b",
+            ws, "--name", "agent_b",
             "--params", '{"prompt": {"step": "agent_a", "key": "text"}}',
         )
         assert 'get_run_context().step_span("agent_a").output["text"]' in output
@@ -608,7 +608,7 @@ class TestStepConstructorConfig:
         workflow = Workflow(name="my_workflow")
         workflow.step(agent_a)
         """)
-        output = _run_dry_wf(ws, "agent_a", "--config", '{"model": "openai/gpt-4o"}')
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"model": "openai/gpt-4o"}')
         assert 'model="openai/gpt-4o"' in output
 
     def test_set_step_config_with_params(self, wf_workspace):
@@ -624,7 +624,7 @@ class TestStepConstructorConfig:
         workflow.step(agent_b)
         """)
         output = _run_dry_wf(
-            ws, "agent_b",
+            ws, "--name", "agent_b",
             "--config", '{"model": "openai/gpt-4o"}',
             "--params", '{"prompt": {"step": "agent_a"}}',
         )
@@ -641,7 +641,7 @@ class TestStepConfigValidation:
         agent = Agent(name="a", model="openai/gpt-4o-mini")
         """)
         result = _run_dry_fail(
-            ws, "some_tool",
+            ws, "--name", "some_tool",
             "--params", '{"prompt": {"step": "other"}}',
         )
         assert result.returncode != 0

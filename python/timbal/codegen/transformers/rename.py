@@ -10,7 +10,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "rename",
         help="Rename a step or tool.",
     )
-    sp.add_argument("old_name", help="Current name of the step or tool to rename.")
+    sp.add_argument("--old-name", required=True, help="Current name of the step or tool to rename.")
     sp.add_argument("--to", required=True, dest="new_name", help="New name for the step or tool.")
 
 

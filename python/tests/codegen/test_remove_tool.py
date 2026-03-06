@@ -22,7 +22,7 @@ def workspace(tmp_path):
 def _run_dry(workspace_path: Path, tool_name: str) -> str:
     """Run codegen remove-tool with --dry-run and return stdout."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "remove-tool", tool_name],
+        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "remove-tool", "--name", tool_name],
         capture_output=True,
         text=True,
     )
@@ -207,7 +207,7 @@ class TestRemoveEdgeCases:
         """)
         # First remove WebSearch.
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-tool", "web_search"],
+            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-tool", "--name", "web_search"],
             capture_output=True,
             text=True,
         )
@@ -239,7 +239,7 @@ class TestRemoveEdgeCases:
 
         # Remove WebSearch (writes to file).
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-tool", "web_search"],
+            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-tool", "--name", "web_search"],
             capture_output=True,
             text=True,
         )
@@ -247,7 +247,7 @@ class TestRemoveEdgeCases:
 
         # Remove custom (writes to file).
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-tool", "custom"],
+            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-tool", "--name", "custom"],
             capture_output=True,
             text=True,
         )
@@ -255,7 +255,7 @@ class TestRemoveEdgeCases:
 
         # Dry-run to inspect final state.
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run", "remove-tool", "nonexistent"],
+            ["python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run", "remove-tool", "--name", "nonexistent"],
             capture_output=True,
             text=True,
         )
@@ -289,7 +289,7 @@ def _run_dry_wf(workspace_path: Path, tool_name: str, *extra_args: str) -> str:
     result = subprocess.run(
         [
             "python", "-m", "timbal.codegen", "--path", str(workspace_path),
-            "--dry-run", "remove-tool", tool_name, *extra_args,
+            "--dry-run", "remove-tool", "--name", tool_name, *extra_args,
         ],
         capture_output=True,
         text=True,
@@ -341,7 +341,7 @@ class TestRemoveToolStep:
         result = subprocess.run(
             [
                 "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
-                "remove-tool", "web_search", "--step", "agent_a",
+                "remove-tool", "--name", "web_search", "--step", "agent_a",
             ],
             capture_output=True,
             text=True,
