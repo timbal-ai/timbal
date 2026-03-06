@@ -59,6 +59,7 @@ def main() -> None:
             {"type": cls, "module": ft.module, "name": ft.name, "description": ft.description}
             for cls, ft in sorted(get_framework_tools().items())
         ]
+        tools = {"tools": tools}
         print(json.dumps(tools, indent=2))
         return
 
