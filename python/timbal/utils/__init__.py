@@ -2,6 +2,17 @@
 # first accessed, avoiding the cost of importing the entire dependency chain
 # (pydantic, structlog, asyncio, …) at package import time.
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .import_spec import ImportSpec
+    from .model import create_model_from_handler, issubclass_safe, resolve_default
+    from .net import is_port_in_use
+    from .schema import SupportedStringFormats, SupportedTypes, assert_never, is_list, transform_schema
+    from .serialization import coerce_to_dict, dump, safe_is_nan, sync_to_async_gen
+
 __all__ = [
     # import_spec
     "ImportSpec",

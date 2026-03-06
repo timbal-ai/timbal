@@ -1,5 +1,44 @@
 # pyright: reportUnsupportedDunderAll=false
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .bash import Bash
+    from .cala import CalaSearch
+    from .edit import Edit
+    from .gmail import GmailAddLabel, GmailListLabels, GmailRemoveLabel, GmailReply, GmailSearch, GmailSend
+    from .google_maps import (
+        GoogleMapsNearbySearch,
+        GoogleMapsPlaceDetails,
+        GoogleMapsTextSearch,
+        GoogleMapsValidateAddress,
+    )
+    from .outlook import (
+        OutlookArchive,
+        OutlookCreateDraft,
+        OutlookForward,
+        OutlookGetAttachments,
+        OutlookReadEmails,
+        OutlookSend,
+        OutlookTrash,
+        OutlookUpdateEmail,
+    )
+    from .pinecone import (
+        PineconeCreateIndex,
+        PineconeDeleteVectors,
+        PineconeFetchVectors,
+        PineconeIndexStats,
+        PineconeListIndexes,
+        PineconeQuery,
+        PineconeUpsertVectors,
+    )
+    from .read import Read
+    from .tavily import TavilyCrawl, TavilyExtract, TavilyMap, TavilySearch
+    from .web_search import WebSearch
+    from .write import Write
+
 __all__ = [
     "Bash",
     "CalaSearch",
