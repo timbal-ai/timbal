@@ -1,11 +1,28 @@
+import os
 from typing import Annotated, Any
 
-import httpx
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 _SF_API_VERSION = "v60.0"
+
+
+async def _resolve_token(tool: Any) -> str:
+    """Resolve Salesforce security token from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["security_token"]
+    if tool.security_token is not None:
+        return tool.security_token.get_secret_value()
+    env_key = os.getenv("SALESFORCE_SECURITY_TOKEN")
+    if env_key:
+        return env_key
+    raise ValueError(
+        "Salesforce security token not found. Set SALESFORCE_SECURITY_TOKEN environment variable, "
+        "pass security_token in config, or configure an integration."
+    )
 
 
 def _sf(instance_url: str, path: str) -> str:
@@ -20,38 +37,33 @@ def _sf(instance_url: str, path: str) -> str:
 class CreateCase(Tool):
     name: str = "salesforce_create_case"
     description: str | None = "Create a new case in Salesforce."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_case(
-            instance_url: str,
-            subject: str,
-            status: str = "New",
-            priority: str = "Medium",
-            origin: str | None = None,
-            description: str | None = None,
-            account_id: str | None = None,
-            contact_id: str | None = None,
-            case_type: str | None = None,
-            reason: str | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            subject: str = Field(..., description="Case subject/title"),
+            status: str = Field("New", description="Case status: e.g. 'New', 'Working', 'Closed'"),
+            priority: str = Field("Medium", description="Case priority: e.g. 'High', 'Medium', 'Low'"),
+            origin: str | None = Field(None, description="Case origin: e.g. 'Web', 'Email', 'Phone'"),
+            description: str | None = Field(None, description="Case description/details"),
+            account_id: str | None = Field(None, description="Salesforce Account ID"),
+            contact_id: str | None = Field(None, description="Salesforce Contact ID"),
+            case_type: str | None = Field(None, description="Case type: e.g. 'Problem', 'Feature Request', 'Question'"),
+            reason: str | None = Field(None, description="Case reason: e.g. 'Equipment failure', 'User error'"),
         ) -> Any:
-            """
-            instance_url: Salesforce org URL, e.g. "https://myorg.my.salesforce.com"
-            status: e.g. "New", "Working", "Closed".
-            priority: "Low", "Medium", or "High".
-            origin: e.g. "Phone", "Email", "Web".
-            case_type: e.g. "Question", "Problem", "Feature Request".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {"Subject": subject, "Status": status, "Priority": priority}
             if origin:
@@ -66,6 +78,8 @@ class CreateCase(Tool):
                 payload["Type"] = case_type
             if reason:
                 payload["Reason"] = reason
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -84,32 +98,34 @@ class CreateCase(Tool):
 class UpdateCase(Tool):
     name: str = "salesforce_update_case"
     description: str | None = "Update an existing Salesforce case."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_case(
-            instance_url: str,
-            case_id: str,
-            subject: str | None = None,
-            status: str | None = None,
-            priority: str | None = None,
-            origin: str | None = None,
-            description: str | None = None,
-            account_id: str | None = None,
-            contact_id: str | None = None,
-            case_type: str | None = None,
-            reason: str | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            case_id: str = Field(..., description="Salesforce Case ID"),
+            subject: str | None = Field(None, description="Case subject/title"),
+            status: str | None = Field(None, description="Case status: e.g. 'New', 'Working', 'Closed'"),
+            priority: str | None = Field(None, description="Case priority: e.g. 'High', 'Medium', 'Low'"),
+            origin: str | None = Field(None, description="Case origin: e.g. 'Web', 'Email', 'Phone'"),
+            description: str | None = Field(None, description="Case description/details"),
+            account_id: str | None = Field(None, description="Salesforce Account ID"),
+            contact_id: str | None = Field(None, description="Salesforce Contact ID"),
+            case_type: str | None = Field(None, description="Case type: e.g. 'Problem', 'Feature Request'"),
+            reason: str | None = Field(None, description="Case reason: e.g. 'Equipment failure', 'User error'"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {}
             if subject:
@@ -131,6 +147,8 @@ class UpdateCase(Tool):
             if reason:
                 payload["Reason"] = reason
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     _sf(instance_url, f"sobjects/Case/{case_id}"),
@@ -148,20 +166,27 @@ class UpdateCase(Tool):
 class DeleteCase(Tool):
     name: str = "salesforce_delete_case"
     description: str | None = "Delete a Salesforce case."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_case(instance_url: str, case_id: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _delete_case(
+            instance_url: str = Field(..., description="Salesforce org URL"),
+            case_id: str = Field(..., description="Salesforce case ID")
+        ) -> Any:
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -184,29 +209,29 @@ class DeleteCase(Tool):
 class CreateComment(Tool):
     name: str = "salesforce_create_comment"
     description: str | None = "Create a comment on a Salesforce case."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_comment(
-            instance_url: str,
-            parent_id: str,
-            comment_body: str,
-            is_published: bool = True,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            parent_id: str = Field(..., description="ID of the Case this comment belongs to"),
+            comment_body: str = Field(..., description="Comment content/body text"),
+            is_published: bool = Field(True, description="If True, the comment is visible to the customer portal"),
         ) -> Any:
-            """
-            parent_id: ID of the Case this comment belongs to.
-            is_published: if True, the comment is visible to the customer portal.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -225,31 +250,35 @@ class CreateComment(Tool):
 class UpdateComment(Tool):
     name: str = "salesforce_update_comment"
     description: str | None = "Update a Salesforce case comment."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_comment(
-            instance_url: str,
-            comment_id: str,
-            comment_body: str | None = None,
-            is_published: bool | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            comment_id: str = Field(..., description="Salesforce Case Comment ID to update"),
+            comment_body: str | None = Field(None, description="Updated comment content/body text"),
+            is_published: bool | None = Field(None, description="Updated visibility status: True if visible to customer portal"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {}
             if comment_body:
                 payload["CommentBody"] = comment_body
             if is_published is not None:
                 payload["IsPublished"] = is_published
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
@@ -268,20 +297,27 @@ class UpdateComment(Tool):
 class DeleteComment(Tool):
     name: str = "salesforce_delete_comment"
     description: str | None = "Delete a Salesforce case comment."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_comment(instance_url: str, comment_id: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _delete_comment(
+            instance_url: str = Field(..., description="Salesforce org URL"),
+            comment_id: str = Field(..., description="Salesforce comment ID")
+        ) -> Any:
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -304,31 +340,33 @@ class DeleteComment(Tool):
 class CreateContact(Tool):
     name: str = "salesforce_create_contact"
     description: str | None = "Create a new contact in Salesforce."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_contact(
-            instance_url: str,
-            last_name: str,
-            first_name: str | None = None,
-            email: str | None = None,
-            phone: str | None = None,
-            title: str | None = None,
-            department: str | None = None,
-            account_id: str | None = None,
-            mailing_city: str | None = None,
-            mailing_country: str | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            last_name: str = Field(..., description="Contact last name (required)"),
+            first_name: str | None = Field(None, description="Contact first name"),
+            email: str | None = Field(None, description="Contact email address"),
+            phone: str | None = Field(None, description="Contact phone number"),
+            title: str | None = Field(None, description="Contact job title"),
+            department: str | None = Field(None, description="Contact department"),
+            account_id: str | None = Field(None, description="Salesforce Account ID to associate with contact"),
+            mailing_city: str | None = Field(None, description="Contact mailing city"),
+            mailing_country: str | None = Field(None, description="Contact mailing country"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {"LastName": last_name}
             if first_name:
@@ -348,6 +386,8 @@ class CreateContact(Tool):
             if mailing_country:
                 payload["MailingCountry"] = mailing_country
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     _sf(instance_url, "sobjects/Contact/"),
@@ -365,32 +405,34 @@ class CreateContact(Tool):
 class UpdateContact(Tool):
     name: str = "salesforce_update_contact"
     description: str | None = "Update an existing Salesforce contact."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_contact(
-            instance_url: str,
-            contact_id: str,
-            last_name: str | None = None,
-            first_name: str | None = None,
-            email: str | None = None,
-            phone: str | None = None,
-            title: str | None = None,
-            department: str | None = None,
-            account_id: str | None = None,
-            mailing_city: str | None = None,
-            mailing_country: str | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            contact_id: str = Field(..., description="Salesforce Contact ID to update"),
+            last_name: str | None = Field(None, description="Updated contact last name"),
+            first_name: str | None = Field(None, description="Updated contact first name"),
+            email: str | None = Field(None, description="Updated contact email address"),
+            phone: str | None = Field(None, description="Updated contact phone number"),
+            title: str | None = Field(None, description="Updated contact job title"),
+            department: str | None = Field(None, description="Updated contact department"),
+            account_id: str | None = Field(None, description="Updated Salesforce Account ID to associate with contact"),
+            mailing_city: str | None = Field(None, description="Updated contact mailing city"),
+            mailing_country: str | None = Field(None, description="Updated contact mailing country"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {}
             if last_name:
@@ -412,6 +454,8 @@ class UpdateContact(Tool):
             if mailing_country:
                 payload["MailingCountry"] = mailing_country
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     _sf(instance_url, f"sobjects/Contact/{contact_id}"),
@@ -429,20 +473,27 @@ class UpdateContact(Tool):
 class DeleteContact(Tool):
     name: str = "salesforce_delete_contact"
     description: str | None = "Delete a Salesforce contact."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_contact(instance_url: str, contact_id: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _delete_contact(
+            instance_url: str = Field(..., description="Salesforce org URL"),
+            contact_id: str = Field(..., description="Salesforce contact ID")
+        ) -> Any:
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -465,38 +516,36 @@ class DeleteContact(Tool):
 class CreateLead(Tool):
     name: str = "salesforce_create_lead"
     description: str | None = "Create a new lead in Salesforce."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_lead(
-            instance_url: str,
-            last_name: str,
-            company: str,
-            first_name: str | None = None,
-            email: str | None = None,
-            phone: str | None = None,
-            title: str | None = None,
-            lead_source: str | None = None,
-            status: str = "Open - Not Contacted",
-            industry: str | None = None,
-            city: str | None = None,
-            country: str | None = None,
-            description: str | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            last_name: str = Field(..., description="Lead last name (required)"),
+            company: str = Field(..., description="Lead company name (required)"),
+            first_name: str | None = Field(None, description="Lead first name"),
+            email: str | None = Field(None, description="Lead email address"),
+            phone: str | None = Field(None, description="Lead phone number"),
+            title: str | None = Field(None, description="Lead job title"),
+            lead_source: str | None = Field(None, description="Lead source: e.g. 'Web', 'Phone Inquiry', 'Partner Referral', 'Purchased List'"),
+            status: str = Field("Open - Not Contacted", description="Lead status: e.g. 'Open - Not Contacted', 'Working - Contacted', 'Closed - Converted'"),
+            industry: str | None = Field(None, description="Lead industry"),
+            city: str | None = Field(None, description="Lead city"),
+            country: str | None = Field(None, description="Lead country"),
+            description: str | None = Field(None, description="Lead description or notes"),
         ) -> Any:
-            """
-            lead_source: e.g. "Web", "Phone Inquiry", "Partner Referral", "Purchased List".
-            status: e.g. "Open - Not Contacted", "Working - Contacted", "Closed - Converted".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {
                 "LastName": last_name,
@@ -522,6 +571,8 @@ class CreateLead(Tool):
             if description:
                 payload["Description"] = description
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     _sf(instance_url, "sobjects/Lead/"),
@@ -539,31 +590,32 @@ class CreateLead(Tool):
 class GetLead(Tool):
     name: str = "salesforce_get_lead"
     description: str | None = "Retrieve a specific Salesforce lead by ID."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_lead(
-            instance_url: str,
-            lead_id: str,
-            fields: list[str] | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            lead_id: str = Field(..., description="Salesforce Lead ID to retrieve"),
+            fields: list[str] | None = Field(None, description="List of API field names to return. Returns all fields if omitted"),
         ) -> Any:
-            """
-            fields: list of API field names to return. Returns all fields if omitted.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             url = _sf(instance_url, f"sobjects/Lead/{lead_id}")
             if fields:
                 url += f"?fields={','.join(fields)}"
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -581,33 +633,35 @@ class GetLead(Tool):
 class UpdateLead(Tool):
     name: str = "salesforce_update_lead"
     description: str | None = "Update an existing Salesforce lead."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_lead(
-            instance_url: str,
-            lead_id: str,
-            last_name: str | None = None,
-            first_name: str | None = None,
-            company: str | None = None,
-            email: str | None = None,
-            phone: str | None = None,
-            title: str | None = None,
-            lead_source: str | None = None,
-            status: str | None = None,
-            industry: str | None = None,
-            description: str | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            lead_id: str = Field(..., description="Salesforce Lead ID to update"),
+            last_name: str | None = Field(None, description="Lead last name"),
+            first_name: str | None = Field(None, description="Lead first name"),
+            company: str | None = Field(None, description="Lead company"),
+            email: str | None = Field(None, description="Lead email"),
+            phone: str | None = Field(None, description="Lead phone"),
+            title: str | None = Field(None, description="Lead title"),
+            lead_source: str | None = Field(None, description="Lead source"),
+            status: str | None = Field(None, description="Lead status"),
+            industry: str | None = Field(None, description="Lead industry"),
+            description: str | None = Field(None, description="Lead description"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {}
             if last_name:
@@ -631,6 +685,8 @@ class UpdateLead(Tool):
             if description:
                 payload["Description"] = description
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     _sf(instance_url, f"sobjects/Lead/{lead_id}"),
@@ -648,20 +704,27 @@ class UpdateLead(Tool):
 class DeleteLead(Tool):
     name: str = "salesforce_delete_lead"
     description: str | None = "Delete a Salesforce lead."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_lead(instance_url: str, lead_id: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _delete_lead(
+            instance_url: str = Field(..., description="Salesforce org URL"),
+            lead_id: str = Field(..., description="Salesforce lead ID")
+        ) -> Any:
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -679,32 +742,32 @@ class DeleteLead(Tool):
 class SearchLeads(Tool):
     name: str = "salesforce_search_leads"
     description: str | None = "Search for Salesforce leads using a SOSL query."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_leads(
-            instance_url: str,
-            search_term: str,
-            fields: list[str] | None = None,
-            limit: int = 20,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            search_term: str = Field(..., description="Keyword(s) to search for across lead fields."),
+            fields: list[str] | None = Field(None, description="list of Lead fields to return, e.g. ['Id', 'FirstName', 'LastName', 'Email', 'Status']."),
+            limit: int = Field(20, description="Maximum number of leads to return"),
         ) -> Any:
-            """
-            search_term: keyword(s) to search for across lead fields.
-            fields: list of Lead fields to return, e.g. ["Id", "FirstName", "LastName", "Email", "Status"].
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             returning_fields = ", ".join(fields) if fields else "Id, FirstName, LastName, Email, Company, Status, Phone"
             sosl = f"FIND {{{search_term}}} IN ALL FIELDS RETURNING Lead({returning_fields} LIMIT {limit})"
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -728,37 +791,33 @@ class SearchLeads(Tool):
 class CreateOpportunity(Tool):
     name: str = "salesforce_create_opportunity"
     description: str | None = "Create a new opportunity in Salesforce."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_opportunity(
-            instance_url: str,
-            name: str,
-            stage_name: str,
-            close_date: str,
-            amount: float | None = None,
-            account_id: str | None = None,
-            probability: float | None = None,
-            lead_source: str | None = None,
-            description: str | None = None,
-            owner_id: str | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            name: str = Field(..., description="Opportunity name (required)"),
+            stage_name: str = Field(..., description="Opportunity stage: e.g. 'Prospecting', 'Qualification', 'Proposal/Price Quote', 'Negotiation/Review', 'Closed Won', 'Closed Lost'"),
+            close_date: str = Field(..., description="Expected close date in YYYY-MM-DD format"),
+            amount: float | None = Field(None, description="Opportunity amount/value"),
+            account_id: str | None = Field(None, description="Salesforce Account ID to associate with opportunity"),
+            probability: float | None = Field(None, description="Probability of closing (0-100)"),
+            lead_source: str | None = Field(None, description="Lead source: e.g. 'Web', 'Phone', 'Referral'"),
+            description: str | None = Field(None, description="Opportunity description or notes"),
+            owner_id: str | None = Field(None, description="Salesforce User ID for opportunity owner"),
         ) -> Any:
-            """
-            stage_name: e.g. "Prospecting", "Qualification", "Proposal/Price Quote",
-                        "Negotiation/Review", "Closed Won", "Closed Lost".
-            close_date: expected close date in YYYY-MM-DD format.
-            probability: win probability percentage (0–100).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {
                 "Name": name,
@@ -778,6 +837,8 @@ class CreateOpportunity(Tool):
             if owner_id:
                 payload["OwnerId"] = owner_id
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     _sf(instance_url, "sobjects/Opportunity/"),
@@ -795,31 +856,33 @@ class CreateOpportunity(Tool):
 class UpdateOpportunity(Tool):
     name: str = "salesforce_update_opportunity"
     description: str | None = "Update an existing Salesforce opportunity."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_opportunity(
-            instance_url: str,
-            opportunity_id: str,
-            name: str | None = None,
-            stage_name: str | None = None,
-            close_date: str | None = None,
-            amount: float | None = None,
-            account_id: str | None = None,
-            probability: float | None = None,
-            lead_source: str | None = None,
-            description: str | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL"),
+            opportunity_id: str = Field(..., description="Salesforce opportunity ID"),
+            name: str | None = Field(None, description="Opportunity name"),
+            stage_name: str | None = Field(None, description="Opportunity stage"),
+            close_date: str | None = Field(None, description="Close date in YYYY-MM-DD format"),
+            amount: float | None = Field(None, description="Opportunity amount"),
+            account_id: str | None = Field(None, description="Account ID"),
+            probability: float | None = Field(None, description="Probability of closing (0-100)"),
+            lead_source: str | None = Field(None, description="Lead source: e.g. 'Web', 'Phone', 'Referral'"),
+            description: str | None = Field(None, description="Opportunity description or notes"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {}
             if name:
@@ -839,6 +902,8 @@ class UpdateOpportunity(Tool):
             if description:
                 payload["Description"] = description
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     _sf(instance_url, f"sobjects/Opportunity/{opportunity_id}"),
@@ -856,20 +921,27 @@ class UpdateOpportunity(Tool):
 class DeleteOpportunity(Tool):
     name: str = "salesforce_delete_opportunity"
     description: str | None = "Delete a Salesforce opportunity."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_opportunity(instance_url: str, opportunity_id: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _delete_opportunity(
+            instance_url: str = Field(..., description="Salesforce org URL"),
+            opportunity_id: str = Field(..., description="Salesforce opportunity ID")
+        ) -> Any:
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -892,39 +964,33 @@ class DeleteOpportunity(Tool):
 class CreateTask(Tool):
     name: str = "salesforce_create_task"
     description: str | None = "Create a new task in Salesforce."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_task(
-            instance_url: str,
-            subject: str,
-            status: str = "Not Started",
-            priority: str = "Normal",
-            what_id: str | None = None,
-            who_id: str | None = None,
-            activity_date: str | None = None,
-            description: str | None = None,
-            owner_id: str | None = None,
-            task_type: str | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL"),
+            subject: str = Field(..., description="Task subject/description"),
+            status: str = Field("Not Started", description="Task status:  'Not Started', 'In Progress', 'Completed', 'Waiting on someone else', 'Deferred'"),
+            priority: str = Field("Normal", description="Task priority. Possibilities: 'High', 'Normal', or 'Low'"),
+            what_id: str | None = Field(None, description="Related record ID (e.g. Opportunity or Account ID)"),
+            who_id: str | None = Field(None, description="Related contact or lead ID"),
+            activity_date: str | None = Field(None, description="Due date in YYYY-MM-DD format"),
+            description: str | None = Field(None, description="Task description"),
+            owner_id: str | None = Field(None, description="Owner ID"),
+            task_type: str | None = Field(None, description="Task type (e.g. Call, Email, Meeting)"),
         ) -> Any:
-            """
-            what_id: related record ID (e.g. an Opportunity or Account ID).
-            who_id: related contact or lead ID.
-            activity_date: due date in YYYY-MM-DD format.
-            status: e.g. "Not Started", "In Progress", "Completed", "Waiting on someone else", "Deferred".
-            priority: "High", "Normal", or "Low".
-            task_type: e.g. "Call", "Email", "Meeting".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {"Subject": subject, "Status": status, "Priority": priority}
             if what_id:
@@ -939,6 +1005,8 @@ class CreateTask(Tool):
                 payload["OwnerId"] = owner_id
             if task_type:
                 payload["Type"] = task_type
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -957,28 +1025,32 @@ class CreateTask(Tool):
 class GetTask(Tool):
     name: str = "salesforce_get_task"
     description: str | None = "Retrieve a specific Salesforce task by ID."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_task(
-            instance_url: str,
-            task_id: str,
-            fields: list[str] | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            task_id: str = Field(..., description="Salesforce Task ID to retrieve"),
+            fields: list[str] | None = Field(None, description="List of API field names to return. Returns all fields if omitted"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             url = _sf(instance_url, f"sobjects/Task/{task_id}")
             if fields:
                 url += f"?fields={','.join(fields)}"
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -996,29 +1068,31 @@ class GetTask(Tool):
 class UpdateTask(Tool):
     name: str = "salesforce_update_task"
     description: str | None = "Update an existing Salesforce task."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_task(
-            instance_url: str,
-            task_id: str,
-            subject: str | None = None,
-            status: str | None = None,
-            priority: str | None = None,
-            activity_date: str | None = None,
-            description: str | None = None,
-            owner_id: str | None = None,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            task_id: str = Field(..., description="Salesforce Task ID to update"),
+            subject: str | None = Field(None, description="Updated task subject/title"),
+            status: str | None = Field(None, description="Updated task status: e.g. 'Not Started', 'In Progress', 'Completed'"),
+            priority: str | None = Field(None, description="Updated task priority: e.g. 'High', 'Normal', 'Low'"),
+            activity_date: str | None = Field(None, description="Updated activity date in YYYY-MM-DD format"),
+            description: str | None = Field(None, description="Updated task description or notes"),
+            owner_id: str | None = Field(None, description="Updated Salesforce User ID for task owner"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             payload: dict[str, Any] = {}
             if subject:
@@ -1033,6 +1107,8 @@ class UpdateTask(Tool):
                 payload["Description"] = description
             if owner_id:
                 payload["OwnerId"] = owner_id
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
@@ -1051,20 +1127,27 @@ class UpdateTask(Tool):
 class DeleteTask(Tool):
     name: str = "salesforce_delete_task"
     description: str | None = "Delete a Salesforce task."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_task(instance_url: str, task_id: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _delete_task(
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            task_id: str = Field(..., description="Salesforce Task ID to delete"),
+        ) -> Any:
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -1082,32 +1165,32 @@ class DeleteTask(Tool):
 class SearchTasks(Tool):
     name: str = "salesforce_search_tasks"
     description: str | None = "Search for Salesforce tasks using a SOSL query."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_tasks(
-            instance_url: str,
-            search_term: str,
-            fields: list[str] | None = None,
-            limit: int = 20,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            search_term: str = Field(..., description="Keyword(s) to search for across task fields"),
+            fields: list[str] | None = Field(None, description="List of Task fields to return, e.g. ['Id', 'Subject', 'Status', 'Priority', 'ActivityDate']"),
+            limit: int = Field(20, description="Maximum number of tasks to return"),
         ) -> Any:
-            """
-            search_term: keyword(s) to search for across task fields.
-            fields: list of Task fields to return, e.g. ["Id", "Subject", "Status", "Priority", "ActivityDate"].
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             returning_fields = ", ".join(fields) if fields else "Id, Subject, Status, Priority, ActivityDate, OwnerId"
             sosl = f"FIND {{{search_term}}} IN ALL FIELDS RETURNING Task({returning_fields} LIMIT {limit})"
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1131,31 +1214,30 @@ class SearchTasks(Tool):
 class QuerySalesforce(Tool):
     name: str = "salesforce_query"
     description: str | None = "Execute a SOQL query against Salesforce and return matching records."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _query_salesforce(
-            instance_url: str,
-            soql: str,
-            all_rows: bool = False,
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            soql: str = Field(..., description="SOQL query string. Example: 'SELECT Id, Name, Email FROM Contact WHERE CreatedDate = TODAY'"),
+            all_rows: bool = Field(False, description="If True, includes deleted and archived records in results"),
         ) -> Any:
-            """
-            soql: SOQL query string.
-              Example: "SELECT Id, Name, Email FROM Contact WHERE CreatedDate = TODAY"
-            all_rows: if True, includes deleted and archived records in results.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
 
             endpoint = "queryAll/" if all_rows else "query/"
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1174,29 +1256,28 @@ class QuerySalesforce(Tool):
 class CreateRecord(Tool):
     name: str = "salesforce_create_record"
     description: str | None = "Create a record for any Salesforce object type."
-    integration: Annotated[str, Integration("salesforce")]
+    integration: Annotated[str, Integration("salesforce")] | None = None
+    security_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "security_token": self.security_token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_record(
-            instance_url: str,
-            object_type: str,
-            fields: dict[str, Any],
+            instance_url: str = Field(..., description="Salesforce org URL, e.g. 'https://myorg.my.salesforce.com'"),
+            object_type: str = Field(..., description="Salesforce API object name, e.g. 'Account', 'CustomObject__c'"),
+            fields: dict[str, Any] = Field(..., description="Dict of Salesforce API field names to values. Example: {'Name': 'Acme Corp', 'BillingCity': 'San Francisco'}"),
         ) -> Any:
-            """
-            object_type: Salesforce API object name, e.g. "Account", "CustomObject__c".
-            fields: dict of Salesforce API field names to values.
-              Example: {"Name": "Acme Corp", "BillingCity": "San Francisco"}
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(

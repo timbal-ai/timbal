@@ -1,6 +1,7 @@
+import os
 from typing import Annotated, Any
 
-import httpx
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
@@ -8,35 +9,48 @@ from ..platform.integrations import Integration
 _STRIPE_API_BASE = "https://api.stripe.com/v1"
 
 
+async def _resolve_api_key(tool: Any) -> str:
+    """Resolve Stripe API key from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["api_key"]
+    if tool.api_key is not None:
+        return tool.api_key.get_secret_value()
+    env_key = os.getenv("STRIPE_API_KEY")
+    if env_key:
+        return env_key
+    raise ValueError(
+        "Stripe API key not found. Set STRIPE_API_KEY environment variable, "
+        "pass api_key in config, or configure an integration."
+    )
+
+
 class ListCharges(Tool):
     name: str = "stripe_list_charges"
     description: str | None = "List charges from Stripe with optional filtering by customer, amount, or date range."
-    integration: Annotated[str, Integration("stripe")]
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_charges(
-            limit: int = 10,
-            customer: str | None = None,
-            starting_after: str | None = None,
-            ending_before: str | None = None,
-            created_gte: int | None = None,
-            created_lte: int | None = None,
+            limit: int = Field(10, description="Maximum number of charges to return"),
+            customer: str | None = Field(None, description="Stripe customer ID to filter charges by"),
+            starting_after: str | None = Field(None, description="Charge ID cursor for pagination (start after this charge)"),
+            ending_before: str | None = Field(None, description="Charge ID cursor for pagination (end before this charge)"),
+            created_gte: int | None = Field(None, description="Unix timestamp to filter charges created after this time"),
+            created_lte: int | None = Field(None, description="Unix timestamp to filter charges created before this time"),
         ) -> Any:
-            """
-            customer: Stripe customer ID to filter charges by.
-            starting_after / ending_before: charge ID cursors for pagination.
-            created_gte / created_lte: Unix timestamps to filter by creation date.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
 
             params: dict[str, Any] = {"limit": limit}
             if customer:
@@ -50,10 +64,12 @@ class ListCharges(Tool):
             if created_lte:
                 params["created[lte]"] = created_lte
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_STRIPE_API_BASE}/charges",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     params=params,
                 )
                 response.raise_for_status()
@@ -68,29 +84,28 @@ class ListCharges(Tool):
 class CreateCustomer(Tool):
     name: str = "stripe_create_customer"
     description: str | None = "Create a new Stripe customer."
-    integration: Annotated[str, Integration("stripe")]
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_customer(
-            email: str | None = None,
-            name: str | None = None,
-            phone: str | None = None,
-            description: str | None = None,
-            metadata: dict[str, str] | None = None,
+            email: str | None = Field(None, description="Customer email address"),
+            name: str | None = Field(None, description="Customer full name"),
+            phone: str | None = Field(None, description="Customer phone number"),
+            description: str | None = Field(None, description="Customer description or notes"),
+            metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the customer object (max 50 keys)"),
         ) -> Any:
-            """
-            metadata: key-value pairs to attach to the customer object (max 50 keys).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
 
             data: dict[str, Any] = {}
             if email:
@@ -105,10 +120,12 @@ class CreateCustomer(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_STRIPE_API_BASE}/customers",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     data=data,
                 )
                 response.raise_for_status()
@@ -123,41 +140,37 @@ class CreateCustomer(Tool):
 class SearchCustomer(Tool):
     name: str = "stripe_search_customer"
     description: str | None = "Search for Stripe customers using a query string."
-    integration: Annotated[str, Integration("stripe")]
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_customer(
-            query: str,
-            limit: int = 10,
-            page: str | None = None,
+            query: str = Field(..., description="Stripe search query string. Examples: email:'customer@example.com', name:'John Doe', metadata['user_id']:'12345'"),
+            limit: int = Field(10, description="Maximum number of customers to return"),
+            page: str | None = Field(None, description="Cursor for the next page, from a previous response's next_page field"),
         ) -> Any:
-            """
-            query: Stripe search query string.
-            Examples:
-              - "email:'customer@example.com'"
-              - "name:'John Doe'"
-              - "metadata['user_id']:'12345'"
-            page: cursor for the next page, from a previous response's next_page field.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
 
             params: dict[str, Any] = {"query": query, "limit": limit}
             if page:
                 params["page"] = page
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_STRIPE_API_BASE}/customers/search",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     params=params,
                 )
                 response.raise_for_status()
@@ -172,37 +185,31 @@ class SearchCustomer(Tool):
 class CreatePayment(Tool):
     name: str = "stripe_create_payment"
     description: str | None = "Create a Stripe PaymentIntent to collect a payment."
-    integration: Annotated[str, Integration("stripe")]
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_payment(
-            amount: int,
-            currency: str,
-            customer: str | None = None,
-            payment_method: str | None = None,
-            description: str | None = None,
-            confirm: bool = False,
-            automatic_payment_methods: bool = True,
-            metadata: dict[str, str] | None = None,
+            amount: int = Field(..., description="Amount in the smallest currency unit (e.g. cents for USD). e.g. 1099 = $10.99"),
+            currency: str = Field(..., description="Three-letter ISO currency code, lowercase, e.g. 'usd', 'eur'"),
+            customer: str | None = Field(None, description="Stripe customer ID to associate with the payment"),
+            payment_method: str | None = Field(None, description="Stripe payment method ID (e.g. 'pm_card_visa'). Required if confirm=True"),
+            description: str | None = Field(None, description="Payment description"),
+            confirm: bool = Field(False, description="Whether to confirm the payment immediately"),
+            automatic_payment_methods: bool = Field(True, description="Whether to use automatic payment methods"),
+            metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the payment object"),
         ) -> Any:
-            """
-            amount: amount in the smallest currency unit (e.g. cents for USD). e.g. 1099 = $10.99.
-            currency: three-letter ISO currency code, lowercase, e.g. "usd", "eur".
-            customer: Stripe customer ID to associate with the payment.
-            payment_method: Stripe payment method ID (e.g. "pm_card_visa"). Required if confirm=True.
-            confirm: if True, confirms the PaymentIntent immediately after creation.
-            automatic_payment_methods: enable automatic payment method selection (recommended for new integrations).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
 
             data: dict[str, Any] = {
                 "amount": amount,
@@ -221,10 +228,12 @@ class CreatePayment(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_STRIPE_API_BASE}/payment_intents",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     data=data,
                 )
                 response.raise_for_status()
@@ -239,32 +248,28 @@ class CreatePayment(Tool):
 class SendRefund(Tool):
     name: str = "stripe_send_refund"
     description: str | None = "Refund a Stripe charge or PaymentIntent, fully or partially."
-    integration: Annotated[str, Integration("stripe")]
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _send_refund(
-            charge: str | None = None,
-            payment_intent: str | None = None,
-            amount: int | None = None,
-            reason: str | None = None,
-            metadata: dict[str, str] | None = None,
+            charge: str | None = Field(None, description="Stripe charge ID to refund (e.g. 'ch_xxx'). Provide either charge or payment_intent"),
+            payment_intent: str | None = Field(None, description="Stripe PaymentIntent ID to refund (e.g. 'pi_xxx')"),
+            amount: int | None = Field(None, description="Amount to refund in the smallest currency unit. Omit to refund the full charge"),
+            reason: str | None = Field(None, description="Refund reason: 'duplicate', 'fraudulent', or 'requested_by_customer'"),
+            metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the refund object"),
         ) -> Any:
-            """
-            charge: Stripe charge ID to refund (e.g. "ch_xxx"). Provide either charge or payment_intent.
-            payment_intent: Stripe PaymentIntent ID to refund (e.g. "pi_xxx").
-            amount: amount to refund in the smallest currency unit. Omit to refund the full charge.
-            reason: "duplicate", "fraudulent", or "requested_by_customer".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
 
             data: dict[str, Any] = {}
             if charge:
@@ -278,6 +283,8 @@ class SendRefund(Tool):
             if metadata:
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(

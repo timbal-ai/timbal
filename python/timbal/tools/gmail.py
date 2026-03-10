@@ -13,7 +13,15 @@ from ..platform.integrations import Integration
 _BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 
 
-async def _download_and_encode_attachment(url: str) -> tuple[str, str, str]:
+async def _resolve_token(tool: Any) -> str:
+    """Resolve Gmail OAuth token from integration."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["token"]
+    raise ValueError("Gmail integration not configured.")
+
+
+async def _download_and_encode_attachment(url: str = Field(..., description="URL of the attachment to download")) -> tuple[str, str, str]:
     """Download file from URL and return filename, content_type, and base64 content."""
     import httpx
 
@@ -169,10 +177,7 @@ class GmailSend(Tool):
             message_format: Literal["text", "html"] = Field("text", description='"text" or "html"'),
             email_signature: str | None = Field(None, description="Email signature to append"),
         ) -> Any:
-            if not isinstance(self.integration, Integration):
-                raise ValueError("Gmail integration not configured.")
-            credentials = await self.integration.resolve()
-            api_key = credentials["token"]
+            api_key = await _resolve_token(self)
             import httpx
 
             if isinstance(to, list):
@@ -299,10 +304,7 @@ class GmailReply(Tool):
             email_signature: str | None = Field(None, description="Email signature to append"),
             attachments: list[str] | None = Field(None, description="URLs of files to attach"),
         ) -> Any:
-            if not isinstance(self.integration, Integration):
-                raise ValueError("Gmail integration not configured.")
-            credentials = await self.integration.resolve()
-            api_key = credentials["token"]
+            api_key = await _resolve_token(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -495,10 +497,7 @@ class GmailSearch(Tool):
             max_results: int = Field(10, description="Maximum number of results"),
             include_attachments: bool = Field(False, description="Include attachment metadata"),
         ) -> Any:
-            if not isinstance(self.integration, Integration):
-                raise ValueError("Gmail integration not configured.")
-            credentials = await self.integration.resolve()
-            api_key = credentials["token"]
+            api_key = await _resolve_token(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -600,10 +599,7 @@ class GmailAddLabel(Tool):
             email_to_label: str = Field(..., description="Message ID to label"),
             labels: list[str] = Field(..., description="Label names to add"),
         ) -> Any:
-            if not isinstance(self.integration, Integration):
-                raise ValueError("Gmail integration not configured.")
-            credentials = await self.integration.resolve()
-            api_key = credentials["token"]
+            api_key = await _resolve_token(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -668,10 +664,7 @@ class GmailListLabels(Tool):
             include_system_labels: bool = Field(True, description="Include system labels"),
             include_user_labels: bool = Field(True, description="Include user-created labels"),
         ) -> Any:
-            if not isinstance(self.integration, Integration):
-                raise ValueError("Gmail integration not configured.")
-            credentials = await self.integration.resolve()
-            api_key = credentials["token"]
+            api_key = await _resolve_token(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -740,10 +733,7 @@ class GmailRemoveLabel(Tool):
             email_to_update: str = Field(..., description="Message ID to update"),
             labels: list[str] = Field(..., description="Label names to remove"),
         ) -> Any:
-            if not isinstance(self.integration, Integration):
-                raise ValueError("Gmail integration not configured.")
-            credentials = await self.integration.resolve()
-            api_key = credentials["token"]
+            api_key = await _resolve_token(self)
             import httpx
 
             async with httpx.AsyncClient() as client:

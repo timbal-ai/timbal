@@ -1,26 +1,34 @@
-import json
+import os
 from typing import Annotated, Any
 
-import httpx
-from pydantic import model_validator
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+
+
+async def _resolve_api_key(tool: Any) -> str:
+    """Resolve Google Drive API key from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["api_key"]
+    if tool.api_key is not None:
+        return tool.api_key.get_secret_value()
+    env_key = os.getenv("GOOGLE_DRIVE_API_KEY")
+    if env_key:
+        return env_key
+    raise ValueError(
+        "Google Drive API key not found. Set GOOGLE_DRIVE_API_KEY environment variable, "
+        "pass api_key in config, or configure an integration."
+    )
 
 
 class GoogleDriveCreateFile(Tool):
     name: str = "google_drive_create_file"
     description: str | None = "Create a new file in Google Drive with specified name and content."
     integration: Annotated[str, Integration("google_drive")] | None = None
+    api_key: SecretStr | None = None
     base_url: str = "https://www.googleapis.com/upload/drive/v3"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "GoogleDriveCreateFile":
-        if self.integration is None:
-            raise ValueError(
-                "Google Drive integration not found. Please configure google_drive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -29,6 +37,7 @@ class GoogleDriveCreateFile(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "api_key": self.api_key,
                     "base_url": self.base_url,
                 }
             ),
@@ -36,15 +45,14 @@ class GoogleDriveCreateFile(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_file(
-            name: str,
-            content: str,
-            folder_id: str | None = None,
-            mime_type: str = "text/plain",
+            name: str = Field(..., description="Name of the file to create"),
+            content: str = Field(..., description="Content of the file to create"),
+            folder_id: str | None = Field(None, description="ID of the folder to create the file in (defaults to root)"),
+            mime_type: str = Field("text/plain", description="MIME type of the file"),
         ) -> dict:
-            if self.integration:
-                assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+            api_key = await _resolve_api_key(self)
+            import json
+            import httpx
 
             metadata = {
                 "name": name,
@@ -64,7 +72,7 @@ class GoogleDriveCreateFile(Tool):
                 response = await client.post(
                     f"{self.base_url}/files",
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                     },
                     params={
                         "uploadType": "multipart",
@@ -93,15 +101,8 @@ class GoogleDriveGetDownloadLink(Tool):
     name: str = "google_drive_get_download_link"
     description: str | None = "Get download link for a Google Drive file. Optionally specify a shared drive, or leave empty to use your drive."
     integration: Annotated[str, Integration("google_drive")] | None = None
+    api_key: SecretStr | None = None
     base_url: str = "https://www.googleapis.com/drive/v3"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "GoogleDriveGetDownloadLink":
-        if self.integration is None:
-            raise ValueError(
-                "Google Drive integration not found. Please configure google_drive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -110,6 +111,7 @@ class GoogleDriveGetDownloadLink(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "api_key": self.api_key,
                     "base_url": self.base_url,
                 }
             ),
@@ -117,13 +119,11 @@ class GoogleDriveGetDownloadLink(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_download_link(
-            file_id: str,
-            drive: str | None = None,
+            file_id: str = Field(..., description="ID of the file to get download link for"),
+            drive: str | None = Field(None, description="ID of the shared drive (optional)"),
         ) -> dict:
-            if self.integration:
-                assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             params: dict[str, Any] = {
                 "fields": "id,name,webViewLink,webContentLink",
@@ -138,7 +138,7 @@ class GoogleDriveGetDownloadLink(Tool):
                 response = await client.get(
                     f"{self.base_url}/files/{file_id}",
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                     },
                     params=params,
                     timeout=httpx.Timeout(10.0, read=None),
@@ -164,15 +164,8 @@ class GoogleDriveGetFile(Tool):
     name: str = "google_drive_get_file"
     description: str | None = "Download and return content of a Google Drive file."
     integration: Annotated[str, Integration("google_drive")] | None = None
+    api_key: SecretStr | None = None
     base_url: str = "https://www.googleapis.com/drive/v3"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "GoogleDriveGetFile":
-        if self.integration is None:
-            raise ValueError(
-                "Google Drive integration not found. Please configure google_drive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -181,6 +174,7 @@ class GoogleDriveGetFile(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "api_key": self.api_key,
                     "base_url": self.base_url,
                 }
             ),
@@ -188,18 +182,16 @@ class GoogleDriveGetFile(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_file(
-            file_id: str,
+            file_id: str = Field(..., description="ID of the file to download"),
         ) -> dict:
-            if self.integration:
-                assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{self.base_url}/files/{file_id}",
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                     },
                     params={
                         "alt": "media"
@@ -226,15 +218,8 @@ class GoogleDriveCreateFolder(Tool):
     name: str = "google_drive_create_folder"
     description: str | None = "Create a new folder in Google Drive with specified name."
     integration: Annotated[str, Integration("google_drive")] | None = None
+    api_key: SecretStr | None = None
     base_url: str = "https://www.googleapis.com/drive/v3"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "GoogleDriveCreateFolder":
-        if self.integration is None:
-            raise ValueError(
-                "Google Drive integration not found. Please configure google_drive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -243,6 +228,7 @@ class GoogleDriveCreateFolder(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "api_key": self.api_key,
                     "base_url": self.base_url,
                 }
             ),
@@ -250,13 +236,11 @@ class GoogleDriveCreateFolder(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_folder(
-            name: str,
-            parent_folder_id: str | None = None,
+            name: str = Field(..., description="Name of the folder to create"),
+            parent_folder_id: str | None = Field(None, description="ID of the parent folder (defaults to root)"),
         ) -> dict:
-            if self.integration:
-                assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             folder_metadata = {
                 "name": name,
@@ -270,7 +254,7 @@ class GoogleDriveCreateFolder(Tool):
                 response = await client.post(
                     f"{self.base_url}/files",
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json"
                     },
                     json=folder_metadata,
@@ -298,15 +282,8 @@ class GoogleDriveSearchFolders(Tool):
     name: str = "google_drive_search_folders"
     description: str | None = "Search for folders in Google Drive. Optionally limit search to a specific parent folder."
     integration: Annotated[str, Integration("google_drive")] | None = None
+    api_key: SecretStr | None = None
     base_url: str = "https://www.googleapis.com/drive/v3"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "GoogleDriveSearchFolders":
-        if self.integration is None:
-            raise ValueError(
-                "Google Drive integration not found. Please configure google_drive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -315,6 +292,7 @@ class GoogleDriveSearchFolders(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "api_key": self.api_key,
                     "base_url": self.base_url,
                 }
             ),
@@ -322,12 +300,10 @@ class GoogleDriveSearchFolders(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_folders(
-            folder_id: str | None = None,
+            folder_id: str | None = Field(None, description="ID of the parent folder to search in (optional)"),
         ) -> dict:
-            if self.integration:
-                assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             # Build query - search for folders only
             query = "mimeType='application/vnd.google-apps.folder'"
@@ -353,7 +329,7 @@ class GoogleDriveSearchFolders(Tool):
                     response = await client.get(
                         f"{self.base_url}/files",
                         headers={
-                            "Authorization": f"Bearer {token}",
+                            "Authorization": f"Bearer {api_key}",
                         },
                         params=params,
                         timeout=httpx.Timeout(30.0, read=None),
@@ -387,15 +363,8 @@ class GoogleDriveSearchFiles(Tool):
     name: str = "google_drive_search_files"
     description: str | None = "Search for files in Google Drive with optional query. Supports pagination, filtering by folder, name, and trashed status."
     integration: Annotated[str, Integration("google_drive")] | None = None
+    api_key: SecretStr | None = None
     base_url: str = "https://www.googleapis.com/drive/v3"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "GoogleDriveSearchFiles":
-        if self.integration is None:
-            raise ValueError(
-                "Google Drive integration not found. Please configure google_drive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -404,6 +373,7 @@ class GoogleDriveSearchFiles(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "api_key": self.api_key,
                     "base_url": self.base_url,
                 }
             ),
@@ -411,17 +381,15 @@ class GoogleDriveSearchFiles(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_files(
-            query: str | None = None,
-            folder_id: str | None = None,
-            fields: str | None = None,
-            filter_text: str | None = None,
-            filter_type: str = "CONTAINS",
-            trashed: bool | None = None,
+            query: str | None = Field(None, description="Search query string"),
+            folder_id: str | None = Field(None, description="ID of the folder to search in (optional)"),
+            fields: str | None = Field(None, description="Fields to return in response"),
+            filter_text: str | None = Field(None, description="Text to filter file names by"),
+            filter_type: str = Field("CONTAINS", description="Filter type: CONTAINS or EXACT"),
+            trashed: bool | None = Field(None, description="Include trashed files"),
         ) -> dict:
-            if self.integration:
-                assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             # Build query string
             query_parts = []
@@ -475,7 +443,7 @@ class GoogleDriveSearchFiles(Tool):
                     response = await client.get(
                         f"{self.base_url}/files",
                         headers={
-                            "Authorization": f"Bearer {token}",
+                            "Authorization": f"Bearer {api_key}",
                         },
                         params=params,
                         timeout=httpx.Timeout(30.0, read=None),
@@ -514,15 +482,8 @@ class GoogleDriveUploadFile(Tool):
     name: str = "google_drive_upload_file"
     description: str | None = "Upload a file to Google Drive from URL or local path. Supports file replacement and metadata."
     integration: Annotated[str, Integration("google_drive")] | None = None
+    api_key: SecretStr | None = None
     base_url: str = "https://www.googleapis.com/upload/drive/v3"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "GoogleDriveUploadFile":
-        if self.integration is None:
-            raise ValueError(
-                "Google Drive integration not found. Please configure google_drive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -531,6 +492,7 @@ class GoogleDriveUploadFile(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "api_key": self.api_key,
                     "base_url": self.base_url,
                 }
             ),
@@ -538,14 +500,13 @@ class GoogleDriveUploadFile(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _upload_file(
-            file_url: str,
-            folder_id: str | None = None,
-            file_name: str | None = None,
+            file_url: str = Field(..., description="URL of the file to upload"),
+            folder_id: str | None = Field(None, description="ID of the folder to upload to (defaults to root)"),
+            file_name: str | None = Field(None, description="Name to save the file as (optional)"),
         ) -> dict:
-            if self.integration:
-                assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+            api_key = await _resolve_api_key(self)
+            import json
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(file_url)
@@ -570,7 +531,7 @@ class GoogleDriveUploadFile(Tool):
                 upload_response = await client.post(
                     f"{self.base_url}/files",
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                     },
                     params={
                         "uploadType": "multipart",
@@ -599,15 +560,8 @@ class GoogleDriveCreateSharedDrive(Tool):
     name: str = "google_drive_create_shared_drive"
     description: str | None = "Create a new shared drive."
     integration: Annotated[str, Integration("google_drive")] | None = None
+    api_key: SecretStr | None = None
     base_url: str = "https://www.googleapis.com/drive/v3"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "GoogleDriveCreateSharedDrive":
-        if self.integration is None:
-            raise ValueError(
-                "Google Drive integration not found. Please configure google_drive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -616,6 +570,7 @@ class GoogleDriveCreateSharedDrive(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "api_key": self.api_key,
                     "base_url": self.base_url,
                 }
             ),
@@ -623,12 +578,10 @@ class GoogleDriveCreateSharedDrive(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_shared_drive(
-            name: str,
+            name: str = Field(..., description="Name of the shared drive to create"),
         ) -> dict:
-            if self.integration:
-                assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             drive_metadata = {
                 "name": name
@@ -638,7 +591,7 @@ class GoogleDriveCreateSharedDrive(Tool):
                 response = await client.post(
                     f"{self.base_url}/drives",
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json"
                     },
                     json=drive_metadata,

@@ -1,11 +1,19 @@
-import os
 from typing import Annotated, Any
 
-import httpx
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+
+
+async def _resolve_api_key(tool: Any) -> str:
+    """Resolve Tavily API key from integration or api_key field."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["api_key"]
+    elif tool.api_key:
+        return tool.api_key.get_secret_value()
+    raise ValueError("Tavily integration not configured and no API key provided.")
 
 
 class TavilySearch(Tool):
@@ -17,19 +25,6 @@ class TavilySearch(Tool):
     integration: Annotated[str, Integration("tavily")] | None = None
     api_key: SecretStr | None = None
     base_url: str = "https://api.tavily.com"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "TavilySearch":
-        if self.integration is None and self.api_key is None:
-            env_key = os.getenv("TAVILY_API_KEY")
-            if env_key:
-                self.api_key = SecretStr(env_key)
-        if self.integration is None and not self.api_key:
-            raise ValueError(
-                "Tavily API key not found. Set TAVILY_API_KEY environment variable, "
-                "pass api_key in config, or configure an integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -46,23 +41,16 @@ class TavilySearch(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _tavily_search(
-            input: str,
-            search_depth: str = "basic",
-            include_domains: list[str] | None = None,
-            exclude_domains: list[str] | None = None,
-            include_answer: bool = True,
-            include_raw_content: bool = True,
-            include_images: bool = False,
-            max_results: int = 10,
+            input: str = Field(..., description="Search query"),
+            search_depth: str = Field("basic", description="Search depth: 'basic' or 'advanced'"),
+            include_domains: list[str] | None = Field(None, description="Domains to include in search"),
+            exclude_domains: list[str] | None = Field(None, description="Domains to exclude from search"),
+            include_answer: bool = Field(True, description="Include answer in results"),
+            include_raw_content: bool = Field(True, description="Include raw content in results"),
+            include_images: bool = Field(False, description="Include images in results"),
+            max_results: int = Field(10, description="Maximum number of results to return"),
         ) -> dict:
-            if self.integration:
-                assert isinstance(self.integration, Integration)
-                credentials = await self.integration.resolve()
-                assert "api_key" in credentials
-                api_key = credentials["api_key"]
-            else:
-                assert self.api_key is not None
-                api_key = self.api_key.get_secret_value()
+            api_key = await _resolve_api_key(self)
 
             payload = {
                 "query": input,
@@ -74,6 +62,8 @@ class TavilySearch(Tool):
                 "include_domains": include_domains if include_domains else None,
                 "exclude_domains": exclude_domains if exclude_domains else None
             }
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(

@@ -1,14 +1,28 @@
-import base64
-import io
-import zipfile
+import os
 from typing import Annotated, Any
 
-import httpx
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 _ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
+
+
+async def _resolve_api_key(tool: Any) -> str:
+    """Resolve ElevenLabs API key from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["api_key"]
+    if tool.api_key is not None:
+        return tool.api_key.get_secret_value()
+    env_key = os.getenv("ELEVENLABS_API_KEY")
+    if env_key:
+        return env_key
+    raise ValueError(
+        "ElevenLabs API key not found. Set ELEVENLABS_API_KEY environment variable, "
+        "pass api_key in config, or configure an integration."
+    )
 
 
 class TextToSpeech(Tool):
@@ -17,44 +31,38 @@ class TextToSpeech(Tool):
         "Convert text to speech using a specified ElevenLabs voice. "
         "Returns the audio encoded as a base64 string."
     )
-    integration: Annotated[str, Integration("elevenlabs")]
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _text_to_speech(
-            text: str,
-            voice_id: str,
-            model_id: str = "eleven_multilingual_v2",
-            output_format: str = "mp3_44100_128",
-            stability: float = 0.5,
-            similarity_boost: float = 0.75,
-            style: float = 0.0,
-            use_speaker_boost: bool = True,
+            text: str = Field(..., description="The text to synthesize."),
+            voice_id: str = Field(..., description="ElevenLabs voice ID to use."),
+            model_id: str = Field("eleven_multilingual_v2", description="Model to use, e.g. 'eleven_multilingual_v2', 'eleven_turbo_v2'."),
+            output_format: str = Field("mp3_44100_128", description="Audio format, e.g. 'mp3_44100_128', 'pcm_16000', 'ulaw_8000'."),
+            stability: float = Field(0.5, description="Voice stability (0.0–1.0)."),
+            similarity_boost: float = Field(0.75, description="Voice similarity boost (0.0–1.0)."),
+            style: float = Field(0.0, description="Style exaggeration (0.0–1.0, only for v2 models)."),
+            use_speaker_boost: bool = Field(True, description="Improve speaker clarity (slight latency increase)."),
         ) -> Any:
-            """
-            text: the text to synthesize.
-            voice_id: ElevenLabs voice ID to use.
-            model_id: model to use, e.g. "eleven_multilingual_v2", "eleven_turbo_v2".
-            output_format: audio format, e.g. "mp3_44100_128", "pcm_16000", "ulaw_8000".
-            stability: voice stability (0.0–1.0).
-            similarity_boost: voice similarity boost (0.0–1.0).
-            style: style exaggeration (0.0–1.0, only for v2 models).
-            use_speaker_boost: improve speaker clarity (slight latency increase).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import base64
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_ELEVENLABS_BASE}/text-to-speech/{voice_id}",
-                    headers={"xi-api-key": token},
+                    headers={"xi-api-key": api_key},
                     params={"output_format": output_format},
                     json={
                         "text": text,
@@ -85,31 +93,28 @@ class MakeOutboundCall(Tool):
     description: str | None = (
         "Initiate an outbound phone call via Twilio using an ElevenLabs conversational agent."
     )
-    integration: Annotated[str, Integration("elevenlabs")]
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _make_outbound_call(
-            agent_id: str,
-            to_number: str,
-            from_number: str,
-            agent_phone_number_id: str | None = None,
+            agent_id: str = Field(..., description="The ElevenLabs conversational agent ID."),
+            to_number: str = Field(..., description="Destination phone number in E.164 format, e.g. '+14155552671'."),
+            from_number: str = Field(..., description="Twilio phone number in E.164 format to place the call from."),
+            agent_phone_number_id: str | None = Field(None, description="Optional phone number ID registered on the agent."),
         ) -> Any:
-            """
-            agent_id: the ElevenLabs conversational agent ID.
-            to_number: destination phone number in E.164 format, e.g. "+14155552671".
-            from_number: Twilio phone number in E.164 format to place the call from.
-            agent_phone_number_id: optional phone number ID registered on the agent.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             payload: dict[str, Any] = {
                 "agent_id": agent_id,
@@ -122,7 +127,7 @@ class MakeOutboundCall(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_ELEVENLABS_BASE}/convai/twilio/outbound-call",
-                    headers={"xi-api-key": token},
+                    headers={"xi-api-key": api_key},
                     json=payload,
                 )
                 response.raise_for_status()
@@ -136,25 +141,28 @@ class MakeOutboundCall(Tool):
 class GetModels(Tool):
     name: str = "elevenlabs_get_models"
     description: str | None = "List all available ElevenLabs TTS models with their capabilities."
-    integration: Annotated[str, Integration("elevenlabs")]
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_models() -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_ELEVENLABS_BASE}/models",
-                    headers={"xi-api-key": token},
+                    headers={"xi-api-key": api_key},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -170,30 +178,30 @@ class GetVoicesWithDescriptions(Tool):
         "Fetch all available voices from ElevenLabs including metadata "
         "such as name, gender, accent, age, and category."
     )
-    integration: Annotated[str, Integration("elevenlabs")]
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_voices_with_descriptions(
-            show_legacy: bool = False,
+            show_legacy: bool = Field(False, description="Include legacy pre-XTTS voices in the response."),
         ) -> Any:
-            """
-            show_legacy: include legacy pre-XTTS voices in the response.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_ELEVENLABS_BASE}/voices",
-                    headers={"xi-api-key": token},
+                    headers={"xi-api-key": api_key},
                     params={"show_legacy": str(show_legacy).lower()},
                 )
                 response.raise_for_status()
@@ -227,30 +235,31 @@ class GetAudioFromHistoryItem(Tool):
     description: str | None = (
         "Retrieve the audio of a history item and return it as a base64-encoded file."
     )
-    integration: Annotated[str, Integration("elevenlabs")]
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_audio_from_history_item(
-            history_item_id: str,
+            history_item_id: str = Field(..., description="The ID of the history item to retrieve audio for."),
         ) -> Any:
-            """
-            history_item_id: the ID of the history item to retrieve audio for.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import base64
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_ELEVENLABS_BASE}/history/{history_item_id}/audio",
-                    headers={"xi-api-key": token},
+                    headers={"xi-api-key": api_key},
                 )
                 response.raise_for_status()
                 audio_b64 = base64.b64encode(response.content).decode("utf-8")
@@ -271,31 +280,33 @@ class DownloadHistoryItems(Tool):
         "Download one or more history items. A single item returns an audio file (base64). "
         "Multiple items are packed into a .zip file and returned as base64."
     )
-    integration: Annotated[str, Integration("elevenlabs")]
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _download_history_items(
-            history_item_ids: list[str],
+            history_item_ids: list[str] = Field(..., description="List of history item IDs to download. Single ID returns audio; multiple IDs return a .zip."),
         ) -> Any:
-            """
-            history_item_ids: list of history item IDs to download.
-                              Single ID returns audio; multiple IDs return a .zip.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import base64
+            import httpx
+            import io
+            import zipfile
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_ELEVENLABS_BASE}/history/download",
-                    headers={"xi-api-key": token},
+                    headers={"xi-api-key": api_key},
                     json={"history_item_ids": history_item_ids},
                 )
                 response.raise_for_status()
@@ -333,39 +344,32 @@ class CreateAgent(Tool):
         "Create a new ElevenLabs conversational AI agent with a given name, "
         "prompt, voice, and optional first message."
     )
-    integration: Annotated[str, Integration("elevenlabs")]
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_agent(
-            name: str,
-            voice_id: str,
-            system_prompt: str,
-            first_message: str | None = None,
-            language: str = "en",
-            model_id: str = "eleven_turbo_v2",
-            max_duration_seconds: int = 600,
-            turn_timeout: int = 20,
+            name: str = Field(..., description="Display name for the agent."),
+            voice_id: str = Field(..., description="ElevenLabs voice ID the agent will use."),
+            system_prompt: str = Field(..., description="The LLM system prompt defining agent behaviour."),
+            first_message: str | None = Field(None, description="Optional opening message the agent speaks first."),
+            language: str = Field("en", description="BCP-47 language code, e.g. 'en', 'es', 'fr'."),
+            model_id: str = Field("eleven_turbo_v2", description="ElevenLabs model ID to use. e.g. 'eleven_turbo_v2'"),
+            max_duration_seconds: int = Field(600, description="Maximum call/conversation length in seconds."),
+            turn_timeout: int = Field(20, description="Seconds of silence before the agent ends its turn."),
         ) -> Any:
-            """
-            name: display name for the agent.
-            voice_id: ElevenLabs voice ID the agent will use.
-            system_prompt: the LLM system prompt defining agent behaviour.
-            first_message: optional opening message the agent speaks first.
-            language: BCP-47 language code, e.g. "en", "es", "fr".
-            model_id: TTS model to use, e.g. "eleven_turbo_v2".
-            max_duration_seconds: maximum call/conversation length in seconds.
-            turn_timeout: seconds of silence before the agent ends its turn.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             payload: dict[str, Any] = {
                 "name": name,
@@ -392,7 +396,7 @@ class CreateAgent(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_ELEVENLABS_BASE}/convai/agents/create",
-                    headers={"xi-api-key": token},
+                    headers={"xi-api-key": api_key},
                     json=payload,
                 )
                 response.raise_for_status()
@@ -408,34 +412,29 @@ class AddVoice(Tool):
     description: str | None = (
         "Clone or add a new voice to ElevenLabs from one or more base64-encoded audio files."
     )
-    integration: Annotated[str, Integration("elevenlabs")]
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _add_voice(
-            name: str,
-            audio_files_base64: list[str],
-            filenames: list[str] | None = None,
-            description: str | None = None,
-            labels: dict[str, str] | None = None,
+            name: str = Field(..., description="Display name for the new voice."),
+            audio_files_base64: list[str] = Field(..., description="List of audio file contents encoded as base64 strings."),
+            filenames: list[str] | None = Field(None, description="Optional list of original filenames (e.g. ['sample1.mp3']). Must match the length of audio_files_base64 if provided."),
+            description: str | None = Field(None, description="Optional text description of the voice."),
+            labels: dict[str, str] | None = Field(None, description="Optional key-value metadata, e.g. {'accent': 'British', 'gender': 'female'}."),
         ) -> Any:
-            """
-            name: display name for the new voice.
-            audio_files_base64: list of audio file contents encoded as base64 strings.
-            filenames: optional list of original filenames (e.g. ["sample1.mp3"]).
-                       Must match the length of audio_files_base64 if provided.
-            description: optional text description of the voice.
-            labels: optional key-value metadata, e.g. {"accent": "British", "gender": "female"}.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             resolved_names = filenames or [f"sample_{i}.mp3" for i in range(len(audio_files_base64))]
 

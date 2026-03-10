@@ -1,7 +1,7 @@
-import base64
+import os
 from typing import Annotated, Any
 
-import httpx
+from pydantic import SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
@@ -11,6 +11,22 @@ _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 _DEFAULT_EDIT_MODEL = "gemini-3.1-flash-image-preview"
 _DEFAULT_GENERATE_MODEL = "gemini-3.1-flash-image-preview"
 _DEFAULT_ANALYZE_MODEL = "gemini-3.1-flash-image-preview"
+
+
+async def _resolve_api_key(tool: Any) -> str:
+    """Resolve Gemini API key from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["api_key"]
+    if tool.api_key is not None:
+        return tool.api_key.get_secret_value()
+    env_key = os.getenv("GEMINI_API_KEY")
+    if env_key:
+        return env_key
+    raise ValueError(
+        "Gemini API key not found. Set GEMINI_API_KEY environment variable, "
+        "pass api_key in config, or configure an integration."
+    )
 
 
 def _parse_gemini_response(data: dict[str, Any]) -> dict[str, Any]:
@@ -35,31 +51,28 @@ class EditImage(Tool):
         "Edit or transform an existing image using a natural language prompt via Gemini. "
         "Returns the edited image as a base64 string."
     )
-    integration: Annotated[str, Integration("gemini")]
+    integration: Annotated[str, Integration("gemini")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _edit_image(
-            prompt: str,
-            image_base64: str,
-            image_mime_type: str = "image/png",
-            model: str = _DEFAULT_EDIT_MODEL,
+            prompt: str = Field(..., description="Instruction describing the desired edit, e.g. 'remove the background'."),
+            image_base64: str = Field(..., description="The source image encoded as a base64 string."),
+            image_mime_type: str = Field("image/png", description="MIME type of the input image, e.g. 'image/png', 'image/jpeg'."),
+            model: str = Field(_DEFAULT_EDIT_MODEL, description="Gemini model to use. Defaults to gemini-2.0-flash-exp-image-generation."),
         ) -> Any:
-            """
-            prompt: instruction describing the desired edit, e.g. "remove the background".
-            image_base64: the source image encoded as a base64 string.
-            image_mime_type: MIME type of the input image, e.g. "image/png", "image/jpeg".
-            model: Gemini model to use. Defaults to gemini-2.0-flash-exp-image-generation.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             payload = {
                 "contents": [
@@ -81,7 +94,7 @@ class EditImage(Tool):
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{_GEMINI_BASE}/{model}:generateContent",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json=payload,
                 )
                 response.raise_for_status()
@@ -98,29 +111,27 @@ class GenerateImage(Tool):
         "Generate a new image from a text prompt using Gemini. "
         "Returns the generated image as a base64 string."
     )
-    integration: Annotated[str, Integration("gemini")]
+    integration: Annotated[str, Integration("gemini")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _generate_image(
-            prompt: str,
-            negative_prompt: str | None = None,
-            model: str = _DEFAULT_GENERATE_MODEL,
+            prompt: str = Field(..., description="Text description of the image to generate."),
+            negative_prompt: str | None = Field(None, description="Optional description of what to avoid in the image."),
+            model: str = Field(_DEFAULT_GENERATE_MODEL, description="Gemini model to use. Defaults to gemini-2.0-flash-exp-image-generation."),
         ) -> Any:
-            """
-            prompt: text description of the image to generate.
-            negative_prompt: optional description of what to avoid in the image.
-            model: Gemini model to use. Defaults to gemini-2.0-flash-exp-image-generation.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             text = prompt
             if negative_prompt:
@@ -138,7 +149,7 @@ class GenerateImage(Tool):
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{_GEMINI_BASE}/{model}:generateContent",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json=payload,
                 )
                 response.raise_for_status()
@@ -155,32 +166,28 @@ class AnalyzeImage(Tool):
         "Analyze, describe, or extract information from an image using Gemini vision. "
         "Returns a text response based on your question or instruction."
     )
-    integration: Annotated[str, Integration("gemini")]
+    integration: Annotated[str, Integration("gemini")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _analyze_image(
-            prompt: str,
-            image_base64: str,
-            image_mime_type: str = "image/png",
-            model: str = _DEFAULT_ANALYZE_MODEL,
+            prompt: str = Field(..., description="Question or instruction about the image, e.g. 'Describe this image', 'What text is visible?', 'List all objects'."),
+            image_base64: str = Field(..., description="The image encoded as a base64 string."),
+            image_mime_type: str = Field("image/png", description="MIME type of the image, e.g. 'image/png', 'image/jpeg'."),
+            model: str = Field(_DEFAULT_ANALYZE_MODEL, description="Gemini model to use. Defaults to gemini-2.0-flash."),
         ) -> Any:
-            """
-            prompt: question or instruction about the image,
-                    e.g. "Describe this image", "What text is visible?", "List all objects".
-            image_base64: the image encoded as a base64 string.
-            image_mime_type: MIME type of the image, e.g. "image/png", "image/jpeg".
-            model: Gemini model to use. Defaults to gemini-2.0-flash.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             payload = {
                 "contents": [
@@ -202,7 +209,7 @@ class AnalyzeImage(Tool):
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
                     f"{_GEMINI_BASE}/{model}:generateContent",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json=payload,
                 )
                 response.raise_for_status()
@@ -224,31 +231,28 @@ class GenerateImageWithReference(Tool):
     description: str | None = (
         "Generate a new image using a text prompt and one or more reference images for style or composition guidance."
     )
-    integration: Annotated[str, Integration("gemini")]
+    integration: Annotated[str, Integration("gemini")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _generate_image_with_reference(
-            prompt: str,
-            reference_images_base64: list[str],
-            reference_mime_types: list[str] | None = None,
-            model: str = _DEFAULT_GENERATE_MODEL,
+            prompt: str = Field(..., description="Text instruction describing the desired output image."),
+            reference_images_base64: list[str] = Field(..., description="List of reference images as base64 strings."),
+            reference_mime_types: list[str] | None = Field(None, description="MIME type per reference image. Defaults to 'image/png' for all."),
+            model: str = Field(_DEFAULT_GENERATE_MODEL, description="Gemini model to use. Defaults to gemini-2.0-flash-exp-image-generation."),
         ) -> Any:
-            """
-            prompt: text instruction describing the desired output image.
-            reference_images_base64: list of reference images as base64 strings.
-            reference_mime_types: MIME type per reference image. Defaults to "image/png" for all.
-            model: Gemini model to use. Defaults to gemini-2.0-flash-exp-image-generation.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             resolved_mime = reference_mime_types or ["image/png"] * len(reference_images_base64)
 
@@ -284,11 +288,10 @@ class ImageToBase64(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _image_url_to_base64(
-            url: str,
+            url: str = Field(..., description="Publicly accessible URL of the image to fetch."),
         ) -> Any:
-            """
-            url: publicly accessible URL of the image to fetch.
-            """
+            import base64
+            import httpx
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url)
                 response.raise_for_status()

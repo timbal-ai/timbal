@@ -1,11 +1,28 @@
+import os
 from typing import Annotated, Any
 
-import httpx
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 _LINKEDIN_API_BASE = "https://api.linkedin.com/v2"
+
+
+async def _resolve_api_key(tool: Any) -> str:
+    """Resolve LinkedIn API key from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["api_key"]
+    if tool.api_key is not None:
+        return tool.api_key.get_secret_value()
+    env_key = os.getenv("LINKEDIN_API_KEY")
+    if env_key:
+        return env_key
+    raise ValueError(
+        "LinkedIn API key not found. Set LINKEDIN_API_KEY environment variable, "
+        "pass api_key in config, or configure an integration."
+    )
 
 
 class SearchPeople(Tool):
@@ -14,45 +31,35 @@ class SearchPeople(Tool):
         "Search for people on LinkedIn. Supports keyword query with optional filters "
         "by country, industry, seniority, company, and more."
     )
-    integration: Annotated[str, Integration("linkedin")]
+    integration: Annotated[str, Integration("linkedin")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_people(
-            query: str,
-            top_k: int = 10,
-            country: str | None = None,
-            industries: list[str] | None = None,
-            seniority_levels: list[str] | None = None,
-            current_companies: list[str] | None = None,
-            past_companies: list[str] | None = None,
-            schools: list[str] | None = None,
-            network_depths: list[str] | None = None,
-            title: str | None = None,
-            start: int = 0,
+                query: str = Field(..., description="Keywords to search for (name, title, skills, etc.)"),
+                top_k: int = Field(10, description="Number of results to return (max 49 per LinkedIn API limits)"),
+                country: str | None = Field(None, description="ISO 3166-1 alpha-2 country code, e.g. 'US', 'GB', 'ES'"),
+                industries: list[str] | None = Field(None, description="List of LinkedIn industry URNs or names, e.g. ['Software Development', 'Finance']"),
+                seniority_levels: list[str] | None = Field(None, description="List of levels, e.g. ['DIRECTOR', 'VP', 'CXO', 'SENIOR', 'ENTRY', 'MANAGER']"),
+                current_companies: list[str] | None = Field(None, description="List of company names or URNs to filter by current employer"),
+                past_companies: list[str] | None = Field(None, description="List of company names or URNs to filter by past employer"),
+                schools: list[str] | None = Field(None, description="List of school names to filter by education"),
+                network_depths: list[str] | None = Field(None, description="List of connection degrees, e.g. ['F'] (1st), ['S'] (2nd), ['O'] (3rd+)"),
+                title: str | None = Field(None, description="Filter by job title keyword"),
+                start: int = Field(0, description="Pagination offset"),
         ) -> Any:
-            """
-            query: keywords to search for (name, title, skills, etc.).
-            top_k: number of results to return (max 49 per LinkedIn API limits).
-            country: ISO 3166-1 alpha-2 country code, e.g. "US", "GB", "ES".
-            industries: list of LinkedIn industry URNs or names, e.g. ["Software Development", "Finance"].
-            seniority_levels: list of levels, e.g. ["DIRECTOR", "VP", "CXO", "SENIOR", "ENTRY", "MANAGER"].
-            current_companies: list of company names or URNs to filter by current employer.
-            past_companies: list of company names or URNs to filter by past employer.
-            schools: list of school names to filter by education.
-            network_depths: list of connection degrees, e.g. ["F"] (1st), ["S"] (2nd), ["O"] (3rd+).
-            title: filter by job title keyword.
-            start: pagination offset.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             params: dict[str, Any] = {
                 "q": "people",
@@ -81,7 +88,7 @@ class SearchPeople(Tool):
                 response = await client.get(
                     f"{_LINKEDIN_API_BASE}/search",
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                         "X-Restli-Protocol-Version": "2.0.0",
                     },
                     params=params,
@@ -99,35 +106,30 @@ class SearchCompanies(Tool):
     description: str | None = (
         "Search for companies on LinkedIn with optional filters by country, industry, and size."
     )
-    integration: Annotated[str, Integration("linkedin")]
+    integration: Annotated[str, Integration("linkedin")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_companies(
-            query: str,
-            top_k: int = 10,
-            country: str | None = None,
-            industries: list[str] | None = None,
-            company_sizes: list[str] | None = None,
-            start: int = 0,
+            query: str = Field(..., description="Company name or keyword"),
+            top_k: int = Field(10, description="Number of results to return (max 49 per LinkedIn API limits)"),
+            country: str | None = Field(None, description="ISO 3166-1 alpha-2 country code, e.g. 'US', 'DE'"),
+            industries: list[str] | None = Field(None, description="List of industry names to filter by"),
+            company_sizes: list[str] | None = Field(None, description="List of size codes, e.g. ['B'] (2–10), ['C'] (11–50), ['D'] (51–200), ['E'] (201–500), ['F'] (501–1000), ['G'] (1001–5000), ['H'] (5001–10000), ['I'] (10001+)"),
+            start: int = Field(0, description="Pagination offset"),
         ) -> Any:
-            """
-            query: company name or keyword.
-            country: ISO 3166-1 alpha-2 country code, e.g. "US", "DE".
-            industries: list of industry names to filter by.
-            company_sizes: list of size codes, e.g. ["B"] (2–10), ["C"] (11–50),
-                           ["D"] (51–200), ["E"] (201–500), ["F"] (501–1000),
-                           ["G"] (1001–5000), ["H"] (5001–10000), ["I"] (10001+).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             params: dict[str, Any] = {
                 "q": "search",
@@ -146,7 +148,7 @@ class SearchCompanies(Tool):
                 response = await client.get(
                     f"{_LINKEDIN_API_BASE}/organizationsLookup",
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                         "X-Restli-Protocol-Version": "2.0.0",
                     },
                     params=params,
@@ -165,41 +167,34 @@ class SearchJobs(Tool):
         "Search for job postings on LinkedIn with optional filters by country, "
         "industry, seniority, and job type."
     )
-    integration: Annotated[str, Integration("linkedin")]
+    integration: Annotated[str, Integration("linkedin")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_jobs(
-            query: str,
-            top_k: int = 10,
-            country: str | None = None,
-            location: str | None = None,
-            industries: list[str] | None = None,
-            seniority_levels: list[str] | None = None,
-            job_types: list[str] | None = None,
-            remote_filter: str | None = None,
-            posted_at_range: str | None = None,
-            start: int = 0,
+            query: str = Field(..., description="Job title or keywords"),
+            top_k: int = Field(10, description="Number of results to return (max 49 per LinkedIn API limits)"),
+            country: str | None = Field(None, description="ISO 3166-1 alpha-2 country code"),
+            location: str | None = Field(None, description="City or region name, e.g. 'San Francisco Bay Area'"),
+            industries: list[str] | None = Field(None, description="List of industry names to filter by"),
+            seniority_levels: list[str] | None = Field(None, description="List of seniority levels, e.g. ['ENTRY_LEVEL', 'MID_SENIOR_LEVEL', 'DIRECTOR', 'EXECUTIVE']"),
+            job_types: list[str] | None = Field(None, description="List of job types, e.g. ['FULL_TIME', 'PART_TIME', 'CONTRACT', 'INTERNSHIP', 'TEMPORARY']"),
+            remote_filter: str | None = Field(None, description="Remote filter: 'REMOTE', 'ON_SITE', 'HYBRID'"),
+            posted_at_range: str | None = Field(None, description="Time range: '24h', '7d', '30d', '90d'"),
+            start: int = Field(0, description="Pagination offset"),
         ) -> Any:
-            """
-            query: job title or keywords, e.g. "machine learning engineer".
-            country: ISO 3166-1 alpha-2 country code.
-            location: city or region name, e.g. "San Francisco Bay Area".
-            seniority_levels: e.g. ["ENTRY_LEVEL", "MID_SENIOR_LEVEL", "DIRECTOR", "EXECUTIVE"].
-            job_types: e.g. ["FULL_TIME", "PART_TIME", "CONTRACT", "INTERNSHIP", "TEMPORARY"].
-            remote_filter: "REMOTE", "ON_SITE", or "HYBRID".
-            posted_at_range: filter by posting age, e.g. "r86400" (24h), "r604800" (7 days),
-                             "r2592000" (30 days).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             params: dict[str, Any] = {
                 "keywords": query,
@@ -225,7 +220,7 @@ class SearchJobs(Tool):
                 response = await client.get(
                     f"{_LINKEDIN_API_BASE}/jobSearch",
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                         "X-Restli-Protocol-Version": "2.0.0",
                     },
                     params=params,
@@ -244,52 +239,30 @@ class Search(Tool):
         "Unified LinkedIn search across people, companies, and jobs. "
         "Supports keyword query with optional type, country, and multi-select filters."
     )
-    integration: Annotated[str, Integration("linkedin")]
+    integration: Annotated[str, Integration("linkedin")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search(
-            query: str,
-            type: str = "people",
-            top_k: int = 10,
-            country: str | None = None,
-            filters: list[str] | None = None,
-            start: int = 0,
+            query: str = Field(..., description="Keyword(s) to search for"),
+            type: str = Field("people", description="Entity type to search — 'people', 'companies', or 'jobs'"),
+            top_k: int = Field(10, description="Max number of results (capped at 49 by LinkedIn API)"),
+            country: str | None = Field(None, description="ISO 3166-1 alpha-2 country code, e.g. 'US', 'GB', 'ES', 'DE'"),
+            filters: list[str] | None = Field(None, description="List of filter strings in 'key:value' format. Supported keys: People filters: - 'industry:<name>'          e.g. 'industry:Software Development' - 'seniority:<level>'        e.g. 'seniority:DIRECTOR' - 'current_company:<name>'   e.g. 'current_company:Google' - 'past_company:<name>' - 'school:<name>' - 'network:<depth>'          e.g. 'network:F' (1st), 'network:S' (2nd) - 'title:<keyword>'          e.g. 'title:CTO' Company filters: - 'industry:<name>' - 'size:<code>'              e.g. 'size:G' (1001–5000 employees) Job filters: - 'job_type:<type>'          e.g. 'job_type:FULL_TIME' - 'seniority:<level>'        e.g. 'seniority:MID_SENIOR_LEVEL' - 'remote:<filter>'          e.g. 'remote:REMOTE' - 'posted:<range>'           e.g. 'posted:r86400' (last 24h) - 'location:<city/region>'"),
+            start: int = Field(0, description="Pagination offset"),
         ) -> Any:
-            """
-            query: keyword(s) to search for.
-            type: entity type to search — "people", "companies", or "jobs".
-            top_k: max number of results (capped at 49 by LinkedIn API).
-            country: ISO 3166-1 alpha-2 country code, e.g. "US", "GB", "ES", "DE".
-            filters: list of filter strings in "key:value" format. Supported keys:
-              People filters:
-                - "industry:<name>"          e.g. "industry:Software Development"
-                - "seniority:<level>"        e.g. "seniority:DIRECTOR"
-                - "current_company:<name>"   e.g. "current_company:Google"
-                - "past_company:<name>"
-                - "school:<name>"
-                - "network:<depth>"          e.g. "network:F" (1st), "network:S" (2nd)
-                - "title:<keyword>"          e.g. "title:CTO"
-              Company filters:
-                - "industry:<name>"
-                - "size:<code>"              e.g. "size:G" (1001–5000 employees)
-              Job filters:
-                - "job_type:<type>"          e.g. "job_type:FULL_TIME"
-                - "seniority:<level>"        e.g. "seniority:MID_SENIOR_LEVEL"
-                - "remote:<filter>"          e.g. "remote:REMOTE"
-                - "posted:<range>"           e.g. "posted:r86400" (last 24h)
-                - "location:<city/region>"
-            start: pagination offset.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             parsed: dict[str, list[str]] = {}
             for f in (filters or []):

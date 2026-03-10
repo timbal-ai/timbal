@@ -1,11 +1,19 @@
 from typing import Annotated, Any
 
-import httpx
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 _GITHUB_API_BASE = "https://api.github.com"
+
+
+async def _resolve_token(tool: Any) -> str:
+    """Resolve GitHub OAuth token from integration."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["token"]
+    raise ValueError("GitHub integration not configured.")
 
 
 def _repo(owner: str, repo: str) -> str:
@@ -20,23 +28,27 @@ def _repo(owner: str, repo: str) -> str:
 class GetReference(Tool):
     name: str = "github_get_reference"
     description: str | None = "Get a single git reference (branch, tag, or HEAD) from a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_reference(owner: str, repo: str, ref: str) -> Any:
-            """
-            ref: fully-qualified reference, e.g. "heads/main" or "tags/v1.0".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_reference(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            ref: str = Field(..., description="Fully-qualified reference, e.g. 'heads/main' or 'tags/v1.0'")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -54,24 +66,28 @@ class GetReference(Tool):
 class CreateReference(Tool):
     name: str = "github_create_reference"
     description: str | None = "Create a git reference (branch or tag) in a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _create_reference(owner: str, repo: str, ref: str, sha: str) -> Any:
-            """
-            ref: fully-qualified reference name, e.g. "refs/heads/my-branch".
-            sha: the SHA1 value to set the reference to.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _create_reference(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            ref: str = Field(..., description="Fully-qualified reference name, e.g. 'refs/heads/my-branch'"),
+            sha: str = Field(..., description="The SHA1 value to set the reference to"),
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -90,30 +106,29 @@ class CreateReference(Tool):
 class UpdateReference(Tool):
     name: str = "github_update_reference"
     description: str | None = "Update a git reference to point to a new commit SHA."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_reference(
-            owner: str,
-            repo: str,
-            ref: str,
-            sha: str,
-            force: bool = False,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            ref: str = Field(..., description="Reference to update, e.g. 'heads/main'"),
+            sha: str = Field(..., description="New commit SHA to point the reference to"),
+            force: bool = Field(False, description="If True, force-update even if not a fast-forward"),
         ) -> Any:
-            """
-            ref: reference to update, e.g. "heads/main".
-            force: if True, force-updates even if it's not a fast-forward.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
@@ -132,23 +147,27 @@ class UpdateReference(Tool):
 class DeleteReference(Tool):
     name: str = "github_delete_reference"
     description: str | None = "Delete a git reference (branch or tag) from a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_reference(owner: str, repo: str, ref: str) -> Any:
-            """
-            ref: reference to delete, e.g. "heads/my-branch".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _delete_reference(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            ref: str = Field(..., description="Reference to delete, e.g. 'heads/my-branch'"),
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -166,20 +185,27 @@ class DeleteReference(Tool):
 class GetGitCommit(Tool):
     name: str = "github_get_git_commit"
     description: str | None = "Get a git commit object (tree, parents, author, committer) by SHA."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_git_commit(owner: str, repo: str, commit_sha: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_git_commit(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            commit_sha: str = Field(..., description="Git commit SHA to retrieve"),
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -202,27 +228,26 @@ class GetGitCommit(Tool):
 class AddUserToOrganization(Tool):
     name: str = "github_add_user_to_organization"
     description: str | None = "Add or update a user's membership in a GitHub organization."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _add_user_to_organization(
-            org: str,
-            username: str,
-            role: str = "member",
+            org: str = Field(..., description="GitHub organization name"),
+            username: str = Field(..., description="GitHub username to add to organization"),
+            role: str = Field("member", description="Role for the user: 'member' or 'admin'"),
         ) -> Any:
-            """
-            role: "member" or "admin".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.put(
@@ -241,20 +266,25 @@ class AddUserToOrganization(Tool):
 class RemoveUserFromOrganization(Tool):
     name: str = "github_remove_user_from_organization"
     description: str | None = "Remove a user's membership from a GitHub organization."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _remove_user_from_organization(org: str, username: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _remove_user_from_organization(
+            org: str = Field(..., description="GitHub organization name"),
+            username: str = Field(..., description="GitHub username to remove from organization")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -272,28 +302,28 @@ class RemoveUserFromOrganization(Tool):
 class AddUserToTeam(Tool):
     name: str = "github_add_user_to_team"
     description: str | None = "Add or update a user's membership in a GitHub team."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _add_user_to_team(
-            org: str,
-            team_slug: str,
-            username: str,
-            role: str = "member",
+            org: str = Field(..., description="GitHub organization name"),
+            team_slug: str = Field(..., description="GitHub team slug"),
+            username: str = Field(..., description="GitHub username to add to team"),
+            role: str = Field("member", description="Role for the user: 'member' or 'maintainer'"),
         ) -> Any:
-            """
-            role: "member" or "maintainer".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.put(
@@ -317,36 +347,32 @@ class AddUserToTeam(Tool):
 class ListPullRequests(Tool):
     name: str = "github_list_pull_requests"
     description: str | None = "List pull requests for a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_pull_requests(
-            owner: str,
-            repo: str,
-            state: str = "open",
-            head: str | None = None,
-            base: str | None = None,
-            sort: str = "created",
-            direction: str = "desc",
-            per_page: int = 30,
-            page: int = 1,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            state: str = Field("open", description="Pull request state: 'open', 'closed', or 'all'"),
+            head: str | None = Field(None, description="Filter by head branch, e.g. 'user:branch-name'"),
+            base: str | None = Field(None, description="Filter by base branch, e.g. 'main'"),
+            sort: str = Field("created", description="Sort field: 'created', 'updated', 'popularity', or 'long-running'"),
+            direction: str = Field("desc", description="Sort direction: 'asc' or 'desc'"),
+            per_page: int = Field(30, description="Number of pull requests per page"),
+            page: int = Field(1, description="Page number"),
         ) -> Any:
-            """
-            state: "open", "closed", or "all".
-            head: filter by head branch, e.g. "user:branch-name".
-            base: filter by base branch, e.g. "main".
-            sort: "created", "updated", "popularity", or "long-running".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {
                 "state": state,
@@ -377,20 +403,27 @@ class ListPullRequests(Tool):
 class GetPullRequest(Tool):
     name: str = "github_get_pull_request"
     description: str | None = "Get a specific pull request by number."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_pull_request(owner: str, repo: str, pull_number: int) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_pull_request(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            pull_number: int = Field(..., description="Pull request number")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -408,20 +441,26 @@ class GetPullRequest(Tool):
 class GetPullRequestPreview(Tool):
     name: str = "github_get_pull_request_preview"
     description: str | None = "Get the unified diff (patch) of a pull request."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_pull_request_preview(owner: str, repo: str, pull_number: int) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_pull_request_preview(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            pull_number: int = Field(..., description="Pull request number")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -442,33 +481,32 @@ class GetPullRequestPreview(Tool):
 class CreatePullRequest(Tool):
     name: str = "github_create_pull_request"
     description: str | None = "Create a new pull request."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_pull_request(
-            owner: str,
-            repo: str,
-            title: str,
-            head: str,
-            base: str,
-            body: str | None = None,
-            draft: bool = False,
-            maintainer_can_modify: bool = True,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            title: str = Field(..., description="Pull request title"),
+            head: str = Field(..., description="Branch containing your changes, e.g. 'feature-branch' or 'user:feature-branch'"),
+            base: str = Field(..., description="Branch you want to merge into, e.g. 'main'"),
+            body: str | None = Field(None, description="Pull request description"),
+            draft: bool = Field(False, description="Whether the pull request should be created as a draft"),
+            maintainer_can_modify: bool = Field(True, description="Whether the maintainer can modify the pull request"),
         ) -> Any:
-            """
-            head: branch containing your changes, e.g. "feature-branch" or "user:feature-branch".
-            base: branch you want to merge into, e.g. "main".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             payload: dict[str, Any] = {
                 "title": title,
@@ -497,30 +535,29 @@ class CreatePullRequest(Tool):
 class MergePullRequest(Tool):
     name: str = "github_merge_pull_request"
     description: str | None = "Merge a pull request."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _merge_pull_request(
-            owner: str,
-            repo: str,
-            pull_number: int,
-            commit_title: str | None = None,
-            commit_message: str | None = None,
-            merge_method: str = "merge",
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            pull_number: int = Field(..., description="Pull request number"),
+            commit_title: str | None = Field(None, description="Commit title"),
+            commit_message: str | None = Field(None, description="Commit message"),
+            merge_method: str = Field("merge", description="Merge method: \"merge\", \"squash\", or \"rebase\"."),
         ) -> Any:
-            """
-            merge_method: "merge", "squash", or "rebase".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             payload: dict[str, Any] = {"merge_method": merge_method}
             if commit_title:
@@ -545,22 +582,26 @@ class MergePullRequest(Tool):
 class CheckIfPullRequestIsMerged(Tool):
     name: str = "github_check_if_pull_request_is_merged"
     description: str | None = "Check whether a pull request has been merged."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _check_if_pull_request_is_merged(
-            owner: str, repo: str, pull_number: int
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            pull_number: int = Field(..., description="Pull request number"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -577,22 +618,28 @@ class CheckIfPullRequestIsMerged(Tool):
 class ListPullRequestCommits(Tool):
     name: str = "github_list_pull_request_commits"
     description: str | None = "List commits on a pull request."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_pull_request_commits(
-            owner: str, repo: str, pull_number: int, per_page: int = 30, page: int = 1
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            pull_number: int = Field(..., description="Pull request number"),
+            per_page: int = Field(30, description="Number of items per page"),
+            page: int = Field(1, description="Page number"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -611,22 +658,28 @@ class ListPullRequestCommits(Tool):
 class ListPullRequestFiles(Tool):
     name: str = "github_list_pull_request_files"
     description: str | None = "List files changed in a pull request."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_pull_request_files(
-            owner: str, repo: str, pull_number: int, per_page: int = 30, page: int = 1
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            pull_number: int = Field(..., description="Pull request number"),
+            per_page: int = Field(30, description="Number of items per page"),
+            page: int = Field(1, description="Page number"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -645,22 +698,28 @@ class ListPullRequestFiles(Tool):
 class ListPullRequestReviews(Tool):
     name: str = "github_list_pull_request_reviews"
     description: str | None = "List reviews for a pull request."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_pull_request_reviews(
-            owner: str, repo: str, pull_number: int, per_page: int = 30, page: int = 1
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            pull_number: int = Field(..., description="Pull request number"),
+            per_page: int = Field(30, description="Number of items per page"),
+            page: int = Field(1, description="Page number"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -679,28 +738,30 @@ class ListPullRequestReviews(Tool):
 class ListPRReviewComments(Tool):
     name: str = "github_list_pr_review_comments"
     description: str | None = "List all inline review comments on a pull request."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_pr_review_comments(
-            owner: str,
-            repo: str,
-            pull_number: int,
-            sort: str = "created",
-            direction: str = "asc",
-            per_page: int = 30,
-            page: int = 1,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            pull_number: int = Field(..., description="Pull request number"),
+            sort: str = Field("created", description="Sort order"),
+            direction: str = Field("asc", description="Sort direction"),
+            per_page: int = Field(30, description="Number of items per page"),
+            page: int = Field(1, description="Page number"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -719,20 +780,26 @@ class ListPRReviewComments(Tool):
 class GetReviewComment(Tool):
     name: str = "github_get_review_comment"
     description: str | None = "Get a single inline review comment on a pull request."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_review_comment(owner: str, repo: str, comment_id: int) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_review_comment(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            comment_id: int = Field(..., description="Review comment ID")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -750,22 +817,29 @@ class GetReviewComment(Tool):
 class ListCommentsForReview(Tool):
     name: str = "github_list_comments_for_review"
     description: str | None = "List all comments for a specific pull request review."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_comments_for_review(
-            owner: str, repo: str, pull_number: int, review_id: int, per_page: int = 30, page: int = 1
+            owner: str = Field(..., description="GitHub repository owner"), 
+            repo: str = Field(..., description="GitHub repository name"), 
+            pull_number: int = Field(..., description="Pull request number"), 
+            review_id: int = Field(..., description="Review ID"), 
+            per_page: int = Field(30, description="Number of comments per page (max 100)"), 
+            page: int = Field(1, description="Page number for pagination")
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -784,22 +858,28 @@ class ListCommentsForReview(Tool):
 class ListPullRequestsForCommit(Tool):
     name: str = "github_list_pull_requests_for_commit"
     description: str | None = "List pull requests associated with a specific commit."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_pull_requests_for_commit(
-            owner: str, repo: str, commit_sha: str, per_page: int = 30, page: int = 1
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            commit_sha: str = Field(..., description="Commit SHA"),
+            per_page: int = Field(30, description="Number of pull requests per page (max 100)"), 
+            age: int = Field(1, description="Page number for pagination")
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -826,20 +906,25 @@ class ListPullRequestsForCommit(Tool):
 class GetRepositoryDetails(Tool):
     name: str = "github_get_repository_details"
     description: str | None = "Get metadata and details for a GitHub repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_repository_details(owner: str, repo: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_repository_details(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -857,24 +942,27 @@ class GetRepositoryDetails(Tool):
 class CompareBranches(Tool):
     name: str = "github_compare_branches"
     description: str | None = "Compare two branches, tags, or commits and return their diff."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _compare_branches(owner: str, repo: str, base: str, head: str) -> Any:
-            """
-            base: base branch, tag, or commit SHA.
-            head: head branch, tag, or commit SHA.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _compare_branches(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            base: str = Field(..., description="Base branch, tag, or commit SHA"),
+            head: str = Field(..., description="Head branch, tag, or commit SHA")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -892,29 +980,27 @@ class CompareBranches(Tool):
 class GetFileContent(Tool):
     name: str = "github_get_file_content"
     description: str | None = "Get the content of a file or directory in a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_file_content(
-            owner: str,
-            repo: str,
-            path: str,
-            ref: str | None = None,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            path: str = Field(..., description="File path relative to the repository root."),
+            ref: str | None = Field(None, description="Branch, tag, or commit SHA. Defaults to the default branch."),
         ) -> Any:
-            """
-            path: file path relative to the repository root.
-            ref: branch, tag, or commit SHA. Defaults to the default branch.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {}
             if ref:
@@ -937,35 +1023,32 @@ class GetFileContent(Tool):
 class CreateOrUpdateFile(Tool):
     name: str = "github_create_or_update_file"
     description: str | None = "Create or update a file in a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_or_update_file(
-            owner: str,
-            repo: str,
-            path: str,
-            message: str,
-            content: str,
-            sha: str | None = None,
-            branch: str | None = None,
-            author_name: str | None = None,
-            author_email: str | None = None,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            path: str = Field(..., description="File path relative to the repository root."),
+            message: str = Field(..., description="Commit message."),
+            content: str = Field(..., description="Base64-encoded file content."),
+            sha: str | None = Field(None, description="Blob SHA of the file being replaced (required when updating an existing file)."),
+            branch: str | None = Field(None, description="Branch to commit to. Defaults to the default branch."),
+            author_name: str | None = Field(None, description="Author name for the commit."),
+            author_email: str | None = Field(None, description="Author email for the commit."),
         ) -> Any:
-            """
-            content: base64-encoded file content.
-            sha: blob SHA of the file being replaced (required when updating an existing file).
-            branch: branch to commit to. Defaults to the default branch.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             payload: dict[str, Any] = {"message": message, "content": content}
             if sha:
@@ -992,20 +1075,26 @@ class CreateOrUpdateFile(Tool):
 class GetReadme(Tool):
     name: str = "github_get_readme"
     description: str | None = "Get the README file of a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_readme(owner: str, repo: str, ref: str | None = None) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_readme(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            ref: str | None = Field(None, description="Git reference (branch, tag, or commit SHA). If not provided, returns default branch README"),
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {}
             if ref:
@@ -1028,26 +1117,28 @@ class GetReadme(Tool):
 class ListBranches(Tool):
     name: str = "github_list_branches"
     description: str | None = "List branches in a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_branches(
-            owner: str,
-            repo: str,
-            protected: bool | None = None,
-            per_page: int = 30,
-            page: int = 1,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            protected: bool | None = Field(None, description="Filter for protected branches only (true) or non-protected branches only (false). If not provided, returns all branches"),
+            per_page: int = Field(30, description="Number of branches per page (max 100)"),
+            page: int = Field(1, description="Page number for pagination"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"per_page": per_page, "page": page}
             if protected is not None:
@@ -1070,29 +1161,28 @@ class ListBranches(Tool):
 class SearchBranches(Tool):
     name: str = "github_search_branches"
     description: str | None = "Search branches in a repository by name pattern."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_branches(
-            owner: str,
-            repo: str,
-            query: str,
-            per_page: int = 30,
-            page: int = 1,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            query: str = Field(..., description="Substring to match against branch names (case-insensitive)"),
+            per_page: int = Field(30, description="Number of branches per page (max 100)"),
+            page: int = Field(1, description="Page number for pagination"),
         ) -> Any:
-            """
-            query: substring to match against branch names (case-insensitive).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1118,34 +1208,32 @@ class SearchBranches(Tool):
 class ListCommits(Tool):
     name: str = "github_list_commits"
     description: str | None = "List commits for a repository, optionally filtered by branch, path, or author."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_commits(
-            owner: str,
-            repo: str,
-            sha: str | None = None,
-            path: str | None = None,
-            author: str | None = None,
-            since: str | None = None,
-            until: str | None = None,
-            per_page: int = 30,
-            page: int = 1,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            sha: str | None = Field(None, description="SHA or branch to start listing from"),
+            path: str | None = Field(None, description="Only commits containing this file path"),
+            author: str | None = Field(None, description="Only commits by this author (username or email)"),
+            since: str | None = Field(None, description="Only commits after this ISO 8601 timestamp e.g. '2024-01-01T00:00:00Z'"),
+            until: str | None = Field(None, description="Only commits before this ISO 8601 timestamp e.g. '2024-01-01T00:00:00Z'"),
+            per_page: int = Field(30, description="Number of commits per page (max 100)"),
+            page: int = Field(1, description="Page number for pagination"),
         ) -> Any:
-            """
-            sha: SHA or branch to start listing from.
-            since / until: ISO 8601 timestamps, e.g. "2024-01-01T00:00:00Z".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"per_page": per_page, "page": page}
             if sha:
@@ -1176,22 +1264,24 @@ class ListCommits(Tool):
 class ListCommitStatuses(Tool):
     name: str = "github_list_commit_statuses"
     description: str | None = "List commit statuses (CI checks) for a specific ref."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_commit_statuses(
             owner: str, repo: str, ref: str, per_page: int = 30, page: int = 1
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1210,22 +1300,28 @@ class ListCommitStatuses(Tool):
 class ListContributors(Tool):
     name: str = "github_list_contributors"
     description: str | None = "List contributors to a repository sorted by number of commits."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_contributors(
-            owner: str, repo: str, anon: bool = False, per_page: int = 30, page: int = 1
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            anon: bool = Field(False, description="Include anonymous contributors"),
+            per_page: int = Field(30, description="Number of contributors per page"),
+            page: int = Field(1, description="Page number for pagination"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1244,31 +1340,29 @@ class ListContributors(Tool):
 class ListCollaborators(Tool):
     name: str = "github_list_collaborators"
     description: str | None = "List collaborators for a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_collaborators(
-            owner: str,
-            repo: str,
-            affiliation: str = "all",
-            permission: str | None = None,
-            per_page: int = 30,
-            page: int = 1,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            affiliation: str = Field("all", description="Collaborator affiliation: 'outside', 'direct', or 'all'"),
+            permission: str | None = Field(None, description="Filter by permission level: 'pull', 'triage', 'push', 'maintain', 'admin'"),
+            per_page: int = Field(30, description="Number of collaborators per page"),
+            page: int = Field(1, description="Page number for pagination"),
         ) -> Any:
-            """
-            affiliation: "outside", "direct", or "all".
-            permission: filter by permission level: "pull", "triage", "push", "maintain", "admin".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"affiliation": affiliation, "per_page": per_page, "page": page}
             if permission:
@@ -1291,20 +1385,27 @@ class ListCollaborators(Tool):
 class ListTags(Tool):
     name: str = "github_list_tags"
     description: str | None = "List tags in a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _list_tags(owner: str, repo: str, per_page: int = 30, page: int = 1) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _list_tags(
+            owner: str = Field(..., description="GitHub repository owner"), 
+            repo: str = Field(..., description="GitHub repository name"), 
+            per_page: int = Field(30, description="Number of tags per page (max 100)"), 
+            page: int = Field(1, description="Page number for pagination")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1323,29 +1424,28 @@ class ListTags(Tool):
 class ListForks(Tool):
     name: str = "github_list_forks"
     description: str | None = "List forks of a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_forks(
-            owner: str,
-            repo: str,
-            sort: str = "newest",
-            per_page: int = 30,
-            page: int = 1,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            sort: str = Field("newest", description="Sort order: 'newest', 'oldest', 'stargazers', or 'watchers'"),
+            per_page: int = Field(30, description="Number of forks per page (max 100)"),
+            page: int = Field(1, description="Page number for pagination"),
         ) -> Any:
-            """
-            sort: "newest", "oldest", "stargazers", or "watchers".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1364,29 +1464,31 @@ class ListForks(Tool):
 class ListDeployments(Tool):
     name: str = "github_list_deployments"
     description: str | None = "List deployments for a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_deployments(
-            owner: str,
-            repo: str,
-            sha: str | None = None,
-            ref: str | None = None,
-            task: str | None = None,
-            environment: str | None = None,
-            per_page: int = 30,
-            page: int = 1,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            sha: str | None = Field(None, description="Commit SHA to filter deployments"),
+            ref: str | None = Field(None, description="Branch or tag name to filter deployments"),
+            task: str | None = Field(None, description="Task name to filter deployments"),
+            environment: str | None = Field(None, description="Environment name to filter deployments"),
+            per_page: int = Field(30, description="Number of deployments per page (max 100)"),
+            page: int = Field(1, description="Page number for pagination"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"per_page": per_page, "page": page}
             if sha:
@@ -1415,37 +1517,32 @@ class ListDeployments(Tool):
 class ListActivities(Tool):
     name: str = "github_list_activities"
     description: str | None = "List activity events for a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_activities(
-            owner: str,
-            repo: str,
-            direction: str = "desc",
-            per_page: int = 30,
-            before: str | None = None,
-            after: str | None = None,
-            ref: str | None = None,
-            actor: str | None = None,
-            activity_type: str | None = None,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            direction: str = Field("desc", description="Sort order: 'asc' or 'desc'"),
+            per_page: int = Field(30, description="Number of activities per page (max 100)"),
+            before: str | None = Field(None, description="ISO 8601 timestamp to filter activities before"),
+            after: str | None = Field(None, description="ISO 8601 timestamp to filter activities after"),
+            ref: str | None = Field(None, description="Git ref to filter activities"),
+            actor: str | None = Field(None, description="GitHub username to filter activities"),
+            activity_type: str | None = Field(None, description="Activity type to filter (e.g., 'push', 'force_push', 'branch_creation', 'branch_deletion', 'pr_merge', 'merge_queue_merge')"),
         ) -> Any:
-            """
-            activity_type: filter by type, e.g. "push", "force_push", "branch_creation",
-                           "branch_deletion", "pr_merge", "merge_queue_merge".
-            ref: filter by Git ref.
-            actor: filter by GitHub username.
-            before / after: ISO 8601 timestamps for date range filtering.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"direction": direction, "per_page": per_page}
             if before:
@@ -1476,20 +1573,27 @@ class ListActivities(Tool):
 class ListTeams(Tool):
     name: str = "github_list_teams"
     description: str | None = "List teams that have access to a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _list_teams(owner: str, repo: str, per_page: int = 30, page: int = 1) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _list_teams(
+            owner: str = Field(..., description="GitHub repository owner"), 
+            repo: str = Field(..., description="GitHub repository name"), 
+            per_page: int = Field(30, description="Number of teams per page (max 100)"), 
+            page: int = Field(1, description="Page number for pagination")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1513,20 +1617,27 @@ class ListTeams(Tool):
 class ListReleases(Tool):
     name: str = "github_list_releases"
     description: str | None = "List releases for a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _list_releases(owner: str, repo: str, per_page: int = 30, page: int = 1) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _list_releases(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            per_page: int = Field(30, description="Number of releases per page (max 100)"),
+            page: int = Field(1, description="Page number for pagination")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1545,20 +1656,26 @@ class ListReleases(Tool):
 class GetRelease(Tool):
     name: str = "github_get_release"
     description: str | None = "Get a specific release by ID."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_release(owner: str, repo: str, release_id: int) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_release(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            release_id: int = Field(..., description="Release ID")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1576,20 +1693,25 @@ class GetRelease(Tool):
 class GetLatestRelease(Tool):
     name: str = "github_get_latest_release"
     description: str | None = "Get the latest published release for a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_latest_release(owner: str, repo: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_latest_release(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1607,20 +1729,25 @@ class GetLatestRelease(Tool):
 class GetPages(Tool):
     name: str = "github_get_pages"
     description: str | None = "Get information about a repository's GitHub Pages site."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_pages(owner: str, repo: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_pages(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1643,20 +1770,27 @@ class GetPages(Tool):
 class ListWebhooks(Tool):
     name: str = "github_list_webhooks"
     description: str | None = "List webhooks for a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _list_webhooks(owner: str, repo: str, per_page: int = 30, page: int = 1) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _list_webhooks(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            per_page: int = Field(30, description="Number of webhooks per page (max 100)"),
+            page: int = Field(1, description="Page number for pagination")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1675,20 +1809,26 @@ class ListWebhooks(Tool):
 class GetWebhook(Tool):
     name: str = "github_get_webhook"
     description: str | None = "Get a specific webhook for a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_webhook(owner: str, repo: str, hook_id: int) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_webhook(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            hook_id: int = Field(..., description="Webhook ID")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1711,20 +1851,26 @@ class GetWebhook(Tool):
 class GetWorkflowRun(Tool):
     name: str = "github_get_workflow_run"
     description: str | None = "Get details for a specific GitHub Actions workflow run."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_workflow_run(owner: str, repo: str, run_id: int) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_workflow_run(
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            run_id: int = Field(..., description="Workflow run ID")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1742,31 +1888,28 @@ class GetWorkflowRun(Tool):
 class RunWorkflow(Tool):
     name: str = "github_run_workflow"
     description: str | None = "Trigger a GitHub Actions workflow dispatch event."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _run_workflow(
-            owner: str,
-            repo: str,
-            workflow_id: str,
-            ref: str,
-            inputs: dict[str, str] | None = None,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            workflow_id: str = Field(..., description="Workflow file name (e.g. 'deploy.yml') or numeric workflow ID"),
+            ref: str = Field(..., description="Branch or tag to run the workflow on"),
+            inputs: dict[str, str] | None = Field(None, description="Key-value pairs matching the workflow's on.workflow_dispatch.inputs"),
         ) -> Any:
-            """
-            workflow_id: workflow file name (e.g. "deploy.yml") or numeric workflow ID.
-            ref: branch or tag to run the workflow on.
-            inputs: key-value pairs matching the workflow's on.workflow_dispatch.inputs.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             payload: dict[str, Any] = {"ref": ref}
             if inputs:
@@ -1789,38 +1932,33 @@ class RunWorkflow(Tool):
 class SearchWorkflowRuns(Tool):
     name: str = "github_search_workflow_runs"
     description: str | None = "List and filter GitHub Actions workflow runs for a repository."
-    integration: Annotated[str, Integration("github")]
+    integration: Annotated[str, Integration("github")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_workflow_runs(
-            owner: str,
-            repo: str,
-            workflow_id: str | None = None,
-            actor: str | None = None,
-            branch: str | None = None,
-            event: str | None = None,
-            status: str | None = None,
-            created: str | None = None,
-            per_page: int = 30,
-            page: int = 1,
+            owner: str = Field(..., description="GitHub repository owner"),
+            repo: str = Field(..., description="GitHub repository name"),
+            workflow_id: str | None = Field(None, description="Filter by specific workflow file name or ID"),
+            actor: str | None = Field(None, description="Filter by actor who triggered the run"),
+            branch: str | None = Field(None, description="Filter by branch"),
+            event: str | None = Field(None, description="Filter by event type: e.g. 'push', 'pull_request', 'workflow_dispatch'"),
+            status: str | None = Field(None, description="Filter by run status: 'completed', 'action_required', 'cancelled', 'failure', 'neutral', 'skipped', 'stale', 'success', 'timed_out', 'in_progress', 'queued', 'waiting'"),
+            created: str | None = Field(None, description="Filter by creation date range (e.g. '>=2024-01-01' or '2024-01-01..2024-12-31')"),
+            per_page: int = Field(30, description="Number of runs per page"),
+            page: int = Field(1, description="Page number"),
         ) -> Any:
-            """
-            workflow_id: filter by specific workflow file name or ID.
-            status: "completed", "action_required", "cancelled", "failure", "neutral",
-                    "skipped", "stale", "success", "timed_out", "in_progress", "queued", "waiting".
-            event: filter by trigger event, e.g. "push", "pull_request", "workflow_dispatch".
-            created: date range filter, e.g. ">=2024-01-01" or "2024-01-01..2024-12-31".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"per_page": per_page, "page": page}
             if actor:
