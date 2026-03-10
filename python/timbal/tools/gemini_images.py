@@ -1,7 +1,7 @@
 import os
 from typing import Annotated, Any
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
@@ -268,7 +268,7 @@ class GenerateImageWithReference(Tool):
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{_GEMINI_BASE}/{model}:generateContent",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json=payload,
                 )
                 response.raise_for_status()

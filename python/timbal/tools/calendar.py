@@ -324,7 +324,7 @@ class CheckFreeSlots(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_CALENDAR_API_BASE}/freeBusy",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json=body,
                 )
                 response.raise_for_status()

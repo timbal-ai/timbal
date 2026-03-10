@@ -26,6 +26,28 @@ async def _resolve_token(tool: Any) -> str:
     )
 
 
+async def _resolve_token_and_channel(tool: Any, channel: str | None = None) -> tuple[str, str]:
+    """Resolve Slack token and a channel ID, using parameter or integration default."""
+    if channel is not None:
+        token = await _resolve_token(tool)
+        return token, channel
+
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        token = credentials["api_token"]
+        channel_id = credentials.get("channel_id")
+        if not channel_id:
+            raise ValueError(
+                "Slack integration is missing 'channel_id'. Provide channel explicitly or configure the integration."
+            )
+        return token, channel_id
+
+    raise ValueError(
+        "Channel ID not provided and Slack integration has no default 'channel_id'. "
+        "Provide channel explicitly or configure the integration."
+    )
+
+
 class ReadMessages(Tool):
     name: str = "slack_read_messages"
     description: str | None = "Read messages from a Slack channel."
@@ -51,13 +73,7 @@ class ReadMessages(Tool):
             latest: str | None = Field(None, description="Timestamp of latest message to include"),
             inclusive: bool = Field(False, description="Include messages with timestamps exactly matching oldest/latest"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             params: dict[str, Any] = {"channel": target_channel, "limit": limit, "inclusive": inclusive}
             if cursor:
@@ -116,13 +132,7 @@ class SendMessage(Tool):
             icon_emoji: str | None = Field(None, description="Custom emoji icon for the bot (e.g., ':robot_face:')"),
             icon_url: str | None = Field(None, description="Custom icon URL for the bot"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             body: dict[str, Any] = {
                 "channel": target_channel,
@@ -184,13 +194,7 @@ class SendEphemeralMessage(Tool):
             blocks: list[dict[str, Any]] | None = Field(None, description="Slack Block Kit blocks for rich formatting"),
             thread_ts: str | None = Field(None, description="Thread timestamp to reply to a specific message"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             body: dict[str, Any] = {"channel": target_channel, "user": user}
             if text:
@@ -239,13 +243,7 @@ class CreateCanvas(Tool):
             document_content: dict[str, Any] | None = Field(None, description="Canvas document content, e.g. {'type': 'markdown', 'markdown': '## Hello\nThis is a canvas.'}"),
             channel_id: str | None = Field(None, description="Channel ID to associate the canvas with. If not provided, uses channel_id from integration"),
         ) -> Any:
-            token = await _resolve_token(self)
-
-            if channel_id:
-                target_channel_id = channel_id
-            else:
-                assert "channel_id" in credentials
-                target_channel_id = credentials["channel_id"]
+            token, target_channel_id = await _resolve_token_and_channel(self, channel_id)
 
             body: dict[str, Any] = {"title": title}
             if document_content:
@@ -291,13 +289,7 @@ class DeleteMessage(Tool):
             ts: str = Field(..., description="Timestamp of the message to delete (the message's unique ID)"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -339,13 +331,7 @@ class GetMessageThread(Tool):
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
             cursor: str | None = Field(None, description="Pagination cursor for next page"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             params: dict[str, Any] = {"channel": target_channel, "ts": ts, "limit": limit}
             if cursor:
@@ -389,13 +375,7 @@ class PinMessage(Tool):
             timestamp: str = Field(..., description="Timestamp of the message to pin"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -435,13 +415,7 @@ class UnpinMessage(Tool):
             timestamp: str = Field(..., description="Timestamp of the message to unpin"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -478,13 +452,7 @@ class ListPinnedItems(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_pinned_items(channel: str | None = Field(None, description="Channel ID to list pinned items from. If not provided, uses channel_id from integration")) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -622,13 +590,7 @@ class AddUserToChannel(Tool):
             users: list[str] = Field(..., description="List of user IDs to invite to channel (up to 1000)."),
             channel: str | None = Field(None, description="Channel ID to add users to. If no channel is specified, uses the integration's default channel.")
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -668,13 +630,7 @@ class RemoveFromChannel(Tool):
             user: str = Field(..., description="User ID to remove from channel"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -715,13 +671,7 @@ class ListUsersInChannel(Tool):
             channel: str | None = Field(None, description="Channel ID to list users from. If not provided, uses channel_id from integration"),
             cursor: str | None = Field(None, description="Pagination cursor for next page"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             params: dict[str, Any] = {"channel": target_channel, "limit": limit}
             if cursor:
@@ -810,13 +760,7 @@ class UpdateChannelTopic(Tool):
             topic: str = Field(..., description="New channel topic"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            token = await _resolve_token(self)
-                
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -856,13 +800,7 @@ class UpdateChannelPurpose(Tool):
             purpose: str = Field(..., description="New channel purpose"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -899,13 +837,7 @@ class ArchiveChannel(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _archive_channel(channel: str | None = Field(None, description="Channel ID to archive. If not provided, uses channel_id from integration")) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -942,13 +874,7 @@ class UnarchiveChannel(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _unarchive_channel(channel: str | None = Field(None, description="Channel ID to unarchive. If not provided, uses channel_id from integration")) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -989,13 +915,7 @@ class GetConversationInfo(Tool):
             include_num_members: bool = Field(True, description="Whether to include member count"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -1204,13 +1124,7 @@ class AddReaction(Tool):
             name: str = Field(..., description="Emoji name without colons, e.g. 'thumbsup', 'white_check_mark'"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
                 
 
             import httpx
@@ -1252,13 +1166,7 @@ class RemoveReaction(Tool):
             name: str = Field(..., description="Emoji name without colons, e.g. 'thumbsup', 'white_check_mark'"),
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             import httpx
 
@@ -1308,13 +1216,10 @@ class ListFiles(Tool):
             ts_from: str | None = Field(None, description="Unix timestamp to filter files uploaded after this time"),
             ts_to: str | None = Field(None, description="Unix timestamp to filter files uploaded before this time"),
         ) -> Any:
-            token = await _resolve_token(self)
-
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel) if channel is not None else (
+                await _resolve_token(self),
+                None,
+            )
 
             params: dict[str, Any] = {"count": count, "page": page}
             if target_channel:
@@ -1454,8 +1359,19 @@ class UploadFile(Tool):
             if channels:
                 target_channels = channels
             else:
-                assert "channel_id" in credentials
-                target_channels = [credentials["channel_id"]]
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    channel_id = credentials.get("channel_id")
+                    if not channel_id:
+                        raise ValueError(
+                            "Slack integration is missing 'channel_id'. Provide channels explicitly or configure the integration."
+                        )
+                    target_channels = [channel_id]
+                else:
+                    raise ValueError(
+                        "No channels provided and Slack integration has no default 'channel_id'. "
+                        "Provide channels explicitly or configure the integration."
+                    )
 
             data: dict[str, Any] = {"filename": filename, "content": content}
             if target_channels:
@@ -1551,13 +1467,7 @@ class SendAndWaitForResponse(Tool):
             channel: str | None = Field(None, description="Channel ID. If not provided, uses channel_id from integration"),
             blocks: list[dict[str, Any]] | None = Field(None, description="Slack Block Kit blocks for rich formatting"),
         ) -> Any:
-            token = await _resolve_token(self)
-            
-            if channel:
-                target_channel = channel
-            else:
-                assert "channel_id" in credentials
-                target_channel = credentials["channel_id"]
+            token, target_channel = await _resolve_token_and_channel(self, channel)
 
             headers = {"Authorization": f"Bearer {token}"}
 

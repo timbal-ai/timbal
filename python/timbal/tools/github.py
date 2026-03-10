@@ -876,7 +876,7 @@ class ListPullRequestsForCommit(Tool):
             repo: str = Field(..., description="GitHub repository name"),
             commit_sha: str = Field(..., description="Commit SHA"),
             per_page: int = Field(30, description="Number of pull requests per page (max 100)"), 
-            age: int = Field(1, description="Page number for pagination")
+            page: int = Field(1, description="Page number for pagination")
         ) -> Any:
             token = await _resolve_token(self)
             import httpx

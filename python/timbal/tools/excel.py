@@ -66,7 +66,7 @@ class WriteToSheet(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/range(address='{range_addr}')",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json={"values": values},
                 )
                 response.raise_for_status()
@@ -110,7 +110,7 @@ class ClearSheet(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/range/clear",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json={"applyTo": "All"},
                 )
                 response.raise_for_status()
@@ -149,7 +149,7 @@ class CreateSheet(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_wb(drive_id, workbook_id)}/worksheets/add",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json={"name": sheet_name},
                 )
                 response.raise_for_status()
@@ -188,7 +188,7 @@ class DeleteSheet(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return {"deleted": True, "sheet": sheet_name}
@@ -225,7 +225,7 @@ class ListSheets(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_wb(drive_id, workbook_id)}/worksheets",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -271,7 +271,7 @@ class ReadFromSheet(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     url,
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -310,7 +310,7 @@ class UpdateCell(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/range(address='{address}')",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json={"values": [[value]]},
                 )
                 response.raise_for_status()
@@ -359,7 +359,7 @@ class FindRow(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/usedRange",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -411,7 +411,7 @@ class GetCellsInRange(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/range(address='{address}')",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -451,7 +451,7 @@ class GetRowByIndex(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/usedRange",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -511,7 +511,7 @@ class UpdateRow(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/range(address='{address}')",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json={"values": [values]},
                 )
                 response.raise_for_status()
@@ -557,7 +557,7 @@ class AddDataToTable(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/tables/{table_name}/rows/add",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json={"values": rows},
                 )
                 response.raise_for_status()
@@ -600,7 +600,7 @@ class CreateTable(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/tables/add",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json={"address": address, "hasHeaders": has_headers},
                 )
                 response.raise_for_status()
@@ -663,7 +663,7 @@ class CreateWorkbook(Tool):
                 response = await client.put(
                     url,
                     headers={
-                        "Authorization": f"Bearer {api_key}",
+                        "Authorization": f"Bearer {token}",
                         "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     },
                     content=b"",
@@ -717,7 +717,7 @@ class ListWorkbooks(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     url,
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     params={"$filter": "endswith(name, '.xlsx')", "$select": "id,name,size,lastModifiedDateTime,webUrl"},
                 )
                 response.raise_for_status()
@@ -761,7 +761,7 @@ class GetSheetById(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_wb(drive_id, workbook_id)}/worksheets/{sheet_id}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -800,7 +800,7 @@ class RenameSheet(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json={"name": new_name},
                 )
                 response.raise_for_status()

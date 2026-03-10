@@ -53,20 +53,6 @@ def _normalize_fields(fields: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-async def _raise_for_status(response: httpx.Response) -> None:
-    """Like response.raise_for_status() but always includes the response body in the message."""
-    if response.is_error:
-        try:
-            body: Any = response.json()
-        except Exception:
-            body = response.text
-        raise httpx.HTTPStatusError(
-            f"HTTP {response.status_code} {response.request.method} {response.url} — {body}",
-            request=response.request,
-            response=response,
-        )
-
-
 # ---------------------------------------------------------------------------
 # Records
 # ---------------------------------------------------------------------------
@@ -102,11 +88,6 @@ class ListRecords(Tool):
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
             _validate_airtable_id(table_id_or_name, "tbl", "table_id_or_name")
-            sort: list[dict[str, str]] | None = None,
-            view: str | None = None,
-            offset: str | None = None,
-        ) -> Any:
-            _validate_airtable_id(base_id, "app", "base_id")
             api_key = await _resolve_api_key(self)
             import httpx
 
@@ -132,7 +113,7 @@ class ListRecords(Tool):
                     headers={"Authorization": f"Bearer {api_key}"},
                     params=params,
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -173,7 +154,7 @@ class GetRecord(Tool):
                     f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}/{record_id}",
                     headers={"Authorization": f"Bearer {api_key}"},
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -202,7 +183,7 @@ class CreateRecords(Tool):
         async def _create_records(
             base_id: str = Field(..., description="Airtable base ID starting with 'app' (not the base name)"),
             table_id_or_name: str = Field(..., description="Airtable table ID or name"),
-            records: list[dict[str, Any]] = Field(..., description="List of records to create ({'fields': {'FieldName': value, ...}}). Each record should be a dictionary with 'fields' key. singleSelect values can be passed as a plain string or {"name": "..."} — both are accepted."),
+            records: list[dict[str, Any]] = Field(..., description="List of records to create ({'fields': {'FieldName': value, ...}}). Each record should be a dictionary with 'fields' key. singleSelect values can be passed as a plain string or {'name': '...'} — both are accepted."),
             typecast: bool = Field(False, description="If True, Airtable will attempt to convert string values to the correct type."),
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
@@ -220,7 +201,7 @@ class CreateRecords(Tool):
                         headers={"Authorization": f"Bearer {api_key}"},
                         json={"records": batch, "typecast": typecast},
                     )
-                    await _raise_for_status(response)
+                    response.raise_for_status()
                     all_created.extend(response.json().get("records", []))
 
             return {"records": all_created}
@@ -268,7 +249,7 @@ class UpdateRecords(Tool):
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={"records": normalized, "typecast": typecast},
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -309,7 +290,7 @@ class DeleteRecords(Tool):
                     headers={"Authorization": f"Bearer {api_key}"},
                     params=[("records[]", rid) for rid in record_ids],
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -357,7 +338,7 @@ class ListComments(Tool):
                     headers={"Authorization": f"Bearer {api_key}"},
                     params=params,
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -402,7 +383,7 @@ class ListBases(Tool):
                     headers={"Authorization": f"Bearer {api_key}"},
                     params=params,
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -444,7 +425,7 @@ class ListTables(Tool):
                     headers={"Authorization": f"Bearer {api_key}"},
                     params={"include[]": "visibleFieldIds"},
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 data = response.json()
                 return [
                     {"id": t["id"], "name": t["name"], "description": t.get("description")}
@@ -484,7 +465,7 @@ class BaseSchema(Tool):
                     f"{_AIRTABLE_META_BASE}/bases/{base_id}/tables",
                     headers={"Authorization": f"Bearer {api_key}"},
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -530,7 +511,7 @@ class CreateTable(Tool):
                     headers={"Authorization": f"Bearer {api_key}"},
                     json=body,
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -579,7 +560,7 @@ class UpdateTable(Tool):
                     headers={"Authorization": f"Bearer {api_key}"},
                     json=body,
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -635,7 +616,7 @@ class CreateField(Tool):
                     headers={"Authorization": f"Bearer {api_key}"},
                     json=body,
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})
@@ -685,10 +666,10 @@ class UpdateField(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{_AIRTABLE_META_BASE}/bases/{base_id}/tables/{table_id}/fields/{field_id}",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json=body,
                 )
-                await _raise_for_status(response)
+                response.raise_for_status()
                 return response.json()
 
         metadata = kwargs.pop("metadata", {})

@@ -435,6 +435,7 @@ class AddVoice(Tool):
         ) -> Any:
             api_key = await _resolve_api_key(self)
             import httpx
+            import base64
 
             resolved_names = filenames or [f"sample_{i}.mp3" for i in range(len(audio_files_base64))]
 
@@ -454,7 +455,7 @@ class AddVoice(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_ELEVENLABS_BASE}/voices/add",
-                    headers={"xi-api-key": token},
+                    headers={"xi-api-key": api_key},
                     data=data,
                     files=files,
                 )

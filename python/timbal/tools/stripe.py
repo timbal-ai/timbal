@@ -289,7 +289,7 @@ class SendRefund(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_STRIPE_API_BASE}/refunds",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     data=data,
                 )
                 response.raise_for_status()

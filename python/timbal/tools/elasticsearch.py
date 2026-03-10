@@ -459,7 +459,7 @@ class SearchDocuments(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{host}/{index}/_search",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     json=body,
                 )
                 response.raise_for_status()

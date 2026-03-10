@@ -44,7 +44,7 @@ class CreateSheet(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_sheet(
-            title: str = Fie    ld(..., description="Title of the new spreadsheet"),
+            title: str = Field(..., description="Title of the new spreadsheet"),
             sheet_names: list[str] | None = Field(None, description="List of sheet names to create in the spreadsheet"),
         ) -> Any:
             api_key = await _resolve_api_key(self)
@@ -505,7 +505,7 @@ class ShareSpreadsheet(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_DRIVE_API_BASE}/files/{spreadsheet_id}/permissions",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     params=params,
                     json=body,
                 )

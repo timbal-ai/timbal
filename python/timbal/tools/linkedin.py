@@ -336,7 +336,7 @@ class Search(Tool):
                 response = await client.get(
                     endpoint,
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                         "X-Restli-Protocol-Version": "2.0.0",
                     },
                     params=params,
