@@ -78,11 +78,16 @@ def main() -> None:
         import asyncio
         import os
 
-        from timbal.codegen import parse_fqn
-        from timbal.codegen.test import run_test
-        from timbal.state import RunContext
+        os.environ["TIMBAL_LOG_LEVEL"] = "CRITICAL"
+        os.environ["TIMBAL_DELTA_EVENTS"] = "true"
 
-        os.environ.setdefault("TIMBAL_LOG_LEVEL", "CRITICAL")
+        from ..logs import setup_logging
+
+        setup_logging()
+
+        from ..state import RunContext
+        from . import parse_fqn
+        from .test import run_test
 
         try:
             import_spec = parse_fqn(workspace_path)
@@ -104,16 +109,7 @@ def main() -> None:
                 print(f"error: invalid JSON context: {e}", file=sys.stderr)
                 sys.exit(1)
 
-        all_events, output_event = asyncio.run(run_test(import_spec, params, run_context=run_context))
-
-        if args.stream:
-            for event_dict in all_events:
-                print(json.dumps(event_dict))
-        elif output_event is not None:
-            print(json.dumps(output_event))
-
-        if output_event is None or output_event.get("status", {}).get("code") != "success":
-            sys.exit(1)
+        asyncio.run(run_test(import_spec, params, run_context=run_context, stream=args.stream))
         return
 
     # Transformer operations — heavy imports already loaded above.
