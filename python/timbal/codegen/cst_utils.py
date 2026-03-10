@@ -113,7 +113,9 @@ def build_cst_value(value: object) -> cst.BaseExpression:
     if isinstance(value, float):
         return cst.Float(str(value))
     if isinstance(value, str):
-        return cst.SimpleString(f'"{value}"')
+        # Use repr() to properly escape special characters (newlines, quotes, etc.)
+        # then wrap as a SimpleString CST node.
+        return cst.SimpleString(repr(value))
     if value is None:
         return cst.Name("None")
     if isinstance(value, list):
