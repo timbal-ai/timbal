@@ -1,0 +1,39 @@
+---
+title: "Overview"
+description: "Specs, pricing, and capabilities for every supported model"
+---
+
+Every model supported by Timbal with full specs, pricing, capability scores, and short descriptions. **Price** = per 1M tokens (input / output). All models support tool/function calling unless noted.
+
+<CardGroup cols={3}>
+  <Card title="OpenAI" icon="https://content.timbal.ai/assets/openai_favicon.svg" href="/models/openai">
+    GPT-5, GPT-4, and o-series reasoning models
+  </Card>
+  <Card title="Anthropic" icon="https://content.timbal.ai/assets/claude_favicon.svg" href="/models/anthropic">
+    Claude 4 Opus, Sonnet, and Haiku
+  </Card>
+  <Card title="Google" icon="https://content.timbal.ai/assets/gemini_favicon.svg" href="/models/google">
+    Gemini 3 and 2.5 series
+  </Card>
+  <Card title="xAI" icon="https://content.timbal.ai/assets/grok_favicon.svg" href="/models/xai">
+    Grok 4 and Grok 4 Fast
+  </Card>
+  <Card title="TogetherAI" icon="https://content.timbal.ai/assets/together_favicon.svg" href="/models/togetherai">
+    Open-source models via TogetherAI
+  </Card>
+  <Card title="Groq" icon="https://content.timbal.ai/assets/groq_favicon.svg" href="/models/groq">
+    Ultra-low latency via Groq LPU
+  </Card>
+  <Card title="Fireworks" icon="https://content.timbal.ai/assets/fireworks_favicon.svg" href="/models/fireworks">
+    Open-source models via Fireworks
+  </Card>
+</CardGroup>
+
+## Scoring
+
+Each model is rated on two axes using a **1-5 scale**:
+
+- **Reasoning** — depth of analytical and chain-of-thought capability
+- **Speed** — relative latency and throughput for its class
+
+Scores are **relative within the full set of models on this page**, not within a single provider. A reasoning score of 5 means frontier-class reasoning (e.g. o3-pro, Claude Opus 4.6, Gemini 2.5 Pro). A speed score of 5 means the fastest tier (nano/mini/flash-lite models, or Groq-hosted inference).

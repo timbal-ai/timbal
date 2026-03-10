@@ -18,8 +18,7 @@
             "pages": [
               "index",
               "installation",
-              "quickstart",
-              "model_capabilities"
+              "quickstart"
             ]
           },
           {
@@ -213,6 +212,24 @@
                   "api-reference/knowledge-bases/indexes/delete"
                 ]
               }
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Model Reference",
+        "groups": [
+          {
+            "group": "Model Reference",
+            "pages": [
+              "models/overview",
+              "models/openai",
+              "models/anthropic",
+              "models/google",
+              "models/xai",
+              "models/togetherai",
+              "models/groq",
+              "models/fireworks"
             ]
           }
         ]
