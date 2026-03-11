@@ -1,11 +1,18 @@
 from typing import Annotated, Any
-
-import httpx
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+
+async def _resolve_token(tool: Any) -> str:
+    """Resolve Excel OAuth token from integration."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["token"]
+    raise ValueError("Excel integration not configured.")
 
 
 def _wb(drive_id: str | None, workbook_id: str) -> str:
@@ -28,33 +35,29 @@ class WriteToSheet(Tool):
     description: str | None = (
         "Write one or more rows of values to a worksheet starting at a given cell address."
     )
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _write_to_sheet(
-            workbook_id: str,
-            sheet_name: str,
-            address: str,
-            values: list[list[Any]],
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            address: str = Field(..., description="Top-left cell address to start writing, e.g. 'A1' or 'B3'."),
+            values: list[list[Any]] = Field(..., description="2-D array of values, e.g. [['Name', 'Age'], ['Alice', 30]]."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            """
-            workbook_id: the ID of the workbook file in OneDrive/SharePoint.
-            sheet_name: name or index of the worksheet (e.g. "Sheet1" or "0").
-            address: top-left cell address to start writing, e.g. "A1" or "B3".
-            values: 2-D array of values, e.g. [["Name", "Age"], ["Alice", 30]].
-            drive_id: optional Drive ID for SharePoint drives; omit for personal OneDrive.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             rows = len(values)
             cols = max(len(r) for r in values) if values else 1
@@ -82,24 +85,27 @@ class WriteToSheet(Tool):
 class ClearSheet(Tool):
     name: str = "excel_clear_sheet"
     description: str | None = "Clear all content and formatting from a worksheet."
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _clear_sheet(
-            workbook_id: str,
-            sheet_name: str,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -118,24 +124,27 @@ class ClearSheet(Tool):
 class CreateSheet(Tool):
     name: str = "excel_create_sheet"
     description: str | None = "Add a new worksheet to an existing workbook."
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_sheet(
-            workbook_id: str,
-            sheet_name: str,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -154,24 +163,27 @@ class CreateSheet(Tool):
 class DeleteSheet(Tool):
     name: str = "excel_delete_sheet"
     description: str | None = "Delete a worksheet from a workbook by name."
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _delete_sheet(
-            workbook_id: str,
-            sheet_name: str,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -189,23 +201,26 @@ class DeleteSheet(Tool):
 class ListSheets(Tool):
     name: str = "excel_list_sheets"
     description: str | None = "List all worksheets in a workbook."
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_sheets(
-            workbook_id: str,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -225,28 +240,28 @@ class ReadFromSheet(Tool):
     description: str | None = (
         "Read all used values from a worksheet, or a specific cell range."
     )
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _read_from_sheet(
-            workbook_id: str,
-            sheet_name: str,
-            address: str | None = None,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            address: str | None = Field(None, description="Optional range address, e.g. 'A1:D10'. If omitted, reads the used range."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            """
-            address: optional range address, e.g. "A1:D10". If omitted, reads the used range.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             if address:
                 url = f"{_sheet(drive_id, workbook_id, sheet_name)}/range(address='{address}')"
@@ -269,30 +284,28 @@ class ReadFromSheet(Tool):
 class UpdateCell(Tool):
     name: str = "excel_update_cell"
     description: str | None = "Update the value of a single cell in a worksheet."
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_cell(
-            workbook_id: str,
-            sheet_name: str,
-            address: str,
-            value: Any,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            address: str = Field(..., description="Cell address, e.g. 'B4'."),
+            value: Any = Field(..., description="The new value to set (string, number, bool, or formula starting with '=')."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            """
-            address: cell address, e.g. "B4".
-            value: the new value to set (string, number, bool, or formula starting with "=").
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
@@ -318,32 +331,30 @@ class FindRow(Tool):
     description: str | None = (
         "Find the first row in a worksheet where a specified column matches a given value."
     )
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _find_row(
-            workbook_id: str,
-            sheet_name: str,
-            column: str,
-            value: str,
-            has_header: bool = True,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            column: str = Field(..., description="Column letter to search, e.g. 'A' or 'C'."),
+            value: str = Field(..., description="The value to look for (case-insensitive string match)."),
+            has_header: bool = Field(True, description="Whether the first row is a header row (skipped during search)."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            """
-            column: column letter to search, e.g. "A" or "C".
-            value: the value to look for (case-insensitive string match).
-            has_header: whether the first row is a header row (skipped during search).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -374,28 +385,28 @@ class FindRow(Tool):
 class GetCellsInRange(Tool):
     name: str = "excel_get_cells_in_range"
     description: str | None = "Get all cell values within a specified range address."
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_cells_in_range(
-            workbook_id: str,
-            sheet_name: str,
-            address: str,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            address: str = Field(..., description="Range address, e.g. 'A1:E20'."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            """
-            address: range address, e.g. "A1:E20".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -413,29 +424,29 @@ class GetCellsInRange(Tool):
 class GetRowByIndex(Tool):
     name: str = "excel_get_row_by_index"
     description: str | None = "Get a single row from a worksheet by its 0-based row index."
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_row_by_index(
-            workbook_id: str,
-            sheet_name: str,
-            row_index: int,
-            has_header: bool = True,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            row_index: int = Field(..., description="0-based index of the data row to retrieve (header row not counted when has_header=True)."),
+            has_header: bool = Field(True, description="Whether the first row is a header row (skipped during indexing)."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            """
-            row_index: 0-based index of the data row to retrieve (header row not counted when has_header=True).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -466,31 +477,30 @@ class UpdateRow(Tool):
     description: str | None = (
         "Update all values in an existing row by its 0-based row index."
     )
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_row(
-            workbook_id: str,
-            sheet_name: str,
-            row_index: int,
-            values: list[Any],
-            has_header: bool = True,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            row_index: int = Field(..., description="0-based index of the data row to update (header not counted when has_header=True)."),
+            values: list[Any] = Field(..., description="List of cell values for the row, left to right."),
+            has_header: bool = Field(True, description="Whether the first row is a header row (skipped during indexing)."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            """
-            row_index: 0-based index of the data row to update (header not counted when has_header=True).
-            values: list of cell values for the row, left to right.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             actual_idx = row_index + (1 if has_header else 0)
             excel_row = actual_idx + 1  # Excel rows are 1-based
@@ -520,30 +530,29 @@ class UpdateRow(Tool):
 class AddDataToTable(Tool):
     name: str = "excel_add_data_to_table"
     description: str | None = "Append one or more rows to an Excel table."
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _add_data_to_table(
-            workbook_id: str,
-            sheet_name: str,
-            table_name: str,
-            rows: list[list[Any]],
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            table_name: str = Field(..., description="Name of the Excel table (ListObject)."),
+            rows: list[list[Any]] = Field(..., description="List of row arrays to append, e.g. [['Alice', 30], ['Bob', 25]]."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            """
-            table_name: name of the Excel table (ListObject).
-            rows: list of row arrays to append, e.g. [["Alice", 30], ["Bob", 25]].
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -564,30 +573,29 @@ class CreateTable(Tool):
     description: str | None = (
         "Convert a range into a named Excel table (ListObject) with optional headers."
     )
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_table(
-            workbook_id: str,
-            sheet_name: str,
-            address: str,
-            has_headers: bool = True,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="Name or index of the worksheet (e.g. 'Sheet1' or '0')."),
+            address: str = Field(..., description="Range to convert to a table, e.g. 'A1:D10'."),
+            has_headers: bool = Field(True, description="Whether the first row of the range contains column headers."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            """
-            address: range to convert to a table, e.g. "A1:D10".
-            has_headers: whether the first row of the range contains column headers.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -613,29 +621,28 @@ class CreateWorkbook(Tool):
     description: str | None = (
         "Create a new Excel workbook (.xlsx) in OneDrive at the specified path."
     )
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_workbook(
-            name: str,
-            folder_path: str = "/",
-            drive_id: str | None = None,
+            name: str = Field(..., description="Filename for the new workbook, e.g. 'report.xlsx'."),
+            folder_path: str = Field("/", description="OneDrive folder path, e.g. '/Documents/Reports'. Defaults to root."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint; omit for personal OneDrive."),
         ) -> Any:
-            """
-            name: filename for the new workbook, e.g. "report.xlsx".
-            folder_path: OneDrive folder path, e.g. "/Documents/Reports". Defaults to root.
-            drive_id: optional Drive ID for SharePoint; omit for personal OneDrive.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            
+            token = await _resolve_token(self)
+            import httpx
 
             if not name.endswith(".xlsx"):
                 name = f"{name}.xlsx"
@@ -674,27 +681,26 @@ class ListWorkbooks(Tool):
     description: str | None = (
         "List Excel workbooks (.xlsx files) in a OneDrive folder."
     )
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_workbooks(
-            folder_path: str = "/",
-            drive_id: str | None = None,
+            folder_path: str = Field("/", description="OneDrive folder path to search in. Defaults to root."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint."),
         ) -> Any:
-            """
-            folder_path: OneDrive folder path to search in. Defaults to root.
-            drive_id: optional Drive ID for SharePoint.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             folder_path = folder_path.rstrip("/")
             if drive_id:
@@ -730,27 +736,27 @@ class ListWorkbooks(Tool):
 class GetSheetById(Tool):
     name: str = "excel_get_sheet_by_id"
     description: str | None = "Get worksheet metadata by its persistent ID."
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_sheet_by_id(
-            workbook_id: str,
-            sheet_id: str,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_id: str = Field(..., description="The persistent worksheet ID (not the display name)."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            """
-            sheet_id: the persistent worksheet ID (not the display name).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -768,25 +774,28 @@ class GetSheetById(Tool):
 class RenameSheet(Tool):
     name: str = "excel_rename_sheet"
     description: str | None = "Rename a worksheet in a workbook."
-    integration: Annotated[str, Integration("excel")]
+    integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _rename_sheet(
-            workbook_id: str,
-            sheet_name: str,
-            new_name: str,
-            drive_id: str | None = None,
+            workbook_id: str = Field(..., description="The ID of the workbook file in OneDrive/SharePoint."),
+            sheet_name: str = Field(..., description="The current display name of the worksheet."),
+            new_name: str = Field(..., description="The new display name for the worksheet."),
+            drive_id: str | None = Field(None, description="Optional Drive ID for SharePoint drives; omit for personal OneDrive."),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(

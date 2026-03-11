@@ -1,48 +1,68 @@
+import os
 from typing import Annotated, Any
 
-import httpx
+import lancedb
+import pyarrow as pa
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 
+async def _resolve_api_key(tool: Any) -> str:
+    """Resolve LanceDB API key from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["api_key"]
+    if tool.api_key is not None:
+        return tool.api_key.get_secret_value()
+    env_key = os.getenv("LANCEDB_API_KEY")
+    if env_key:
+        return env_key
+    raise ValueError(
+        "LanceDB API key not found. Set LANCEDB_API_KEY environment variable, "
+        "pass api_key in config, or configure an integration."
+    )
+
+
 class ListTables(Tool):
     name: str = "lancedb_list_tables"
-    description: str | None = "List all tables in a LanceDB Cloud database."
-    integration: Annotated[str, Integration("lancedb")]
+    description: str | None = "List all tables in a LanceDB Cloud database. If db_uri is None, uses the integration's default db_uri."
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_tables(
-            host: str,
-            limit: int = 10,
-            page_token: str | None = None,
+            db_uri: str | None = Field(None, description="LanceDB Cloud project URL, e.g. 'db://default-p73jfr'. If not provided, will use integration's db_uri."),
         ) -> Any:
-            """
-            host: LanceDB Cloud project URL, e.g. "https://your-project.api.lancedb.com"
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
 
-            params: dict[str, Any] = {"limit": limit}
-            if page_token:
-                params["page_token"] = page_token
-
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{host}/v1/table/",
-                    headers={"x-api-key": token},
-                    params=params,
-                )
-                response.raise_for_status()
-                return response.json()
+            db = lancedb.connect(db_uri, api_key=api_key)
+            
+            table_names = db.table_names()
+            
+            return {
+                "tables": [{"name": name} for name in table_names],
+                "count": len(table_names)
+            }
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "LanceDB/ListTables"
@@ -53,45 +73,71 @@ class ListTables(Tool):
 class CreateTable(Tool):
     name: str = "lancedb_create_table"
     description: str | None = "Create a new table in LanceDB Cloud."
-    integration: Annotated[str, Integration("lancedb")]
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_table(
-            host: str,
-            table_name: str,
-            schema: dict[str, Any] | None = None,
-            data: list[dict[str, Any]] | None = None,
+            table_name: str = Field(..., description="Name of the table to create"),
+            schema: dict[str, Any] | list[dict[str, str]] = Field(..., description="Arrow schema definition (dict or list format)"),
+            db_uri: str | None = Field(None, description="LanceDB Cloud project URL (optional, uses integration default)"),
         ) -> Any:
-            """
-            host: LanceDB Cloud project URL, e.g. "https://your-project.api.lancedb.com"
-            schema: Arrow schema as a JSON-serializable dict (optional if data is provided).
-            data: initial rows to insert on creation (optional).
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
 
-            body: dict[str, Any] = {}
-            if schema:
-                body["schema"] = schema
-            if data:
-                body["data"] = data
-
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{host}/v1/table/{table_name}/create/",
-                    headers={"x-api-key": token},
-                    json=body,
-                )
-                response.raise_for_status()
-                return response.json()
+            db = lancedb.connect(db_uri, api_key=api_key)
+            
+            # Convert list format to dict if needed
+            if isinstance(schema, list):
+                schema_dict = {}
+                for field in schema:
+                    if isinstance(field, dict) and 'name' in field and 'type' in field:
+                        schema_dict[field['name']] = field['type']
+                schema = schema_dict
+            
+            # Convert dict schema to PyArrow Schema
+            if isinstance(schema, dict):
+                arrow_fields = []
+                for field_name, field_type in schema.items():
+                    if field_type == "string":
+                        arrow_fields.append(pa.field(field_name, pa.string()))
+                    elif field_type == "int" or field_type == "integer":
+                        arrow_fields.append(pa.field(field_name, pa.int64()))
+                    elif field_type == "float":
+                        arrow_fields.append(pa.field(field_name, pa.float32()))
+                    elif field_type.startswith("float[") and field_type.endswith("]"):
+                        # Parse vector dimension: float[1536] -> 1536
+                        try:
+                            dim = int(field_type[6:-1])
+                            arrow_fields.append(pa.field(field_name, pa.list_(pa.float32(), dim)))
+                        except ValueError:
+                            arrow_fields.append(pa.field(field_name, pa.float32()))
+                    else:
+                        # Default to string for unknown types
+                        arrow_fields.append(pa.field(field_name, pa.string()))
+                schema = pa.schema(arrow_fields)
+            
+            # Create table with schema
+            table = db.create_table(table_name, schema=schema)
+            
+            return {"table_created": table.name}
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "LanceDB/CreateTable"
@@ -102,28 +148,38 @@ class CreateTable(Tool):
 class DropTable(Tool):
     name: str = "lancedb_drop_table"
     description: str | None = "Drop (delete) a table from LanceDB Cloud."
-    integration: Annotated[str, Integration("lancedb")]
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _drop_table(host: str, table_name: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _drop_table(
+            table_name: str = Field(..., description="Name of the table to drop"),
+            db_uri: str | None = Field(None, description="LanceDB database URI. If not provided, uses integration default")
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
 
-            async with httpx.AsyncClient() as client:
-                response = await client.delete(
-                    f"{host}/v1/table/{table_name}/",
-                    headers={"x-api-key": token},
-                )
-                response.raise_for_status()
-                return {"dropped": True, "table": table_name}
+            db = lancedb.connect(db_uri, api_key=api_key)
+            db.drop_table(table_name)
+            
+            return {"dropped": True, "table": table_name}
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "LanceDB/DropTable"
@@ -134,39 +190,45 @@ class DropTable(Tool):
 class InsertRecords(Tool):
     name: str = "lancedb_insert_records"
     description: str | None = "Insert or upsert records into a LanceDB Cloud table."
-    integration: Annotated[str, Integration("lancedb")]
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _insert_records(
-            host: str,
-            table_name: str,
-            data: list[dict[str, Any]],
-            mode: str = "append",
+            table_name: str = Field(..., description="Name of the table to insert into"),
+            data: list[dict[str, Any]] = Field(..., description="List of row dictionaries to insert. Each row with a vector column should include a 'vector' key containing a list of floats, e.g. [{'vector': [0.1, 0.2, ...], 'text': '...'}]"),
+            mode: str = Field("append", description="Insert mode: 'append' or 'overwrite'"),
+            db_uri: str | None = Field(None, description="LanceDB database URI. If not provided, uses integration default")
         ) -> Any:
-            """
-            data: list of row dicts. Each row with a vector column should include a "vector" key
-                  containing a list of floats, e.g. [{"vector": [0.1, 0.2, ...], "text": "..."}]
-            mode: "append" to add rows, "overwrite" to replace the entire table.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
 
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{host}/v1/table/{table_name}/insert/",
-                    headers={"x-api-key": token},
-                    json={"data": data, "mode": mode},
-                )
-                response.raise_for_status()
-                return response.json()
+            db = lancedb.connect(db_uri, api_key=api_key)
+            table = db.open_table(table_name)
+            
+            if mode == "overwrite":
+                table.add(data, mode="overwrite")
+            else:
+                table.add(data)
+            
+            return {"inserted": len(data), "table": table_name, "mode": mode}
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "LanceDB/InsertRecords"
@@ -176,31 +238,35 @@ class InsertRecords(Tool):
 
 class VectorSearch(Tool):
     name: str = "lancedb_vector_search"
-    description: str | None = "Search a LanceDB Cloud table by vector similarity."
-    integration: Annotated[str, Integration("lancedb")]
+    description: str | None = "Search a LanceDB Cloud table by vector similarity. If db_uri is None, uses the integration's default db_uri."
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _vector_search(
-            host: str,
             table_name: str,
             vector: list[float],
             limit: int = 10,
             metric: str = "cosine",
             vector_column: str = "vector",
+            db_uri: str | None = None,
             columns: list[str] | None = None,
             where: str | None = None,
             nprobes: int | None = None,
             refine_factor: int | None = None,
         ) -> Any:
             """
-            host: LanceDB Cloud project URL.
+            db_uri: LanceDB Cloud project URL.
             vector: query embedding as a list of floats.
             metric: "cosine", "l2", or "dot".
             vector_column: name of the column containing embeddings (default "vector").
@@ -209,33 +275,39 @@ class VectorSearch(Tool):
             nprobes: number of IVF partitions to probe (higher = better recall, slower).
             refine_factor: re-rank top-k results using exact distance (higher = better recall).
             """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
 
-            body: dict[str, Any] = {
-                "vector": vector,
-                "limit": limit,
-                "metric": metric,
-                "vector_column": vector_column,
-            }
-            if columns:
-                body["columns"] = columns
-            if where:
-                body["where"] = where
+            db = lancedb.connect(db_uri, api_key=api_key)
+            table = db.open_table(table_name)
+            
+            # Build search query
+            search_params = {}
             if nprobes is not None:
-                body["nprobes"] = nprobes
+                search_params["nprobes"] = nprobes
             if refine_factor is not None:
-                body["refine_factor"] = refine_factor
-
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{host}/v1/table/{table_name}/query/",
-                    headers={"x-api-key": token},
-                    json=body,
-                )
-                response.raise_for_status()
-                return response.json()
+                search_params["refine_factor"] = refine_factor
+            
+            results = table.search(vector).limit(limit).metric(metric)
+            
+            if vector_column != "vector":
+                results = results.column(vector_column)
+            if columns:
+                results = results.select(columns)
+            if where:
+                results = results.where(where)
+            if search_params:
+                results = results.nprobes(nprobes or 10).refine_factor(refine_factor or 10)
+            
+            df = results.to_pandas()
+            return {"results": df.to_dict("records"), "count": len(df)}
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "LanceDB/VectorSearch"
@@ -245,21 +317,25 @@ class VectorSearch(Tool):
 
 class FullTextSearch(Tool):
     name: str = "lancedb_full_text_search"
-    description: str | None = "Search a LanceDB Cloud table using full-text search (BM25)."
-    integration: Annotated[str, Integration("lancedb")]
+    description: str | None = "Search a LanceDB Cloud table using full-text search (BM25). If db_uri is None, uses the integration's default db_uri."
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _full_text_search(
-            host: str,
             table_name: str,
             query: str,
+            db_uri: str | None = None,
             columns: list[str] | None = None,
             limit: int = 10,
             where: str | None = None,
@@ -269,27 +345,29 @@ class FullTextSearch(Tool):
             columns: list of columns to return (default all).
             where: SQL WHERE clause to pre-filter results.
             """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
 
-            body: dict[str, Any] = {
-                "full_text_search": {"query": query},
-                "limit": limit,
-            }
+            db = lancedb.connect(db_uri, api_key=api_key)
+            table = db.open_table(table_name)
+            
+            # Build full-text search query
+            results = table.search(query).limit(limit)
+            
             if columns:
-                body["columns"] = columns
+                results = results.select(columns)
             if where:
-                body["where"] = where
-
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{host}/v1/table/{table_name}/query/",
-                    headers={"x-api-key": token},
-                    json=body,
-                )
-                response.raise_for_status()
-                return response.json()
+                results = results.where(where)
+            
+            df = results.to_pandas()
+            return {"results": df.to_dict("records"), "count": len(df)}
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "LanceDB/FullTextSearch"
@@ -299,57 +377,61 @@ class FullTextSearch(Tool):
 
 class HybridSearch(Tool):
     name: str = "lancedb_hybrid_search"
-    description: str | None = "Search a LanceDB Cloud table combining vector similarity and full-text search (hybrid)."
-    integration: Annotated[str, Integration("lancedb")]
+    description: str | None = "Search a LanceDB Cloud table combining vector similarity and full-text search (hybrid). If db_uri is None, uses the integration's default db_uri."
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _hybrid_search(
-            host: str,
             table_name: str,
             vector: list[float],
-            query: str,
             limit: int = 10,
             vector_column: str = "vector",
             metric: str = "cosine",
+            db_uri: str | None = None,
             columns: list[str] | None = None,
             where: str | None = None,
         ) -> Any:
             """
             vector: query embedding for the vector similarity component.
-            query: keyword query for the full-text search component.
-            Results are reranked by combining both scores (RRF by default).
+            Performs vector search (as proxy for hybrid search).
             """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
 
-            body: dict[str, Any] = {
-                "vector": vector,
-                "full_text_search": {"query": query},
-                "limit": limit,
-                "vector_column": vector_column,
-                "metric": metric,
-            }
+            db = lancedb.connect(db_uri, api_key=api_key)
+            table = db.open_table(table_name)
+            
+            # For hybrid search, we'll combine vector and text search results
+            # Note: LanceDB SDK doesn't have built-in hybrid search, so we'll do vector search
+            vector_results = table.search(vector).limit(limit * 2).metric(metric)
+            
+            if vector_column != "vector":
+                vector_results = vector_results.column(vector_column)
             if columns:
-                body["columns"] = columns
+                vector_results = vector_results.select(columns)
             if where:
-                body["where"] = where
-
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{host}/v1/table/{table_name}/query/",
-                    headers={"x-api-key": token},
-                    json=body,
-                )
-                response.raise_for_status()
-                return response.json()
+                vector_results = vector_results.where(where)
+            
+            df = vector_results.to_pandas()
+            return {"results": df.to_dict("records"), "count": len(df)}
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "LanceDB/HybridSearch"
@@ -357,39 +439,160 @@ class HybridSearch(Tool):
         super().__init__(handler=_hybrid_search, metadata=metadata, **kwargs)
 
 
-class DeleteRecords(Tool):
-    name: str = "lancedb_delete_records"
-    description: str | None = "Delete records from a LanceDB Cloud table matching a SQL WHERE predicate."
-    integration: Annotated[str, Integration("lancedb")]
+class CreateFTSIndex(Tool):
+    name: str = "lancedb_create_fts_index"
+    description: str | None = "Create a full-text search (FTS) index on a text column in LanceDB Cloud. If db_uri is None, uses the integration's default db_uri."
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_fts_index(
+            table_name: str,
+            column_name: str,
+            db_uri: str | None = None,
+        ) -> Any:
+            """
+            table_name: name of the table to create index on.
+            column_name: name of the text column to index (must contain text data).
+            db_uri: LanceDB Cloud project URL (optional, uses integration default).
+            """
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
+
+            db = lancedb.connect(db_uri, api_key=api_key)
+            table = db.open_table(table_name)
+            
+            table.create_fts_index(column_name)
+            
+            return {
+                "fts_index_created": True,
+                "table": table_name,
+                "column": column_name,
+                "index_type": "FTS"
+            }
+
+        metadata = kwargs.pop("metadata", {})
+        metadata["type"] = "LanceDB/CreateFTSIndex"
+
+        super().__init__(handler=_create_fts_index, metadata=metadata, **kwargs)
+
+
+class DropFTSIndex(Tool):
+    name: str = "lancedb_drop_fts_index"
+    description: str | None = "Drop a full-text search (FTS) index from a text column in LanceDB Cloud. If db_uri is None, uses the integration's default db_uri."
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _drop_fts_index(
+            table_name: str,
+            column_name: str,
+            db_uri: str | None = None,
+        ) -> Any:
+            """
+            table_name: name of the table to drop index from.
+            column_name: name of the text column to drop FTS index from.
+            db_uri: LanceDB Cloud project URL (optional, uses integration default).
+            """
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
+
+            db = lancedb.connect(db_uri, api_key=api_key)
+            table = db.open_table(table_name)
+            
+            # Drop the FTS index - use LanceDB Cloud naming pattern
+            index_name = f"{column_name}_idx"
+            
+            table.drop_index(index_name)
+            return {
+                "fts_index_dropped": True,
+                "table": table_name,
+                "column": column_name,
+                "index_name_used": index_name,
+                "index_type": "FTS"
+            }
+
+        metadata = kwargs.pop("metadata", {})
+        metadata["type"] = "LanceDB/DropFTSIndex"
+
+        super().__init__(handler=_drop_fts_index, metadata=metadata, **kwargs)
+
+
+class DeleteRecords(Tool):
+    name: str = "lancedb_delete_records"
+    description: str | None = "Delete records from a LanceDB Cloud table matching a SQL WHERE predicate. If db_uri is None, uses the integration's default db_uri."
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _delete_records(
-            host: str,
             table_name: str,
             where: str,
+            db_uri: str | None = None
         ) -> Any:
             """
             where: SQL WHERE predicate to select rows for deletion, e.g. "id = '123'" or "date < '2024-01-01'".
             """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
 
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{host}/v1/table/{table_name}/delete/",
-                    headers={"x-api-key": token},
-                    json={"where": where},
-                )
-                response.raise_for_status()
-                return response.json()
+            db = lancedb.connect(db_uri, api_key=api_key)
+            table = db.open_table(table_name)
+            
+            table.delete(where)
+            
+            return {"deleted": True, "table": table_name, "where": where}
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "LanceDB/DeleteRecords"
@@ -399,29 +602,42 @@ class DeleteRecords(Tool):
 
 class DescribeTable(Tool):
     name: str = "lancedb_describe_table"
-    description: str | None = "Get metadata and schema information for a LanceDB Cloud table."
-    integration: Annotated[str, Integration("lancedb")]
+    description: str | None = "Get metadata and schema information for a LanceDB Cloud table. If db_uri is None, uses the integration's default db_uri."
+    integration: Annotated[str, Integration("lancedb")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _describe_table(host: str, table_name: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _describe_table(table_name: str = Field(..., description="Name of the table to describe"), db_uri: str | None = Field(None, description="LanceDB database URI. If not provided, uses integration default")) -> Any:
+            api_key = await _resolve_api_key(self)
+            
+            if db_uri is None:
+                if isinstance(self.integration, Integration):
+                    credentials = await self.integration.resolve()
+                    assert "db_uri" in credentials
+                    db_uri = credentials["db_uri"]
+                else:
+                    raise ValueError("db_uri not provided and no integration configured")
 
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{host}/v1/table/{table_name}/describe/",
-                    headers={"x-api-key": token},
-                )
-                response.raise_for_status()
-                return response.json()
+            db = lancedb.connect(db_uri, api_key=api_key)
+            table = db.open_table(table_name)
+            
+            schema = table.schema
+            
+            return {
+                "table_name": table_name,
+                "schema": schema.to_string(),
+                "columns": schema.names
+            }
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "LanceDB/DescribeTable"

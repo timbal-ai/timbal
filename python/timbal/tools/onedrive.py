@@ -1,25 +1,28 @@
+import os
 from typing import Annotated, Any
 
-import httpx
-from pydantic import model_validator
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
+
+
+async def _resolve_token(tool: Any) -> str:
+    """Resolve OneDrive token from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["token"]
+    raise ValueError(
+        "OneDrive token not found. Pass token in config, or configure an integration."
+    )
 
 
 class OneDriveSearchFiles(Tool):
     name: str = "onedrive_search_files"
     description: str | None = "Search for files in OneDrive using a query string."
     integration: Annotated[str, Integration("onedrive")] | None = None
+    token: SecretStr | None = None
     base_url: str = "https://graph.microsoft.com/v1.0"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "OneDriveSearchFiles":
-        if self.integration is None:
-            raise ValueError(
-                "OneDrive integration not found. Please configure onedrive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -28,17 +31,17 @@ class OneDriveSearchFiles(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "token": self.token,
                     "base_url": self.base_url,
                 }
             ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _search_files(query: str) -> dict:
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "token" in credentials
-            token = credentials["token"]
+        async def _search_files(query: str = Field(..., description="Search query string to find files in OneDrive")) -> dict:
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -59,15 +62,8 @@ class OneDriveUploadFile(Tool):
     name: str = "onedrive_upload_file"
     description: str | None = "Upload a file to OneDrive with specified name and content. Can also download from URL and upload."
     integration: Annotated[str, Integration("onedrive")] | None = None
+    token: SecretStr | None = None
     base_url: str = "https://graph.microsoft.com/v1.0"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "OneDriveUploadFile":
-        if self.integration is None:
-            raise ValueError(
-                "OneDrive integration not found. Please configure onedrive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -76,6 +72,7 @@ class OneDriveUploadFile(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "token": self.token,
                     "base_url": self.base_url,
                 }
             ),
@@ -83,15 +80,12 @@ class OneDriveUploadFile(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _upload_file(
-            name: str,
-            content: str,
-            folder_id: str | None = None,
-            url: str | None = None,
+            name: str = Field(..., description="Name of the file to upload to OneDrive"),
+            content: str = Field(..., description="Content of the file to upload"),
+            folder_id: str | None = Field(None, description="Optional folder ID where the file should be uploaded"),
+            url: str | None = Field(None, description="Optional URL to download content from before uploading"),
         ) -> dict:
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "token" in credentials
-            token = credentials["token"]
+            token = await _resolve_token(self)
 
             # If URL is provided, download the content first
             if url:
@@ -103,6 +97,8 @@ class OneDriveUploadFile(Tool):
             upload_url = f"{self.base_url}/me/drive/root:/{name}:/content"
             if folder_id:
                 upload_url = f"{self.base_url}/me/drive/items/{folder_id}:/{name}:/content"
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.put(
@@ -124,15 +120,8 @@ class OneDriveListFiles(Tool):
     name: str = "onedrive_list_files"
     description: str | None = "List files and folders in a specified OneDrive folder."
     integration: Annotated[str, Integration("onedrive")] | None = None
+    token: SecretStr | None = None
     base_url: str = "https://graph.microsoft.com/v1.0"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "OneDriveListFiles":
-        if self.integration is None:
-            raise ValueError(
-                "OneDrive integration not found. Please configure onedrive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -141,21 +130,21 @@ class OneDriveListFiles(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "token": self.token,
                     "base_url": self.base_url,
                 }
             ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _list_files(folder_id: str | None = None) -> dict:
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "token" in credentials
-            token = credentials["token"]
+        async def _list_files(folder_id: str | None = Field(None, description="Optional folder ID to list files from. If not provided, lists files from root directory")) -> dict:
+            token = await _resolve_token(self)
 
             url = f"{self.base_url}/me/drive/root/children"
             if folder_id:
                 url = f"{self.base_url}/me/drive/items/{folder_id}/children"
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -176,15 +165,8 @@ class OneDriveGetFile(Tool):
     name: str = "onedrive_get_file"
     description: str | None = "Get file metadata and content by file ID from OneDrive."
     integration: Annotated[str, Integration("onedrive")] | None = None
+    token: SecretStr | None = None
     base_url: str = "https://graph.microsoft.com/v1.0"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "OneDriveGetFile":
-        if self.integration is None:
-            raise ValueError(
-                "OneDrive integration not found. Please configure onedrive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -193,17 +175,17 @@ class OneDriveGetFile(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "token": self.token,
                     "base_url": self.base_url,
                 }
             ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_file(file_id: str) -> dict:
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "token" in credentials
-            token = credentials["token"]
+        async def _get_file(file_id: str = Field(..., description="OneDrive file ID to retrieve metadata and content for")) -> dict:
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient(follow_redirects=True) as client:
                 metadata_response = await client.get(
@@ -235,15 +217,8 @@ class OneDriveGetTable(Tool):
     name: str = "onedrive_get_table"
     description: str | None = "Get table data from an Excel file in OneDrive."
     integration: Annotated[str, Integration("onedrive")] | None = None
+    token: SecretStr | None = None
     base_url: str = "https://graph.microsoft.com/v1.0"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "OneDriveGetTable":
-        if self.integration is None:
-            raise ValueError(
-                "OneDrive integration not found. Please configure onedrive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -252,22 +227,22 @@ class OneDriveGetTable(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "token": self.token,
                     "base_url": self.base_url,
                 }
             ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_table(file_id: str, table_name: str | None = None) -> dict:
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "token" in credentials
-            token = credentials["token"]
+        async def _get_table(file_id: str = Field(..., description="OneDrive file ID of the Excel file"), table_name: str | None = Field(None, description="Optional name of the specific table to retrieve. If not provided, returns all tables")) -> dict:
+            token = await _resolve_token(self)
 
             if table_name:
                 url = f"{self.base_url}/me/drive/items/{file_id}/workbook/tables/{table_name}"
             else:
                 url = f"{self.base_url}/me/drive/items/{file_id}/workbook/tables"
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -288,15 +263,8 @@ class OneDriveFindFile(Tool):
     name: str = "onedrive_find_file"
     description: str | None = "Find a file in OneDrive by its exact name."
     integration: Annotated[str, Integration("onedrive")] | None = None
+    token: SecretStr | None = None
     base_url: str = "https://graph.microsoft.com/v1.0"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "OneDriveFindFile":
-        if self.integration is None:
-            raise ValueError(
-                "OneDrive integration not found. Please configure onedrive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -305,21 +273,21 @@ class OneDriveFindFile(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "token": self.token,
                     "base_url": self.base_url,
                 }
             ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _find_file(name: str, folder_id: str | None = None) -> dict:
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "token" in credentials
-            token = credentials["token"]
+        async def _find_file(name: str = Field(..., description="Exact name of the file to find in OneDrive"), folder_id: str | None = Field(None, description="Optional folder ID to search within. If not provided, searches in root directory")) -> dict:
+            token = await _resolve_token(self)
 
             search_url = f"{self.base_url}/me/drive/root/search(q='{name}')"
             if folder_id:
                 search_url = f"{self.base_url}/me/drive/items/{folder_id}/search(q='{name}')"
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -347,15 +315,8 @@ class OneDriveDownloadFile(Tool):
     name: str = "onedrive_download_file"
     description: str | None = "Download a file from OneDrive by file ID."
     integration: Annotated[str, Integration("onedrive")] | None = None
+    token: SecretStr | None = None
     base_url: str = "https://graph.microsoft.com/v1.0"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "OneDriveDownloadFile":
-        if self.integration is None:
-            raise ValueError(
-                "OneDrive integration not found. Please configure onedrive integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -364,17 +325,17 @@ class OneDriveDownloadFile(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "token": self.token,
                     "base_url": self.base_url,
                 }
             ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _download_file(file_id: str) -> dict:
-            assert isinstance(self.integration, Integration)
-            credentials = await self.integration.resolve()
-            assert "token" in credentials
-            token = credentials["token"]
+        async def _download_file(file_id: str = Field(..., description="OneDrive file ID to download")) -> dict:
+            token = await _resolve_token(self)
+
+            import httpx
 
             async with httpx.AsyncClient(follow_redirects=True) as client:
                 response = await client.get(

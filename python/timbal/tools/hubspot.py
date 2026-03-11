@@ -1,11 +1,28 @@
+import os
 from typing import Annotated, Any
 
-import httpx
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 _HUBSPOT_API_BASE = "https://api.hubapi.com"
+
+
+async def _resolve_token(tool: Any) -> str:
+    """Resolve HubSpot token from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["token"]
+    if tool.token is not None:
+        return tool.token.get_secret_value()
+    env_key = os.getenv("HUBSPOT_TOKEN")
+    if env_key:
+        return env_key
+    raise ValueError(
+        "HubSpot token not found. Set HUBSPOT_TOKEN environment variable, "
+        "pass token in config, or configure an integration."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -16,25 +33,28 @@ _HUBSPOT_API_BASE = "https://api.hubapi.com"
 class ListContacts(Tool):
     name: str = "hubspot_list_contacts"
     description: str | None = "List HubSpot contacts with optional filtering."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_contacts(
-            limit: int = 10,
-            after: str | None = None,
-            properties: list[str] | None = None,
-            archived: bool = False,
+            limit: int = Field(10, description="Number of contacts to return (max 100)"),
+            after: str | None = Field(None, description="Pagination cursor to get next page of results"),
+            properties: list[str] | None = Field(None, description="List of contact properties to return"),
+            archived: bool = Field(False, description="Include archived contacts in results"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"limit": limit, "archived": archived}
             if after:
@@ -60,24 +80,27 @@ class ListContacts(Tool):
 class GetContact(Tool):
     name: str = "hubspot_get_contact"
     description: str | None = "Retrieve a specific HubSpot contact by ID with detailed information."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_contact(
-            contact_id: str,
-            properties: list[str] | None = None,
-            associations: list[str] | None = None,
+            contact_id: str = Field(..., description="The HubSpot contact ID to retrieve"),
+            properties: list[str] | None = Field(None, description="List of properties to retrieve"),
+            associations: list[str] | None = Field(None, description="List of association types to retrieve"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {}
             if properties:
@@ -103,30 +126,33 @@ class GetContact(Tool):
 class CreateContact(Tool):
     name: str = "hubspot_create_contact"
     description: str | None = "Create a new HubSpot contact."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_contact(
-            email: str,
-            firstname: str | None = None,
-            lastname: str | None = None,
-            phone: str | None = None,
-            company: str | None = None,
-            jobtitle: str | None = None,
-            website: str | None = None,
-            lifecyclestage: str | None = None,
-            hs_lead_status: str | None = None,
+            email: str = Field(..., description="The email address of the contact"),
+            firstname: str | None = Field(None, description="The first name of the contact"),
+            lastname: str | None = Field(None, description="The last name of the contact"),
+            phone: str | None = Field(None, description="The phone number of the contact"),
+            company: str | None = Field(None, description="The company name of the contact"),
+            jobtitle: str | None = Field(None, description="The job title of the contact"),
+            website: str | None = Field(None, description="The website of the contact"),
+            lifecyclestage: str | None = Field(None, description="The lifecycle stage of the contact"),
+            hs_lead_status: str | None = Field(None, description="The lead status of the contact"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             properties: dict[str, Any] = {"email": email}
             if firstname:
@@ -164,31 +190,34 @@ class CreateContact(Tool):
 class UpdateContact(Tool):
     name: str = "hubspot_update_contact"
     description: str | None = "Update an existing HubSpot contact."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_contact(
-            contact_id: str,
-            email: str | None = None,
-            firstname: str | None = None,
-            lastname: str | None = None,
-            phone: str | None = None,
-            company: str | None = None,
-            jobtitle: str | None = None,
-            website: str | None = None,
-            lifecyclestage: str | None = None,
-            hs_lead_status: str | None = None,
+            contact_id: str = Field(..., description="The HubSpot contact ID to update"),
+            email: str | None = Field(None, description="The email address of the contact"),
+            firstname: str | None = Field(None, description="The first name of the contact"),
+            lastname: str | None = Field(None, description="The last name of the contact"),
+            phone: str | None = Field(None, description="The phone number of the contact"),
+            company: str | None = Field(None, description="The company name of the contact"),
+            jobtitle: str | None = Field(None, description="The job title of the contact"),
+            website: str | None = Field(None, description="The website of the contact"),
+            lifecyclestage: str | None = Field(None, description="The lifecycle stage of the contact"),
+            hs_lead_status: str | None = Field(None, description="The lead status of the contact"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             properties: dict[str, Any] = {}
             if email:
@@ -228,30 +257,29 @@ class UpdateContact(Tool):
 class SearchContacts(Tool):
     name: str = "hubspot_search_contacts"
     description: str | None = "Search for HubSpot contacts using advanced filters."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_contacts(
-            filter_groups: list[dict[str, Any]],
-            properties: list[str] | None = None,
-            sorts: list[dict[str, Any]] | None = None,
-            limit: int = 10,
-            after: int = 0,
+            filter_groups: list[dict[str, Any]] = Field(..., description=" list of {'filters': [{'propertyName': ..., 'operator': ..., 'value': ...}]}"),
+            properties: list[str] | None = Field(None, description="List of properties to retrieve"),
+            sorts: list[dict[str, Any]] | None = Field(None, description="list of {'propertyName': ..., 'direction': 'ASCENDING' | 'DESCENDING'}"),
+            limit: int = Field(10, description="Maximum number of results to return"),
+            after: int = Field(0, description="Cursor for pagination"),
         ) -> Any:
-            """
-            filter_groups: list of {"filters": [{"propertyName": ..., "operator": ..., "value": ...}]}
-            sorts: list of {"propertyName": ..., "direction": "ASCENDING" | "DESCENDING"}
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             body: dict[str, Any] = {
                 "filterGroups": filter_groups,
@@ -281,20 +309,26 @@ class SearchContacts(Tool):
 class MergeContacts(Tool):
     name: str = "hubspot_merge_contacts"
     description: str | None = "Merge two HubSpot contacts into one."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _merge_contacts(primary_object_id: str, object_id_to_merge: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _merge_contacts(
+            primary_object_id: str = Field(..., description="Primary contact ID to merge into"),
+            object_id_to_merge: str = Field(..., description="Contact ID to be merged")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -314,26 +348,29 @@ class MergeContacts(Tool):
 class GdprDeleteContact(Tool):
     name: str = "hubspot_gdpr_delete_contact"
     description: str | None = "Permanently delete a contact and all associated content to follow GDPR."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _gdpr_delete_contact(
-            object_id: str | None = None,
-            email: str | None = None,
+            object_id: str | None = Field(None, description="Contact ID to delete"),
+            email: str | None = Field(None, description="Email address of the contact to delete"),
         ) -> Any:
             """
             Provide either object_id or email to identify the contact.
             """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             body: dict[str, Any] = {}
             if object_id:
@@ -364,25 +401,28 @@ class GdprDeleteContact(Tool):
 class ListCompanies(Tool):
     name: str = "hubspot_list_companies"
     description: str | None = "List HubSpot companies with optional filtering."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_companies(
-            limit: int = 10,
-            after: str | None = None,
-            properties: list[str] | None = None,
-            archived: bool = False,
+            limit: int = Field(10, description="Maximum number of results to return"),
+            after: str | None = Field(None, description="Cursor for pagination"),
+            properties: list[str] | None = Field(None, description="List of properties to retrieve"),
+            archived: bool = Field(False, description="Whether to include archived companies"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"limit": limit, "archived": archived}
             if after:
@@ -408,24 +448,27 @@ class ListCompanies(Tool):
 class GetCompany(Tool):
     name: str = "hubspot_get_company"
     description: str | None = "Retrieve a specific HubSpot company by ID with detailed information."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_company(
-            company_id: str,
-            properties: list[str] | None = None,
-            associations: list[str] | None = None,
+            company_id: str = Field(..., description="Company ID to retrieve"),
+            properties: list[str] | None = Field(None, description="List of properties to retrieve"),
+            associations: list[str] | None = Field(None, description="List of associations to retrieve"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {}
             if properties:
@@ -451,31 +494,34 @@ class GetCompany(Tool):
 class CreateCompany(Tool):
     name: str = "hubspot_create_company"
     description: str | None = "Create a new HubSpot company."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_company(
-            name: str,
-            domain: str | None = None,
-            industry: str | None = None,
-            city: str | None = None,
-            country: str | None = None,
-            phone: str | None = None,
-            website: str | None = None,
-            description: str | None = None,
-            numberofemployees: int | None = None,
-            annualrevenue: str | None = None,
+            name: str = Field(..., description="Company name"),
+            domain: str | None = Field(None, description="Company domain"),
+            industry: str | None = Field(None, description="Company industry"),
+            city: str | None = Field(None, description="Company city"),
+            country: str | None = Field(None, description="Company country"),
+            phone: str | None = Field(None, description="Company phone"),
+            website: str | None = Field(None, description="Company website"),
+            description: str | None = Field(None, description="Company description"),
+            numberofemployees: int | None = Field(None, description="Number of employees"),
+            annualrevenue: str | None = Field(None, description="Annual revenue"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             properties: dict[str, Any] = {"name": name}
             if domain:
@@ -515,32 +561,35 @@ class CreateCompany(Tool):
 class UpdateCompany(Tool):
     name: str = "hubspot_update_company"
     description: str | None = "Update an existing HubSpot company."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_company(
-            company_id: str,
-            name: str | None = None,
-            domain: str | None = None,
-            industry: str | None = None,
-            city: str | None = None,
-            country: str | None = None,
-            phone: str | None = None,
-            website: str | None = None,
-            description: str | None = None,
-            numberofemployees: int | None = None,
-            annualrevenue: str | None = None,
+            company_id: str = Field(..., description="Company ID to update"),
+            name: str | None = Field(None, description="Company name"),
+            domain: str | None = Field(None, description="Company domain"),
+            industry: str | None = Field(None, description="Company industry"),
+            city: str | None = Field(None, description="Company city"),
+            country: str | None = Field(None, description="Company country"),
+            phone: str | None = Field(None, description="Company phone"),
+            website: str | None = Field(None, description="Company website"),
+            description: str | None = Field(None, description="Company description"),
+            numberofemployees: int | None = Field(None, description="Number of employees"),
+            annualrevenue: str | None = Field(None, description="Annual revenue"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             properties: dict[str, Any] = {}
             if name:
@@ -570,6 +619,9 @@ class UpdateCompany(Tool):
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
+                if response.status_code >= 400:
+                    error_details = response.json()
+                    raise ValueError(f"HubSpot API Error: {response.status_code} - {error_details}")
                 response.raise_for_status()
                 return response.json()
 
@@ -582,26 +634,29 @@ class UpdateCompany(Tool):
 class SearchCompanies(Tool):
     name: str = "hubspot_search_companies"
     description: str | None = "Search for HubSpot companies using advanced filters and sorting options."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_companies(
-            filter_groups: list[dict[str, Any]],
-            properties: list[str] | None = None,
-            sorts: list[dict[str, Any]] | None = None,
-            limit: int = 10,
-            after: int = 0,
+            filter_groups: list[dict[str, Any]] = Field(..., description="List of filter groups"),
+            properties: list[str] | None = Field(None, description="List of properties to retrieve"),
+            sorts: list[dict[str, Any]] | None = Field(None, description="List of sorts"),
+            limit: int = Field(10, description="Maximum number of results to return"),
+            after: int = Field(0, description="Cursor for pagination"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             body: dict[str, Any] = {
                 "filterGroups": filter_groups,
@@ -636,25 +691,28 @@ class SearchCompanies(Tool):
 class ListDeals(Tool):
     name: str = "hubspot_list_deals"
     description: str | None = "List or search HubSpot deals with optional filtering."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_deals(
-            limit: int = 10,
-            after: str | None = None,
-            properties: list[str] | None = None,
-            archived: bool = False,
+            limit: int = Field(10, description="Maximum number of results to return"),
+            after: str | None = Field(None, description="Cursor for pagination"),
+            properties: list[str] | None = Field(None, description="List of properties to retrieve"),
+            archived: bool = Field(False, description="Whether to include archived deals"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"limit": limit, "archived": archived}
             if after:
@@ -680,24 +738,27 @@ class ListDeals(Tool):
 class GetDeal(Tool):
     name: str = "hubspot_get_deal"
     description: str | None = "Retrieve a specific HubSpot deal by ID with detailed information."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_deal(
-            deal_id: str,
-            properties: list[str] | None = None,
-            associations: list[str] | None = None,
+            deal_id: str = Field(..., description="Deal ID to retrieve"),
+            properties: list[str] | None = Field(None, description="List of properties to retrieve"),
+            associations: list[str] | None = Field(None, description="List of associations to retrieve"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {}
             if properties:
@@ -723,34 +784,31 @@ class GetDeal(Tool):
 class CreateDeal(Tool):
     name: str = "hubspot_create_deal"
     description: str | None = "Create a new HubSpot deal."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_deal(
-            dealname: str,
-            pipeline: str | None = None,
-            dealstage: str | None = None,
-            amount: str | None = None,
-            closedate: str | None = None,
-            hubspot_owner_id: str | None = None,
-            description: str | None = None,
+            dealname: str = Field(..., description="Deal name"),
+            pipeline: str | None = Field(None, description="Pipeline ID (use hubspot_get_deal_pipelines to discover available IDs)."),
+            dealstage: str | None = Field(None, description="Stage ID within the pipeline."),
+            amount: str | None = Field(None, description="Deal value as a string, e.g. '5000'"),
+            closedate: str | None = Field(None, description="Expected close date in ISO 8601 format e.g. '2026-06-30'"),
+            hubspot_owner_id: str | None = Field(None, description="Owner ID"),
+            description: str | None = Field(None, description="Deal description"),
         ) -> Any:
-            """
-            pipeline: pipeline ID (use hubspot_get_deal_pipelines to discover available IDs).
-            dealstage: stage ID within the pipeline.
-            amount: deal value as a string, e.g. "5000".
-            closedate: expected close date in ISO 8601 format, e.g. "2026-06-30".
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             properties: dict[str, Any] = {"dealname": dealname}
             if pipeline:
@@ -784,29 +842,32 @@ class CreateDeal(Tool):
 class UpdateDeal(Tool):
     name: str = "hubspot_update_deal"
     description: str | None = "Update an existing HubSpot deal."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_deal(
-            deal_id: str,
-            dealname: str | None = None,
-            pipeline: str | None = None,
-            dealstage: str | None = None,
-            amount: str | None = None,
-            closedate: str | None = None,
-            hubspot_owner_id: str | None = None,
-            description: str | None = None,
+            deal_id: str = Field(..., description="Deal ID to update"),
+            dealname: str | None = Field(None, description="Deal name"),
+            pipeline: str | None = Field(None, description="Pipeline ID"),
+            dealstage: str | None = Field(None, description="Stage ID within the pipeline."),
+            amount: str | None = Field(None, description="Deal value as a string, e.g. '5000'"),
+            closedate: str | None = Field(None, description="Expected close date in ISO 8601 format e.g. '2026-06-30'"),
+            hubspot_owner_id: str | None = Field(None, description="Owner ID"),
+            description: str | None = Field(None, description="Deal description"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             properties: dict[str, Any] = {}
             if dealname:
@@ -842,20 +903,23 @@ class UpdateDeal(Tool):
 class GetDealPipelines(Tool):
     name: str = "hubspot_get_deal_pipelines"
     description: str | None = "Get all deal pipelines and their stages. Use this before creating a deal to discover valid pipeline and dealstage IDs."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_deal_pipelines() -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -879,25 +943,28 @@ class GetDealPipelines(Tool):
 class ListTickets(Tool):
     name: str = "hubspot_list_tickets"
     description: str | None = "List HubSpot tickets with optional filtering."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_tickets(
-            limit: int = 10,
-            after: str | None = None,
-            properties: list[str] | None = None,
-            archived: bool = False,
+            limit: int = Field(10, description="Maximum number of tickets to return"),
+            after: str | None = Field(None, description="Cursor for pagination"),
+            properties: list[str] | None = Field(None, description="Properties to include in the response"),
+            archived: bool = Field(False, description="Whether to include archived tickets"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"limit": limit, "archived": archived}
             if after:
@@ -923,24 +990,27 @@ class ListTickets(Tool):
 class GetTicket(Tool):
     name: str = "hubspot_get_ticket"
     description: str | None = "Get a specific HubSpot ticket by ID."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_ticket(
-            ticket_id: str,
-            properties: list[str] | None = None,
-            associations: list[str] | None = None,
+            ticket_id: str = Field(..., description="Ticket ID to retrieve"),
+            properties: list[str] | None = Field(None, description="Properties to include in the response"),
+            associations: list[str] | None = Field(None, description="Associations to include in the response"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {}
             if properties:
@@ -966,31 +1036,30 @@ class GetTicket(Tool):
 class CreateTicket(Tool):
     name: str = "hubspot_create_ticket"
     description: str | None = "Create a new HubSpot ticket."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_ticket(
-            subject: str,
-            hs_pipeline: str | None = None,
-            hs_pipeline_stage: str | None = None,
-            content: str | None = None,
-            hs_ticket_priority: str | None = None,
-            hubspot_owner_id: str | None = None,
+            subject: str = Field(..., description="Ticket subject"),
+            hs_pipeline: str | None = Field(None, description="Pipeline ID. Use hubspot_get_deal_pipelines (tickets share the same pipeline API) to find valid IDs."),
+            hs_pipeline_stage: str | None = Field(None, description="Pipeline stage ID. Use hubspot_get_deal_pipelines (tickets share the same pipeline API) to find valid IDs."),
+            content: str | None = Field(None, description="Ticket content"),
+            hs_ticket_priority: str | None = Field(None, description="Ticket priority: 'LOW', 'MEDIUM', or 'HIGH'"),
+            hubspot_owner_id: str | None = Field(None, description="Owner ID"),
         ) -> Any:
-            """
-            hs_ticket_priority: "LOW", "MEDIUM", or "HIGH"
-            hs_pipeline / hs_pipeline_stage: use hubspot_get_deal_pipelines (tickets share the same pipeline API) to find valid IDs.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             properties: dict[str, Any] = {"subject": subject}
             if hs_pipeline:
@@ -1022,28 +1091,31 @@ class CreateTicket(Tool):
 class UpdateTicket(Tool):
     name: str = "hubspot_update_ticket"
     description: str | None = "Update an existing HubSpot ticket."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_ticket(
-            ticket_id: str,
-            subject: str | None = None,
-            hs_pipeline: str | None = None,
-            hs_pipeline_stage: str | None = None,
-            content: str | None = None,
-            hs_ticket_priority: str | None = None,
-            hubspot_owner_id: str | None = None,
+            ticket_id: str = Field(..., description="Ticket ID to update"),
+            subject: str | None = Field(None, description="Ticket subject"),
+            hs_pipeline: str | None = Field(None, description="Pipeline ID. Use hubspot_get_deal_pipelines (tickets share the same pipeline API) to find valid IDs."),
+            hs_pipeline_stage: str | None = Field(None, description="Pipeline stage ID. Use hubspot_get_deal_pipelines (tickets share the same pipeline API) to find valid IDs."),
+            content: str | None = Field(None, description="Ticket content"),
+            hs_ticket_priority: str | None = Field(None, description="Ticket priority: 'LOW', 'MEDIUM', or 'HIGH'"),
+            hubspot_owner_id: str | None = Field(None, description="Owner ID"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             properties: dict[str, Any] = {}
             if subject:
@@ -1077,20 +1149,23 @@ class UpdateTicket(Tool):
 class DeleteTicket(Tool):
     name: str = "hubspot_delete_ticket"
     description: str | None = "Archive/delete a HubSpot ticket."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_ticket(ticket_id: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _delete_ticket(ticket_id: str = Field(..., description="Ticket ID to delete")) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -1109,20 +1184,26 @@ class DeleteTicket(Tool):
 class MergeTickets(Tool):
     name: str = "hubspot_merge_tickets"
     description: str | None = "Merge two HubSpot tickets into one."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _merge_tickets(primary_object_id: str, object_id_to_merge: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _merge_tickets(
+            primary_object_id: str = Field(..., description="Primary ticket ID to merge into"),
+            object_id_to_merge: str = Field(..., description="Ticket ID to be merged")
+        ) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -1147,25 +1228,28 @@ class MergeTickets(Tool):
 class ListProducts(Tool):
     name: str = "hubspot_list_products"
     description: str | None = "List HubSpot products with optional filtering."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_products(
-            limit: int = 10,
-            after: str | None = None,
-            properties: list[str] | None = None,
-            archived: bool = False,
+            limit: int = Field(10, description="Maximum number of products to return"),
+            after: str | None = Field(None, description="Cursor for pagination"),
+            properties: list[str] | None = Field(None, description="List of properties to include in the response"),
+            archived: bool = Field(False, description="Whether to include archived products"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"limit": limit, "archived": archived}
             if after:
@@ -1191,23 +1275,26 @@ class ListProducts(Tool):
 class GetProduct(Tool):
     name: str = "hubspot_get_product"
     description: str | None = "Get a specific HubSpot product by ID."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_product(
-            product_id: str,
-            properties: list[str] | None = None,
+            product_id: str = Field(..., description="Product ID to retrieve"),
+            properties: list[str] | None = Field(None, description="List of properties to include in the response"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {}
             if properties:
@@ -1231,27 +1318,30 @@ class GetProduct(Tool):
 class CreateProduct(Tool):
     name: str = "hubspot_create_product"
     description: str | None = "Create a new HubSpot product."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_product(
-            name: str,
-            price: str | None = None,
-            description: str | None = None,
-            hs_sku: str | None = None,
-            hs_cost_of_goods_sold: str | None = None,
-            hs_recurring_billing_period: str | None = None,
+            name: str = Field(..., description="Product name"),
+            price: str | None = Field(None, description="Product price"),
+            description: str | None = Field(None, description="Product description"),
+            hs_sku: str | None = Field(None, description="Product SKU"),
+            hs_cost_of_goods_sold: str | None = Field(None, description="Cost of goods sold"),
+            hs_recurring_billing_period: str | None = Field(None, description="Recurring billing period"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             properties: dict[str, Any] = {"name": name}
             if price:
@@ -1283,28 +1373,31 @@ class CreateProduct(Tool):
 class UpdateProduct(Tool):
     name: str = "hubspot_update_product"
     description: str | None = "Update an existing HubSpot product."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_product(
-            product_id: str,
-            name: str | None = None,
-            price: str | None = None,
-            description: str | None = None,
-            hs_sku: str | None = None,
-            hs_cost_of_goods_sold: str | None = None,
-            hs_recurring_billing_period: str | None = None,
+            product_id: str = Field(..., description="Product ID to update"),
+            name: str | None = Field(None, description="Product name"),
+            price: str | None = Field(None, description="Product price"),
+            description: str | None = Field(None, description="Product description"),
+            hs_sku: str | None = Field(None, description="Product SKU"),
+            hs_cost_of_goods_sold: str | None = Field(None, description="Cost of goods sold"),
+            hs_recurring_billing_period: str | None = Field(None, description="Recurring billing period"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             properties: dict[str, Any] = {}
             if name:
@@ -1338,20 +1431,23 @@ class UpdateProduct(Tool):
 class DeleteProduct(Tool):
     name: str = "hubspot_delete_product"
     description: str | None = "Archive/delete a HubSpot product."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_product(product_id: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _delete_product(product_id: str = Field(..., description="Product ID to delete")) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -1375,24 +1471,27 @@ class DeleteProduct(Tool):
 class GetEngagements(Tool):
     name: str = "hubspot_get_engagements"
     description: str | None = "Get engagement data (calls, emails, meetings, etc.) for a contact."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_engagements(
-            contact_id: str,
-            limit: int = 20,
-            offset: int = 0,
+            contact_id: str = Field(..., description="Contact ID to get engagements for"),
+            limit: int = Field(20, description="Maximum number of engagements to return"),
+            offset: int = Field(0, description="Offset for pagination"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1412,20 +1511,23 @@ class GetEngagements(Tool):
 class GetEngagement(Tool):
     name: str = "hubspot_get_engagement"
     description: str | None = "Get a specific HubSpot engagement by ID."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _get_engagement(engagement_id: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _get_engagement(engagement_id: str = Field(..., description="Engagement ID to retrieve")) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1444,23 +1546,26 @@ class GetEngagement(Tool):
 class ListEngagements(Tool):
     name: str = "hubspot_list_engagements"
     description: str | None = "List HubSpot engagements with optional filtering."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_engagements(
-            limit: int = 20,
-            offset: int = 0,
+            limit: int = Field(20, description="Maximum number of engagements to return"),
+            offset: int = Field(0, description="Offset for pagination"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1480,27 +1585,27 @@ class ListEngagements(Tool):
 class GetRecentEngagements(Tool):
     name: str = "hubspot_get_recent_engagements"
     description: str | None = "Get recently created or updated HubSpot engagements."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_recent_engagements(
-            limit: int = 20,
-            offset: int = 0,
-            since: int | None = None,
+            limit: int = Field(20, description="Maximum number of engagements to return"),
+            offset: int = Field(0, description="Offset for pagination"),
+            since: int | None = Field(None, description="Unix timestamp in milliseconds — only return engagements modified after this time"),
         ) -> Any:
-            """
-            since: Unix timestamp in milliseconds — only return engagements modified after this time.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"count": limit, "offset": offset}
             if since:
@@ -1524,20 +1629,23 @@ class GetRecentEngagements(Tool):
 class GetCallDispositions(Tool):
     name: str = "hubspot_get_call_dispositions"
     description: str | None = "Get all possible dispositions for sales calls in HubSpot."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_call_dispositions() -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1556,33 +1664,30 @@ class GetCallDispositions(Tool):
 class CreateEngagement(Tool):
     name: str = "hubspot_create_engagement"
     description: str | None = "Create a new HubSpot engagement (email, call, meeting, task, or note)."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_engagement(
-            engagement_type: str,
-            metadata: dict[str, Any],
-            associations: dict[str, list[int]] | None = None,
-            active: bool = True,
-            timestamp: int | None = None,
-            owner_id: int | None = None,
+            engagement_type: str = Field(..., description="Engagement type: EMAIL, CALL, MEETING, TASK, or NOTE"),
+            metadata: dict[str, Any] = Field(..., description="Type-specific fields (e.g. {\"body\": \"...\"} for NOTE, {\"subject\": \"...\"} for EMAIL)"),
+            associations: dict[str, list[int]] | None = Field(None, description="Associations with contacts, companies, deals, or tickets: {\"contactIds\": [...], \"companyIds\": [...], \"dealIds\": [...], \"ticketIds\": [...]}"),
+            active: bool = Field(True, description="Whether the engagement is active"),
+            timestamp: int | None = Field(None, description="Unix timestamp in milliseconds for the engagement time"),
+            owner_id: int | None = Field(None, description="Owner ID of the engagement"),
         ) -> Any:
-            """
-            engagement_type: "EMAIL", "CALL", "MEETING", "TASK", or "NOTE"
-            metadata: type-specific fields (e.g. {"body": "..."} for NOTE, {"subject": "..."} for EMAIL)
-            associations: {"contactIds": [...], "companyIds": [...], "dealIds": [...], "ticketIds": [...]}
-            timestamp: Unix timestamp in milliseconds for the engagement time.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             engagement: dict[str, Any] = {"type": engagement_type, "active": active}
             if timestamp:
@@ -1612,24 +1717,27 @@ class CreateEngagement(Tool):
 class UpdateEngagement(Tool):
     name: str = "hubspot_update_engagement"
     description: str | None = "Update an existing HubSpot engagement."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_engagement(
-            engagement_id: str,
-            engagement: dict[str, Any] | None = None,
-            metadata: dict[str, Any] | None = None,
+            engagement_id: str = Field(..., description="The ID of the engagement to update"),
+            engagement: dict[str, Any] | None = Field(None, description="Updated engagement fields"),
+            metadata: dict[str, Any] | None = Field(None, description="Updated metadata"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             body: dict[str, Any] = {}
             if engagement:
@@ -1655,20 +1763,23 @@ class UpdateEngagement(Tool):
 class DeleteEngagement(Tool):
     name: str = "hubspot_delete_engagement"
     description: str | None = "Delete a HubSpot engagement."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_engagement(engagement_id: str) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _delete_engagement(engagement_id: str = Field(..., description="Engagement ID to delete")) -> Any:
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -1692,31 +1803,28 @@ class DeleteEngagement(Tool):
 class SendEmail(Tool):
     name: str = "hubspot_send_email"
     description: str | None = "Send a transactional email to a HubSpot contact."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _send_email(
-            email_id: int,
-            to_email: str,
-            contact_properties: dict[str, str] | None = None,
-            custom_properties: dict[str, Any] | None = None,
+            email_id: int = Field(..., description="ID of the HubSpot transactional email template to send"),
+            to_email: str = Field(..., description="Recipient email address"),
+            contact_properties: dict[str, str] | None = Field(None, description="Override contact properties for personalization tokens"),
+            custom_properties: dict[str, Any] | None = Field(None, description="Additional custom personalization tokens"),
         ) -> Any:
-            """
-            email_id: ID of the HubSpot transactional email template to send.
-            to_email: recipient email address.
-            contact_properties: override contact properties for personalization tokens.
-            custom_properties: additional custom personalization tokens.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             body: dict[str, Any] = {
                 "emailId": email_id,
@@ -1754,26 +1862,29 @@ class SendEmail(Tool):
 class GetAssociations(Tool):
     name: str = "hubspot_get_associations"
     description: str | None = "Get all associations for a specific object (contact, company, deal, ticket)."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_associations(
-            from_object_type: str,
-            object_id: str,
-            to_object_type: str,
-            after: str | None = None,
-            limit: int = 500,
+            from_object_type: str = Field(..., description="The type of object to get associations from (e.g., 'contacts', 'companies', 'deals', 'tickets')"),
+            object_id: str = Field(..., description="The ID of the object to get associations from"),
+            to_object_type: str = Field(..., description="The type of object to get associations to (e.g., 'contacts', 'companies', 'deals', 'tickets')"),
+            after: str | None = Field(None, description="Cursor for pagination"),
+            limit: int = Field(500, description="Maximum number of associations to return"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             params: dict[str, Any] = {"limit": limit}
             if after:
@@ -1797,29 +1908,32 @@ class GetAssociations(Tool):
 class CreateAssociation(Tool):
     name: str = "hubspot_create_association"
     description: str | None = "Create an association between two HubSpot objects (e.g. link a contact to a company)."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_association(
-            from_object_type: str,
-            from_object_id: str,
-            to_object_type: str,
-            to_object_id: str,
-            association_type: str,
+            from_object_type: str = Field(..., description="The type of object to create an association from (e.g., 'contacts', 'companies', 'deals', 'tickets')"),
+            from_object_id: str = Field(..., description="The ID of the object to create an association from"),
+            to_object_type: str = Field(..., description="The type of object to create an association to (e.g., 'contacts', 'companies', 'deals', 'tickets')"),
+            to_object_id: str = Field(..., description="The ID of the object to create an association to"),
+            association_type: str = Field(..., description="The type of association to create (e.g., 'contact_to_company', 'deal_to_contact')"),
         ) -> Any:
             """
             association_type: e.g. "contact_to_company", "deal_to_contact". See GetAssociationTypes.
             """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.put(
@@ -1839,26 +1953,29 @@ class CreateAssociation(Tool):
 class DeleteAssociation(Tool):
     name: str = "hubspot_delete_association"
     description: str | None = "Remove an association between two HubSpot objects."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _delete_association(
-            from_object_type: str,
-            from_object_id: str,
-            to_object_type: str,
-            to_object_id: str,
-            association_type: str,
+            from_object_type: str = Field(..., description="The type of object to delete an association from (e.g., 'contacts', 'companies', 'deals', 'tickets')"),
+            from_object_id: str = Field(..., description="The ID of the object to delete an association from"),
+            to_object_type: str = Field(..., description="The type of object to delete an association to (e.g., 'contacts', 'companies', 'deals', 'tickets')"),
+            to_object_id: str = Field(..., description="The ID of the object to delete an association to"),
+            association_type: str = Field(..., description="The type of association to delete (e.g., 'contact_to_company', 'deal_to_contact')"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -1878,23 +1995,26 @@ class DeleteAssociation(Tool):
 class GetAssociationTypes(Tool):
     name: str = "hubspot_get_association_types"
     description: str | None = "Get all available association types and labels between two HubSpot object types."
-    integration: Annotated[str, Integration("hubspot")]
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_association_types(
-            from_object_type: str,
-            to_object_type: str,
+            from_object_type: str = Field(..., description="The type of object to get association types from (e.g., 'contacts', 'companies', 'deals', 'tickets')"),
+            to_object_type: str = Field(..., description="The type of object to get association types to (e.g., 'contacts', 'companies', 'deals', 'tickets')"),
         ) -> Any:
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            token = await _resolve_token(self)
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -1908,3 +2028,38 @@ class GetAssociationTypes(Tool):
         metadata["type"] = "HubSpot/GetAssociationTypes"
 
         super().__init__(handler=_get_association_types, metadata=metadata, **kwargs)
+
+
+class GetUsers(Tool):
+    name: str = "hubspot_get_users"
+    description: str | None = "Get HubSpot users/owners with their IDs and information."
+    integration: Annotated[str, Integration("hubspot")] | None = None
+    token: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config(
+                {"integration": self.integration, "token": self.token},
+                required={"integration"},
+            ),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _get_users() -> Any:
+            token = await _resolve_token(self)
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_HUBSPOT_API_BASE}/crm/v3/owners",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                response.raise_for_status()
+                return response.json()
+
+        metadata = kwargs.pop("metadata", {})
+        metadata["type"] = "HubSpot/GetUsers"
+
+        super().__init__(handler=_get_users, metadata=metadata, **kwargs)

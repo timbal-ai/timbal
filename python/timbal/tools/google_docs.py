@@ -1,28 +1,37 @@
+import os
 from typing import Annotated, Any
 
-import httpx
-from pydantic import model_validator
+from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 
+async def _resolve_api_key(tool: Any) -> str:
+    """Resolve Google Docs API key from integration, explicit field, or env var."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["api_key"]
+    if tool.api_key is not None:
+        return tool.api_key.get_secret_value()
+    env_key = os.getenv("GOOGLE_DOCS_API_KEY")
+    if env_key:
+        return env_key
+    raise ValueError(
+        "Google Docs API key not found. Set GOOGLE_DOCS_API_KEY environment variable, "
+        "pass api_key in config, or configure an integration."
+    )
+
+
 class GoogleDocsCreate(Tool):
     name: str = "google_docs_create"
     description: str | None = (
-        "Create a new Google Docs document with the specified title and content. "
+        "Create a new Google Docs document with specified title and content. "
         "Returns document ID and URL for accessing the created document."
     )
     integration: Annotated[str, Integration("google_docs")] | None = None
+    api_key: SecretStr | None = None
     base_url: str = "https://docs.googleapis.com/v1"
-
-    @model_validator(mode="after")
-    def _resolve_credentials(self) -> "GoogleDocsCreate":
-        if self.integration is None:
-            raise ValueError(
-                "Google Docs integration not found. Please configure the google_docs integration."
-            )
-        return self
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
@@ -31,6 +40,7 @@ class GoogleDocsCreate(Tool):
             **self._annotate_config(
                 {
                     "integration": self.integration,
+                    "api_key": self.api_key,
                     "base_url": self.base_url,
                 }
             ),
@@ -38,14 +48,12 @@ class GoogleDocsCreate(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_document(
-            title: str,
-            content: str | None = None,
-            folder_id: str | None = None,
+            title: str = Field(..., description="Title of the document to create"),
+            content: str | None = Field(None, description="Content of the document to create"),
+            folder_id: str | None = Field(None, description="ID of the folder to create the document in (optional)"),
         ) -> dict:
-            if self.integration:
-                assert isinstance(self.integration, Integration)
-                credential = await self.integration.resolve()
-                token = credential.token
+            api_key = await _resolve_api_key(self)
+            import httpx
 
             document_body = {"title": title}
             
@@ -56,7 +64,7 @@ class GoogleDocsCreate(Tool):
                 response = await client.post(
                     f"{self.base_url}/documents",
                     headers={
-                        "Authorization": f"Bearer {token}",
+                        "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json"
                     },
                     json=document_body,
@@ -83,7 +91,7 @@ class GoogleDocsCreate(Tool):
                     response = await client.post(
                         f"{self.base_url}/documents/{document_id}:batchUpdate",
                         headers={
-                            "Authorization": f"Bearer {token}",
+                            "Authorization": f"Bearer {api_key}",
                             "Content-Type": "application/json"
                         },
                         json=insert_request,
