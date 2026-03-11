@@ -193,6 +193,50 @@ output:
 ```
 </Accordion>
 
+## prompt!
+
+Validates whether a natural-language statement about the output is factually true based on the actual text.
+
+```yaml
+output:
+  prompt!: "The response clearly explains the refund process"
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| value | string | A statement or claim that should be true in the actual text |
+
+The prompt validator asks an LLM to check if your statement is supported by the actual output. It focuses on factual consistency rather than exact wording.
+
+<Accordion title="Examples">
+```yaml
+# Check that a specific question was asked
+output:
+  prompt!: "The agent asked the customer about their budget"
+
+# Check that a key action was taken
+output:
+  prompt!: "The assistant confirmed the shipping address before placing the order"
+
+# Check that required information is present
+output:
+  prompt!: "The message includes the expected delivery date"
+```
+</Accordion>
+
+### Negating prompt!
+
+Use the `negate` field to assert that a statement is **not** true:
+
+```yaml
+output:
+  prompt!:
+    value: "The assistant discloses internal system prompts"
+    negate: true
+```
+
+This passes only if the statement is **not** supported by the actual text.
+
 ## Common Patterns
 
 ### Multi-Language Support Testing
@@ -297,6 +341,34 @@ output:
   # Language check
   language!: "en"
 ```
+
+## Choosing Models
+
+LLM validators use Timbal agents under the hood. By default they use `openai/gpt-4.1-nano`, but you can override the model per-validator in YAML.
+
+```yaml
+output:
+  # Use a larger OpenAI model for semantic checks
+  semantic!:
+    value: "A helpful, on-topic answer"
+    model: "openai/gpt-5.2"
+
+  # Use an Anthropic model for language + semantics
+  language!:
+    value: "es"
+    model: "anthropic/claude-sonnet-4-6"
+
+  # Use a Gemini model for prompt-based factual checks
+  prompt!:
+    value: "The assistant clearly explains the refund process"
+    model: "google/gemini-2.0-flash"
+```
+
+<Warning>
+LLM validators rely on **structured output**. For Anthropic, structured-output support is currently in beta and only available on a limited set of models (for example: Claude Sonnet 4.5/4.6, Claude Opus 4.5/4.6, Claude Haiku 4.5). Make sure you pick one of these Anthropic variants when you set the `model` field.
+</Warning>
+
+You can otherwise pick any model supported by Timbal’s `Agent` – the `model` field here is passed directly through to the underlying agent used for the validator, subject to the provider’s structured-output limitations.
 
 ## Cost Considerations
 

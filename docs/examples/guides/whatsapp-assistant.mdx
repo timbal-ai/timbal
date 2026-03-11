@@ -1,6 +1,6 @@
 ---
-title: "Sales Agent"
-description: "WhatsApp dealership agent that qualifies leads and books appointments automatically"
+title: "WhatsApp Assistant"
+description: "Build a WhatsApp assistant with webhooks, conversation persistence (Knowledge Base or JSONL), and support for text, audio, images, and documents"
 ---
 
 This guide shows how to create a WhatsApp assistant with Timbal that can:
@@ -326,11 +326,11 @@ async def fetch_recent_history_from_kb(user_phone: str, limit: int = 10) -> list
 
 Keep the `pre_hook` minimal: extract the message type, create a concise prompt, and persist the event.
 
-## Complete implementation reference
+## Complete implementation
 
 For a full, end-to-end reference (webhook app, helpers, and utilities), see the official WhatsApp examples in the Timbal repository:
 
-- [timbal/examples/whatsapp](https://github.com/timbal-ai/timbal/tree/e978458d75b6f6632d624977d9b07cf4e2f4b4fd/examples/whatsapp)
+- [timbal/examples/whatsapp](https://github.com/timbal-ai/timbal/tree/main/examples/whatsapp)
 
 ## Possible Improvements
 

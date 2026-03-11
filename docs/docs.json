@@ -93,16 +93,18 @@
       {
         "tab": "Examples",
         "pages": [
-          "examples/index",
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/index"
+            ]
+          },
           {
             "group": "Guides",
             "pages": [
               "examples/guides/mail-assistant",
-              "examples/guides/tech-support",
-              "examples/guides/sales-agent",
-              "examples/guides/customer-support",
-              "examples/guides/ai-engineer",
-              "examples/guides/data-scientist"
+              "examples/guides/slack-bot",
+              "examples/guides/whatsapp-assistant"
             ]
           },
           {
@@ -237,17 +239,22 @@
       {
         "tab": "MCP Integration",
         "pages": [
-          "mcp-integration/index",
+          {
+            "group": "MCP Integration",
+            "pages": [
+              "mcp-integration/index"
+            ]
+          },
           {
             "group": "Connecting Timbal",
             "pages": [
-                "mcp-integration/cursor",
-                "mcp-integration/vscode",
-                "mcp-integration/windsurf",
-                "mcp-integration/zed"
-              ]
-            }
-          ]
+              "mcp-integration/cursor",
+              "mcp-integration/vscode",
+              "mcp-integration/windsurf",
+              "mcp-integration/zed"
+            ]
+          }
+        ]
       }
     ]
   },
