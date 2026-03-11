@@ -3,6 +3,8 @@ import importlib
 import inspect
 import io
 import re
+import typing
+from typing import Annotated
 
 
 def _camel_to_snake(name: str) -> str:
@@ -14,12 +16,16 @@ def _camel_to_snake(name: str) -> str:
 class FrameworkTool:
     """Metadata for a framework tool discovered from timbal.tools."""
 
-    __slots__ = ("module", "name", "description")
+    __slots__ = ("module", "name", "description", "provider", "provider_logo")
 
-    def __init__(self, module: str, name: str, description: str | None):
+    def __init__(
+        self, module: str, name: str, description: str | None, provider: str | None, provider_logo: str | None
+    ):
         self.module = module
         self.name = name
         self.description = description
+        self.provider = provider
+        self.provider_logo = provider_logo
 
 
 def get_framework_tools() -> dict[str, FrameworkTool]:
@@ -47,7 +53,32 @@ def get_framework_tools() -> dict[str, FrameworkTool]:
                 runtime_name = _camel_to_snake(cls_name)
             desc_field = cls.model_fields.get("description")
             description = desc_field.default if desc_field and desc_field.default is not PydanticUndefined else None
-            registry[cls_name] = FrameworkTool(module="timbal.tools", name=runtime_name, description=description)
+            provider = None
+            provider_logo = None
+            integration_field = cls.model_fields.get("integration")
+            if integration_field and integration_field.annotation is not None:
+                from timbal.platform.integrations import Integration as _Integration
+
+                # The annotation may be Union[Annotated[str, Integration(...)], None],
+                # so unwrap union args and check each for Annotated metadata.
+                union_args = typing.get_args(integration_field.annotation)
+                candidates = union_args if union_args else [integration_field.annotation]
+                for candidate in candidates:
+                    if typing.get_origin(candidate) is Annotated:
+                        for meta in typing.get_args(candidate)[1:]:
+                            if isinstance(meta, _Integration):
+                                provider = meta.provider
+                                provider_logo = f"https://content.timbal.ai/assets/{provider}_favicon.svg"
+                                break
+                    if provider:
+                        break
+            registry[cls_name] = FrameworkTool(
+                module="timbal.tools",
+                name=runtime_name,
+                description=description,
+                provider=provider,
+                provider_logo=provider_logo,
+            )
 
     return registry
 

@@ -56,7 +56,14 @@ def main() -> None:
         from timbal.codegen.tool_discovery import get_framework_tools
 
         tools = [
-            {"type": cls, "module": ft.module, "name": ft.name, "description": ft.description}
+            {
+                "type": cls,
+                "module": ft.module,
+                "name": ft.name,
+                "description": ft.description,
+                "provider": ft.provider,
+                "provider_logo": ft.provider_logo,
+            }
             for cls, ft in sorted(get_framework_tools().items())
         ]
         tools = {"tools": tools}
