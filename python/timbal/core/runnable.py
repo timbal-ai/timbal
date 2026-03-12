@@ -48,18 +48,23 @@ from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import dump, sync_to_async_gen
 
+
 def _get_logger():
     import structlog
+
     return structlog.get_logger("timbal.core.runnable")
 
 
 def _timbal_collector_wrap(fn):
     """Lazy wrapper for @TimbalCollector.wrap — avoids importing the collector at module load."""
     from functools import wraps
+
     @wraps(fn)
     def wrapper(self, **kwargs):
         from ..collectors.impl.timbal import TimbalCollector
+
         return TimbalCollector(async_gen=fn(self, **kwargs))
+
     return wrapper
 
 
@@ -342,6 +347,8 @@ class Runnable(ABC, BaseModel):
         import typing
         from typing import Annotated
 
+        from ..platform.integrations import Integration
+
         required = required or set()
         model_fields = self.__class__.model_fields
 
@@ -376,8 +383,10 @@ class Runnable(ABC, BaseModel):
                     field_schema.pop("default", None)
                     field_schema.update(non_null[0])
 
-
-            field_schema["value"] = value
+            if isinstance(value, Integration):
+                field_schema["value"] = str(value)
+            else:
+                field_schema["value"] = value
             result[key] = field_schema
         return result
 
