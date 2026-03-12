@@ -75,7 +75,6 @@ def main() -> None:
 
         try:
             flow = get_flow(workspace_path)
-            print("flow", flow)
         except (FileNotFoundError, ValueError) as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(1)
