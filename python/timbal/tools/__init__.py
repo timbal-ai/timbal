@@ -36,6 +36,13 @@ if TYPE_CHECKING:
         PineconeUpsertVectors,
     )
     from .read import Read
+    from .scraperapi import (
+        ScraperAPIAmazonProduct,
+        ScraperAPIAmazonSearch,
+        ScraperAPIAsyncScrape,
+        ScraperAPIGoogleSearch,
+        ScraperAPIScrape,
+    )
     from .tavily import TavilyCrawl, TavilyExtract, TavilyMap, TavilySearch
     from .web_search import WebSearch
     from .write import Write
@@ -75,6 +82,11 @@ __all__ = [
     "PineconeQuery",
     "PineconeUpsertVectors",
     "Read",
+    "ScraperAPIAmazonProduct",
+    "ScraperAPIAmazonSearch",
+    "ScraperAPIAsyncScrape",
+    "ScraperAPIGoogleSearch",
+    "ScraperAPIScrape",
     "TavilyCrawl",
     "TavilyExtract",
     "TavilyMap",
@@ -118,6 +130,11 @@ _LAZY_IMPORTS = {
     "PineconeQuery": ".pinecone",
     "PineconeUpsertVectors": ".pinecone",
     "Read": ".read",
+    "ScraperAPIAmazonProduct": ".scraperapi",
+    "ScraperAPIAmazonSearch": ".scraperapi",
+    "ScraperAPIAsyncScrape": ".scraperapi",
+    "ScraperAPIGoogleSearch": ".scraperapi",
+    "ScraperAPIScrape": ".scraperapi",
     "TavilyCrawl": ".tavily",
     "TavilyExtract": ".tavily",
     "TavilyMap": ".tavily",
