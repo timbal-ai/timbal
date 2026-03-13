@@ -160,7 +160,7 @@ def print_failure_details(result: EvalResult) -> None:
     name = result.eval.name
 
     console.print()
-    console.rule(f"[red]FAILED[/red] {path}::{name}", style="red")
+    console.print(f"[red]FAILED[/red] {path}::{name}", style="red")
 
     if result.captured_stdout:
         console.print(
