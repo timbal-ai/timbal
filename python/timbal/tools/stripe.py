@@ -304,31 +304,31 @@ class SendRefund(Tool):
 class UpdateCustomer(Tool):
     name: str = "stripe_update_customer"
     description: str | None = "Update an existing Stripe customer's details."
-    integration: Annotated[str, Integration("stripe")]
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _update_customer(
-            customer_id: str,
-            email: str | None = None,
-            name: str | None = None,
-            phone: str | None = None,
-            description: str | None = None,
-            metadata: dict[str, str] | None = None,
+            customer_id: str = Field(..., description="Stripe customer ID to update (e.g. 'cus_xxx')."),
+            email: str | None = Field(None, description="Updated customer email address"),
+            name: str | None = Field(None, description="Updated customer full name"),
+            phone: str | None = Field(None, description="Updated customer phone number"),
+            description: str | None = Field(None, description="Updated customer description or notes"),
+            metadata: dict[str, str] | None = Field(
+                None, description="Key-value pairs to attach to the customer object (max 50 keys)"
+            ),
         ) -> Any:
-            """
-            customer_id: Stripe customer ID (e.g. "cus_xxx").
-            metadata: key-value pairs to attach to the customer object.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
 
             data: dict[str, Any] = {}
             if email:
@@ -343,10 +343,12 @@ class UpdateCustomer(Tool):
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_STRIPE_API_BASE}/customers/{customer_id}",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     data=data,
                 )
                 response.raise_for_status()
@@ -361,28 +363,31 @@ class UpdateCustomer(Tool):
 class RetrieveCustomer(Tool):
     name: str = "stripe_retrieve_customer"
     description: str | None = "Retrieve the details of an existing Stripe customer."
-    integration: Annotated[str, Integration("stripe")]
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _retrieve_customer(customer_id: str) -> Any:
-            """
-            customer_id: Stripe customer ID (e.g. "cus_xxx").
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _retrieve_customer(
+            customer_id: str = Field(..., description="Stripe customer ID to retrieve (e.g. 'cus_xxx')."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_STRIPE_API_BASE}/customers/{customer_id}",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -396,32 +401,37 @@ class RetrieveCustomer(Tool):
 class ListCustomers(Tool):
     name: str = "stripe_list_customers"
     description: str | None = "List or find Stripe customers."
-    integration: Annotated[str, Integration("stripe")]
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_customers(
-            limit: int = 10,
-            email: str | None = None,
-            starting_after: str | None = None,
-            ending_before: str | None = None,
-            created_gte: int | None = None,
-            created_lte: int | None = None,
+            limit: int = Field(10, description="Maximum number of customers to return"),
+            email: str | None = Field(None, description="Filter customers by exact email address"),
+            starting_after: str | None = Field(
+                None, description="Customer ID cursor for pagination (return results after this customer)."
+            ),
+            ending_before: str | None = Field(
+                None, description="Customer ID cursor for pagination (return results before this customer)."
+            ),
+            created_gte: int | None = Field(
+                None, description="Unix timestamp to filter customers created after this time"
+            ),
+            created_lte: int | None = Field(
+                None, description="Unix timestamp to filter customers created before this time"
+            ),
         ) -> Any:
-            """
-            email: filter customers by exact email address.
-            starting_after / ending_before: customer ID cursors for pagination.
-            created_gte / created_lte: Unix timestamps to filter by creation date.
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+            api_key = await _resolve_api_key(self)
 
             params: dict[str, Any] = {"limit": limit}
             if email:
@@ -435,10 +445,12 @@ class ListCustomers(Tool):
             if created_lte:
                 params["created[lte]"] = created_lte
 
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_STRIPE_API_BASE}/customers",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                     params=params,
                 )
                 response.raise_for_status()
@@ -549,28 +561,33 @@ class UpdatePaymentIntent(Tool):
 class RetrievePaymentIntent(Tool):
     name: str = "stripe_retrieve_payment_intent"
     description: str | None = "Retrieve the details of a previously created Stripe payment intent."
-    integration: Annotated[str, Integration("stripe")]
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            "integration": {"type": "string", "value": self.integration},
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _retrieve_payment_intent(payment_intent_id: str) -> Any:
-            """
-            payment_intent_id: Stripe PaymentIntent ID (e.g. "pi_xxx").
-            """
-            assert isinstance(self.integration, Integration)
-            credential = await self.integration.resolve()
-            token = credential.token
+        async def _retrieve_payment_intent(
+            payment_intent_id: str = Field(
+                ..., description="Stripe PaymentIntent ID to retrieve (e.g. 'pi_xxx')."
+            ),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_STRIPE_API_BASE}/payment_intents/{payment_intent_id}",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -1758,6 +1775,56 @@ class RetrieveProduct(Tool):
         metadata["type"] = "Stripe/RetrieveProduct"
 
         super().__init__(handler=_retrieve_product, metadata=metadata, **kwargs)
+
+
+class ListProducts(Tool):
+    name: str = "stripe_list_products"
+    description: str | None = "List Stripe products with optional filtering."
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key},
+                required={"integration"},
+            ),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_products(
+            limit: int = Field(10, description="Maximum number of products to return (max 100)."),
+            active: bool | None = Field(None, description="Filter by active status. True returns only active products, false only inactive."),
+            starting_after: str | None = Field(None, description="Product ID cursor for pagination (return results after this product)."),
+            ending_before: str | None = Field(None, description="Product ID cursor for pagination (return results before this product)."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+
+            params: dict[str, Any] = {"limit": limit}
+            if active is not None:
+                params["active"] = str(active).lower()
+            if starting_after:
+                params["starting_after"] = starting_after
+            if ending_before:
+                params["ending_before"] = ending_before
+
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_STRIPE_API_BASE}/products",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    params=params,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        metadata = kwargs.pop("metadata", {})
+        metadata["type"] = "Stripe/ListProducts"
+
+        super().__init__(handler=_list_products, metadata=metadata, **kwargs)
 
 
 class CreatePrice(Tool):
