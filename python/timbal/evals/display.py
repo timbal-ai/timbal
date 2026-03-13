@@ -198,8 +198,8 @@ def print_failure_details(result: EvalResult) -> None:
             else:
                 content = "Validation failed"
             
-            # For semantic validators, show the full output at the beginning
-            if vr.name == "semantic!" and vr.actual_value is not None:
+            # For semantic and prompt validators, show the full output at the beginning
+            if vr.name in ("semantic!", "prompt!") and vr.actual_value is not None:
                 content = f"[dim]Output:[/dim]\n{vr.actual_value}\n\n{content}"
             
             console.print(
