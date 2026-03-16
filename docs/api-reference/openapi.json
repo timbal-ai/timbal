@@ -3,16 +3,10 @@
   "info": {
     "title": "Timbal Platform API",
     "description": "Public API documentation for the Timbal platform",
-    "license": {
-      "name": ""
-    },
+    "license": { "name": "" },
     "version": "1.3.0"
   },
-  "servers": [
-    {
-      "url": "https://api.timbal.ai"
-    }
-  ],
+  "servers": [{ "url": "https://api.timbal.ai" }],
   "paths": {
     "/me/orgs": {
       "get": {
@@ -25,18 +19,14 @@
             "in": "query",
             "description": "Optional search query to filter orgs by name",
             "required": false,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "page_token",
             "in": "query",
             "description": "Page token",
             "required": false,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -44,18 +34,12 @@
             "description": "Organizations listed successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListOrgsResult"
-                }
+                "schema": { "$ref": "#/components/schemas/ListOrgsResult" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}": {
@@ -68,9 +52,7 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -78,18 +60,12 @@
             "description": "Organization details",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GetOrgResBody"
-                }
+                "schema": { "$ref": "#/components/schemas/GetOrgResBody" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "patch": {
         "tags": ["orgs"],
@@ -100,31 +76,21 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EditOrgReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/EditOrgReqBody" }
             }
           },
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "Organization updated successfully"
-          }
+          "204": { "description": "Organization updated successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/apps/{app_id}/runs": {
@@ -137,77 +103,55 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "app_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "user_id",
             "in": "query",
             "description": "Filter runs by user ID",
             "required": false,
-            "schema": {
-              "type": ["integer", "null"],
-              "format": "int64"
-            }
+            "schema": { "type": ["integer", "null"], "format": "int64" }
           },
           {
             "name": "version_id",
             "in": "query",
             "description": "Filter runs by version ID",
             "required": false,
-            "schema": {
-              "type": ["integer", "null"],
-              "format": "int64"
-            }
+            "schema": { "type": ["integer", "null"], "format": "int64" }
           },
           {
             "name": "status",
             "in": "query",
             "description": "Filter runs by status",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           },
           {
             "name": "sentiment",
             "in": "query",
             "description": "Filter runs by sentiment",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           },
           {
             "name": "group_id",
             "in": "query",
             "description": "Filter runs by group ID",
             "required": false,
-            "schema": {
-              "type": ["integer", "null"],
-              "format": "int64"
-            }
+            "schema": { "type": ["integer", "null"], "format": "int64" }
           },
           {
             "name": "from",
             "in": "query",
             "description": "Filter runs by start time (epoch timestamp in milliseconds)",
             "required": false,
-            "schema": {
-              "type": ["integer", "null"],
-              "format": "int64"
-            },
+            "schema": { "type": ["integer", "null"], "format": "int64" },
             "example": 1729540800000
           },
           {
@@ -215,10 +159,7 @@
             "in": "query",
             "description": "Filter runs by end time (epoch timestamp in milliseconds)",
             "required": false,
-            "schema": {
-              "type": ["integer", "null"],
-              "format": "int64"
-            },
+            "schema": { "type": ["integer", "null"], "format": "int64" },
             "example": 1729627200000
           },
           {
@@ -226,19 +167,14 @@
             "in": "query",
             "description": "Filter runs by metadata",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           },
           {
             "name": "page_token",
             "in": "query",
             "description": "Page token",
             "required": false,
-            "schema": {
-              "type": ["integer", "null"],
-              "format": "int64"
-            }
+            "schema": { "type": ["integer", "null"], "format": "int64" }
           }
         ],
         "responses": {
@@ -246,18 +182,12 @@
             "description": "Runs listed successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListRunsResBody"
-                }
+                "schema": { "$ref": "#/components/schemas/ListRunsResBody" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/apps/{app_id}/runs/{run_id}": {
@@ -270,36 +200,26 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "app_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "run_id",
             "in": "path",
             "description": "This can be a platform-defined id or a custom id.\nThe platform will map the custom id to an internal one afterwards.",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateRunReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/UpdateRunReqBody" }
             }
           },
           "required": true
@@ -309,18 +229,12 @@
             "description": "Run updated successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RunPreview"
-                }
+                "schema": { "$ref": "#/components/schemas/RunPreview" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/domains": {
@@ -333,9 +247,7 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -343,18 +255,12 @@
             "description": "Domains listed successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListDomainsResBody"
-                }
+                "schema": { "$ref": "#/components/schemas/ListDomainsResBody" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "post": {
         "tags": ["orgs"],
@@ -365,31 +271,21 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateDomainReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/CreateDomainReqBody" }
             }
           },
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "Domain created successfully"
-          }
+          "204": { "description": "Domain created successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/domains/{domain_id}": {
@@ -402,17 +298,13 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "domain_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -420,18 +312,12 @@
             "description": "Domain details",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Domain"
-                }
+                "schema": { "$ref": "#/components/schemas/Domain" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "delete": {
         "tags": ["orgs"],
@@ -442,29 +328,19 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "domain_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
-          "204": {
-            "description": "Domain deleted successfully"
-          }
+          "204": { "description": "Domain deleted successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/embedding-models": {
@@ -477,10 +353,7 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           }
         ],
         "responses": {
@@ -502,11 +375,7 @@
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/files": {
@@ -519,9 +388,7 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
@@ -551,18 +418,12 @@
             "description": "File uploaded successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/File"
-                }
+                "schema": { "$ref": "#/components/schemas/File" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/embeddings": {
@@ -575,27 +436,19 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "table_name",
             "in": "query",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           }
         ],
         "responses": {
@@ -610,11 +463,7 @@
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "post": {
         "tags": ["embeddings"],
@@ -625,19 +474,13 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           }
         ],
         "requestBody": {
@@ -651,15 +494,9 @@
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "Embedding created successfully"
-          }
+          "204": { "description": "Embedding created successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/embeddings/{embedding_name}": {
@@ -672,39 +509,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "embedding_name",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
-          "204": {
-            "description": "Embedding deleted successfully"
-          }
+          "204": { "description": "Embedding deleted successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/indexes": {
@@ -717,28 +540,20 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "table_name",
             "in": "query",
             "description": "Table name to filter indexes by",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           }
         ],
         "responses": {
@@ -746,18 +561,12 @@
             "description": "Array of indexes",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListIndexesResBody"
-                }
+                "schema": { "$ref": "#/components/schemas/ListIndexesResBody" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "post": {
         "tags": ["indexes"],
@@ -768,41 +577,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateIndexReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/CreateIndexReqBody" }
             }
           },
           "required": true
         },
-        "responses": {
-          "204": {
-            "description": "Index created successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "responses": { "204": { "description": "Index created successfully" } },
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/indexes/{index_name}": {
@@ -815,39 +608,23 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "index_name",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
-        "responses": {
-          "204": {
-            "description": "Index deleted successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "responses": { "204": { "description": "Index deleted successfully" } },
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/csv": {
@@ -860,44 +637,24 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "table_name",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/csv": {}
-          }
-        },
-        "responses": {
-          "204": {
-            "description": "Rows inserted successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "requestBody": { "content": { "application/csv": {} } },
+        "responses": { "204": { "description": "Rows inserted successfully" } },
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/records": {
@@ -910,49 +667,33 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "table_name",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpsertRecordsReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/UpsertRecordsReqBody" }
             }
           },
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "Records upserted successfully"
-          }
+          "204": { "description": "Records upserted successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search": {
@@ -965,35 +706,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "schema": { "type": "integer", "format": "int64" }
           },
           {
             "name": "table_name",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SearchTableReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/SearchTableReqBody" }
             }
           },
           "required": true
@@ -1003,36 +734,21 @@
             "description": "Array of records matching the search query. Structure depends on the table schema and selected columns.",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {}
-                },
+                "schema": { "type": "array", "items": {} },
                 "example": [
                   {
                     "id": 1,
                     "name": "Alice Johnson",
                     "email": "alice@example.com"
                   },
-                  {
-                    "id": 2,
-                    "name": null,
-                    "email": "bob@example.com"
-                  },
-                  {
-                    "id": 3,
-                    "name": "Carol",
-                    "email": "carol@example.com"
-                  }
+                  { "id": 2, "name": null, "email": "bob@example.com" },
+                  { "id": 3, "name": "Carol", "email": "carol@example.com" }
                 ]
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects": {
@@ -1045,9 +761,7 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -1055,18 +769,12 @@
             "description": "Projects listed successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListProjectsResBody"
-                }
+                "schema": { "$ref": "#/components/schemas/ListProjectsResBody" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "post": {
         "tags": ["projects"],
@@ -1077,17 +785,13 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateProjectReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/CreateProjectReqBody" }
             }
           },
           "required": true
@@ -1104,11 +808,7 @@
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}": {
@@ -1121,17 +821,13 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -1139,18 +835,12 @@
             "description": "Project details",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProjectDetail"
-                }
+                "schema": { "$ref": "#/components/schemas/ProjectDetail" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "delete": {
         "tags": ["projects"],
@@ -1161,29 +851,19 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
-          "204": {
-            "description": "Project deleted successfully"
-          }
+          "204": { "description": "Project deleted successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "patch": {
         "tags": ["projects"],
@@ -1194,39 +874,27 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EditProjectReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/EditProjectReqBody" }
             }
           },
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "Project updated successfully"
-          }
+          "204": { "description": "Project updated successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/connections": {
@@ -1239,17 +907,13 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -1264,11 +928,7 @@
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "post": {
         "tags": ["projects"],
@@ -1279,39 +939,27 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConnectToProject"
-              }
+              "schema": { "$ref": "#/components/schemas/ConnectToProject" }
             }
           },
           "required": true
         },
         "responses": {
-          "201": {
-            "description": "Connection created successfully"
-          }
+          "201": { "description": "Connection created successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/connections/{connection_id}": {
@@ -1324,37 +972,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "connection_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
-          "204": {
-            "description": "Connection deleted successfully"
-          }
+          "204": { "description": "Connection deleted successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/deployments": {
@@ -1367,41 +1003,31 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_env_id",
             "in": "query",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           },
           {
             "name": "manifest_id",
             "in": "query",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           },
           {
             "name": "status",
             "in": "query",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           }
         ],
         "responses": {
@@ -1416,11 +1042,7 @@
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/deployments/{deployment_id}": {
@@ -1433,25 +1055,19 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "deployment_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -1459,18 +1075,12 @@
             "description": "Deployment details",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Deployment"
-                }
+                "schema": { "$ref": "#/components/schemas/Deployment" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs": {
@@ -1483,17 +1093,13 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -1501,18 +1107,12 @@
             "description": "Environments listed successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListEnvsResBody"
-                }
+                "schema": { "$ref": "#/components/schemas/ListEnvsResBody" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "post": {
         "tags": ["projects"],
@@ -1523,39 +1123,27 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateEnvReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/CreateEnvReqBody" }
             }
           },
           "required": true
         },
         "responses": {
-          "201": {
-            "description": "Environment created successfully"
-          }
+          "201": { "description": "Environment created successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}": {
@@ -1568,37 +1156,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
-          "204": {
-            "description": "Environment deleted successfully"
-          }
+          "204": { "description": "Environment deleted successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/branch": {
@@ -1611,47 +1187,33 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SetEnvBranchReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/SetEnvBranchReqBody" }
             }
           },
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Branch updated successfully"
-          }
+          "200": { "description": "Branch updated successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/config": {
@@ -1664,25 +1226,19 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
@@ -1696,15 +1252,9 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Configuration updated successfully"
-          }
+          "200": { "description": "Configuration updated successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/deploy": {
@@ -1717,47 +1267,31 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DeployEnvReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/DeployEnvReqBody" }
             }
           },
           "required": true
         },
-        "responses": {
-          "202": {
-            "description": "Deployment initiated"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "responses": { "202": { "description": "Deployment initiated" } },
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/domain": {
@@ -1770,47 +1304,33 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SetEnvDomainReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/SetEnvDomainReqBody" }
             }
           },
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Domain updated successfully"
-          }
+          "200": { "description": "Domain updated successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/metrics/{metric_type}": {
@@ -1823,63 +1343,41 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "metric_type",
             "in": "path",
             "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/MetricType"
-            }
+            "schema": { "$ref": "#/components/schemas/MetricType" }
           },
           {
             "name": "start_time",
             "in": "query",
             "required": false,
-            "schema": {
-              "type": ["integer", "null"],
-              "format": "int64"
-            }
+            "schema": { "type": ["integer", "null"], "format": "int64" }
           },
           {
             "name": "end_time",
             "in": "query",
             "required": false,
-            "schema": {
-              "type": ["integer", "null"],
-              "format": "int64"
-            }
+            "schema": { "type": ["integer", "null"], "format": "int64" }
           }
         ],
-        "responses": {
-          "200": {
-            "description": "Metrics data"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "responses": { "200": { "description": "Metrics data" } },
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/stop": {
@@ -1892,37 +1390,23 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
-        "responses": {
-          "202": {
-            "description": "Stop initiated"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "responses": { "202": { "description": "Stop initiated" } },
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/users": {
@@ -1935,17 +1419,13 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -1960,11 +1440,7 @@
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "post": {
         "tags": ["projects"],
@@ -1975,39 +1451,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AddProjectUserReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/AddProjectUserReqBody" }
             }
           },
           "required": true
         },
-        "responses": {
-          "204": {
-            "description": "User added successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "responses": { "204": { "description": "User added successfully" } },
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/users/{user_id}": {
@@ -2020,37 +1482,23 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "user_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
-        "responses": {
-          "204": {
-            "description": "User removed successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "responses": { "204": { "description": "User removed successfully" } },
+        "security": [{ "bearer_auth": [] }]
       },
       "patch": {
         "tags": ["projects"],
@@ -2061,25 +1509,19 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "user_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
@@ -2093,15 +1535,9 @@
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "User role updated successfully"
-          }
+          "204": { "description": "User role updated successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/vars": {
@@ -2114,26 +1550,20 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "env_ids",
             "in": "query",
             "description": "Comma-separated list of environment IDs to filter by",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           }
         ],
         "responses": {
@@ -2141,18 +1571,12 @@
             "description": "Variables listed successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListVarsResBody"
-                }
+                "schema": { "$ref": "#/components/schemas/ListVarsResBody" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "post": {
         "tags": ["projects"],
@@ -2163,39 +1587,27 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateVarReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/CreateVarReqBody" }
             }
           },
           "required": true
         },
         "responses": {
-          "201": {
-            "description": "Variable created successfully"
-          }
+          "201": { "description": "Variable created successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/vars/batch": {
@@ -2208,17 +1620,13 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
@@ -2232,15 +1640,9 @@
           "required": true
         },
         "responses": {
-          "201": {
-            "description": "Variables created successfully"
-          }
+          "201": { "description": "Variables created successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/vars/{var_id}": {
@@ -2253,25 +1655,19 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "var_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -2279,18 +1675,12 @@
             "description": "Variable details",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Var"
-                }
+                "schema": { "$ref": "#/components/schemas/Var" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "delete": {
         "tags": ["projects"],
@@ -2301,37 +1691,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "var_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
-          "204": {
-            "description": "Variable deleted successfully"
-          }
+          "204": { "description": "Variable deleted successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "patch": {
         "tags": ["projects"],
@@ -2342,47 +1720,33 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "var_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateVarReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/UpdateVarReqBody" }
             }
           },
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "Variable updated successfully"
-          }
+          "204": { "description": "Variable updated successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     },
     "/orgs/{org_id}/users": {
@@ -2395,27 +1759,21 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           },
           {
             "name": "q",
             "in": "query",
             "description": "Optional search query to filter users by name",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           },
           {
             "name": "page_token",
             "in": "query",
             "description": "Page token for pagination",
             "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
+            "schema": { "type": ["string", "null"] }
           }
         ],
         "responses": {
@@ -2423,18 +1781,12 @@
             "description": "Users listed successfully",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListOrgUsersResBody"
-                }
+                "schema": { "$ref": "#/components/schemas/ListOrgUsersResBody" }
               }
             }
           }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       },
       "post": {
         "tags": ["orgs"],
@@ -2445,31 +1797,19 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/InviteOrgUserReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/InviteOrgUserReqBody" }
             }
           },
           "required": true
         },
-        "responses": {
-          "204": {
-            "description": "User invited successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "responses": { "204": { "description": "User invited successfully" } },
+        "security": [{ "bearer_auth": [] }]
       },
       "delete": {
         "tags": ["orgs"],
@@ -2480,31 +1820,19 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RemoveOrgUserReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/RemoveOrgUserReqBody" }
             }
           },
           "required": true
         },
-        "responses": {
-          "204": {
-            "description": "User removed successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "responses": { "204": { "description": "User removed successfully" } },
+        "security": [{ "bearer_auth": [] }]
       },
       "patch": {
         "tags": ["orgs"],
@@ -2515,31 +1843,21 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EditOrgUserReqBody"
-              }
+              "schema": { "$ref": "#/components/schemas/EditOrgUserReqBody" }
             }
           },
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "User role updated successfully"
-          }
+          "204": { "description": "User role updated successfully" }
         },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        "security": [{ "bearer_auth": [] }]
       }
     }
   },
@@ -2548,33 +1866,20 @@
       "AddProjectUserReqBody": {
         "type": "object",
         "required": ["user_id"],
-        "properties": {
-          "user_id": {
-            "type": "integer",
-            "format": "int64"
-          }
-        }
+        "properties": { "user_id": { "type": "integer", "format": "int64" } }
       },
-      "AppType": {
-        "type": "string",
-        "enum": ["agent", "workflow"]
-      },
+      "AppType": { "type": "string", "enum": ["agent", "workflow"] },
       "BatchCreateVarsReqBody": {
         "type": "object",
         "required": ["vars"],
         "properties": {
           "env_ids": {
             "type": ["array", "null"],
-            "items": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "items": { "type": "integer", "format": "int64" }
           },
           "vars": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/VarInput"
-            }
+            "items": { "$ref": "#/components/schemas/VarInput" }
           }
         }
       },
@@ -2584,28 +1889,16 @@
             "type": "object",
             "required": ["id", "type"],
             "properties": {
-              "id": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "type": {
-                "type": "string",
-                "enum": ["kb"]
-              }
+              "id": { "type": "integer", "format": "int64" },
+              "type": { "type": "string", "enum": ["kb"] }
             }
           },
           {
             "type": "object",
             "required": ["id", "type"],
             "properties": {
-              "id": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "type": {
-                "type": "string",
-                "enum": ["integration"]
-              }
+              "id": { "type": "integer", "format": "int64" },
+              "type": { "type": "string", "enum": ["integration"] }
             }
           }
         ]
@@ -2639,10 +1932,7 @@
             "$ref": "#/components/schemas/EmbeddingModel",
             "description": "Embedding model to use. See the list embedding models endpoint for available options."
           },
-          "name": {
-            "type": "string",
-            "description": "Name of the embedding"
-          },
+          "name": { "type": "string", "description": "Name of the embedding" },
           "table_name": {
             "type": "string",
             "description": "Name of the source table"
@@ -2657,15 +1947,9 @@
         "type": "object",
         "required": ["name", "color"],
         "properties": {
-          "color": {
-            "type": "string"
-          },
-          "description": {
-            "type": ["string", "null"]
-          },
-          "name": {
-            "type": "string"
-          }
+          "color": { "type": "string" },
+          "description": { "type": ["string", "null"] },
+          "name": { "type": "string" }
         }
       },
       "CreateIndexReqBody": {
@@ -2674,9 +1958,7 @@
         "properties": {
           "column_names": {
             "type": "array",
-            "items": {
-              "type": "string"
-            },
+            "items": { "type": "string" },
             "description": "List of column names to index. At least one column is required. Multiple columns will create a composite index"
           },
           "is_unique": {
@@ -2687,10 +1969,7 @@
             "type": "string",
             "description": "Index name. This must be unique in the entire Knowledge Base"
           },
-          "table_name": {
-            "type": "string",
-            "description": "Table name"
-          },
+          "table_name": { "type": "string", "description": "Table name" },
           "type": {
             "$ref": "#/components/schemas/IndexType",
             "description": "Index type"
@@ -2701,59 +1980,35 @@
         "type": "object",
         "required": ["origin"],
         "properties": {
-          "name": {
-            "type": ["string", "null"]
-          },
-          "origin": {
-            "$ref": "#/components/schemas/ProjectOrigin"
-          }
+          "name": { "type": ["string", "null"] },
+          "origin": { "$ref": "#/components/schemas/ProjectOrigin" }
         }
       },
       "CreateProjectResBody": {
         "type": "object",
         "required": ["id", "name"],
         "properties": {
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "name": {
-            "type": "string"
-          }
+          "id": { "type": "integer", "format": "int64" },
+          "name": { "type": "string" }
         }
       },
       "CreateVarReqBody": {
         "type": "object",
         "required": ["type", "name", "value"],
         "properties": {
-          "description": {
-            "type": ["string", "null"]
-          },
+          "description": { "type": ["string", "null"] },
           "env_ids": {
             "type": ["array", "null"],
-            "items": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "items": { "type": "integer", "format": "int64" }
           },
-          "name": {
-            "type": "string"
-          },
-          "type": {
-            "$ref": "#/components/schemas/VarType"
-          },
-          "value": {
-            "type": "string"
-          }
+          "name": { "type": "string" },
+          "type": { "$ref": "#/components/schemas/VarType" },
+          "value": { "type": "string" }
         }
       },
       "DeployEnvReqBody": {
         "type": "object",
-        "properties": {
-          "rev": {
-            "type": ["string", "null"]
-          }
-        }
+        "properties": { "rev": { "type": ["string", "null"] } }
       },
       "Deployment": {
         "type": "object",
@@ -2771,60 +2026,27 @@
             "type": ["string", "null"],
             "format": "date-time"
           },
-          "build_logs": {
-            "type": ["string", "null"]
-          },
+          "build_logs": { "type": ["string", "null"] },
           "build_started_at": {
             "type": ["string", "null"],
             "format": "date-time"
           },
-          "cpu": {
-            "type": ["integer", "null"],
-            "format": "int32"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "desired_count": {
-            "type": ["integer", "null"],
-            "format": "int32"
-          },
-          "domain": {
-            "type": ["string", "null"]
-          },
+          "cpu": { "type": ["integer", "null"], "format": "int32" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "desired_count": { "type": ["integer", "null"], "format": "int32" },
+          "domain": { "type": ["string", "null"] },
           "ephemeral_storage": {
             "type": ["integer", "null"],
             "format": "int32"
           },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "memory": {
-            "type": ["integer", "null"],
-            "format": "int32"
-          },
-          "project_env_id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "status": {
-            "type": "string"
-          },
-          "status_detail": {
-            "type": ["string", "null"]
-          },
-          "target": {
-            "$ref": "#/components/schemas/Target"
-          },
-          "type": {
-            "type": "string"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          }
+          "id": { "type": "integer", "format": "int64" },
+          "memory": { "type": ["integer", "null"], "format": "int32" },
+          "project_env_id": { "type": "integer", "format": "int64" },
+          "status": { "type": "string" },
+          "status_detail": { "type": ["string", "null"] },
+          "target": { "$ref": "#/components/schemas/Target" },
+          "type": { "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time" }
         }
       },
       "Domain": {
@@ -2843,14 +2065,8 @@
             "format": "int64",
             "description": "Creation timestamp in epoch milliseconds"
           },
-          "domain": {
-            "type": "string",
-            "description": "Custom domain name"
-          },
-          "id": {
-            "type": "string",
-            "description": "Unique domain identifier"
-          },
+          "domain": { "type": "string", "description": "Custom domain name" },
+          "id": { "type": "string", "description": "Unique domain identifier" },
           "project_env": {
             "description": "Project environment this domain is linked to, if any"
           },
@@ -2861,9 +2077,7 @@
           },
           "validation_records": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ValidationRecord"
-            },
+            "items": { "$ref": "#/components/schemas/ValidationRecord" },
             "description": "DNS records required for SSL certificate validation"
           },
           "validation_status": {
@@ -2914,10 +2128,7 @@
         "type": "object",
         "required": ["email", "role"],
         "properties": {
-          "email": {
-            "type": "string",
-            "description": "User's email address"
-          },
+          "email": { "type": "string", "description": "User's email address" },
           "role": {
             "type": "string",
             "description": "User's role in the organization. Standard values are `admin` and `user`. Custom roles are available — contact sales for more information",
@@ -2928,40 +2139,22 @@
       "EditProjectReqBody": {
         "type": "object",
         "properties": {
-          "banner_url": {
-            "type": ["string", "null"]
-          },
-          "default_role": {
-            "type": ["string", "null"]
-          },
-          "description": {
-            "type": ["string", "null"]
-          },
-          "is_public_template": {
-            "type": ["boolean", "null"]
-          },
-          "name": {
-            "type": ["string", "null"]
-          },
-          "use_platform_iam": {
-            "type": ["boolean", "null"]
-          }
+          "banner_url": { "type": ["string", "null"] },
+          "default_role": { "type": ["string", "null"] },
+          "description": { "type": ["string", "null"] },
+          "is_public_template": { "type": ["boolean", "null"] },
+          "name": { "type": ["string", "null"] },
+          "use_platform_iam": { "type": ["boolean", "null"] }
         }
       },
       "EditProjectUserReqBody": {
         "type": "object",
         "required": ["role"],
-        "properties": {
-          "role": {
-            "type": "string"
-          }
-        }
+        "properties": { "role": { "type": "string" } }
       },
       "Embedding": {
         "allOf": [
-          {
-            "$ref": "#/components/schemas/EmbeddingStatus"
-          },
+          { "$ref": "#/components/schemas/EmbeddingStatus" },
           {
             "type": "object",
             "required": [
@@ -2974,50 +2167,26 @@
               "updated_at"
             ],
             "properties": {
-              "column_name": {
-                "type": "string"
-              },
-              "created_at": {
-                "type": "string",
-                "format": "date-time"
-              },
-              "id": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "model": {
-                "$ref": "#/components/schemas/EmbeddingModel"
-              },
-              "name": {
-                "type": "string"
-              },
-              "table_name": {
-                "type": "string"
-              },
-              "updated_at": {
-                "type": "string",
-                "format": "date-time"
-              }
+              "column_name": { "type": "string" },
+              "created_at": { "type": "string", "format": "date-time" },
+              "id": { "type": "integer", "format": "int64" },
+              "model": { "$ref": "#/components/schemas/EmbeddingModel" },
+              "name": { "type": "string" },
+              "table_name": { "type": "string" },
+              "updated_at": { "type": "string", "format": "date-time" }
             }
           }
         ]
       },
-      "EmbeddingModel": {
-        "type": "string"
-      },
+      "EmbeddingModel": { "type": "string" },
       "EmbeddingStatus": {
         "oneOf": [
           {
             "type": "object",
             "required": ["details", "status"],
             "properties": {
-              "details": {
-                "type": "object"
-              },
-              "status": {
-                "type": "string",
-                "enum": ["pending"]
-              }
+              "details": { "type": "object" },
+              "status": { "type": "string", "enum": ["pending"] }
             }
           },
           {
@@ -3037,23 +2206,15 @@
                   }
                 }
               },
-              "status": {
-                "type": "string",
-                "enum": ["processing"]
-              }
+              "status": { "type": "string", "enum": ["processing"] }
             }
           },
           {
             "type": "object",
             "required": ["details", "status"],
             "properties": {
-              "details": {
-                "type": "object"
-              },
-              "status": {
-                "type": "string",
-                "enum": ["success"]
-              }
+              "details": { "type": "object" },
+              "status": { "type": "string", "enum": ["success"] }
             }
           },
           {
@@ -3063,16 +2224,9 @@
               "details": {
                 "type": "object",
                 "required": ["error"],
-                "properties": {
-                  "error": {
-                    "type": "string"
-                  }
-                }
+                "properties": { "error": { "type": "string" } }
               },
-              "status": {
-                "type": "string",
-                "enum": ["error"]
-              }
+              "status": { "type": "string", "enum": ["error"] }
             }
           }
         ]
@@ -3112,10 +2266,7 @@
             "format": "int64",
             "description": "Unique identifier for the file"
           },
-          "name": {
-            "type": "string",
-            "description": "The name of the file"
-          },
+          "name": { "type": "string", "description": "The name of the file" },
           "url": {
             "type": "string",
             "description": "The URL where the file can be accessed"
@@ -3125,11 +2276,7 @@
       "GetOrgResBody": {
         "type": "object",
         "required": ["org"],
-        "properties": {
-          "org": {
-            "$ref": "#/components/schemas/Org"
-          }
-        }
+        "properties": { "org": { "$ref": "#/components/schemas/Org" } }
       },
       "Index": {
         "type": "object",
@@ -3142,27 +2289,12 @@
           "definition"
         ],
         "properties": {
-          "columns": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "definition": {
-            "type": "string"
-          },
-          "is_unique": {
-            "type": "boolean"
-          },
-          "name": {
-            "type": "string"
-          },
-          "table": {
-            "type": "string"
-          },
-          "type": {
-            "$ref": "#/components/schemas/IndexType"
-          }
+          "columns": { "type": "array", "items": { "type": "string" } },
+          "definition": { "type": "string" },
+          "is_unique": { "type": "boolean" },
+          "name": { "type": "string" },
+          "table": { "type": "string" },
+          "type": { "$ref": "#/components/schemas/IndexType" }
         }
       },
       "IndexType": {
@@ -3172,11 +2304,7 @@
       "InviteOrgUserReqBody": {
         "type": "object",
         "required": ["email"],
-        "properties": {
-          "email": {
-            "type": "string"
-          }
-        }
+        "properties": { "email": { "type": "string" } }
       },
       "ListConnectionsResBody": {
         "type": "object",
@@ -3184,9 +2312,7 @@
         "properties": {
           "connections": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ProjectConnection"
-            }
+            "items": { "$ref": "#/components/schemas/ProjectConnection" }
           }
         }
       },
@@ -3196,9 +2322,7 @@
         "properties": {
           "deployments": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Deployment"
-            }
+            "items": { "$ref": "#/components/schemas/Deployment" }
           }
         }
       },
@@ -3208,9 +2332,7 @@
         "properties": {
           "domains": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Domain"
-            }
+            "items": { "$ref": "#/components/schemas/Domain" }
           }
         }
       },
@@ -3220,9 +2342,7 @@
         "properties": {
           "embedding_models": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EmbeddingModel"
-            }
+            "items": { "$ref": "#/components/schemas/EmbeddingModel" }
           }
         }
       },
@@ -3232,9 +2352,7 @@
         "properties": {
           "embeddings": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Embedding"
-            }
+            "items": { "$ref": "#/components/schemas/Embedding" }
           }
         }
       },
@@ -3244,9 +2362,7 @@
         "properties": {
           "envs": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ProjectEnv"
-            }
+            "items": { "$ref": "#/components/schemas/ProjectEnv" }
           }
         }
       },
@@ -3256,9 +2372,7 @@
         "properties": {
           "indexes": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Index"
-            }
+            "items": { "$ref": "#/components/schemas/Index" }
           }
         }
       },
@@ -3272,9 +2386,7 @@
           },
           "org_users": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/OrgUser"
-            },
+            "items": { "$ref": "#/components/schemas/OrgUser" },
             "description": "List of users in the organization"
           }
         }
@@ -3289,9 +2401,7 @@
           },
           "orgs": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/OrgPreview"
-            },
+            "items": { "$ref": "#/components/schemas/OrgPreview" },
             "description": "List of organizations"
           }
         }
@@ -3302,9 +2412,7 @@
         "properties": {
           "users": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/UserWithRole"
-            }
+            "items": { "$ref": "#/components/schemas/UserWithRole" }
           }
         }
       },
@@ -3314,9 +2422,7 @@
         "properties": {
           "projects": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ProjectPreview"
-            }
+            "items": { "$ref": "#/components/schemas/ProjectPreview" }
           }
         }
       },
@@ -3336,9 +2442,7 @@
           },
           "runs": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RunPreview"
-            },
+            "items": { "$ref": "#/components/schemas/RunPreview" },
             "description": "List of runs"
           },
           "user_id": {
@@ -3354,9 +2458,7 @@
         "properties": {
           "vars": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Var"
-            }
+            "items": { "$ref": "#/components/schemas/Var" }
           }
         }
       },
@@ -3372,52 +2474,21 @@
           "role"
         ],
         "properties": {
-          "banner_url": {
-            "type": ["string", "null"]
-          },
-          "contact_email": {
-            "type": ["string", "null"]
-          },
-          "contact_name": {
-            "type": ["string", "null"]
-          },
-          "contact_phone": {
-            "type": ["string", "null"]
-          },
-          "country": {
-            "type": ["string", "null"]
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "credits_per_usd": {
-            "type": "number",
-            "format": "double"
-          },
-          "description": {
-            "type": ["string", "null"]
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "name": {
-            "type": "string"
-          },
-          "photo_url": {
-            "type": ["string", "null"]
-          },
-          "plan": {
-            "type": "string"
-          },
+          "banner_url": { "type": ["string", "null"] },
+          "contact_email": { "type": ["string", "null"] },
+          "contact_name": { "type": ["string", "null"] },
+          "contact_phone": { "type": ["string", "null"] },
+          "country": { "type": ["string", "null"] },
+          "created_at": { "type": "string", "format": "date-time" },
+          "credits_per_usd": { "type": "number", "format": "double" },
+          "description": { "type": ["string", "null"] },
+          "id": { "type": "integer", "format": "int64" },
+          "name": { "type": "string" },
+          "photo_url": { "type": ["string", "null"] },
+          "plan": { "type": "string" },
           "plan_metadata": {},
-          "role": {
-            "type": "string"
-          },
-          "stripe_customer_id": {
-            "type": ["string", "null"]
-          }
+          "role": { "type": "string" },
+          "stripe_customer_id": { "type": ["string", "null"] }
         }
       },
       "OrgPreview": {
@@ -3447,18 +2518,12 @@
             "format": "int64",
             "description": "Number of projects in the organization"
           },
-          "name": {
-            "type": "string",
-            "description": "Organization name"
-          },
+          "name": { "type": "string", "description": "Organization name" },
           "photo_url": {
             "type": ["string", "null"],
             "description": "URL of the organization's profile photo"
           },
-          "plan": {
-            "type": "string",
-            "description": "Subscription plan"
-          },
+          "plan": { "type": "string", "description": "Subscription plan" },
           "role": {
             "type": "string",
             "description": "Authenticated user's role in the organization"
@@ -3469,10 +2534,7 @@
         "type": "object",
         "required": ["email", "role"],
         "properties": {
-          "email": {
-            "type": "string",
-            "description": "User's email address"
-          },
+          "email": { "type": "string", "description": "User's email address" },
           "id": {
             "type": ["string", "null"],
             "description": "Unique user identifier. Null for pending invites that haven't been accepted yet"
@@ -3491,29 +2553,6 @@
           }
         }
       },
-      "ProjectApp": {
-        "type": "object",
-        "required": ["id", "type", "name"],
-        "properties": {
-          "description": {
-            "type": ["string", "null"]
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "name": {
-            "type": "string"
-          },
-          "type": {
-            "$ref": "#/components/schemas/AppType"
-          },
-          "unversioned_source_updated_at": {
-            "type": ["string", "null"],
-            "format": "date-time"
-          }
-        }
-      },
       "ProjectConnection": {
         "type": "object",
         "required": [
@@ -3525,29 +2564,13 @@
           "updated_at"
         ],
         "properties": {
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
+          "created_at": { "type": "string", "format": "date-time" },
+          "id": { "type": "integer", "format": "int64" },
           "resource_data": {},
-          "resource_id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "resource_name": {
-            "type": ["string", "null"]
-          },
-          "type": {
-            "type": "string"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          }
+          "resource_id": { "type": "integer", "format": "int64" },
+          "resource_name": { "type": ["string", "null"] },
+          "type": { "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time" }
         }
       },
       "ProjectDetail": {
@@ -3557,6 +2580,7 @@
           "name",
           "has_ui",
           "apps",
+          "workforce",
           "role",
           "use_platform_iam",
           "is_public_template",
@@ -3568,60 +2592,70 @@
         "properties": {
           "apps": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ProjectApp"
-            }
+            "items": { "$ref": "#/components/schemas/WorkforcePreview" },
+            "description": "List of workforce items in this project.\n\n**Deprecated:** Use `workforce` instead. This field will be removed in a future version.",
+            "deprecated": true
           },
           "created_at": {
-            "type": "string",
-            "format": "date-time"
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation timestamp in epoch milliseconds"
           },
           "default_role": {
-            "type": ["string", "null"]
+            "type": ["string", "null"],
+            "description": "Project's default role. All organization members will be assigned this role by default for this project"
           },
           "description": {
-            "type": ["string", "null"]
+            "type": ["string", "null"],
+            "description": "Project description"
           },
           "has_ui": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether the project has a UI interface"
           },
           "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "interface_unversioned_source_updated_at": {
-            "type": ["string", "null"],
-            "format": "date-time"
+            "type": "string",
+            "description": "Unique project identifier"
           },
           "is_public_template": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether the project is a public template"
           },
-          "name": {
-            "type": "string"
-          },
+          "name": { "type": "string", "description": "Project name" },
           "publishable_api_key": {
-            "type": "string"
+            "type": "string",
+            "description": "Publishable API key for this project"
           },
           "repository_url": {
             "type": ["string", "null"],
-            "description": "When null, the project does not have the source code available."
+            "description": "URL of the project's source code repository. When null, the project does not have source code available"
           },
           "role": {
-            "type": "string"
+            "type": "string",
+            "description": "Authenticated user's role in the project"
           },
           "screenshot_url": {
-            "type": ["string", "null"]
+            "type": ["string", "null"],
+            "description": "URL of the project's screenshot image"
           },
           "template_uses": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Number of times this template has been used"
           },
           "updated_at": {
-            "type": "string",
-            "format": "date-time"
+            "type": "integer",
+            "format": "int64",
+            "description": "Last update timestamp in epoch milliseconds"
           },
           "use_platform_iam": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether the project uses the platform's IAM system for access control"
+          },
+          "workforce": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/WorkforcePreview" },
+            "description": "List of workforce items in this project"
           }
         }
       },
@@ -3636,50 +2670,22 @@
           "updated_at"
         ],
         "properties": {
-          "branch": {
-            "type": ["string", "null"]
-          },
-          "color": {
-            "type": "string"
-          },
-          "cpu": {
-            "type": ["integer", "null"],
-            "format": "int32"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
+          "branch": { "type": ["string", "null"] },
+          "color": { "type": "string" },
+          "cpu": { "type": ["integer", "null"], "format": "int32" },
+          "created_at": { "type": "string", "format": "date-time" },
           "custom_domain": {},
-          "description": {
-            "type": ["string", "null"]
-          },
-          "desired_count": {
-            "type": ["integer", "null"],
-            "format": "int32"
-          },
+          "description": { "type": ["string", "null"] },
+          "desired_count": { "type": ["integer", "null"], "format": "int32" },
           "ephemeral_storage": {
             "type": ["integer", "null"],
             "format": "int32"
           },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "memory": {
-            "type": ["integer", "null"],
-            "format": "int32"
-          },
-          "name": {
-            "type": "string"
-          },
-          "subdomain": {
-            "type": "string"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          }
+          "id": { "type": "integer", "format": "int64" },
+          "memory": { "type": ["integer", "null"], "format": "int32" },
+          "name": { "type": "string" },
+          "subdomain": { "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time" }
         }
       },
       "ProjectOrigin": {
@@ -3688,30 +2694,17 @@
             "type": "object",
             "required": ["project_id", "type"],
             "properties": {
-              "project_id": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "type": {
-                "type": "string",
-                "enum": ["Template"]
-              }
+              "project_id": { "type": "integer", "format": "int64" },
+              "type": { "type": "string", "enum": ["Template"] }
             }
           },
           {
             "type": "object",
             "required": ["has_ui", "app_type", "type"],
             "properties": {
-              "app_type": {
-                "$ref": "#/components/schemas/AppType"
-              },
-              "has_ui": {
-                "type": "boolean"
-              },
-              "type": {
-                "type": "string",
-                "enum": ["Scratch"]
-              }
+              "app_type": { "$ref": "#/components/schemas/AppType" },
+              "has_ui": { "type": "boolean" },
+              "type": { "type": "string", "enum": ["Scratch"] }
             }
           }
         ]
@@ -3748,10 +2741,7 @@
             "type": "boolean",
             "description": "Whether the project is a public template"
           },
-          "name": {
-            "type": "string",
-            "description": "Project name"
-          },
+          "name": { "type": "string", "description": "Project name" },
           "role": {
             "type": "string",
             "description": "Authenticated user's role in the project"
@@ -3790,51 +2780,20 @@
           "idempotency_key"
         ],
         "properties": {
-          "cost_credits": {
-            "type": "number",
-            "format": "double"
-          },
-          "cost_usd": {
-            "type": "number",
-            "format": "double"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "duration_ms": {
-            "type": ["integer", "null"],
-            "format": "int64"
-          },
-          "group_id": {
-            "type": ["integer", "null"],
-            "format": "int64"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "idempotency_key": {
-            "type": "string"
-          },
-          "last_reaction_sentiment": {
-            "type": ["string", "null"]
-          },
-          "parent_id": {
-            "type": ["integer", "null"],
-            "format": "int64"
-          },
-          "status": {
-            "type": "string"
-          },
+          "cost_credits": { "type": "number", "format": "double" },
+          "cost_usd": { "type": "number", "format": "double" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "duration_ms": { "type": ["integer", "null"], "format": "int64" },
+          "group_id": { "type": ["integer", "null"], "format": "int64" },
+          "id": { "type": "integer", "format": "int64" },
+          "idempotency_key": { "type": "string" },
+          "last_reaction_sentiment": { "type": ["string", "null"] },
+          "parent_id": { "type": ["integer", "null"], "format": "int64" },
+          "status": { "type": "string" },
           "status_detail": {},
           "trace": {},
-          "user": {
-            "$ref": "#/components/schemas/UserRef"
-          },
-          "version": {
-            "$ref": "#/components/schemas/VersionRef"
-          }
+          "user": { "$ref": "#/components/schemas/UserRef" },
+          "version": { "$ref": "#/components/schemas/VersionRef" }
         },
         "additionalProperties": {}
       },
@@ -3844,16 +2803,12 @@
         "properties": {
           "embedding_names": {
             "type": "array",
-            "items": {
-              "type": "string"
-            },
+            "items": { "type": "string" },
             "description": "List of embedding names to use for semantic search. Only a single column is supported at the moment."
           },
           "fts_columns": {
             "type": ["array", "null"],
-            "items": {
-              "type": "string"
-            },
+            "items": { "type": "string" },
             "description": "List of column names to use for full-text search. When specified together with embedding_names, search will be hybrid (both semantic and full-text)."
           },
           "limit": {
@@ -3874,9 +2829,7 @@
           },
           "select_columns": {
             "type": ["array", "null"],
-            "items": {
-              "type": "string"
-            },
+            "items": { "type": "string" },
             "description": "List of column names to return in the search results. When not specified, all columns will be returned."
           },
           "where": {
@@ -3897,10 +2850,7 @@
       "SetEnvDomainReqBody": {
         "type": "object",
         "properties": {
-          "domain_id": {
-            "type": ["integer", "null"],
-            "format": "int64"
-          }
+          "domain_id": { "type": ["integer", "null"], "format": "int64" }
         }
       },
       "Target": {
@@ -3908,56 +2858,33 @@
         "required": ["type", "id"],
         "properties": {
           "commit": {},
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "manifest_id": {
-            "type": ["string", "null"]
-          },
-          "type": {
-            "type": "string"
-          },
-          "version_id": {
-            "type": ["integer", "null"],
-            "format": "int64"
-          }
+          "id": { "type": "integer", "format": "int64" },
+          "manifest_id": { "type": ["string", "null"] },
+          "type": { "type": "string" },
+          "version_id": { "type": ["integer", "null"], "format": "int64" }
         }
       },
       "UpdateEnvConfigReqBody": {
         "type": "object",
         "properties": {
-          "cpu": {
-            "type": ["integer", "null"],
-            "format": "int32"
-          },
-          "desired_count": {
-            "type": ["integer", "null"],
-            "format": "int32"
-          },
+          "cpu": { "type": ["integer", "null"], "format": "int32" },
+          "desired_count": { "type": ["integer", "null"], "format": "int32" },
           "ephemeral_storage": {
             "type": ["integer", "null"],
             "format": "int32"
           },
-          "memory": {
-            "type": ["integer", "null"],
-            "format": "int32"
-          }
+          "memory": { "type": ["integer", "null"], "format": "int32" }
         }
       },
       "UpdateRunReqBody": {
         "type": "object",
         "properties": {
-          "metadata": {
-            "description": "Custom metadata"
-          },
+          "metadata": { "description": "Custom metadata" },
           "parent_id": {
             "type": ["string", "null"],
             "description": "This can be a platform-defined id or a custom id.\nThe platform will map the custom id to an internal one afterwards."
           },
-          "trace": {
-            "description": "Trace data"
-          },
+          "trace": { "description": "Trace data" },
           "version_id": {
             "type": ["string", "null"],
             "description": "Version identifier (if any)"
@@ -3967,19 +2894,12 @@
       "UpdateVarReqBody": {
         "type": "object",
         "properties": {
-          "description": {
-            "type": ["string", "null"]
-          },
+          "description": { "type": ["string", "null"] },
           "env_ids": {
             "type": ["array", "null"],
-            "items": {
-              "type": "integer",
-              "format": "int64"
-            }
+            "items": { "type": "integer", "format": "int64" }
           },
-          "value": {
-            "type": ["string", "null"]
-          }
+          "value": { "type": ["string", "null"] }
         }
       },
       "UpsertRecordsReqBody": {
@@ -3991,9 +2911,7 @@
             "items": {
               "type": "object",
               "additionalProperties": {},
-              "propertyNames": {
-                "type": "string"
-              }
+              "propertyNames": { "type": "string" }
             },
             "description": "Array of records to insert or update (at least one record is required)"
           }
@@ -4003,59 +2921,33 @@
         "type": "object",
         "required": ["id", "name", "email"],
         "properties": {
-          "email": {
-            "type": "string"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "name": {
-            "type": "string"
-          },
-          "photo_url": {
-            "type": ["string", "null"]
-          }
+          "email": { "type": "string" },
+          "id": { "type": "integer", "format": "int64" },
+          "name": { "type": "string" },
+          "photo_url": { "type": ["string", "null"] }
         }
       },
       "UserWithRole": {
         "type": "object",
         "required": ["id", "email", "name", "role"],
         "properties": {
-          "email": {
-            "type": "string"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "name": {
-            "type": "string"
-          },
-          "photo_url": {
-            "type": ["string", "null"]
-          },
-          "role": {
-            "type": "string"
-          }
+          "email": { "type": "string" },
+          "id": { "type": "integer", "format": "int64" },
+          "name": { "type": "string" },
+          "photo_url": { "type": ["string", "null"] },
+          "role": { "type": "string" }
         }
       },
       "ValidationRecord": {
         "type": "object",
         "required": ["type", "name", "value"],
         "properties": {
-          "name": {
-            "type": "string",
-            "description": "DNS record name"
-          },
+          "name": { "type": "string", "description": "DNS record name" },
           "type": {
             "type": "string",
             "description": "DNS record type (e.g. `CNAME`)"
           },
-          "value": {
-            "type": "string",
-            "description": "DNS record value"
-          }
+          "value": { "type": "string", "description": "DNS record value" }
         }
       },
       "ValidationStatus": {
@@ -4075,94 +2967,53 @@
         "type": "object",
         "required": ["id", "name", "value", "envs"],
         "properties": {
-          "description": {
-            "type": ["string", "null"]
-          },
+          "description": { "type": ["string", "null"] },
           "envs": {
             "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/VarEnv"
-            }
+            "items": { "$ref": "#/components/schemas/VarEnv" }
           },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "name": {
-            "type": "string"
-          },
-          "value": {
-            "$ref": "#/components/schemas/VarValue"
-          }
+          "id": { "type": "integer", "format": "int64" },
+          "name": { "type": "string" },
+          "value": { "$ref": "#/components/schemas/VarValue" }
         }
       },
       "VarEnv": {
         "type": "object",
         "required": ["id", "name", "color"],
         "properties": {
-          "color": {
-            "type": "string"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "name": {
-            "type": "string"
-          }
+          "color": { "type": "string" },
+          "id": { "type": "integer", "format": "int64" },
+          "name": { "type": "string" }
         }
       },
       "VarInput": {
         "type": "object",
         "required": ["type", "name", "value"],
         "properties": {
-          "description": {
-            "type": ["string", "null"]
-          },
-          "name": {
-            "type": "string"
-          },
-          "type": {
-            "$ref": "#/components/schemas/VarType"
-          },
-          "value": {
-            "type": "string"
-          }
+          "description": { "type": ["string", "null"] },
+          "name": { "type": "string" },
+          "type": { "$ref": "#/components/schemas/VarType" },
+          "value": { "type": "string" }
         }
       },
-      "VarType": {
-        "type": "string",
-        "enum": ["plain", "secret"]
-      },
+      "VarType": { "type": "string", "enum": ["plain", "secret"] },
       "VarValue": {
         "oneOf": [
           {
             "type": "object",
             "required": ["value", "type"],
             "properties": {
-              "type": {
-                "type": "string",
-                "enum": ["plain"]
-              },
-              "value": {
-                "type": "string"
-              }
+              "type": { "type": "string", "enum": ["plain"] },
+              "value": { "type": "string" }
             }
           },
           {
             "type": "object",
             "required": ["type"],
             "properties": {
-              "decrypted": {
-                "type": ["string", "null"]
-              },
-              "preview": {
-                "type": ["string", "null"]
-              },
-              "type": {
-                "type": "string",
-                "enum": ["secret"]
-              }
+              "decrypted": { "type": ["string", "null"] },
+              "preview": { "type": ["string", "null"] },
+              "type": { "type": "string", "enum": ["secret"] }
             }
           }
         ]
@@ -4173,23 +3024,35 @@
         "properties": {
           "deployment": {
             "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Deployment"
-              }
+              { "type": "null" },
+              { "$ref": "#/components/schemas/Deployment" }
             ]
           },
+          "id": { "type": "integer", "format": "int64" },
+          "is_prod": { "type": "boolean" },
+          "name": { "type": "string" }
+        }
+      },
+      "WorkforcePreview": {
+        "type": "object",
+        "required": ["id", "type", "name"],
+        "properties": {
+          "description": {
+            "type": ["string", "null"],
+            "description": "Workforce item description"
+          },
           "id": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string",
+            "description": "Unique workforce item identifier"
           },
-          "is_prod": {
-            "type": "boolean"
+          "name": { "type": "string", "description": "Workforce item name" },
+          "type": {
+            "$ref": "#/components/schemas/AppType",
+            "description": "Workforce item type"
           },
-          "name": {
-            "type": "string"
+          "uid": {
+            "type": ["string", "null"],
+            "description": "Unique identifier from the project manifest (timbal.yaml)"
           }
         }
       }
@@ -4203,33 +3066,12 @@
     }
   },
   "tags": [
-    {
-      "name": "orgs",
-      "description": "Organization operations"
-    },
-    {
-      "name": "embeddings",
-      "description": "KB Embeddings operations"
-    },
-    {
-      "name": "files",
-      "description": "File operations"
-    },
-    {
-      "name": "indexes",
-      "description": "KB Indexes operations"
-    },
-    {
-      "name": "projects",
-      "description": "Project operations"
-    },
-    {
-      "name": "runs",
-      "description": "Execution operations"
-    },
-    {
-      "name": "tables",
-      "description": "KB Tables operations"
-    }
+    { "name": "orgs", "description": "Organization operations" },
+    { "name": "embeddings", "description": "KB Embeddings operations" },
+    { "name": "files", "description": "File operations" },
+    { "name": "indexes", "description": "KB Indexes operations" },
+    { "name": "projects", "description": "Project operations" },
+    { "name": "runs", "description": "Execution operations" },
+    { "name": "tables", "description": "KB Tables operations" }
   ]
 }
