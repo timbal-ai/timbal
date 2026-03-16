@@ -6,57 +6,45 @@ from pydantic import Field, SecretStr
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
-_SHOPIFY_API_VERSION = "2024-01"
-
-
-async def _resolve_token(tool: Any) -> str:
-    """Resolve Shopify token from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["token"]
-    if tool.token is not None:
-        return tool.token.get_secret_value()
-    env_key = os.getenv("SHOPIFY_TOKEN")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Shopify token not found. Set SHOPIFY_TOKEN environment variable, "
-        "pass token in config, or configure an integration."
-    )
+_API_VERSION = "2024-01"
 
 
 def _shopify_base(shop: str) -> str:
-    return f"https://{shop}/admin/api/{_SHOPIFY_API_VERSION}"
+    return f"https://{shop}/admin/api/{_API_VERSION}"
 
 
-# ---------------------------------------------------------------------------
-# Shop
-# ---------------------------------------------------------------------------
+async def _resolve_credentials(tool: Any) -> tuple[str, str]:
+    """Resolve Shopify token and shop from integration, explicit fields, or env vars."""
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["token"], credentials["shop_url"]
+    token = tool.token.get_secret_value() if tool.token else os.getenv("SHOPIFY_TOKEN")
+    shop = tool.shop_url if tool.shop_url else os.getenv("SHOPIFY_SHOP")
+    if not token or not shop:
+        raise ValueError(
+            "Shopify credentials not found. Set SHOPIFY_TOKEN and SHOPIFY_SHOP environment variables, "
+            "pass token and shop_url in config, or configure an integration."
+        )
+    return token, shop
 
 
-class GetShopDetails(Tool):
+class ShopifyGetShopDetails(Tool):
     name: str = "shopify_get_shop_details"
     description: str | None = "Get the details of a Shopify store (name, email, currency, timezone, plan, etc.)."
     integration: Annotated[str, Integration("shopify")] | None = None
     token: SecretStr | None = None
+    shop_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "shop_url": self.shop_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_shop_details() -> Any:
-            """
-            Gets shop details using the shop_url and token from integration credentials.
-            """
-            token = await _resolve_token(self)
-            shop = await self.integration.resolve()["shop_url"]
+            token, shop = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -67,31 +55,21 @@ class GetShopDetails(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Shopify/GetShopDetails"
-
-        super().__init__(handler=_get_shop_details, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_shop_details, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Products
-# ---------------------------------------------------------------------------
-
-
-class GetProducts(Tool):
+class ShopifyGetProducts(Tool):
     name: str = "shopify_get_products"
-    description: str | None = "Retrieve a list of products from a Shopify store (using shop_url and token from integration credentials)."
+    description: str | None = "Retrieve a list of products from a Shopify store."
     integration: Annotated[str, Integration("shopify")] | None = None
     token: SecretStr | None = None
+    shop_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "shop_url": self.shop_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -104,8 +82,8 @@ class GetProducts(Tool):
             status: str | None = Field(None, description="Filter products by status: 'active', 'archived', or 'draft'"),
             ids: list[str] | None = Field(None, description="Filter products by specific product IDs"),
         ) -> Any:
-            token = await _resolve_token(self)
-            shop = await self.integration.resolve()["shop_url"]
+            token, shop = await _resolve_credentials(self)
+            import httpx
 
             params: dict[str, Any] = {"limit": limit}
             if page_info:
@@ -121,8 +99,6 @@ class GetProducts(Tool):
             if ids:
                 params["ids"] = ",".join(ids)
 
-            import httpx
-
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_shopify_base(shop)}/products.json",
@@ -132,35 +108,26 @@ class GetProducts(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Shopify/GetProducts"
-
-        super().__init__(handler=_get_products, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_products, **kwargs)
 
 
-class GetProduct(Tool):
+class ShopifyGetProduct(Tool):
     name: str = "shopify_get_product"
     description: str | None = "Retrieve a single product from Shopify by product ID."
     integration: Annotated[str, Integration("shopify")] | None = None
     token: SecretStr | None = None
+    shop_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "shop_url": self.shop_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_product(product_id: str = Field(..., description="Shopify product ID")) -> Any:
-            """
-            Gets a single product using shop_url and token from integration credentials.
-            """
-            token = await _resolve_token(self)
-            shop = await self.integration.resolve()["shop_url"]
+            token, shop = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -171,26 +138,21 @@ class GetProduct(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Shopify/GetProduct"
-
-        super().__init__(handler=_get_product, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_product, **kwargs)
 
 
-class CreateProduct(Tool):
+class ShopifyCreateProduct(Tool):
     name: str = "shopify_create_product"
-    description: str | None = "Create a product in a Shopify store (using shop_url and token from integration credentials)."
+    description: str | None = "Create a product in a Shopify store."
     integration: Annotated[str, Integration("shopify")] | None = None
     token: SecretStr | None = None
+    shop_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "shop_url": self.shop_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -205,8 +167,8 @@ class CreateProduct(Tool):
             options: list[dict[str, Any]] | None = Field(None, description="List of product options, e.g. [{'name': 'Size', 'values': ['S', 'M', 'L']}]"),
             images: list[dict[str, Any]] | None = Field(None, description="List of image objects, e.g. [{'src': 'https://example.com/image.jpg'}]"),
         ) -> Any:
-            token = await _resolve_token(self)
-            shop = await self.integration.resolve()["shop_url"]
+            token, shop = await _resolve_credentials(self)
+            import httpx
 
             product: dict[str, Any] = {"title": title, "status": status}
             if body_html:
@@ -224,8 +186,6 @@ class CreateProduct(Tool):
             if images:
                 product["images"] = images
 
-            import httpx
-
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_shopify_base(shop)}/products.json",
@@ -235,35 +195,26 @@ class CreateProduct(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Shopify/CreateProduct"
-
-        super().__init__(handler=_create_product, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_product, **kwargs)
 
 
-class DeleteProduct(Tool):
+class ShopifyDeleteProduct(Tool):
     name: str = "shopify_delete_product"
     description: str | None = "Delete a product from Shopify, including all associated variants and media."
     integration: Annotated[str, Integration("shopify")] | None = None
     token: SecretStr | None = None
+    shop_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "shop_url": self.shop_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _delete_product(product_id: str = Field(..., description="Shopify product ID")) -> Any:
-            """
-            Deletes a product using shop_url and token from integration credentials.
-            """
-            token = await _resolve_token(self)
-            shop = await self.integration.resolve()["shop_url"]
+            token, shop = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -274,31 +225,21 @@ class DeleteProduct(Tool):
                 response.raise_for_status()
                 return {"deleted": True, "product_id": product_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Shopify/DeleteProduct"
-
-        super().__init__(handler=_delete_product, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_product, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Inventory
-# ---------------------------------------------------------------------------
-
-
-class GetInventoryLevel(Tool):
+class ShopifyGetInventoryLevel(Tool):
     name: str = "shopify_get_inventory_level"
-    description: str | None = "Get the inventory level for a specific inventory item at one or more locations.  Using shop_url and token from integration credentials."
+    description: str | None = "Get the inventory level for a specific inventory item at one or more locations."
     integration: Annotated[str, Integration("shopify")] | None = None
     token: SecretStr | None = None
+    shop_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "shop_url": self.shop_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -306,16 +247,14 @@ class GetInventoryLevel(Tool):
             inventory_item_ids: list[str] = Field(..., description="List of inventory item IDs to get levels for"),
             location_ids: list[str] | None = Field(None, description="List of location IDs to filter by"),
         ) -> Any:
-            token = await _resolve_token(self)
-            shop = await self.integration.resolve()["shop_url"]
+            token, shop = await _resolve_credentials(self)
+            import httpx
 
             params: dict[str, Any] = {
                 "inventory_item_ids": ",".join(inventory_item_ids),
             }
             if location_ids:
                 params["location_ids"] = ",".join(location_ids)
-
-            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -326,26 +265,21 @@ class GetInventoryLevel(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Shopify/GetInventoryLevel"
-
-        super().__init__(handler=_get_inventory_level, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_inventory_level, **kwargs)
 
 
-class AdjustInventory(Tool):
+class ShopifyAdjustInventory(Tool):
     name: str = "shopify_adjust_inventory"
-    description: str | None = "Adjust inventory levels for a specific inventory item at a location. Using shop_url and token from integration credentials."
+    description: str | None = "Adjust inventory levels for a specific inventory item at a location."
     integration: Annotated[str, Integration("shopify")] | None = None
     token: SecretStr | None = None
+    shop_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "shop_url": self.shop_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -354,8 +288,7 @@ class AdjustInventory(Tool):
             location_id: str = Field(..., description="Location ID for the inventory adjustment"),
             adjustment: int = Field(..., description="Inventory adjustment amount (positive to increase, negative to decrease)"),
         ) -> Any:
-            token = await _resolve_token(self)
-            shop = await self.integration.resolve()["shop_url"]
+            token, shop = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -371,26 +304,21 @@ class AdjustInventory(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Shopify/AdjustInventory"
-
-        super().__init__(handler=_adjust_inventory, metadata=metadata, **kwargs)
+        super().__init__(handler=_adjust_inventory, **kwargs)
 
 
-class UpdateInventoryTracking(Tool):
+class ShopifyUpdateInventoryTracking(Tool):
     name: str = "shopify_update_inventory_tracking"
-    description: str | None = "Enable or disable inventory tracking for a specific inventory item. Using shop_url and token from integration credentials."
+    description: str | None = "Enable or disable inventory tracking for a specific inventory item."
     integration: Annotated[str, Integration("shopify")] | None = None
     token: SecretStr | None = None
+    shop_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "shop_url": self.shop_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -398,8 +326,7 @@ class UpdateInventoryTracking(Tool):
             inventory_item_id: str = Field(..., description="Inventory item ID to update tracking for"),
             tracked: bool = Field(..., description="Whether to track inventory for this item (true/false)"),
         ) -> Any:
-            token = await _resolve_token(self)
-            shop = await self.integration.resolve()["shop_url"]
+            token, shop = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -411,32 +338,26 @@ class UpdateInventoryTracking(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Shopify/UpdateInventoryTracking"
-
-        super().__init__(handler=_update_inventory_tracking, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_inventory_tracking, **kwargs)
 
 
-class GetVariantInventoryItem(Tool):
+class ShopifyGetVariantInventoryItem(Tool):
     name: str = "shopify_get_variant_inventory_item"
-    description: str | None = "Get the inventory item ID and details for a specific product variant. Using shop_url and token from integration credentials."
+    description: str | None = "Get the inventory item ID and details for a specific product variant."
     integration: Annotated[str, Integration("shopify")] | None = None
     token: SecretStr | None = None
+    shop_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "shop_url": self.shop_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_variant_inventory_item(variant_id: str = Field(..., description="Shopify product variant ID")) -> Any:
-            token = await _resolve_token(self)
-            shop = await self.integration.resolve()["shop_url"]
+            token, shop = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -448,7 +369,4 @@ class GetVariantInventoryItem(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Shopify/GetVariantInventoryItem"
-
-        super().__init__(handler=_get_variant_inventory_item, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_variant_inventory_item, **kwargs)
