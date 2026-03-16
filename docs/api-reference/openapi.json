@@ -3728,34 +3728,42 @@
         ],
         "properties": {
           "created_at": {
-            "type": "string",
-            "format": "date-time"
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation timestamp in epoch milliseconds"
           },
           "default_role": {
-            "type": ["string", "null"]
+            "type": ["string", "null"],
+            "description": "Project's default role. All organization members will be assigned this role by default for this project"
           },
           "description": {
-            "type": ["string", "null"]
+            "type": ["string", "null"],
+            "description": "Project description"
           },
           "id": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string",
+            "description": "Unique project identifier"
           },
           "is_public_template": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether the project is a public template"
           },
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "Project name"
           },
           "role": {
-            "type": "string"
+            "type": "string",
+            "description": "Authenticated user's role in the project"
           },
           "screenshot_url": {
-            "type": ["string", "null"]
+            "type": ["string", "null"],
+            "description": "URL of the project's screenshot image"
           },
           "template_uses": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Number of times this template has been used"
           }
         }
       },
