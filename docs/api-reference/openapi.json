@@ -326,7 +326,7 @@
     "/orgs/{org_id}/domains": {
       "get": {
         "tags": ["orgs"],
-        "description": "List domains for an organization",
+        "description": "List connected domains for an organization",
         "operationId": "handler",
         "parameters": [
           {
@@ -395,7 +395,7 @@
     "/orgs/{org_id}/domains/{domain_id}": {
       "get": {
         "tags": ["orgs"],
-        "description": "Get a domain by ID",
+        "description": "Get a domain by ID. This endpoint triggers DNS validation and returns the live certificate status.",
         "operationId": "handler",
         "parameters": [
           {
@@ -2613,7 +2613,9 @@
         "required": ["domain"],
         "properties": {
           "domain": {
-            "type": "string"
+            "type": "string",
+            "description": "Custom domain name",
+            "example": "custom.timbal.ai"
           }
         }
       },
@@ -2835,29 +2837,36 @@
         ],
         "properties": {
           "created_at": {
-            "type": "string",
-            "format": "date-time"
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation timestamp in epoch milliseconds"
           },
           "domain": {
-            "type": "string"
+            "type": "string",
+            "description": "Custom domain name"
           },
           "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "project_env": {},
-          "updated_at": {
             "type": "string",
-            "format": "date-time"
+            "description": "Unique domain identifier"
+          },
+          "project_env": {
+            "description": "Project environment this domain is linked to, if any"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last update timestamp in epoch milliseconds"
           },
           "validation_records": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ValidationRecord"
-            }
+            },
+            "description": "DNS records required for SSL certificate validation"
           },
           "validation_status": {
-            "$ref": "#/components/schemas/ValidationStatus"
+            "$ref": "#/components/schemas/ValidationStatus",
+            "description": "Current SSL certificate validation status"
           }
         }
       },
@@ -4020,18 +4029,22 @@
         "required": ["type", "name", "value"],
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "DNS record name"
           },
           "type": {
-            "type": "string"
+            "type": "string",
+            "description": "DNS record type (e.g. `CNAME`)"
           },
           "value": {
-            "type": "string"
+            "type": "string",
+            "description": "DNS record value"
           }
         }
       },
       "ValidationStatus": {
         "type": "string",
+        "description": "SSL certificate validation status",
         "enum": [
           "pending",
           "issued",
