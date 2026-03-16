@@ -42,7 +42,7 @@ async def _resolve_channel_id(tool: Any, channel: str | None = None) -> str:
     )
 
 
-class ReadMessages(Tool):
+class SlackReadMessages(Tool):
     name: str = "slack_read_messages"
     description: str | None = "Read messages from a Slack channel."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -89,7 +89,7 @@ class ReadMessages(Tool):
         super().__init__(handler=_read_messages, **kwargs)
 
 
-class SendMessage(Tool):
+class SlackSendMessage(Tool):
     name: str = "slack_send_message"
     description: str | None = (
         "Send a message to a Slack channel."
@@ -154,7 +154,7 @@ class SendMessage(Tool):
         super().__init__(handler=_send_message, **kwargs)
 
 
-class SendEphemeralMessage(Tool):
+class SlackSendEphemeralMessage(Tool):
     name: str = "slack_send_ephemeral_message"
     description: str | None = "Send an ephemeral message to a user in a channel (only visible to that user)."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -200,7 +200,7 @@ class SendEphemeralMessage(Tool):
         super().__init__(handler=_send_ephemeral_message, **kwargs)
 
 
-class CreateCanvas(Tool):
+class SlackCreateCanvas(Tool):
     name: str = "slack_create_canvas"
     description: str | None = "Create a Slack canvas with rich content."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -242,7 +242,7 @@ class CreateCanvas(Tool):
         super().__init__(handler=_create_canvas, **kwargs)
 
 
-class DeleteMessage(Tool):
+class SlackDeleteMessage(Tool):
     name: str = "slack_delete_message"
     description: str | None = "Delete a Slack message."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -278,7 +278,7 @@ class DeleteMessage(Tool):
         super().__init__(handler=_delete_message, **kwargs)
 
 
-class GetMessageThread(Tool):
+class SlackGetMessageThread(Tool):
     name: str = "slack_get_message_thread"
     description: str | None = "Retrieve a message and all its replies in a thread."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -319,7 +319,7 @@ class GetMessageThread(Tool):
         super().__init__(handler=_get_message_thread, **kwargs)
 
 
-class PinMessage(Tool):
+class SlackPinMessage(Tool):
     name: str = "slack_pin_message"
     description: str | None = "Pin a message in a Slack channel."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -354,7 +354,7 @@ class PinMessage(Tool):
         super().__init__(handler=_pin_message, **kwargs)
 
 
-class UnpinMessage(Tool):
+class SlackUnpinMessage(Tool):
     name: str = "slack_unpin_message"
     description: str | None = "Unpin a message from a Slack channel."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -389,7 +389,7 @@ class UnpinMessage(Tool):
         super().__init__(handler=_unpin_message, **kwargs)
 
 
-class ListPinnedItems(Tool):
+class SlackListPinnedItems(Tool):
     name: str = "slack_list_pinned_items"
     description: str | None = "List all pinned items in a Slack channel."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -421,7 +421,7 @@ class ListPinnedItems(Tool):
         super().__init__(handler=_list_pinned_items, **kwargs)
 
 
-class GetUserPresence(Tool):
+class SlackGetUserPresence(Tool):
     name: str = "slack_get_user_presence"
     description: str | None = "Check a Slack user's online presence status."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -451,7 +451,7 @@ class GetUserPresence(Tool):
         super().__init__(handler=_get_user_presence, **kwargs)
 
 
-class SearchUsers(Tool):
+class SlackSearchUsers(Tool):
     name: str = "slack_search_users"
     description: str | None = (
         "Search for users across the entire Slack workspace by email, user ID, or name. "
@@ -508,7 +508,7 @@ class SearchUsers(Tool):
         super().__init__(handler=_search_users, **kwargs)
 
 
-class AddUserToChannel(Tool):
+class SlackAddUserToChannel(Tool):
     name: str = "slack_add_user_to_channel"
     description: str | None = "Add one or more users to a Slack channel."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -543,7 +543,7 @@ class AddUserToChannel(Tool):
         super().__init__(handler=_add_user_to_channel, **kwargs)
 
 
-class RemoveFromChannel(Tool):
+class SlackRemoveFromChannel(Tool):
     name: str = "slack_remove_from_channel"
     description: str | None = "Remove a user from a Slack channel."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -578,7 +578,7 @@ class RemoveFromChannel(Tool):
         super().__init__(handler=_remove_from_channel, **kwargs)
 
 
-class ListUsersInChannel(Tool):
+class SlackListUsersInChannel(Tool):
     name: str = "slack_list_users_in_channel"
     description: str | None = (
         "List all users (member IDs) in a specific Slack channel. "
@@ -622,7 +622,7 @@ class ListUsersInChannel(Tool):
         super().__init__(handler=_list_users_in_channel, **kwargs)
 
 
-class UpdateChannelTopic(Tool):
+class SlackUpdateChannelTopic(Tool):
     name: str = "slack_update_channel_topic"
     description: str | None = "Set the topic for a Slack channel."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -657,7 +657,7 @@ class UpdateChannelTopic(Tool):
         super().__init__(handler=_update_channel_topic, **kwargs)
 
 
-class UpdateChannelPurpose(Tool):
+class SlackUpdateChannelPurpose(Tool):
     name: str = "slack_update_channel_purpose"
     description: str | None = "Set the purpose for a Slack channel."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -692,7 +692,7 @@ class UpdateChannelPurpose(Tool):
         super().__init__(handler=_update_channel_purpose, **kwargs)
 
 
-class ArchiveChannel(Tool):
+class SlackArchiveChannel(Tool):
     name: str = "slack_archive_channel"
     description: str | None = "Archive a Slack channel."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -724,7 +724,7 @@ class ArchiveChannel(Tool):
         super().__init__(handler=_archive_channel, **kwargs)
 
 
-class UnarchiveChannel(Tool):
+class SlackUnarchiveChannel(Tool):
     name: str = "slack_unarchive_channel"
     description: str | None = "Unarchive a Slack channel."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -756,7 +756,7 @@ class UnarchiveChannel(Tool):
         super().__init__(handler=_unarchive_channel, **kwargs)
 
 
-class GetConversationInfo(Tool):
+class SlackGetConversationInfo(Tool):
     name: str = "slack_get_conversation_info"
     description: str | None = "Retrieve detailed information about a Slack conversation (channel, DM, or group DM)."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -796,7 +796,7 @@ class GetConversationInfo(Tool):
         super().__init__(handler=_get_conversation_info, **kwargs)
 
 
-class ListChannels(Tool):
+class SlackListChannels(Tool):
     name: str = "slack_list_channels"
     description: str | None = "List channels in the Slack workspace."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -845,7 +845,7 @@ class ListChannels(Tool):
 # ---------------------------------------------------------------------------
 
 
-class AddReaction(Tool):
+class SlackAddReaction(Tool):
     name: str = "slack_add_reaction"
     channel_id: str | None = None
     description: str | None = "Add an emoji reaction to a Slack message."
@@ -881,7 +881,7 @@ class AddReaction(Tool):
         super().__init__(handler=_add_reaction, **kwargs)
 
 
-class RemoveReaction(Tool):
+class SlackRemoveReaction(Tool):
     name: str = "slack_remove_reaction"
     description: str | None = "Remove an emoji reaction from a Slack message."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -922,7 +922,7 @@ class RemoveReaction(Tool):
 # ---------------------------------------------------------------------------
 
 
-class ListFiles(Tool):
+class SlackListFiles(Tool):
     name: str = "slack_list_files"
     description: str | None = "List files shared in the Slack workspace with optional filtering."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -974,7 +974,7 @@ class ListFiles(Tool):
         super().__init__(handler=_list_files, **kwargs)
 
 
-class GetFileInfo(Tool):
+class SlackGetFileInfo(Tool):
     name: str = "slack_get_file_info"
     description: str | None = "Get metadata and details for a specific Slack file."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -1004,7 +1004,7 @@ class GetFileInfo(Tool):
         super().__init__(handler=_get_file_info, **kwargs)
 
 
-class DownloadFile(Tool):
+class SlackDownloadFile(Tool):
     name: str = "slack_download_file"
     description: str | None = "Download the raw content of a Slack file and return it as base64-encoded bytes."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -1040,7 +1040,7 @@ class DownloadFile(Tool):
         super().__init__(handler=_download_file, **kwargs)
 
 
-class DeleteFile(Tool):
+class SlackDeleteFile(Tool):
     name: str = "slack_delete_file"
     description: str | None = "Delete a file from Slack."
     integration: Annotated[str, Integration("slack")] | None = None
@@ -1075,7 +1075,7 @@ class DeleteFile(Tool):
 # ---------------------------------------------------------------------------
 
 
-class SendAndWaitForResponse(Tool):
+class SlackSendAndWaitForResponse(Tool):
     name: str = "slack_send_and_wait_for_response"
     description: str | None = "Send a message to a Slack channel or user and wait for a reply. Returns the first reply received within the timeout window. Use this for human-in-the-loop approval, confirmation, or input flows. Returns the reply message on success, or {'timed_out': True} if no reply arrived in time."
     integration: Annotated[str, Integration("slack")] | None = None
