@@ -93,7 +93,7 @@
       },
       "patch": {
         "tags": ["orgs"],
-        "description": "Partially update an organization. Omitted fields are left unchanged. To explicitly clear a field, pass it as `null`.",
+        "description": "Partially update an organization",
         "operationId": "handler",
         "parameters": [
           {
@@ -2402,6 +2402,7 @@
           {
             "name": "q",
             "in": "query",
+            "description": "Optional search query to filter users by name",
             "required": false,
             "schema": {
               "type": ["string", "null"]
@@ -2410,6 +2411,7 @@
           {
             "name": "page_token",
             "in": "query",
+            "description": "Page token for pagination",
             "required": false,
             "schema": {
               "type": ["string", "null"]
@@ -2913,10 +2915,13 @@
         "required": ["email", "role"],
         "properties": {
           "email": {
-            "type": "string"
+            "type": "string",
+            "description": "User's email address"
           },
           "role": {
-            "type": "string"
+            "type": "string",
+            "description": "User's role in the organization. Standard values are `admin` and `user`. Custom roles are available — contact sales for more information",
+            "example": "user"
           }
         }
       },
@@ -3262,17 +3267,15 @@
         "required": ["org_users"],
         "properties": {
           "next_page_token": {
-            "type": ["integer", "null"],
-            "format": "int64"
+            "type": ["string", "null"],
+            "description": "Token to fetch the next page, or null if this is the last page"
           },
           "org_users": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/OrgUser"
-            }
-          },
-          "q": {
-            "type": ["string", "null"]
+            },
+            "description": "List of users in the organization"
           }
         }
       },
@@ -3467,20 +3470,24 @@
         "required": ["email", "role"],
         "properties": {
           "email": {
-            "type": "string"
+            "type": "string",
+            "description": "User's email address"
           },
           "id": {
-            "type": ["integer", "null"],
-            "format": "int64"
+            "type": ["string", "null"],
+            "description": "Unique user identifier. Null for pending invites that haven't been accepted yet"
           },
           "name": {
-            "type": ["string", "null"]
+            "type": ["string", "null"],
+            "description": "User's display name"
           },
           "photo_url": {
-            "type": ["string", "null"]
+            "type": ["string", "null"],
+            "description": "URL of the user's profile photo"
           },
           "role": {
-            "type": "string"
+            "type": "string",
+            "description": "User's role in the organization"
           }
         }
       },
@@ -3757,7 +3764,8 @@
         "required": ["email"],
         "properties": {
           "email": {
-            "type": "string"
+            "type": "string",
+            "description": "Email address of the user to remove from the organization"
           }
         }
       },
