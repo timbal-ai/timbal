@@ -37,10 +37,7 @@ class PineconeListIndexes(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -69,10 +66,7 @@ class PineconeCreateIndex(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -117,10 +111,7 @@ class PineconeIndexStats(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -157,16 +148,15 @@ class PineconeUpsertVectors(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _upsert_vectors(
             index_host: str = Field(..., description=_INDEX_HOST_DESC),
-            vectors: list[dict[str, Any]] = Field(..., description="List of vectors with id, values, and optional metadata"),
+            vectors: list[dict[str, Any]] = Field(
+                ..., description="List of vectors with id, values, and optional metadata"
+            ),
             namespace: str = Field("", description="Index partition"),
         ) -> Any:
             api_key = await _resolve_api_key(self)
@@ -194,10 +184,7 @@ class PineconeQuery(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -206,7 +193,9 @@ class PineconeQuery(Tool):
             vector: list[float] = Field(..., description="Query embedding"),
             top_k: int = Field(10, description="Number of nearest neighbors to return"),
             namespace: str = Field("", description="Index partition to search"),
-            metadata_filter: dict[str, Any] | None = Field(None, description='Metadata filter, e.g. {"genre": {"$eq": "documentary"}}'),
+            metadata_filter: dict[str, Any] | None = Field(
+                None, description='Metadata filter, e.g. {"genre": {"$eq": "documentary"}}'
+            ),
             include_values: bool = Field(False, description="Return vector values in results"),
             include_metadata: bool = Field(True, description="Return metadata in results"),
         ) -> Any:
@@ -245,10 +234,7 @@ class PineconeFetchVectors(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -260,9 +246,9 @@ class PineconeFetchVectors(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            params: list[tuple[str, str]] = [("ids", id_) for id_ in ids]
+            params: dict[str, Any] = {"ids": ids}
             if namespace:
-                params.append(("namespace", namespace))
+                params["namespace"] = namespace
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
@@ -286,10 +272,7 @@ class PineconeDeleteVectors(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -298,7 +281,9 @@ class PineconeDeleteVectors(Tool):
             ids: list[str] | None = Field(None, description="Vector IDs to delete"),
             delete_all: bool = Field(False, description="Delete all vectors in the namespace"),
             namespace: str = Field("", description="Index partition to delete from"),
-            metadata_filter: dict[str, Any] | None = Field(None, description="Metadata filter to select vectors for deletion"),
+            metadata_filter: dict[str, Any] | None = Field(
+                None, description="Metadata filter to select vectors for deletion"
+            ),
         ) -> Any:
             api_key = await _resolve_api_key(self)
             import httpx
