@@ -9,23 +9,23 @@ from ..platform.integrations import Integration
 _API_VERSION = "2024-01"
 
 
-def _shopify_base(shop: str) -> str:
-    return f"https://{shop}/admin/api/{_API_VERSION}"
+def _shopify_base(shop_url: str) -> str:
+    return f"https://{shop_url}/admin/api/{_API_VERSION}"
 
 
 async def _resolve_credentials(tool: Any) -> tuple[str, str]:
-    """Resolve Shopify token and shop from integration, explicit fields, or env vars."""
+    """Resolve Shopify token and shop_url from integration, explicit fields, or env vars."""
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
         return credentials["token"], credentials["shop_url"]
     token = tool.token.get_secret_value() if tool.token else os.getenv("SHOPIFY_TOKEN")
-    shop = tool.shop_url if tool.shop_url else os.getenv("SHOPIFY_SHOP")
-    if not token or not shop:
+    shop_url = tool.shop_url if tool.shop_url else os.getenv("SHOPIFY_SHOP")
+    if not token or not shop_url:
         raise ValueError(
             "Shopify credentials not found. Set SHOPIFY_TOKEN and SHOPIFY_SHOP environment variables, "
             "pass token and shop_url in config, or configure an integration."
         )
-    return token, shop
+    return token, shop_url
 
 
 class ShopifyGetShopDetails(Tool):
@@ -44,12 +44,12 @@ class ShopifyGetShopDetails(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_shop_details() -> Any:
-            token, shop = await _resolve_credentials(self)
+            token, shop_url = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_shopify_base(shop)}/shop.json",
+                    f"{_shopify_base(shop_url)}/shop.json",
                     headers={"X-Shopify-Access-Token": token},
                 )
                 response.raise_for_status()
@@ -82,7 +82,7 @@ class ShopifyGetProducts(Tool):
             status: str | None = Field(None, description="Filter products by status: 'active', 'archived', or 'draft'"),
             ids: list[str] | None = Field(None, description="Filter products by specific product IDs"),
         ) -> Any:
-            token, shop = await _resolve_credentials(self)
+            token, shop_url = await _resolve_credentials(self)
             import httpx
 
             params: dict[str, Any] = {"limit": limit}
@@ -101,7 +101,7 @@ class ShopifyGetProducts(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_shopify_base(shop)}/products.json",
+                    f"{_shopify_base(shop_url)}/products.json",
                     headers={"X-Shopify-Access-Token": token},
                     params=params,
                 )
@@ -127,12 +127,12 @@ class ShopifyGetProduct(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_product(product_id: str = Field(..., description="Shopify product ID")) -> Any:
-            token, shop = await _resolve_credentials(self)
+            token, shop_url = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_shopify_base(shop)}/products/{product_id}.json",
+                    f"{_shopify_base(shop_url)}/products/{product_id}.json",
                     headers={"X-Shopify-Access-Token": token},
                 )
                 response.raise_for_status()
@@ -167,7 +167,7 @@ class ShopifyCreateProduct(Tool):
             options: list[dict[str, Any]] | None = Field(None, description="List of product options, e.g. [{'name': 'Size', 'values': ['S', 'M', 'L']}]"),
             images: list[dict[str, Any]] | None = Field(None, description="List of image objects, e.g. [{'src': 'https://example.com/image.jpg'}]"),
         ) -> Any:
-            token, shop = await _resolve_credentials(self)
+            token, shop_url = await _resolve_credentials(self)
             import httpx
 
             product: dict[str, Any] = {"title": title, "status": status}
@@ -188,7 +188,7 @@ class ShopifyCreateProduct(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_shopify_base(shop)}/products.json",
+                    f"{_shopify_base(shop_url)}/products.json",
                     headers={"X-Shopify-Access-Token": token},
                     json={"product": product},
                 )
@@ -214,12 +214,12 @@ class ShopifyDeleteProduct(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _delete_product(product_id: str = Field(..., description="Shopify product ID")) -> Any:
-            token, shop = await _resolve_credentials(self)
+            token, shop_url = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
-                    f"{_shopify_base(shop)}/products/{product_id}.json",
+                    f"{_shopify_base(shop_url)}/products/{product_id}.json",
                     headers={"X-Shopify-Access-Token": token},
                 )
                 response.raise_for_status()
@@ -247,7 +247,7 @@ class ShopifyGetInventoryLevel(Tool):
             inventory_item_ids: list[str] = Field(..., description="List of inventory item IDs to get levels for"),
             location_ids: list[str] | None = Field(None, description="List of location IDs to filter by"),
         ) -> Any:
-            token, shop = await _resolve_credentials(self)
+            token, shop_url = await _resolve_credentials(self)
             import httpx
 
             params: dict[str, Any] = {
@@ -258,7 +258,7 @@ class ShopifyGetInventoryLevel(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_shopify_base(shop)}/inventory_levels.json",
+                    f"{_shopify_base(shop_url)}/inventory_levels.json",
                     headers={"X-Shopify-Access-Token": token},
                     params=params,
                 )
@@ -288,12 +288,12 @@ class ShopifyAdjustInventory(Tool):
             location_id: str = Field(..., description="Location ID for the inventory adjustment"),
             adjustment: int = Field(..., description="Inventory adjustment amount (positive to increase, negative to decrease)"),
         ) -> Any:
-            token, shop = await _resolve_credentials(self)
+            token, shop_url = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_shopify_base(shop)}/inventory_levels/adjust.json",
+                    f"{_shopify_base(shop_url)}/inventory_levels/adjust.json",
                     headers={"X-Shopify-Access-Token": token},
                     json={
                         "inventory_item_id": inventory_item_id,
@@ -326,12 +326,12 @@ class ShopifyUpdateInventoryTracking(Tool):
             inventory_item_id: str = Field(..., description="Inventory item ID to update tracking for"),
             tracked: bool = Field(..., description="Whether to track inventory for this item (true/false)"),
         ) -> Any:
-            token, shop = await _resolve_credentials(self)
+            token, shop_url = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.put(
-                    f"{_shopify_base(shop)}/inventory_items/{inventory_item_id}.json",
+                    f"{_shopify_base(shop_url)}/inventory_items/{inventory_item_id}.json",
                     headers={"X-Shopify-Access-Token": token},
                     json={"inventory_item": {"id": inventory_item_id, "tracked": tracked}},
                 )
@@ -357,12 +357,12 @@ class ShopifyGetVariantInventoryItem(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_variant_inventory_item(variant_id: str = Field(..., description="Shopify product variant ID")) -> Any:
-            token, shop = await _resolve_credentials(self)
+            token, shop_url = await _resolve_credentials(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_shopify_base(shop)}/variants/{variant_id}.json",
+                    f"{_shopify_base(shop_url)}/variants/{variant_id}.json",
                     headers={"X-Shopify-Access-Token": token},
                     params={"fields": "id,inventory_item_id,sku,title,inventory_quantity"},
                 )
