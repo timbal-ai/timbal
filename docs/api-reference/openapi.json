@@ -6,19 +6,130 @@
     "license": {
       "name": ""
     },
-    "version": "1.0.0"
+    "version": "1.3.0"
   },
   "servers": [
     {
-      "url": "https://dev.timbal.ai"
+      "url": "https://api.timbal.ai"
     }
   ],
   "paths": {
+    "/me/orgs": {
+      "get": {
+        "tags": ["orgs"],
+        "description": "List organizations the authenticated user belongs to",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Optional search query to filter orgs by name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Page token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organizations listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgsResult"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}": {
+      "get": {
+        "tags": ["orgs"],
+        "description": "Get an organization by ID",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetOrgResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": ["orgs"],
+        "description": "Partially update an organization. Omitted fields are left unchanged. To explicitly clear a field, pass it as `null`.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditOrgReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Organization updated successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/apps/{app_id}/runs": {
       "get": {
-        "tags": [
-          "runs"
-        ],
+        "tags": ["runs"],
         "description": "List runs for a specific application",
         "operationId": "handler",
         "parameters": [
@@ -46,10 +157,7 @@
             "description": "Filter runs by user ID",
             "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": ["integer", "null"],
               "format": "int64"
             }
           },
@@ -59,10 +167,7 @@
             "description": "Filter runs by version ID",
             "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": ["integer", "null"],
               "format": "int64"
             }
           },
@@ -72,10 +177,7 @@
             "description": "Filter runs by status",
             "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": ["string", "null"]
             }
           },
           {
@@ -84,10 +186,7 @@
             "description": "Filter runs by sentiment",
             "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": ["string", "null"]
             }
           },
           {
@@ -96,10 +195,7 @@
             "description": "Filter runs by group ID",
             "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": ["integer", "null"],
               "format": "int64"
             }
           },
@@ -109,10 +205,7 @@
             "description": "Filter runs by start time (epoch timestamp in milliseconds)",
             "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": ["integer", "null"],
               "format": "int64"
             },
             "example": 1729540800000
@@ -123,10 +216,7 @@
             "description": "Filter runs by end time (epoch timestamp in milliseconds)",
             "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": ["integer", "null"],
               "format": "int64"
             },
             "example": 1729627200000
@@ -137,10 +227,7 @@
             "description": "Filter runs by metadata",
             "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": ["string", "null"]
             }
           },
           {
@@ -149,10 +236,7 @@
             "description": "Page token",
             "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": ["integer", "null"],
               "format": "int64"
             }
           }
@@ -178,9 +262,7 @@
     },
     "/orgs/{org_id}/apps/{app_id}/runs/{run_id}": {
       "patch": {
-        "tags": [
-          "runs"
-        ],
+        "tags": ["runs"],
         "description": "Update an existing platform run or link a local run with the platform",
         "operationId": "handler",
         "parameters": [
@@ -241,11 +323,153 @@
         ]
       }
     },
+    "/orgs/{org_id}/domains": {
+      "get": {
+        "tags": ["orgs"],
+        "description": "List domains for an organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Domains listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListDomainsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": ["orgs"],
+        "description": "Add a custom domain to an organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDomainReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Domain created successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/domains/{domain_id}": {
+      "get": {
+        "tags": ["orgs"],
+        "description": "Get a domain by ID",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "domain_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Domain details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Domain"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": ["orgs"],
+        "description": "Delete a domain",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "domain_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Domain deleted successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/embedding-models": {
       "get": {
-        "tags": [
-          "embeddings"
-        ],
+        "tags": ["embeddings"],
         "description": "List all available embedding models for the organization",
         "operationId": "handler",
         "parameters": [
@@ -287,9 +511,7 @@
     },
     "/orgs/{org_id}/files": {
       "post": {
-        "tags": [
-          "files"
-        ],
+        "tags": ["files"],
         "description": "Upload a file to an org",
         "operationId": "handler",
         "parameters": [
@@ -298,8 +520,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
-              "format": "int64"
+              "type": "string"
             }
           }
         ],
@@ -308,9 +529,7 @@
             "multipart/form-data": {
               "schema": {
                 "type": "object",
-                "required": [
-                  "file"
-                ],
+                "required": ["file"],
                 "properties": {
                   "file": {
                     "type": "array",
@@ -348,9 +567,7 @@
     },
     "/orgs/{org_id}/kbs/{kb_id}/embeddings": {
       "get": {
-        "tags": [
-          "embeddings"
-        ],
+        "tags": ["embeddings"],
         "description": "List embeddings",
         "operationId": "handler",
         "parameters": [
@@ -377,10 +594,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": ["string", "null"]
             }
           }
         ],
@@ -403,9 +617,7 @@
         ]
       },
       "post": {
-        "tags": [
-          "embeddings"
-        ],
+        "tags": ["embeddings"],
         "description": "Create a new embedding",
         "operationId": "handler",
         "parameters": [
@@ -452,9 +664,7 @@
     },
     "/orgs/{org_id}/kbs/{kb_id}/embeddings/{embedding_name}": {
       "delete": {
-        "tags": [
-          "embeddings"
-        ],
+        "tags": ["embeddings"],
         "description": "Delete an embedding",
         "operationId": "handler",
         "parameters": [
@@ -499,9 +709,7 @@
     },
     "/orgs/{org_id}/kbs/{kb_id}/indexes": {
       "get": {
-        "tags": [
-          "indexes"
-        ],
+        "tags": ["indexes"],
         "description": "List indexes for a KB",
         "operationId": "handler",
         "parameters": [
@@ -529,10 +737,7 @@
             "description": "Table name to filter indexes by",
             "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": ["string", "null"]
             }
           }
         ],
@@ -555,9 +760,7 @@
         ]
       },
       "post": {
-        "tags": [
-          "indexes"
-        ],
+        "tags": ["indexes"],
         "description": "Create a new index on a table",
         "operationId": "handler",
         "parameters": [
@@ -604,9 +807,7 @@
     },
     "/orgs/{org_id}/kbs/{kb_id}/indexes/{index_name}": {
       "delete": {
-        "tags": [
-          "indexes"
-        ],
+        "tags": ["indexes"],
         "description": "Delete an index",
         "operationId": "handler",
         "parameters": [
@@ -651,9 +852,7 @@
     },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/csv": {
       "post": {
-        "tags": [
-          "tables"
-        ],
+        "tags": ["tables"],
         "description": "Insert or update rows into a table from a CSV file",
         "operationId": "handler",
         "parameters": [
@@ -686,9 +885,7 @@
         ],
         "requestBody": {
           "content": {
-            "application/csv": {
-
-            }
+            "application/csv": {}
           }
         },
         "responses": {
@@ -705,9 +902,7 @@
     },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/records": {
       "post": {
-        "tags": [
-          "tables"
-        ],
+        "tags": ["tables"],
         "description": "Insert or update records into a table",
         "operationId": "handler",
         "parameters": [
@@ -762,9 +957,7 @@
     },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search": {
       "post": {
-        "tags": [
-          "tables"
-        ],
+        "tags": ["tables"],
         "description": "Search for records in a table",
         "operationId": "handler",
         "parameters": [
@@ -812,9 +1005,7 @@
               "application/json": {
                 "schema": {
                   "type": "array",
-                  "items": {
-
-                  }
+                  "items": {}
                 },
                 "example": [
                   {
@@ -843,10 +1034,1589 @@
           }
         ]
       }
+    },
+    "/orgs/{org_id}/projects": {
+      "get": {
+        "tags": ["projects"],
+        "description": "List projects for an organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Projects listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListProjectsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": ["projects"],
+        "description": "Create a new project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Project created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateProjectResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}": {
+      "get": {
+        "tags": ["projects"],
+        "description": "Get a project by ID",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Project details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectDetail"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": ["projects"],
+        "description": "Delete a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Project deleted successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": ["projects"],
+        "description": "Update a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditProjectReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Project updated successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/connections": {
+      "get": {
+        "tags": ["projects"],
+        "description": "List connections for a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connections listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListConnectionsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": ["projects"],
+        "description": "Connect a resource (KB or integration) to a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectToProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Connection created successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/connections/{connection_id}": {
+      "delete": {
+        "tags": ["projects"],
+        "description": "Delete a project connection",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "connection_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Connection deleted successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/deployments": {
+      "get": {
+        "tags": ["projects"],
+        "description": "List deployments for a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_env_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": ["string", "null"]
+            }
+          },
+          {
+            "name": "manifest_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": ["string", "null"]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": ["string", "null"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deployments listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListDeploymentsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/deployments/{deployment_id}": {
+      "get": {
+        "tags": ["projects"],
+        "description": "Get a deployment by ID",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deployment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deployment details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs": {
+      "get": {
+        "tags": ["projects"],
+        "description": "List environments for a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Environments listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEnvsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": ["projects"],
+        "description": "Create a new environment",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEnvReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Environment created successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}": {
+      "delete": {
+        "tags": ["projects"],
+        "description": "Delete an environment",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Environment deleted successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/branch": {
+      "patch": {
+        "tags": ["projects"],
+        "description": "Set or clear the branch for an environment",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetEnvBranchReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Branch updated successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/config": {
+      "patch": {
+        "tags": ["projects"],
+        "description": "Update environment configuration (CPU, memory, etc.)",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateEnvConfigReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Configuration updated successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/deploy": {
+      "post": {
+        "tags": ["projects"],
+        "description": "Deploy an environment",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeployEnvReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Deployment initiated"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/domain": {
+      "patch": {
+        "tags": ["projects"],
+        "description": "Associate or disassociate a custom domain with an environment",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetEnvDomainReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Domain updated successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/metrics/{metric_type}": {
+      "get": {
+        "tags": ["projects"],
+        "description": "Query environment metrics",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "metric_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MetricType"
+            }
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": ["integer", "null"],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": ["integer", "null"],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metrics data"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/stop": {
+      "post": {
+        "tags": ["projects"],
+        "description": "Stop an environment",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Stop initiated"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/users": {
+      "get": {
+        "tags": ["projects"],
+        "description": "List users for a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Users listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListProjectUsersResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": ["projects"],
+        "description": "Add a user to a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddProjectUserReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "User added successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/users/{user_id}": {
+      "delete": {
+        "tags": ["projects"],
+        "description": "Remove a user from a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "User removed successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": ["projects"],
+        "description": "Update a user's role in a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditProjectUserReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "User role updated successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/vars": {
+      "get": {
+        "tags": ["projects"],
+        "description": "List variables for a project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_ids",
+            "in": "query",
+            "description": "Comma-separated list of environment IDs to filter by",
+            "required": false,
+            "schema": {
+              "type": ["string", "null"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Variables listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListVarsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": ["projects"],
+        "description": "Create a new variable",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateVarReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Variable created successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/vars/batch": {
+      "post": {
+        "tags": ["projects"],
+        "description": "Batch create variables",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchCreateVarsReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Variables created successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/vars/{var_id}": {
+      "get": {
+        "tags": ["projects"],
+        "description": "Get a variable by ID",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "var_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Variable details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Var"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": ["projects"],
+        "description": "Delete a variable",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "var_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Variable deleted successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": ["projects"],
+        "description": "Update a variable",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "var_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateVarReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Variable updated successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/users": {
+      "get": {
+        "tags": ["orgs"],
+        "description": "List users in an organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": ["string", "null"]
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": ["string", "null"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Users listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgUsersResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": ["orgs"],
+        "description": "Invite a user to an organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteOrgUserReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "User invited successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": ["orgs"],
+        "description": "Remove a user from an organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveOrgUserReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "User removed successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": ["orgs"],
+        "description": "Update a user's role in an organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditOrgUserReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "User role updated successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
     }
   },
   "components": {
     "schemas": {
+      "AddProjectUserReqBody": {
+        "type": "object",
+        "required": ["user_id"],
+        "properties": {
+          "user_id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "AppType": {
+        "type": "string",
+        "enum": ["agent", "workflow"]
+      },
+      "BatchCreateVarsReqBody": {
+        "type": "object",
+        "required": ["vars"],
+        "properties": {
+          "env_ids": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "vars": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VarInput"
+            }
+          }
+        }
+      },
+      "ConnectToProject": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["id", "type"],
+            "properties": {
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "type": {
+                "type": "string",
+                "enum": ["kb"]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["id", "type"],
+            "properties": {
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "type": {
+                "type": "string",
+                "enum": ["integration"]
+              }
+            }
+          }
+        ]
+      },
+      "CreateDomainReqBody": {
+        "type": "object",
+        "required": ["domain"],
+        "properties": {
+          "domain": {
+            "type": "string"
+          }
+        }
+      },
       "CreateEmbeddingReqBody": {
         "type": "object",
         "required": [
@@ -879,15 +2649,24 @@
           }
         }
       },
+      "CreateEnvReqBody": {
+        "type": "object",
+        "required": ["name", "color"],
+        "properties": {
+          "color": {
+            "type": "string"
+          },
+          "description": {
+            "type": ["string", "null"]
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "CreateIndexReqBody": {
         "type": "object",
-        "required": [
-          "table_name",
-          "name",
-          "column_names",
-          "type",
-          "is_unique"
-        ],
+        "required": ["table_name", "name", "column_names", "type", "is_unique"],
         "properties": {
           "column_names": {
             "type": "array",
@@ -914,13 +2693,252 @@
           }
         }
       },
+      "CreateProjectReqBody": {
+        "type": "object",
+        "required": ["origin"],
+        "properties": {
+          "name": {
+            "type": ["string", "null"]
+          },
+          "origin": {
+            "$ref": "#/components/schemas/ProjectOrigin"
+          }
+        }
+      },
+      "CreateProjectResBody": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateVarReqBody": {
+        "type": "object",
+        "required": ["type", "name", "value"],
+        "properties": {
+          "description": {
+            "type": ["string", "null"]
+          },
+          "env_ids": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/VarType"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "DeployEnvReqBody": {
+        "type": "object",
+        "properties": {
+          "rev": {
+            "type": ["string", "null"]
+          }
+        }
+      },
       "Deployment": {
         "type": "object",
         "required": [
-          "status"
+          "id",
+          "type",
+          "project_env_id",
+          "target",
+          "status",
+          "created_at",
+          "updated_at"
         ],
         "properties": {
+          "build_finished_at": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "build_logs": {
+            "type": ["string", "null"]
+          },
+          "build_started_at": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "cpu": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "desired_count": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "domain": {
+            "type": ["string", "null"]
+          },
+          "ephemeral_storage": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "memory": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "project_env_id": {
+            "type": "integer",
+            "format": "int64"
+          },
           "status": {
+            "type": "string"
+          },
+          "status_detail": {
+            "type": ["string", "null"]
+          },
+          "target": {
+            "$ref": "#/components/schemas/Target"
+          },
+          "type": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Domain": {
+        "type": "object",
+        "required": [
+          "id",
+          "domain",
+          "validation_records",
+          "validation_status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "domain": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project_env": {},
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "validation_records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidationRecord"
+            }
+          },
+          "validation_status": {
+            "$ref": "#/components/schemas/ValidationStatus"
+          }
+        }
+      },
+      "EditOrgReqBody": {
+        "type": "object",
+        "properties": {
+          "banner_url": {
+            "type": ["string", "null"],
+            "description": "URL of the organization's banner image",
+            "deprecated": true
+          },
+          "contact_email": {
+            "type": ["string", "null"],
+            "description": "Contact email address"
+          },
+          "contact_name": {
+            "type": ["string", "null"],
+            "description": "Contact person's name"
+          },
+          "contact_phone": {
+            "type": ["string", "null"],
+            "description": "Contact phone number"
+          },
+          "country": {
+            "type": ["string", "null"],
+            "description": "ISO 3166-1 alpha-2 country code"
+          },
+          "description": {
+            "type": ["string", "null"],
+            "description": "Organization description"
+          },
+          "name": {
+            "type": ["string", "null"],
+            "description": "Organization name"
+          },
+          "photo_url": {
+            "type": ["string", "null"],
+            "description": "URL of the organization's profile photo"
+          }
+        }
+      },
+      "EditOrgUserReqBody": {
+        "type": "object",
+        "required": ["email", "role"],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        }
+      },
+      "EditProjectReqBody": {
+        "type": "object",
+        "properties": {
+          "banner_url": {
+            "type": ["string", "null"]
+          },
+          "default_role": {
+            "type": ["string", "null"]
+          },
+          "description": {
+            "type": ["string", "null"]
+          },
+          "is_public_template": {
+            "type": ["boolean", "null"]
+          },
+          "name": {
+            "type": ["string", "null"]
+          },
+          "use_platform_iam": {
+            "type": ["boolean", "null"]
+          }
+        }
+      },
+      "EditProjectUserReqBody": {
+        "type": "object",
+        "required": ["role"],
+        "properties": {
+          "role": {
             "type": "string"
           }
         }
@@ -977,86 +2995,60 @@
         "oneOf": [
           {
             "type": "object",
-            "required": [
-              "details",
-              "status"
-            ],
+            "required": ["details", "status"],
             "properties": {
               "details": {
                 "type": "object"
               },
               "status": {
                 "type": "string",
-                "enum": [
-                  "pending"
-                ]
+                "enum": ["pending"]
               }
             }
           },
           {
             "type": "object",
-            "required": [
-              "details",
-              "status"
-            ],
+            "required": ["details", "status"],
             "properties": {
               "details": {
                 "type": "object",
                 "properties": {
                   "processed_rows": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
+                    "type": ["integer", "null"],
                     "format": "int64"
                   },
                   "total_rows": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
+                    "type": ["integer", "null"],
                     "format": "int64"
                   }
                 }
               },
               "status": {
                 "type": "string",
-                "enum": [
-                  "processing"
-                ]
+                "enum": ["processing"]
               }
             }
           },
           {
             "type": "object",
-            "required": [
-              "details",
-              "status"
-            ],
+            "required": ["details", "status"],
             "properties": {
               "details": {
                 "type": "object"
               },
               "status": {
                 "type": "string",
-                "enum": [
-                  "success"
-                ]
+                "enum": ["success"]
               }
             }
           },
           {
             "type": "object",
-            "required": [
-              "details",
-              "status"
-            ],
+            "required": ["details", "status"],
             "properties": {
               "details": {
                 "type": "object",
-                "required": [
-                  "error"
-                ],
+                "required": ["error"],
                 "properties": {
                   "error": {
                     "type": "string"
@@ -1065,9 +3057,7 @@
               },
               "status": {
                 "type": "string",
-                "enum": [
-                  "error"
-                ]
+                "enum": ["error"]
               }
             }
           }
@@ -1099,10 +3089,7 @@
             "description": "The time the file was created"
           },
           "expires_at": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": ["string", "null"],
             "format": "date-time",
             "description": "The time the file expires at"
           },
@@ -1118,6 +3105,15 @@
           "url": {
             "type": "string",
             "description": "The URL where the file can be accessed"
+          }
+        }
+      },
+      "GetOrgResBody": {
+        "type": "object",
+        "required": ["org"],
+        "properties": {
+          "org": {
+            "$ref": "#/components/schemas/Org"
           }
         }
       },
@@ -1157,20 +3153,56 @@
       },
       "IndexType": {
         "type": "string",
-        "enum": [
-          "btree",
-          "hash",
-          "gin",
-          "gist",
-          "brin",
-          "hnsw"
-        ]
+        "enum": ["btree", "hash", "gin", "gist", "brin", "hnsw"]
+      },
+      "InviteOrgUserReqBody": {
+        "type": "object",
+        "required": ["email"],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        }
+      },
+      "ListConnectionsResBody": {
+        "type": "object",
+        "required": ["connections"],
+        "properties": {
+          "connections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectConnection"
+            }
+          }
+        }
+      },
+      "ListDeploymentsResBody": {
+        "type": "object",
+        "required": ["deployments"],
+        "properties": {
+          "deployments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Deployment"
+            }
+          }
+        }
+      },
+      "ListDomainsResBody": {
+        "type": "object",
+        "required": ["domains"],
+        "properties": {
+          "domains": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Domain"
+            }
+          }
+        }
       },
       "ListEmbeddingModelsResBody": {
         "type": "object",
-        "required": [
-          "embedding_models"
-        ],
+        "required": ["embedding_models"],
         "properties": {
           "embedding_models": {
             "type": "array",
@@ -1182,9 +3214,7 @@
       },
       "ListEmbeddingsResBody": {
         "type": "object",
-        "required": [
-          "embeddings"
-        ],
+        "required": ["embeddings"],
         "properties": {
           "embeddings": {
             "type": "array",
@@ -1194,11 +3224,21 @@
           }
         }
       },
+      "ListEnvsResBody": {
+        "type": "object",
+        "required": ["envs"],
+        "properties": {
+          "envs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectEnv"
+            }
+          }
+        }
+      },
       "ListIndexesResBody": {
         "type": "object",
-        "required": [
-          "indexes"
-        ],
+        "required": ["indexes"],
         "properties": {
           "indexes": {
             "type": "array",
@@ -1208,25 +3248,77 @@
           }
         }
       },
+      "ListOrgUsersResBody": {
+        "type": "object",
+        "required": ["org_users"],
+        "properties": {
+          "next_page_token": {
+            "type": ["integer", "null"],
+            "format": "int64"
+          },
+          "org_users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgUser"
+            }
+          },
+          "q": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "ListOrgsResult": {
+        "type": "object",
+        "required": ["orgs"],
+        "properties": {
+          "next_page_token": {
+            "type": ["string", "null"],
+            "description": "Next page token"
+          },
+          "orgs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgPreview"
+            },
+            "description": "List of organizations"
+          }
+        }
+      },
+      "ListProjectUsersResBody": {
+        "type": "object",
+        "required": ["users"],
+        "properties": {
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserWithRole"
+            }
+          }
+        }
+      },
+      "ListProjectsResBody": {
+        "type": "object",
+        "required": ["projects"],
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectPreview"
+            }
+          }
+        }
+      },
       "ListRunsResBody": {
         "type": "object",
-        "required": [
-          "runs"
-        ],
+        "required": ["runs"],
         "properties": {
           "group_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": ["integer", "null"],
             "format": "int64",
             "description": "The `group_id` filter applied to the query"
           },
           "next_page_token": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": ["integer", "null"],
             "format": "int64",
             "description": "Cursor for the next page"
           },
@@ -1238,12 +3330,425 @@
             "description": "List of runs"
           },
           "user_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": ["integer", "null"],
             "format": "int64",
             "description": "The `user_id` filter applied to the query"
+          }
+        }
+      },
+      "ListVarsResBody": {
+        "type": "object",
+        "required": ["vars"],
+        "properties": {
+          "vars": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Var"
+            }
+          }
+        }
+      },
+      "Org": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "plan",
+          "plan_metadata",
+          "credits_per_usd",
+          "created_at",
+          "role"
+        ],
+        "properties": {
+          "banner_url": {
+            "type": ["string", "null"]
+          },
+          "contact_email": {
+            "type": ["string", "null"]
+          },
+          "contact_name": {
+            "type": ["string", "null"]
+          },
+          "contact_phone": {
+            "type": ["string", "null"]
+          },
+          "country": {
+            "type": ["string", "null"]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "credits_per_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "description": {
+            "type": ["string", "null"]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "photo_url": {
+            "type": ["string", "null"]
+          },
+          "plan": {
+            "type": "string"
+          },
+          "plan_metadata": {},
+          "role": {
+            "type": "string"
+          },
+          "stripe_customer_id": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "OrgPreview": {
+        "type": "object",
+        "required": ["id", "name", "plan", "n_projects", "role", "created_at"],
+        "properties": {
+          "banner_url": {
+            "type": ["string", "null"],
+            "description": "URL of the organization's banner image",
+            "deprecated": true
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation timestamp in epoch milliseconds"
+          },
+          "description": {
+            "type": ["string", "null"],
+            "description": "Organization description"
+          },
+          "id": {
+            "type": "string",
+            "description": "Unique organization identifier"
+          },
+          "n_projects": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of projects in the organization"
+          },
+          "name": {
+            "type": "string",
+            "description": "Organization name"
+          },
+          "photo_url": {
+            "type": ["string", "null"],
+            "description": "URL of the organization's profile photo"
+          },
+          "plan": {
+            "type": "string",
+            "description": "Subscription plan"
+          },
+          "role": {
+            "type": "string",
+            "description": "Authenticated user's role in the organization"
+          }
+        }
+      },
+      "OrgUser": {
+        "type": "object",
+        "required": ["email", "role"],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": ["integer", "null"],
+            "format": "int64"
+          },
+          "name": {
+            "type": ["string", "null"]
+          },
+          "photo_url": {
+            "type": ["string", "null"]
+          },
+          "role": {
+            "type": "string"
+          }
+        }
+      },
+      "ProjectApp": {
+        "type": "object",
+        "required": ["id", "type", "name"],
+        "properties": {
+          "description": {
+            "type": ["string", "null"]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/AppType"
+          },
+          "unversioned_source_updated_at": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          }
+        }
+      },
+      "ProjectConnection": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "resource_id",
+          "resource_data",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "resource_data": {},
+          "resource_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "resource_name": {
+            "type": ["string", "null"]
+          },
+          "type": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ProjectDetail": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "has_ui",
+          "apps",
+          "role",
+          "use_platform_iam",
+          "is_public_template",
+          "template_uses",
+          "publishable_api_key",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "apps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectApp"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "default_role": {
+            "type": ["string", "null"]
+          },
+          "description": {
+            "type": ["string", "null"]
+          },
+          "has_ui": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interface_unversioned_source_updated_at": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "is_public_template": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "publishable_api_key": {
+            "type": "string"
+          },
+          "repository_url": {
+            "type": ["string", "null"],
+            "description": "When null, the project does not have the source code available."
+          },
+          "role": {
+            "type": "string"
+          },
+          "screenshot_url": {
+            "type": ["string", "null"]
+          },
+          "template_uses": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "use_platform_iam": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ProjectEnv": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "color",
+          "subdomain",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "branch": {
+            "type": ["string", "null"]
+          },
+          "color": {
+            "type": "string"
+          },
+          "cpu": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "custom_domain": {},
+          "description": {
+            "type": ["string", "null"]
+          },
+          "desired_count": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "ephemeral_storage": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "memory": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "subdomain": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ProjectOrigin": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["project_id", "type"],
+            "properties": {
+              "project_id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "type": {
+                "type": "string",
+                "enum": ["Template"]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["has_ui", "app_type", "type"],
+            "properties": {
+              "app_type": {
+                "$ref": "#/components/schemas/AppType"
+              },
+              "has_ui": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": "string",
+                "enum": ["Scratch"]
+              }
+            }
+          }
+        ]
+      },
+      "ProjectPreview": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "role",
+          "created_at",
+          "is_public_template",
+          "template_uses"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "default_role": {
+            "type": ["string", "null"]
+          },
+          "description": {
+            "type": ["string", "null"]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "is_public_template": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "screenshot_url": {
+            "type": ["string", "null"]
+          },
+          "template_uses": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "RemoveOrgUserReqBody": {
+        "type": "object",
+        "required": ["email"],
+        "properties": {
+          "email": {
+            "type": "string"
           }
         }
       },
@@ -1255,9 +3760,15 @@
           "version",
           "status",
           "cost_usd",
-          "created_at"
+          "cost_credits",
+          "created_at",
+          "idempotency_key"
         ],
         "properties": {
+          "cost_credits": {
+            "type": "number",
+            "format": "double"
+          },
           "cost_usd": {
             "type": "number",
             "format": "double"
@@ -1267,42 +3778,32 @@
             "format": "date-time"
           },
           "duration_ms": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": ["integer", "null"],
             "format": "int64"
           },
           "group_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": ["integer", "null"],
             "format": "int64"
           },
           "id": {
             "type": "integer",
             "format": "int64"
           },
+          "idempotency_key": {
+            "type": "string"
+          },
           "last_reaction_sentiment": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": ["string", "null"]
           },
           "parent_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": ["integer", "null"],
             "format": "int64"
           },
           "status": {
             "type": "string"
           },
-          "trace": {
-
-          },
+          "status_detail": {},
+          "trace": {},
           "user": {
             "$ref": "#/components/schemas/UserRef"
           },
@@ -1310,16 +3811,11 @@
             "$ref": "#/components/schemas/VersionRef"
           }
         },
-        "additionalProperties": {
-
-        }
+        "additionalProperties": {}
       },
       "SearchTableReqBody": {
         "type": "object",
-        "required": [
-          "query",
-          "embedding_names"
-        ],
+        "required": ["query", "embedding_names"],
         "properties": {
           "embedding_names": {
             "type": "array",
@@ -1329,10 +3825,7 @@
             "description": "List of embedding names to use for semantic search. Only a single column is supported at the moment."
           },
           "fts_columns": {
-            "type": [
-              "array",
-              "null"
-            ],
+            "type": ["array", "null"],
             "items": {
               "type": "string"
             },
@@ -1355,64 +3848,124 @@
             "description": "Semantic search query."
           },
           "select_columns": {
-            "type": [
-              "array",
-              "null"
-            ],
+            "type": ["array", "null"],
             "items": {
               "type": "string"
             },
             "description": "List of column names to return in the search results. When not specified, all columns will be returned."
           },
           "where": {
-            "type": [
-              "string",
-              "null"
-            ],
+            "type": ["string", "null"],
             "description": "SQL WHERE expression to apply to the search. This feature is _experimental_ and may be removed or changed in the future."
+          }
+        }
+      },
+      "SetEnvBranchReqBody": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": ["string", "null"],
+            "description": "When null, the branch will be cleared"
+          }
+        }
+      },
+      "SetEnvDomainReqBody": {
+        "type": "object",
+        "properties": {
+          "domain_id": {
+            "type": ["integer", "null"],
+            "format": "int64"
+          }
+        }
+      },
+      "Target": {
+        "type": "object",
+        "required": ["type", "id"],
+        "properties": {
+          "commit": {},
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "manifest_id": {
+            "type": ["string", "null"]
+          },
+          "type": {
+            "type": "string"
+          },
+          "version_id": {
+            "type": ["integer", "null"],
+            "format": "int64"
+          }
+        }
+      },
+      "UpdateEnvConfigReqBody": {
+        "type": "object",
+        "properties": {
+          "cpu": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "desired_count": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "ephemeral_storage": {
+            "type": ["integer", "null"],
+            "format": "int32"
+          },
+          "memory": {
+            "type": ["integer", "null"],
+            "format": "int32"
           }
         }
       },
       "UpdateRunReqBody": {
         "type": "object",
-        "required": [
-          "trace"
-        ],
         "properties": {
+          "metadata": {
+            "description": "Custom metadata"
+          },
           "parent_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Parent run identifier (if any)"
+            "type": ["string", "null"],
+            "description": "This can be a platform-defined id or a custom id.\nThe platform will map the custom id to an internal one afterwards."
           },
           "trace": {
             "description": "Trace data"
           },
           "version_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
+            "type": ["string", "null"],
             "description": "Version identifier (if any)"
+          }
+        }
+      },
+      "UpdateVarReqBody": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": ["string", "null"]
+          },
+          "env_ids": {
+            "type": ["array", "null"],
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "value": {
+            "type": ["string", "null"]
           }
         }
       },
       "UpsertRecordsReqBody": {
         "type": "object",
-        "required": [
-          "records"
-        ],
+        "required": ["records"],
         "properties": {
           "records": {
             "type": "array",
             "items": {
               "type": "object",
-              "additionalProperties": {
-
-              },
+              "additionalProperties": {},
               "propertyNames": {
                 "type": "string"
               }
@@ -1423,11 +3976,7 @@
       },
       "UserRef": {
         "type": "object",
-        "required": [
-          "id",
-          "name",
-          "email"
-        ],
+        "required": ["id", "name", "email"],
         "properties": {
           "email": {
             "type": "string"
@@ -1440,20 +3989,158 @@
             "type": "string"
           },
           "photo_url": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": ["string", "null"]
           }
         }
       },
+      "UserWithRole": {
+        "type": "object",
+        "required": ["id", "email", "name", "role"],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "photo_url": {
+            "type": ["string", "null"]
+          },
+          "role": {
+            "type": "string"
+          }
+        }
+      },
+      "ValidationRecord": {
+        "type": "object",
+        "required": ["type", "name", "value"],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "ValidationStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "issued",
+          "inactive",
+          "expired",
+          "revoked",
+          "failed",
+          "validationtimedout"
+        ]
+      },
+      "Var": {
+        "type": "object",
+        "required": ["id", "name", "value", "envs"],
+        "properties": {
+          "description": {
+            "type": ["string", "null"]
+          },
+          "envs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VarEnv"
+            }
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/VarValue"
+          }
+        }
+      },
+      "VarEnv": {
+        "type": "object",
+        "required": ["id", "name", "color"],
+        "properties": {
+          "color": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "VarInput": {
+        "type": "object",
+        "required": ["type", "name", "value"],
+        "properties": {
+          "description": {
+            "type": ["string", "null"]
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/VarType"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "VarType": {
+        "type": "string",
+        "enum": ["plain", "secret"]
+      },
+      "VarValue": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["value", "type"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["plain"]
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "decrypted": {
+                "type": ["string", "null"]
+              },
+              "preview": {
+                "type": ["string", "null"]
+              },
+              "type": {
+                "type": "string",
+                "enum": ["secret"]
+              }
+            }
+          }
+        ]
+      },
       "VersionRef": {
         "type": "object",
-        "required": [
-          "id",
-          "name",
-          "is_prod"
-        ],
+        "required": ["id", "name", "is_prod"],
         "properties": {
           "deployment": {
             "oneOf": [
@@ -1488,6 +4175,10 @@
   },
   "tags": [
     {
+      "name": "orgs",
+      "description": "Organization operations"
+    },
+    {
       "name": "embeddings",
       "description": "KB Embeddings operations"
     },
@@ -1498,6 +4189,10 @@
     {
       "name": "indexes",
       "description": "KB Indexes operations"
+    },
+    {
+      "name": "projects",
+      "description": "Project operations"
     },
     {
       "name": "runs",

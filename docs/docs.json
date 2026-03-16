@@ -15,11 +15,7 @@
         "groups": [
           {
             "group": "Getting started",
-            "pages": [
-              "index",
-              "installation",
-              "quickstart"
-            ]
+            "pages": ["index", "installation", "quickstart"]
           },
           {
             "group": "Core Concepts",
@@ -95,9 +91,7 @@
         "pages": [
           {
             "group": "Examples",
-            "pages": [
-              "examples/index"
-            ]
+            "pages": ["examples/index"]
           },
           {
             "group": "Guides",
@@ -179,12 +173,94 @@
             ]
           },
           {
-            "group": "Runs",
-            "pages": ["api-reference/runs/list", "api-reference/runs/upsert"]
+            "group": "Organizations",
+            "pages": [
+              "api-reference/me/list-orgs",
+              "api-reference/orgs/create",
+              "api-reference/orgs/get",
+              "api-reference/orgs/update",
+              {
+                "group": "Domains",
+                "pages": [
+                  "api-reference/orgs/domains/list",
+                  "api-reference/orgs/domains/create",
+                  "api-reference/orgs/domains/get",
+                  "api-reference/orgs/domains/delete"
+                ]
+              },
+              {
+                "group": "Files",
+                "pages": ["api-reference/files/upload"]
+              },
+              {
+                "group": "Users",
+                "pages": [
+                  "api-reference/orgs/users/list",
+                  "api-reference/orgs/users/add",
+                  "api-reference/orgs/users/delete",
+                  "api-reference/orgs/users/update"
+                ]
+              }
+            ]
           },
           {
-            "group": "Files",
-            "pages": ["api-reference/files/upload"]
+            "group": "Projects",
+            "pages": [
+              "api-reference/projects/list",
+              "api-reference/projects/create",
+              "api-reference/projects/get",
+              "api-reference/projects/update",
+              "api-reference/projects/delete",
+              {
+                "group": "Connections",
+                "pages": [
+                  "api-reference/projects/connections/list",
+                  "api-reference/projects/connections/create",
+                  "api-reference/projects/connections/delete"
+                ]
+              },
+              {
+                "group": "Deployments",
+                "pages": [
+                  "api-reference/projects/deployments/list",
+                  "api-reference/projects/deployments/get"
+                ]
+              },
+              {
+                "group": "Environments",
+                "pages": [
+                  "api-reference/projects/environments/list",
+                  "api-reference/projects/environments/create",
+                  "api-reference/projects/environments/delete",
+                  "api-reference/projects/environments/update-branch",
+                  "api-reference/projects/environments/update-config",
+                  "api-reference/projects/environments/deploy",
+                  "api-reference/projects/environments/update-domain",
+                  "api-reference/projects/environments/get-metrics",
+                  "api-reference/projects/environments/stop"
+                ]
+              },
+              {
+                "group": "Users",
+                "pages": [
+                  "api-reference/projects/users/list",
+                  "api-reference/projects/users/add",
+                  "api-reference/projects/users/delete",
+                  "api-reference/projects/users/update"
+                ]
+              },
+              {
+                "group": "Variables",
+                "pages": [
+                  "api-reference/projects/vars/list",
+                  "api-reference/projects/vars/create",
+                  "api-reference/projects/vars/batch-create",
+                  "api-reference/projects/vars/get",
+                  "api-reference/projects/vars/delete",
+                  "api-reference/projects/vars/update"
+                ]
+              }
+            ]
           },
           {
             "group": "Knowledge Bases",
@@ -215,6 +291,10 @@
                 ]
               }
             ]
+          },
+          {
+            "group": "Runs",
+            "pages": ["api-reference/runs/list", "api-reference/runs/upsert"]
           }
         ]
       },
@@ -241,9 +321,7 @@
         "pages": [
           {
             "group": "MCP Integration",
-            "pages": [
-              "mcp-integration/index"
-            ]
+            "pages": ["mcp-integration/index"]
           },
           {
             "group": "Connecting Timbal",
