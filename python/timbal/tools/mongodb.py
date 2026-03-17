@@ -1,7 +1,6 @@
 import os
 from typing import Annotated, Any
 
-import httpx
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
@@ -20,7 +19,12 @@ async def _resolve_api_key(tool: Any) -> str:
     """Resolve MongoDB Data API key from integration, explicit field, or env var."""
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
-        return credentials["api_key"]
+        if isinstance(credentials, dict):
+            key = credentials.get("api_key") or credentials.get("token")
+        else:
+            key = getattr(credentials, "api_key", None) or getattr(credentials, "token", None)
+        if key:
+            return str(key)
     if tool.api_key is not None:
         return tool.api_key.get_secret_value()
     env_key = os.getenv("MONGODB_API_KEY")
@@ -37,7 +41,7 @@ async def _resolve_api_key(tool: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-class CreateDocument(Tool):
+class MongoCreateDocument(Tool):
     name: str = "mongodb_create_document"
     description: str | None = "Insert a new document into a MongoDB collection."
     integration: Annotated[str, Integration("mongodb")] | None = None
@@ -51,7 +55,7 @@ class CreateDocument(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _create_document(
+        async def _mongodb_create_document(
             app_id: str = Field(..., description="Atlas App Services App ID (found in Atlas Data API settings)"),
             data_source: str = Field(..., description="Atlas cluster name, e.g. Cluster0"),
             database: str = Field(..., description="Database name"),
@@ -59,6 +63,8 @@ class CreateDocument(Tool):
             document: dict[str, Any] = Field(..., description="Document to insert as a JSON object"),
         ) -> Any:
             api_key = await _resolve_api_key(self)
+            import httpx
+
             body = {**_base_body(data_source, database, collection), "document": document}
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -69,7 +75,7 @@ class CreateDocument(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_create_document, **kwargs)
+        super().__init__(handler=_mongodb_create_document, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +83,7 @@ class CreateDocument(Tool):
 # ---------------------------------------------------------------------------
 
 
-class FindDocumentById(Tool):
+class MongoFindDocumentById(Tool):
     name: str = "mongodb_find_document_by_id"
     description: str | None = "Retrieve a single MongoDB document by its _id."
     integration: Annotated[str, Integration("mongodb")] | None = None
@@ -91,7 +97,7 @@ class FindDocumentById(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _find_document_by_id(
+        async def _mongodb_find_document_by_id(
             app_id: str = Field(..., description="Atlas App Services App ID"),
             data_source: str = Field(..., description="Atlas cluster name"),
             database: str = Field(..., description="Database name"),
@@ -102,6 +108,8 @@ class FindDocumentById(Tool):
             ),
         ) -> Any:
             api_key = await _resolve_api_key(self)
+            import httpx
+
             body: dict[str, Any] = {
                 **_base_body(data_source, database, collection),
                 "filter": {"_id": {"$oid": document_id}},
@@ -117,10 +125,10 @@ class FindDocumentById(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_find_document_by_id, **kwargs)
+        super().__init__(handler=_mongodb_find_document_by_id, **kwargs)
 
 
-class FindDocument(Tool):
+class MongoFindDocument(Tool):
     name: str = "mongodb_find_document"
     description: str | None = "Find the first document in a MongoDB collection matching a query filter."
     integration: Annotated[str, Integration("mongodb")] | None = None
@@ -134,7 +142,7 @@ class FindDocument(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _find_document(
+        async def _mongodb_find_document(
             app_id: str = Field(..., description="Atlas App Services App ID"),
             data_source: str = Field(..., description="Atlas cluster name"),
             database: str = Field(..., description="Database name"),
@@ -145,6 +153,8 @@ class FindDocument(Tool):
             projection: dict[str, Any] | None = Field(None, description="Optional fields to include/exclude"),
         ) -> Any:
             api_key = await _resolve_api_key(self)
+            import httpx
+
             body: dict[str, Any] = {
                 **_base_body(data_source, database, collection),
                 "filter": query_filter,
@@ -160,10 +170,10 @@ class FindDocument(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_find_document, **kwargs)
+        super().__init__(handler=_mongodb_find_document, **kwargs)
 
 
-class SearchDocuments(Tool):
+class MongoSearchDocuments(Tool):
     name: str = "mongodb_search_documents"
     description: str | None = (
         "Search for documents in a MongoDB collection. "
@@ -180,7 +190,7 @@ class SearchDocuments(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _search_documents(
+        async def _mongodb_search_documents(
             app_id: str = Field(..., description="Atlas App Services App ID"),
             data_source: str = Field(..., description="Atlas cluster name"),
             database: str = Field(..., description="Database name"),
@@ -198,6 +208,8 @@ class SearchDocuments(Tool):
             skip: int = Field(0, description="Number of documents to skip for pagination"),
         ) -> Any:
             api_key = await _resolve_api_key(self)
+            import httpx
+
             body: dict[str, Any] = {
                 **_base_body(data_source, database, collection),
                 "filter": query_filter or {},
@@ -217,7 +229,7 @@ class SearchDocuments(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_search_documents, **kwargs)
+        super().__init__(handler=_mongodb_search_documents, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +237,7 @@ class SearchDocuments(Tool):
 # ---------------------------------------------------------------------------
 
 
-class UpdateDocument(Tool):
+class MongoUpdateDocument(Tool):
     name: str = "mongodb_update_document"
     description: str | None = "Update a single MongoDB document by its _id."
     integration: Annotated[str, Integration("mongodb")] | None = None
@@ -239,7 +251,7 @@ class UpdateDocument(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _update_document(
+        async def _mongodb_update_document(
             app_id: str = Field(..., description="Atlas App Services App ID"),
             data_source: str = Field(..., description="Atlas cluster name"),
             database: str = Field(..., description="Database name"),
@@ -252,6 +264,8 @@ class UpdateDocument(Tool):
             upsert: bool = Field(False, description="If True, creates the document if it does not exist"),
         ) -> Any:
             api_key = await _resolve_api_key(self)
+            import httpx
+
             body: dict[str, Any] = {
                 **_base_body(data_source, database, collection),
                 "filter": {"_id": {"$oid": document_id}},
@@ -267,10 +281,10 @@ class UpdateDocument(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_update_document, **kwargs)
+        super().__init__(handler=_mongodb_update_document, **kwargs)
 
 
-class UpdateDocuments(Tool):
+class MongoUpdateDocuments(Tool):
     name: str = "mongodb_update_documents"
     description: str | None = "Update all MongoDB documents matching a query filter."
     integration: Annotated[str, Integration("mongodb")] | None = None
@@ -284,7 +298,7 @@ class UpdateDocuments(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _update_documents(
+        async def _mongodb_update_documents(
             app_id: str = Field(..., description="Atlas App Services App ID"),
             data_source: str = Field(..., description="Atlas cluster name"),
             database: str = Field(..., description="Database name"),
@@ -300,6 +314,8 @@ class UpdateDocuments(Tool):
             upsert: bool = Field(False, description="If True, creates a document if none matched the filter"),
         ) -> Any:
             api_key = await _resolve_api_key(self)
+            import httpx
+
             body: dict[str, Any] = {
                 **_base_body(data_source, database, collection),
                 "filter": query_filter,
@@ -315,7 +331,7 @@ class UpdateDocuments(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_update_documents, **kwargs)
+        super().__init__(handler=_mongodb_update_documents, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +339,7 @@ class UpdateDocuments(Tool):
 # ---------------------------------------------------------------------------
 
 
-class DeleteDocument(Tool):
+class MongoDeleteDocument(Tool):
     name: str = "mongodb_delete_document"
     description: str | None = "Delete a single MongoDB document by its _id."
     integration: Annotated[str, Integration("mongodb")] | None = None
@@ -337,7 +353,7 @@ class DeleteDocument(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_document(
+        async def _mongodb_delete_document(
             app_id: str = Field(..., description="Atlas App Services App ID"),
             data_source: str = Field(..., description="Atlas cluster name"),
             database: str = Field(..., description="Database name"),
@@ -345,6 +361,8 @@ class DeleteDocument(Tool):
             document_id: str = Field(..., description="String value of the document's _id field to delete"),
         ) -> Any:
             api_key = await _resolve_api_key(self)
+            import httpx
+
             body: dict[str, Any] = {
                 **_base_body(data_source, database, collection),
                 "filter": {"_id": {"$oid": document_id}},
@@ -358,7 +376,7 @@ class DeleteDocument(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_delete_document, **kwargs)
+        super().__init__(handler=_mongodb_delete_document, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +384,7 @@ class DeleteDocument(Tool):
 # ---------------------------------------------------------------------------
 
 
-class ExecuteAggregation(Tool):
+class MongoExecuteAggregation(Tool):
     name: str = "mongodb_execute_aggregation"
     description: str | None = (
         "Execute an aggregation pipeline on a MongoDB collection. "
@@ -383,7 +401,7 @@ class ExecuteAggregation(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _execute_aggregation(
+        async def _mongodb_execute_aggregation(
             app_id: str = Field(..., description="Atlas App Services App ID"),
             data_source: str = Field(..., description="Atlas cluster name"),
             database: str = Field(..., description="Database name"),
@@ -394,6 +412,8 @@ class ExecuteAggregation(Tool):
             ),
         ) -> Any:
             api_key = await _resolve_api_key(self)
+            import httpx
+
             body: dict[str, Any] = {
                 **_base_body(data_source, database, collection),
                 "pipeline": pipeline,
@@ -407,4 +427,4 @@ class ExecuteAggregation(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_execute_aggregation, **kwargs)
+        super().__init__(handler=_mongodb_execute_aggregation, **kwargs)

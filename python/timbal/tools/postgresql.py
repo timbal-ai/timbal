@@ -1,7 +1,6 @@
 import os
 from typing import Annotated, Any
 
-import httpx
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
@@ -51,7 +50,6 @@ async def _resolve_token(tool: Any) -> str:
     """Resolve PostgREST/Supabase API key from integration, explicit field, or env var."""
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
-        print(credentials)
         return credentials["api_key"]
     if tool.api_key is not None:
         return tool.api_key.get_secret_value()
@@ -69,7 +67,7 @@ async def _resolve_token(tool: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-class InsertRow(Tool):
+class PostgresqlInsertRow(Tool):
     name: str = "postgresql_insert_row"
     description: str | None = "Insert a new row into a PostgreSQL table via PostgREST."
     integration: Annotated[str, Integration("postgresql")] | None = None
@@ -83,7 +81,7 @@ class InsertRow(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _insert_row(
+        async def _postgresql_insert_row(
             host: str = Field(
                 ...,
                 description="Base URL of your PostgREST or Supabase instance, e.g. https://xyz.supabase.co",
@@ -95,6 +93,8 @@ class InsertRow(Tool):
             ),
         ) -> Any:
             token = await _resolve_token(self)
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     _rest_url(host, table),
@@ -108,7 +108,7 @@ class InsertRow(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_insert_row, **kwargs)
+        super().__init__(handler=_postgresql_insert_row, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +116,7 @@ class InsertRow(Tool):
 # ---------------------------------------------------------------------------
 
 
-class UpsertRow(Tool):
+class PostgresqlUpsertRow(Tool):
     name: str = "postgresql_upsert_row"
     description: str | None = (
         "Insert a row or update it if a row with the same conflict column already exists."
@@ -132,7 +132,7 @@ class UpsertRow(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _upsert_row(
+        async def _postgresql_upsert_row(
             host: str = Field(
                 ...,
                 description="Base URL of your PostgREST or Supabase instance",
@@ -145,6 +145,8 @@ class UpsertRow(Tool):
             ),
         ) -> Any:
             token = await _resolve_token(self)
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     _rest_url(host, table),
@@ -160,7 +162,7 @@ class UpsertRow(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_upsert_row, **kwargs)
+        super().__init__(handler=_postgresql_upsert_row, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +170,7 @@ class UpsertRow(Tool):
 # ---------------------------------------------------------------------------
 
 
-class UpdateRow(Tool):
+class PostgresqlUpdateRow(Tool):
     name: str = "postgresql_update_row"
     description: str | None = "Update one or more rows in a PostgreSQL table that match the given filters."
     integration: Annotated[str, Integration("postgresql")] | None = None
@@ -182,7 +184,7 @@ class UpdateRow(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _update_row(
+        async def _postgresql_update_row(
             host: str = Field(
                 ...,
                 description="Base URL of your PostgREST or Supabase instance",
@@ -198,6 +200,8 @@ class UpdateRow(Tool):
             ),
         ) -> Any:
             token = await _resolve_token(self)
+            import httpx
+            
             params = _build_filter_params(filters)
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
@@ -213,7 +217,7 @@ class UpdateRow(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_update_row, **kwargs)
+        super().__init__(handler=_postgresql_update_row, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +225,7 @@ class UpdateRow(Tool):
 # ---------------------------------------------------------------------------
 
 
-class FindRow(Tool):
+class PostgresqlFindRow(Tool):
     name: str = "postgresql_find_row"
     description: str | None = (
         "Find a single row in a PostgreSQL table by matching a specific column value."
@@ -237,7 +241,7 @@ class FindRow(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _find_row(
+        async def _postgresql_find_row(
             host: str = Field(
                 ...,
                 description="Base URL of your PostgREST or Supabase instance",
@@ -248,6 +252,8 @@ class FindRow(Tool):
             select: str = Field("*", description="Comma-separated columns to return, e.g. 'id,name,email'"),
         ) -> Any:
             token = await _resolve_token(self)
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     _rest_url(host, table),
@@ -262,10 +268,10 @@ class FindRow(Tool):
                 rows = response.json()
                 return rows[0] if rows else None
 
-        super().__init__(handler=_find_row, **kwargs)
+        super().__init__(handler=_postgresql_find_row, **kwargs)
 
 
-class FindRowWithCustomQuery(Tool):
+class PostgresqlFindRowWithCustomQuery(Tool):
     name: str = "postgresql_find_row_with_custom_query"
     description: str | None = (
         "Find rows in a PostgreSQL table using multiple filter conditions, "
@@ -282,7 +288,7 @@ class FindRowWithCustomQuery(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _find_row_with_custom_query(
+        async def _postgresql_find_row_with_custom_query(
             host: str = Field(
                 ...,
                 description="Base URL of your PostgREST or Supabase instance",
@@ -304,6 +310,8 @@ class FindRowWithCustomQuery(Tool):
             offset: int = Field(0, description="Rows to skip for pagination"),
         ) -> Any:
             token = await _resolve_token(self)
+            import httpx
+
             params: dict[str, Any] = {"select": select, "limit": limit, "offset": offset}
             if filters:
                 params.update(_build_filter_params(filters))
@@ -321,7 +329,7 @@ class FindRowWithCustomQuery(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_find_row_with_custom_query, **kwargs)
+        super().__init__(handler=_postgresql_find_row_with_custom_query, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +337,7 @@ class FindRowWithCustomQuery(Tool):
 # ---------------------------------------------------------------------------
 
 
-class DeleteRows(Tool):
+class PostgresqlDeleteRows(Tool):
     name: str = "postgresql_delete_rows"
     description: str | None = "Delete one or more rows from a PostgreSQL table matching the given filters."
     integration: Annotated[str, Integration("postgresql")] | None = None
@@ -343,7 +351,7 @@ class DeleteRows(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _delete_rows(
+        async def _postgresql_delete_rows(
             host: str = Field(
                 ...,
                 description="Base URL of your PostgREST or Supabase instance",
@@ -357,6 +365,8 @@ class DeleteRows(Tool):
             if not filters:
                 raise ValueError("At least one filter is required to prevent deleting all rows.")
             token = await _resolve_token(self)
+            import httpx
+
             params = _build_filter_params(filters)
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
@@ -371,7 +381,7 @@ class DeleteRows(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_delete_rows, **kwargs)
+        super().__init__(handler=_postgresql_delete_rows, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +389,7 @@ class DeleteRows(Tool):
 # ---------------------------------------------------------------------------
 
 
-class ExecuteSQLQuery(Tool):
+class PostgresqlExecuteSQLQuery(Tool):
     name: str = "postgresql_execute_sql_query"
     description: str | None = (
         "Execute a raw SQL SELECT query and return the result rows. "
@@ -397,7 +407,7 @@ class ExecuteSQLQuery(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _execute_sql_query(
+        async def _postgresql_execute_sql_query(
             host: str = Field(
                 ...,
                 description="Base URL of your PostgREST or Supabase instance",
@@ -416,6 +426,8 @@ class ExecuteSQLQuery(Tool):
             ),
         ) -> Any:
             token = await _resolve_token(self)
+            import httpx
+
             body: dict[str, Any] = {"query": query}
             if params:
                 body["params"] = params
@@ -431,10 +443,10 @@ class ExecuteSQLQuery(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_execute_sql_query, **kwargs)
+        super().__init__(handler=_postgresql_execute_sql_query, **kwargs)
 
 
-class QuerySQLDatabase(Tool):
+class PostgresqlQuerySQLDatabase(Tool):
     name: str = "postgresql_query_sql_database"
     description: str | None = (
         "Execute any SQL statement (INSERT, UPDATE, DELETE, SELECT, DDL) "
@@ -451,7 +463,7 @@ class QuerySQLDatabase(Tool):
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _query_sql_database(
+        async def _postgresql_query_sql_database(
             host: str = Field(
                 ...,
                 description="Base URL of your PostgREST or Supabase instance",
@@ -466,6 +478,8 @@ class QuerySQLDatabase(Tool):
             ),
         ) -> Any:
             token = await _resolve_token(self)
+            import httpx
+
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     _rpc_url(host, rpc_function),
@@ -478,4 +492,4 @@ class QuerySQLDatabase(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        super().__init__(handler=_query_sql_database, **kwargs)
+        super().__init__(handler=_postgresql_query_sql_database, **kwargs)
