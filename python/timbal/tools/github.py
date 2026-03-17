@@ -5,19 +5,25 @@ from pydantic import Field, SecretStr
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
-_GITHUB_API_BASE = "https://api.github.com"
+_GITHUB_BASE = "https://api.github.com"
 
 
 async def _resolve_token(tool: Any) -> str:
-    """Resolve GitHub OAuth token from integration."""
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
-        return credentials["token"]
-    raise ValueError("GitHub integration not configured.")
+        token = credentials.get("token")
+        if token:
+            return token
+        raise ValueError("Integration credentials did not include a token.")
+    if tool.token is not None:
+        return tool.token.get_secret_value()
+    raise ValueError(
+        "GitHub credentials not found. Configure an integration or pass token."
+    )
 
 
 def _repo(owner: str, repo: str) -> str:
-    return f"{_GITHUB_API_BASE}/repos/{owner}/{repo}"
+    return f"{_GITHUB_BASE}/repos/{owner}/{repo}"
 
 
 # ---------------------------------------------------------------------------
@@ -32,13 +38,9 @@ class GetReference(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -58,9 +60,7 @@ class GetReference(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GitHub/GetReference"
-        super().__init__(handler=_get_reference, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_reference, **kwargs)
 
 
 class CreateReference(Tool):
@@ -70,13 +70,9 @@ class CreateReference(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -100,7 +96,7 @@ class CreateReference(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/CreateReference"
-        super().__init__(handler=_create_reference, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_reference, **kwargs)
 
 
 class UpdateReference(Tool):
@@ -110,13 +106,9 @@ class UpdateReference(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -141,7 +133,7 @@ class UpdateReference(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/UpdateReference"
-        super().__init__(handler=_update_reference, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_reference, **kwargs)
 
 
 class DeleteReference(Tool):
@@ -151,13 +143,9 @@ class DeleteReference(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -179,7 +167,7 @@ class DeleteReference(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/DeleteReference"
-        super().__init__(handler=_delete_reference, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_reference, **kwargs)
 
 
 class GetGitCommit(Tool):
@@ -189,13 +177,9 @@ class GetGitCommit(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -217,7 +201,7 @@ class GetGitCommit(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetGitCommit"
-        super().__init__(handler=_get_git_commit, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_git_commit, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -234,10 +218,7 @@ class AddUserToOrganization(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -251,7 +232,7 @@ class AddUserToOrganization(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.put(
-                    f"{_GITHUB_API_BASE}/orgs/{org}/memberships/{username}",
+                    f"{_GITHUB_BASE}/orgs/{org}/memberships/{username}",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"role": role},
                 )
@@ -260,7 +241,7 @@ class AddUserToOrganization(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/AddUserToOrganization"
-        super().__init__(handler=_add_user_to_organization, metadata=metadata, **kwargs)
+        super().__init__(handler=_add_user_to_organization, **kwargs)
 
 
 class RemoveUserFromOrganization(Tool):
@@ -272,10 +253,7 @@ class RemoveUserFromOrganization(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -288,7 +266,7 @@ class RemoveUserFromOrganization(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
-                    f"{_GITHUB_API_BASE}/orgs/{org}/members/{username}",
+                    f"{_GITHUB_BASE}/orgs/{org}/members/{username}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
@@ -296,7 +274,7 @@ class RemoveUserFromOrganization(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/RemoveUserFromOrganization"
-        super().__init__(handler=_remove_user_from_organization, metadata=metadata, **kwargs)
+        super().__init__(handler=_remove_user_from_organization, **kwargs)
 
 
 class AddUserToTeam(Tool):
@@ -306,13 +284,9 @@ class AddUserToTeam(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -327,7 +301,7 @@ class AddUserToTeam(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.put(
-                    f"{_GITHUB_API_BASE}/orgs/{org}/teams/{team_slug}/memberships/{username}",
+                    f"{_GITHUB_BASE}/orgs/{org}/teams/{team_slug}/memberships/{username}",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"role": role},
                 )
@@ -336,7 +310,7 @@ class AddUserToTeam(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/AddUserToTeam"
-        super().__init__(handler=_add_user_to_team, metadata=metadata, **kwargs)
+        super().__init__(handler=_add_user_to_team, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -353,10 +327,7 @@ class ListPullRequests(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -397,7 +368,7 @@ class ListPullRequests(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListPullRequests"
-        super().__init__(handler=_list_pull_requests, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_pull_requests, **kwargs)
 
 
 class GetPullRequest(Tool):
@@ -407,13 +378,9 @@ class GetPullRequest(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -435,7 +402,7 @@ class GetPullRequest(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetPullRequest"
-        super().__init__(handler=_get_pull_request, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_pull_request, **kwargs)
 
 
 class GetPullRequestPreview(Tool):
@@ -447,10 +414,7 @@ class GetPullRequestPreview(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -475,7 +439,7 @@ class GetPullRequestPreview(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetPullRequestPreview"
-        super().__init__(handler=_get_pull_request_preview, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_pull_request_preview, **kwargs)
 
 
 class CreatePullRequest(Tool):
@@ -485,13 +449,9 @@ class CreatePullRequest(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -529,7 +489,7 @@ class CreatePullRequest(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/CreatePullRequest"
-        super().__init__(handler=_create_pull_request, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_pull_request, **kwargs)
 
 
 class MergePullRequest(Tool):
@@ -541,10 +501,7 @@ class MergePullRequest(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -576,7 +533,7 @@ class MergePullRequest(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/MergePullRequest"
-        super().__init__(handler=_merge_pull_request, metadata=metadata, **kwargs)
+        super().__init__(handler=_merge_pull_request, **kwargs)
 
 
 class CheckIfPullRequestIsMerged(Tool):
@@ -588,10 +545,7 @@ class CheckIfPullRequestIsMerged(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -612,7 +566,7 @@ class CheckIfPullRequestIsMerged(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/CheckIfPullRequestIsMerged"
-        super().__init__(handler=_check_if_pull_request_is_merged, metadata=metadata, **kwargs)
+        super().__init__(handler=_check_if_pull_request_is_merged, **kwargs)
 
 
 class ListPullRequestCommits(Tool):
@@ -624,10 +578,7 @@ class ListPullRequestCommits(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -652,7 +603,7 @@ class ListPullRequestCommits(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListPullRequestCommits"
-        super().__init__(handler=_list_pull_request_commits, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_pull_request_commits, **kwargs)
 
 
 class ListPullRequestFiles(Tool):
@@ -664,10 +615,7 @@ class ListPullRequestFiles(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -692,7 +640,7 @@ class ListPullRequestFiles(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListPullRequestFiles"
-        super().__init__(handler=_list_pull_request_files, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_pull_request_files, **kwargs)
 
 
 class ListPullRequestReviews(Tool):
@@ -704,10 +652,7 @@ class ListPullRequestReviews(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -732,7 +677,7 @@ class ListPullRequestReviews(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListPullRequestReviews"
-        super().__init__(handler=_list_pull_request_reviews, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_pull_request_reviews, **kwargs)
 
 
 class ListPRReviewComments(Tool):
@@ -744,10 +689,7 @@ class ListPRReviewComments(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -774,7 +716,7 @@ class ListPRReviewComments(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListPRReviewComments"
-        super().__init__(handler=_list_pr_review_comments, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_pr_review_comments, **kwargs)
 
 
 class GetReviewComment(Tool):
@@ -786,10 +728,7 @@ class GetReviewComment(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -811,7 +750,7 @@ class GetReviewComment(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetReviewComment"
-        super().__init__(handler=_get_review_comment, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_review_comment, **kwargs)
 
 
 class ListCommentsForReview(Tool):
@@ -823,10 +762,7 @@ class ListCommentsForReview(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -852,7 +788,7 @@ class ListCommentsForReview(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListCommentsForReview"
-        super().__init__(handler=_list_comments_for_review, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_comments_for_review, **kwargs)
 
 
 class ListPullRequestsForCommit(Tool):
@@ -864,10 +800,7 @@ class ListPullRequestsForCommit(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -895,7 +828,7 @@ class ListPullRequestsForCommit(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListPullRequestsForCommit"
-        super().__init__(handler=_list_pull_requests_for_commit, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_pull_requests_for_commit, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -912,10 +845,7 @@ class GetRepositoryDetails(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -936,7 +866,7 @@ class GetRepositoryDetails(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetRepositoryDetails"
-        super().__init__(handler=_get_repository_details, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_repository_details, **kwargs)
 
 
 class CompareBranches(Tool):
@@ -948,10 +878,7 @@ class CompareBranches(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -974,7 +901,7 @@ class CompareBranches(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/CompareBranches"
-        super().__init__(handler=_compare_branches, metadata=metadata, **kwargs)
+        super().__init__(handler=_compare_branches, **kwargs)
 
 
 class GetFileContent(Tool):
@@ -986,10 +913,7 @@ class GetFileContent(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1017,7 +941,7 @@ class GetFileContent(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetFileContent"
-        super().__init__(handler=_get_file_content, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_file_content, **kwargs)
 
 
 class CreateOrUpdateFile(Tool):
@@ -1029,10 +953,7 @@ class CreateOrUpdateFile(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1069,7 +990,7 @@ class CreateOrUpdateFile(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/CreateOrUpdateFile"
-        super().__init__(handler=_create_or_update_file, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_or_update_file, **kwargs)
 
 
 class GetReadme(Tool):
@@ -1081,10 +1002,7 @@ class GetReadme(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1111,7 +1029,7 @@ class GetReadme(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetReadme"
-        super().__init__(handler=_get_readme, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_readme, **kwargs)
 
 
 class ListBranches(Tool):
@@ -1123,10 +1041,7 @@ class ListBranches(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1155,7 +1070,7 @@ class ListBranches(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListBranches"
-        super().__init__(handler=_list_branches, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_branches, **kwargs)
 
 
 class SearchBranches(Tool):
@@ -1167,10 +1082,7 @@ class SearchBranches(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1186,7 +1098,7 @@ class SearchBranches(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_GITHUB_API_BASE}/search/refs",
+                    f"{_GITHUB_BASE}/search/refs",
                     headers={
                         "Authorization": f"Bearer {token}",
                         "Accept": "application/vnd.github+json",
@@ -1202,7 +1114,7 @@ class SearchBranches(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/SearchBranches"
-        super().__init__(handler=_search_branches, metadata=metadata, **kwargs)
+        super().__init__(handler=_search_branches, **kwargs)
 
 
 class ListCommits(Tool):
@@ -1214,10 +1126,7 @@ class ListCommits(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1258,7 +1167,7 @@ class ListCommits(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListCommits"
-        super().__init__(handler=_list_commits, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_commits, **kwargs)
 
 
 class ListCommitStatuses(Tool):
@@ -1270,10 +1179,7 @@ class ListCommitStatuses(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1294,7 +1200,7 @@ class ListCommitStatuses(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListCommitStatuses"
-        super().__init__(handler=_list_commit_statuses, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_commit_statuses, **kwargs)
 
 
 class ListContributors(Tool):
@@ -1306,10 +1212,7 @@ class ListContributors(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1334,7 +1237,7 @@ class ListContributors(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListContributors"
-        super().__init__(handler=_list_contributors, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_contributors, **kwargs)
 
 
 class ListCollaborators(Tool):
@@ -1346,10 +1249,7 @@ class ListCollaborators(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1379,7 +1279,7 @@ class ListCollaborators(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListCollaborators"
-        super().__init__(handler=_list_collaborators, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_collaborators, **kwargs)
 
 
 class ListTags(Tool):
@@ -1391,10 +1291,7 @@ class ListTags(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1418,7 +1315,7 @@ class ListTags(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListTags"
-        super().__init__(handler=_list_tags, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_tags, **kwargs)
 
 
 class ListForks(Tool):
@@ -1430,10 +1327,7 @@ class ListForks(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1458,7 +1352,7 @@ class ListForks(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListForks"
-        super().__init__(handler=_list_forks, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_forks, **kwargs)
 
 
 class ListDeployments(Tool):
@@ -1470,10 +1364,7 @@ class ListDeployments(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1511,7 +1402,7 @@ class ListDeployments(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListDeployments"
-        super().__init__(handler=_list_deployments, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_deployments, **kwargs)
 
 
 class ListActivities(Tool):
@@ -1523,10 +1414,7 @@ class ListActivities(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1567,7 +1455,7 @@ class ListActivities(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListActivities"
-        super().__init__(handler=_list_activities, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_activities, **kwargs)
 
 
 class ListTeams(Tool):
@@ -1579,10 +1467,7 @@ class ListTeams(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1606,7 +1491,7 @@ class ListTeams(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListTeams"
-        super().__init__(handler=_list_teams, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_teams, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1623,10 +1508,7 @@ class ListReleases(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1650,7 +1532,7 @@ class ListReleases(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListReleases"
-        super().__init__(handler=_list_releases, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_releases, **kwargs)
 
 
 class GetRelease(Tool):
@@ -1662,10 +1544,7 @@ class GetRelease(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1687,7 +1566,7 @@ class GetRelease(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetRelease"
-        super().__init__(handler=_get_release, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_release, **kwargs)
 
 
 class GetLatestRelease(Tool):
@@ -1699,10 +1578,7 @@ class GetLatestRelease(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1723,7 +1599,7 @@ class GetLatestRelease(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetLatestRelease"
-        super().__init__(handler=_get_latest_release, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_latest_release, **kwargs)
 
 
 class GetPages(Tool):
@@ -1735,10 +1611,7 @@ class GetPages(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1759,7 +1632,7 @@ class GetPages(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetPages"
-        super().__init__(handler=_get_pages, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_pages, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1776,10 +1649,7 @@ class ListWebhooks(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1803,7 +1673,7 @@ class ListWebhooks(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/ListWebhooks"
-        super().__init__(handler=_list_webhooks, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_webhooks, **kwargs)
 
 
 class GetWebhook(Tool):
@@ -1815,10 +1685,7 @@ class GetWebhook(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1840,7 +1707,7 @@ class GetWebhook(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetWebhook"
-        super().__init__(handler=_get_webhook, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_webhook, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1857,10 +1724,7 @@ class GetWorkflowRun(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1882,7 +1746,7 @@ class GetWorkflowRun(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/GetWorkflowRun"
-        super().__init__(handler=_get_workflow_run, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_workflow_run, **kwargs)
 
 
 class RunWorkflow(Tool):
@@ -1894,10 +1758,7 @@ class RunWorkflow(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1926,7 +1787,7 @@ class RunWorkflow(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/RunWorkflow"
-        super().__init__(handler=_run_workflow, metadata=metadata, **kwargs)
+        super().__init__(handler=_run_workflow, **kwargs)
 
 
 class SearchWorkflowRuns(Tool):
@@ -1938,10 +1799,7 @@ class SearchWorkflowRuns(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1989,4 +1847,4 @@ class SearchWorkflowRuns(Tool):
 
         metadata = kwargs.pop("metadata", {})
         metadata["type"] = "GitHub/SearchWorkflowRuns"
-        super().__init__(handler=_search_workflow_runs, metadata=metadata, **kwargs)
+        super().__init__(handler=_search_workflow_runs, **kwargs)

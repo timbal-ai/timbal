@@ -14,7 +14,6 @@ _DEFAULT_ANALYZE_MODEL = "gemini-3.1-flash-image-preview"
 
 
 async def _resolve_api_key(tool: Any) -> str:
-    """Resolve Gemini API key from integration, explicit field, or env var."""
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
         return credentials["api_key"]
@@ -45,7 +44,7 @@ def _parse_gemini_response(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-class EditImage(Tool):
+class GeminiImagesEditImage(Tool):
     name: str = "gemini_edit_image"
     description: str | None = (
         "Edit or transform an existing image using a natural language prompt via Gemini. "
@@ -55,13 +54,9 @@ class EditImage(Tool):
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -100,12 +95,10 @@ class EditImage(Tool):
                 response.raise_for_status()
                 return _parse_gemini_response(response.json())
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GeminiImages/EditImage"
-        super().__init__(handler=_edit_image, metadata=metadata, **kwargs)
+        super().__init__(handler=_edit_image, **kwargs)
 
 
-class GenerateImage(Tool):
+class GeminiImagesGenerateImage(Tool):
     name: str = "gemini_generate_image"
     description: str | None = (
         "Generate a new image from a text prompt using Gemini. "
@@ -115,13 +108,9 @@ class GenerateImage(Tool):
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -155,12 +144,10 @@ class GenerateImage(Tool):
                 response.raise_for_status()
                 return _parse_gemini_response(response.json())
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GeminiImages/GenerateImage"
-        super().__init__(handler=_generate_image, metadata=metadata, **kwargs)
+        super().__init__(handler=_generate_image, **kwargs)
 
 
-class AnalyzeImage(Tool):
+class GeminiImagesAnalyzeImage(Tool):
     name: str = "gemini_analyze_image"
     description: str | None = (
         "Analyze, describe, or extract information from an image using Gemini vision. "
@@ -170,13 +157,9 @@ class AnalyzeImage(Tool):
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -221,12 +204,10 @@ class AnalyzeImage(Tool):
                     text = " ".join(p.get("text", "") for p in parts if "text" in p)
                 return {"text": text}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GeminiImages/AnalyzeImage"
-        super().__init__(handler=_analyze_image, metadata=metadata, **kwargs)
+        super().__init__(handler=_analyze_image, **kwargs)
 
 
-class GenerateImageWithReference(Tool):
+class GeminiImagesGenerateImageWithReference(Tool):
     name: str = "gemini_generate_image_with_reference"
     description: str | None = (
         "Generate a new image using a text prompt and one or more reference images for style or composition guidance."
@@ -235,13 +216,9 @@ class GenerateImageWithReference(Tool):
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -257,7 +234,7 @@ class GenerateImageWithReference(Tool):
             resolved_mime = reference_mime_types or ["image/png"] * len(reference_images_base64)
 
             parts: list[dict[str, Any]] = [{"text": prompt}]
-            for b64, mime in zip(reference_images_base64, resolved_mime):
+            for b64, mime in zip(reference_images_base64, resolved_mime, strict=True):
                 parts.append({"inline_data": {"mime_type": mime, "data": b64}})
 
             payload = {
@@ -274,12 +251,10 @@ class GenerateImageWithReference(Tool):
                 response.raise_for_status()
                 return _parse_gemini_response(response.json())
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GeminiImages/GenerateImageWithReference"
-        super().__init__(handler=_generate_image_with_reference, metadata=metadata, **kwargs)
+        super().__init__(handler=_generate_image_with_reference, **kwargs)
 
 
-class ImageToBase64(Tool):
+class GeminiImagesImageToBase64(Tool):
     name: str = "gemini_image_url_to_base64"
     description: str | None = (
         "Fetch an image from a public URL and return it as a base64 string, "
@@ -291,6 +266,7 @@ class ImageToBase64(Tool):
             url: str = Field(..., description="Publicly accessible URL of the image to fetch."),
         ) -> Any:
             import base64
+
             import httpx
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url)
@@ -299,6 +275,4 @@ class ImageToBase64(Tool):
                 b64 = base64.b64encode(response.content).decode("utf-8")
                 return {"image_base64": b64, "mime_type": mime_type}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GeminiImages/ImageToBase64"
-        super().__init__(handler=_image_url_to_base64, metadata=metadata, **kwargs)
+        super().__init__(handler=_image_url_to_base64, **kwargs)

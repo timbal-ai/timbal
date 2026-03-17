@@ -1,4 +1,5 @@
 from typing import Annotated, Any
+
 from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
@@ -30,7 +31,7 @@ def _sheet(drive_id: str | None, workbook_id: str, sheet_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-class WriteToSheet(Tool):
+class MicrosoftExcelWriteToSheet(Tool):
     name: str = "excel_write_to_sheet"
     description: str | None = (
         "Write one or more rows of values to a worksheet starting at a given cell address."
@@ -39,13 +40,9 @@ class WriteToSheet(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -72,9 +69,7 @@ class WriteToSheet(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/WriteToSheet"
-        super().__init__(handler=_write_to_sheet, metadata=metadata, **kwargs)
+        super().__init__(handler=_write_to_sheet, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -82,20 +77,16 @@ class WriteToSheet(Tool):
 # ---------------------------------------------------------------------------
 
 
-class ClearSheet(Tool):
+class MicrosoftExcelClearSheet(Tool):
     name: str = "excel_clear_sheet"
     description: str | None = "Clear all content and formatting from a worksheet."
     integration: Annotated[str, Integration("excel")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -116,25 +107,19 @@ class ClearSheet(Tool):
                 response.raise_for_status()
                 return {"cleared": True, "sheet": sheet_name}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/ClearSheet"
-        super().__init__(handler=_clear_sheet, metadata=metadata, **kwargs)
+        super().__init__(handler=_clear_sheet, **kwargs)
 
 
-class CreateSheet(Tool):
+class MicrosoftExcelCreateSheet(Tool):
     name: str = "excel_create_sheet"
     description: str | None = "Add a new worksheet to an existing workbook."
     integration: Annotated[str, Integration("excel")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -155,25 +140,19 @@ class CreateSheet(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/CreateSheet"
-        super().__init__(handler=_create_sheet, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_sheet, **kwargs)
 
 
-class DeleteSheet(Tool):
+class MicrosoftExcelDeleteSheet(Tool):
     name: str = "excel_delete_sheet"
     description: str | None = "Delete a worksheet from a workbook by name."
     integration: Annotated[str, Integration("excel")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -193,25 +172,19 @@ class DeleteSheet(Tool):
                 response.raise_for_status()
                 return {"deleted": True, "sheet": sheet_name}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/DeleteSheet"
-        super().__init__(handler=_delete_sheet, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_sheet, **kwargs)
 
 
-class ListSheets(Tool):
+class MicrosoftExcelListSheets(Tool):
     name: str = "excel_list_sheets"
     description: str | None = "List all worksheets in a workbook."
     integration: Annotated[str, Integration("excel")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -230,12 +203,10 @@ class ListSheets(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/ListSheets"
-        super().__init__(handler=_list_sheets, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_sheets, **kwargs)
 
 
-class ReadFromSheet(Tool):
+class MicrosoftExcelReadFromSheet(Tool):
     name: str = "excel_read_from_sheet"
     description: str | None = (
         "Read all used values from a worksheet, or a specific cell range."
@@ -244,13 +215,9 @@ class ReadFromSheet(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -276,24 +243,19 @@ class ReadFromSheet(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/ReadFromSheet"
-        super().__init__(handler=_read_from_sheet, metadata=metadata, **kwargs)
+        super().__init__(handler=_read_from_sheet, **kwargs)
 
 
-class UpdateCell(Tool):
+class MicrosoftExcelUpdateCell(Tool):
     name: str = "excel_update_cell"
     description: str | None = "Update the value of a single cell in a worksheet."
     integration: Annotated[str, Integration("excel")] | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -316,9 +278,7 @@ class UpdateCell(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/UpdateCell"
-        super().__init__(handler=_update_cell, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_cell, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +286,7 @@ class UpdateCell(Tool):
 # ---------------------------------------------------------------------------
 
 
-class FindRow(Tool):
+class MicrosoftExcelFindRow(Tool):
     name: str = "excel_find_row"
     description: str | None = (
         "Find the first row in a worksheet where a specified column matches a given value."
@@ -335,13 +295,9 @@ class FindRow(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -377,25 +333,19 @@ class FindRow(Tool):
 
             return {"row_index": None, "row": None}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/FindRow"
-        super().__init__(handler=_find_row, metadata=metadata, **kwargs)
+        super().__init__(handler=_find_row, **kwargs)
 
 
-class GetCellsInRange(Tool):
+class MicrosoftExcelGetCellsInRange(Tool):
     name: str = "excel_get_cells_in_range"
     description: str | None = "Get all cell values within a specified range address."
     integration: Annotated[str, Integration("excel")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -416,25 +366,19 @@ class GetCellsInRange(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/GetCellsInRange"
-        super().__init__(handler=_get_cells_in_range, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_cells_in_range, **kwargs)
 
 
-class GetRowByIndex(Tool):
+class MicrosoftExcelGetRowByIndex(Tool):
     name: str = "excel_get_row_by_index"
     description: str | None = "Get a single row from a worksheet by its 0-based row index."
     integration: Annotated[str, Integration("excel")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -467,12 +411,10 @@ class GetRowByIndex(Tool):
             row_dict = dict(zip(headers, row_vals)) if headers else {"values": row_vals}
             return {"row_index": row_index, "row": row_dict}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/GetRowByIndex"
-        super().__init__(handler=_get_row_by_index, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_row_by_index, **kwargs)
 
 
-class UpdateRow(Tool):
+class MicrosoftExcelUpdateRow(Tool):
     name: str = "excel_update_row"
     description: str | None = (
         "Update all values in an existing row by its 0-based row index."
@@ -481,13 +423,9 @@ class UpdateRow(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -517,9 +455,7 @@ class UpdateRow(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/UpdateRow"
-        super().__init__(handler=_update_row, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_row, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -527,20 +463,16 @@ class UpdateRow(Tool):
 # ---------------------------------------------------------------------------
 
 
-class AddDataToTable(Tool):
+class MicrosoftExcelAddDataToTable(Tool):
     name: str = "excel_add_data_to_table"
     description: str | None = "Append one or more rows to an Excel table."
     integration: Annotated[str, Integration("excel")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -563,12 +495,10 @@ class AddDataToTable(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/AddDataToTable"
-        super().__init__(handler=_add_data_to_table, metadata=metadata, **kwargs)
+        super().__init__(handler=_add_data_to_table, **kwargs)
 
 
-class CreateTable(Tool):
+class MicrosoftExcelCreateTable(Tool):
     name: str = "excel_create_table"
     description: str | None = (
         "Convert a range into a named Excel table (ListObject) with optional headers."
@@ -577,13 +507,9 @@ class CreateTable(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -606,9 +532,7 @@ class CreateTable(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/CreateTable"
-        super().__init__(handler=_create_table, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_table, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -616,7 +540,7 @@ class CreateTable(Tool):
 # ---------------------------------------------------------------------------
 
 
-class CreateWorkbook(Tool):
+class MicrosoftExcelCreateWorkbook(Tool):
     name: str = "excel_create_workbook"
     description: str | None = (
         "Create a new Excel workbook (.xlsx) in OneDrive at the specified path."
@@ -625,13 +549,9 @@ class CreateWorkbook(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -671,12 +591,10 @@ class CreateWorkbook(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/CreateWorkbook"
-        super().__init__(handler=_create_workbook, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_workbook, **kwargs)
 
 
-class ListWorkbooks(Tool):
+class MicrosoftExcelListWorkbooks(Tool):
     name: str = "excel_list_workbooks"
     description: str | None = (
         "List Excel workbooks (.xlsx files) in a OneDrive folder."
@@ -685,13 +603,9 @@ class ListWorkbooks(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -723,9 +637,7 @@ class ListWorkbooks(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/ListWorkbooks"
-        super().__init__(handler=_list_workbooks, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_workbooks, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -733,20 +645,16 @@ class ListWorkbooks(Tool):
 # ---------------------------------------------------------------------------
 
 
-class GetSheetById(Tool):
+class MicrosoftExcelGetSheetById(Tool):
     name: str = "excel_get_sheet_by_id"
     description: str | None = "Get worksheet metadata by its persistent ID."
     integration: Annotated[str, Integration("excel")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -766,25 +674,19 @@ class GetSheetById(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/GetSheetById"
-        super().__init__(handler=_get_sheet_by_id, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_sheet_by_id, **kwargs)
 
 
-class RenameSheet(Tool):
+class MicrosoftExcelRenameSheet(Tool):
     name: str = "excel_rename_sheet"
     description: str | None = "Rename a worksheet in a workbook."
     integration: Annotated[str, Integration("excel")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -806,9 +708,7 @@ class RenameSheet(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Excel/RenameSheet"
-        super().__init__(handler=_rename_sheet, metadata=metadata, **kwargs)
+        super().__init__(handler=_rename_sheet, **kwargs)
 
 
 # ---------------------------------------------------------------------------
