@@ -33,10 +33,7 @@ class HubSpotListContacts(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -76,10 +73,7 @@ class HubSpotGetContact(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -118,10 +112,7 @@ class HubSpotCreateContact(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -178,10 +169,7 @@ class HubSpotUpdateContact(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -241,10 +229,7 @@ class HubSpotSearchContacts(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -295,10 +280,7 @@ class HubSpotMergeContacts(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -330,10 +312,7 @@ class HubSpotGdprDeleteContact(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -374,10 +353,7 @@ class HubSpotListCompanies(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -417,10 +393,7 @@ class HubSpotGetCompany(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -459,10 +432,7 @@ class HubSpotCreateCompany(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -522,10 +492,7 @@ class HubSpotUpdateCompany(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -591,10 +558,7 @@ class HubSpotSearchCompanies(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -645,10 +609,7 @@ class HubSpotListDeals(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -688,10 +649,7 @@ class HubSpotGetDeal(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -730,10 +688,7 @@ class HubSpotCreateDeal(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -784,10 +739,7 @@ class HubSpotUpdateDeal(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -841,10 +793,7 @@ class HubSpotGetDealPipelines(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -872,10 +821,7 @@ class HubSpotListTickets(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -915,10 +861,7 @@ class HubSpotGetTicket(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -957,10 +900,7 @@ class HubSpotCreateTicket(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1008,10 +948,7 @@ class HubSpotUpdateTicket(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1062,10 +999,7 @@ class HubSpotDeleteTicket(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1093,10 +1027,7 @@ class HubSpotMergeTickets(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1128,10 +1059,7 @@ class HubSpotListProducts(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1171,10 +1099,7 @@ class HubSpotGetProduct(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1210,10 +1135,7 @@ class HubSpotCreateProduct(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1261,10 +1183,7 @@ class HubSpotUpdateProduct(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1315,10 +1234,7 @@ class HubSpotDeleteProduct(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1346,10 +1262,7 @@ class HubSpotGetEngagements(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1382,10 +1295,7 @@ class HubSpotGetEngagement(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1413,10 +1323,7 @@ class HubSpotListEngagements(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1448,10 +1355,7 @@ class HubSpotGetRecentEngagements(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1488,10 +1392,7 @@ class HubSpotGetCallDispositions(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1519,10 +1420,7 @@ class HubSpotCreateEngagement(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1568,10 +1466,7 @@ class UpdateEngagement(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1610,10 +1505,7 @@ class HubSpotDeleteEngagement(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1641,10 +1533,7 @@ class HubSpotSendEmail(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1691,10 +1580,7 @@ class HubSpotGetAssociations(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1733,10 +1619,7 @@ class HubSpotCreateAssociation(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1774,10 +1657,7 @@ class HubSpotDeleteAssociation(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1812,10 +1692,7 @@ class HubSpotGetAssociationTypes(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1846,10 +1723,7 @@ class HubSpotGetUsers(Tool):
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:

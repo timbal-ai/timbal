@@ -1,4 +1,3 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
@@ -6,38 +5,33 @@ from pydantic import Field, SecretStr
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
-_CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3"
+_CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
 
 
-async def _resolve_api_key(tool: Any) -> str:
-    """Resolve Google Calendar API key from integration, explicit field, or env var."""
+async def _resolve_token(tool: Any) -> str:
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("GOOGLE_CALENDAR_API_KEY")
-    if env_key:
-        return env_key
+        token = credentials.get("token")
+        if token:
+            return token
+        raise ValueError("Integration credentials did not include a token.")
+    if tool.token is not None:
+        return tool.token.get_secret_value()
     raise ValueError(
-        "Google Calendar API key not found. Set GOOGLE_CALENDAR_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
+        "Google Calendar credentials not found. Configure an integration or pass token."
     )
 
-class ListEvents(Tool):
+
+class GoogleCalendarListEvents(Tool):
     name: str = "google_calendar_list_events"
     description: str | None = "List events from Google Calendar for a specified time range."
     integration: Annotated[str, Integration("google_calendar")] | None = None
-    api_key: SecretStr | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -48,7 +42,7 @@ class ListEvents(Tool):
             max_results: int = Field(10, description="Maximum number of events to return."),
             q: str | None = Field(None, description="Free-text search query, e.g. 'meeting with John'"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_token(self)
             import httpx
 
             params: dict[str, Any] = {
@@ -65,33 +59,26 @@ class ListEvents(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_CALENDAR_API_BASE}/calendars/{calendar_id}/events",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    f"{_CALENDAR_BASE}/calendars/{calendar_id}/events",
+                    headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GoogleCalendar/ListEvents"
-
-        super().__init__(handler=_list_events, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_events, **kwargs)
 
 
-class CreateEvent(Tool):
+class GoogleCalendarCreateEvent(Tool):
     name: str = "google_calendar_create_event"
     description: str | None = "Create a new event in Google Calendar."
     integration: Annotated[str, Integration("google_calendar")] | None = None
-    api_key: SecretStr | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -105,7 +92,7 @@ class CreateEvent(Tool):
             attendees: list[str] | None = Field(None, description="List of attendee email addresses."),
             timezone: str = Field("UTC", description="Timezone for the event, e.g. 'America/New_York'"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_token(self)
             import httpx
 
             body: dict[str, Any] = {
@@ -122,33 +109,26 @@ class CreateEvent(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_CALENDAR_API_BASE}/calendars/{calendar_id}/events",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    f"{_CALENDAR_BASE}/calendars/{calendar_id}/events",
+                    headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GoogleCalendar/CreateEvent"
-
-        super().__init__(handler=_create_event, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_event, **kwargs)
 
 
-class UpdateEvent(Tool):
+class GoogleCalendarUpdateEvent(Tool):
     name: str = "google_calendar_update_event"
     description: str | None = "Update an existing event in Google Calendar."
     integration: Annotated[str, Integration("google_calendar")] | None = None
-    api_key: SecretStr | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -162,7 +142,7 @@ class UpdateEvent(Tool):
             location: str | None = Field(None, description="Updated event location or venue."),
             timezone: str | None = Field(None, description="Updated timezone for the event, e.g. 'America/New_York'"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_token(self)
             import httpx
 
             body: dict[str, Any] = {}
@@ -179,33 +159,26 @@ class UpdateEvent(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
-                    f"{_CALENDAR_API_BASE}/calendars/{calendar_id}/events/{event_id}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}",
+                    headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GoogleCalendar/UpdateEvent"
-
-        super().__init__(handler=_update_event, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_event, **kwargs)
 
 
-class DeleteEvent(Tool):
+class GoogleCalendarDeleteEvent(Tool):
     name: str = "google_calendar_delete_event"
     description: str | None = "Delete an event from Google Calendar."
     integration: Annotated[str, Integration("google_calendar")] | None = None
-    api_key: SecretStr | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -213,37 +186,30 @@ class DeleteEvent(Tool):
             event_id: str = Field(..., description="Event ID to delete."),
             calendar_id: str = Field("primary", description="Calendar ID, e.g. 'primary' or 'user@example.com'"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_token(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
-                    f"{_CALENDAR_API_BASE}/calendars/{calendar_id}/events/{event_id}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}",
+                    headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return {"deleted": True, "event_id": event_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GoogleCalendar/DeleteEvent"
-
-        super().__init__(handler=_delete_event, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_event, **kwargs)
 
 
-class UpdateAttendeeStatus(Tool):
+class GoogleCalendarUpdateAttendeeStatus(Tool):
     name: str = "google_calendar_update_attendee_status"
     description: str | None = "Update an attendee's response status for a Google Calendar event."
     integration: Annotated[str, Integration("google_calendar")] | None = None
-    api_key: SecretStr | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -253,14 +219,14 @@ class UpdateAttendeeStatus(Tool):
             status: str = Field(..., description="New response status for the attendee. One of 'accepted', 'declined', 'tentative', 'needsAction'"),
             calendar_id: str = Field("primary", description="Calendar ID, e.g. 'primary' or 'user@example.com'"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_token(self)
             import httpx
 
-            headers = {"Authorization": f"Bearer {api_key}"}
+            headers = {"Authorization": f"Bearer {token}"}
 
             async with httpx.AsyncClient() as client:
                 get_response = await client.get(
-                    f"{_CALENDAR_API_BASE}/calendars/{calendar_id}/events/{event_id}",
+                    f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}",
                     headers=headers,
                 )
                 get_response.raise_for_status()
@@ -273,33 +239,26 @@ class UpdateAttendeeStatus(Tool):
                         break
 
                 patch_response = await client.patch(
-                    f"{_CALENDAR_API_BASE}/calendars/{calendar_id}/events/{event_id}",
+                    f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}",
                     headers=headers,
                     json={"attendees": attendees},
                 )
                 patch_response.raise_for_status()
                 return patch_response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GoogleCalendar/UpdateAttendeeStatus"
-
-        super().__init__(handler=_update_attendee_status, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_attendee_status, **kwargs)
 
 
-class CheckFreeSlots(Tool):
+class GoogleCalendarCheckFreeSlots(Tool):
     name: str = "google_calendar_check_free_slots"
     description: str | None = "Check for available (free) time slots across one or more Google Calendars."
     integration: Annotated[str, Integration("google_calendar")] | None = None
-    api_key: SecretStr | None = None
+    token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -309,7 +268,7 @@ class CheckFreeSlots(Tool):
             calendars: list[str] | None = Field(None, description="List of calendar IDs to check, e.g. ['primary', 'user@example.com']"),
             timezone: str = Field("UTC", description="Timezone for the time range, e.g. 'America/New_York'"),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_token(self)
             import httpx
 
             calendar_ids = calendars or ["primary"]
@@ -323,14 +282,11 @@ class CheckFreeSlots(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_CALENDAR_API_BASE}/freeBusy",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    f"{_CALENDAR_BASE}/freeBusy",
+                    headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "GoogleCalendar/CheckFreeSlots"
-
-        super().__init__(handler=_check_free_slots, metadata=metadata, **kwargs)
+        super().__init__(handler=_check_free_slots, **kwargs)
