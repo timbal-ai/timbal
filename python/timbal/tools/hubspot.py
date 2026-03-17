@@ -6,11 +6,10 @@ from pydantic import Field, SecretStr
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
-_HUBSPOT_API_BASE = "https://api.hubapi.com"
+_API_BASE = "https://api.hubapi.com"
 
 
 async def _resolve_token(tool: Any) -> str:
-    """Resolve HubSpot token from integration, explicit field, or env var."""
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
         return credentials["token"]
@@ -25,19 +24,13 @@ async def _resolve_token(tool: Any) -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Contacts
-# ---------------------------------------------------------------------------
-
-
-class ListContacts(Tool):
+class HubSpotListContacts(Tool):
     name: str = "hubspot_list_contacts"
     description: str | None = "List HubSpot contacts with optional filtering."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -64,27 +57,23 @@ class ListContacts(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/contacts",
+                    f"{_API_BASE}/crm/v3/objects/contacts",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/ListContacts"
-
-        super().__init__(handler=_list_contacts, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_contacts, **kwargs)
 
 
-class GetContact(Tool):
+class HubSpotGetContact(Tool):
     name: str = "hubspot_get_contact"
     description: str | None = "Retrieve a specific HubSpot contact by ID with detailed information."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -110,27 +99,23 @@ class GetContact(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/contacts/{contact_id}",
+                    f"{_API_BASE}/crm/v3/objects/contacts/{contact_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetContact"
-
-        super().__init__(handler=_get_contact, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_contact, **kwargs)
 
 
-class CreateContact(Tool):
+class HubSpotCreateContact(Tool):
     name: str = "hubspot_create_contact"
     description: str | None = "Create a new HubSpot contact."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -174,27 +159,23 @@ class CreateContact(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/contacts",
+                    f"{_API_BASE}/crm/v3/objects/contacts",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/CreateContact"
-
-        super().__init__(handler=_create_contact, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_contact, **kwargs)
 
 
-class UpdateContact(Tool):
+class HubSpotUpdateContact(Tool):
     name: str = "hubspot_update_contact"
     description: str | None = "Update an existing HubSpot contact."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -241,27 +222,23 @@ class UpdateContact(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/contacts/{contact_id}",
+                    f"{_API_BASE}/crm/v3/objects/contacts/{contact_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/UpdateContact"
-
-        super().__init__(handler=_update_contact, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_contact, **kwargs)
 
 
-class SearchContacts(Tool):
+class HubSpotSearchContacts(Tool):
     name: str = "hubspot_search_contacts"
     description: str | None = "Search for HubSpot contacts using advanced filters."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -272,7 +249,13 @@ class SearchContacts(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_contacts(
-            filter_groups: list[dict[str, Any]] = Field(..., description=" list of {'filters': [{'propertyName': ..., 'operator': ..., 'value': ...}]}"),
+            filter_groups: list[dict[str, Any]] = Field(
+                ...,
+                description=(
+                    "Required. List of filter groups. Each group: {'filters': [{'propertyName': str, 'operator': 'EQ'|'CONTAINS_TOKEN'|'CONTAINS'|..., 'value': str}]}. "
+                    "E.g. email contains 'example.com': [{'filters': [{'propertyName': 'email', 'operator': 'CONTAINS_TOKEN', 'value': 'example.com'}]}]"
+                ),
+            ),
             properties: list[str] | None = Field(None, description="List of properties to retrieve"),
             sorts: list[dict[str, Any]] | None = Field(None, description="list of {'propertyName': ..., 'direction': 'ASCENDING' | 'DESCENDING'}"),
             limit: int = Field(10, description="Maximum number of results to return"),
@@ -293,27 +276,23 @@ class SearchContacts(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/contacts/search",
+                    f"{_API_BASE}/crm/v3/objects/contacts/search",
                     headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/SearchContacts"
-
-        super().__init__(handler=_search_contacts, metadata=metadata, **kwargs)
+        super().__init__(handler=_search_contacts, **kwargs)
 
 
-class MergeContacts(Tool):
+class HubSpotMergeContacts(Tool):
     name: str = "hubspot_merge_contacts"
     description: str | None = "Merge two HubSpot contacts into one."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -332,27 +311,23 @@ class MergeContacts(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/contacts/merge",
+                    f"{_API_BASE}/crm/v3/objects/contacts/merge",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"primaryObjectId": primary_object_id, "objectIdToMerge": object_id_to_merge},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/MergeContacts"
-
-        super().__init__(handler=_merge_contacts, metadata=metadata, **kwargs)
+        super().__init__(handler=_merge_contacts, **kwargs)
 
 
-class GdprDeleteContact(Tool):
+class HubSpotGdprDeleteContact(Tool):
     name: str = "hubspot_gdpr_delete_contact"
     description: str | None = "Permanently delete a contact and all associated content to follow GDPR."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -380,32 +355,23 @@ class GdprDeleteContact(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/contacts/gdpr-delete",
+                    f"{_API_BASE}/crm/v3/objects/contacts/gdpr-delete",
                     headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return {"deleted": True}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GdprDeleteContact"
-
-        super().__init__(handler=_gdpr_delete_contact, metadata=metadata, **kwargs)
+        super().__init__(handler=_gdpr_delete_contact, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Companies
-# ---------------------------------------------------------------------------
-
-
-class ListCompanies(Tool):
+class HubSpotListCompanies(Tool):
     name: str = "hubspot_list_companies"
     description: str | None = "List HubSpot companies with optional filtering."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -432,27 +398,23 @@ class ListCompanies(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/companies",
+                    f"{_API_BASE}/crm/v3/objects/companies",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/ListCompanies"
-
-        super().__init__(handler=_list_companies, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_companies, **kwargs)
 
 
-class GetCompany(Tool):
+class HubSpotGetCompany(Tool):
     name: str = "hubspot_get_company"
     description: str | None = "Retrieve a specific HubSpot company by ID with detailed information."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -478,27 +440,23 @@ class GetCompany(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/companies/{company_id}",
+                    f"{_API_BASE}/crm/v3/objects/companies/{company_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetCompany"
-
-        super().__init__(handler=_get_company, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_company, **kwargs)
 
 
-class CreateCompany(Tool):
+class HubSpotCreateCompany(Tool):
     name: str = "hubspot_create_company"
     description: str | None = "Create a new HubSpot company."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -545,27 +503,23 @@ class CreateCompany(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/companies",
+                    f"{_API_BASE}/crm/v3/objects/companies",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/CreateCompany"
-
-        super().__init__(handler=_create_company, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_company, **kwargs)
 
 
-class UpdateCompany(Tool):
+class HubSpotUpdateCompany(Tool):
     name: str = "hubspot_update_company"
     description: str | None = "Update an existing HubSpot company."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -615,7 +569,7 @@ class UpdateCompany(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/companies/{company_id}",
+                    f"{_API_BASE}/crm/v3/objects/companies/{company_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
@@ -625,20 +579,16 @@ class UpdateCompany(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/UpdateCompany"
-
-        super().__init__(handler=_update_company, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_company, **kwargs)
 
 
-class SearchCompanies(Tool):
+class HubSpotSearchCompanies(Tool):
     name: str = "hubspot_search_companies"
     description: str | None = "Search for HubSpot companies using advanced filters and sorting options."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -649,7 +599,13 @@ class SearchCompanies(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _search_companies(
-            filter_groups: list[dict[str, Any]] = Field(..., description="List of filter groups"),
+            filter_groups: list[dict[str, Any]] = Field(
+                ...,
+                description=(
+                    "Required. List of filter groups. Each group: {'filters': [{'propertyName': str, 'operator': 'EQ'|'CONTAINS_TOKEN'|'CONTAINS'|..., 'value': str}]}. "
+                    "E.g. domain equals 'example.com': [{'filters': [{'propertyName': 'domain', 'operator': 'EQ', 'value': 'example.com'}]}]"
+                ),
+            ),
             properties: list[str] | None = Field(None, description="List of properties to retrieve"),
             sorts: list[dict[str, Any]] | None = Field(None, description="List of sorts"),
             limit: int = Field(10, description="Maximum number of results to return"),
@@ -670,32 +626,23 @@ class SearchCompanies(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/companies/search",
+                    f"{_API_BASE}/crm/v3/objects/companies/search",
                     headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/SearchCompanies"
-
-        super().__init__(handler=_search_companies, metadata=metadata, **kwargs)
+        super().__init__(handler=_search_companies, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Deals
-# ---------------------------------------------------------------------------
-
-
-class ListDeals(Tool):
+class HubSpotListDeals(Tool):
     name: str = "hubspot_list_deals"
     description: str | None = "List or search HubSpot deals with optional filtering."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -722,27 +669,23 @@ class ListDeals(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/deals",
+                    f"{_API_BASE}/crm/v3/objects/deals",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/ListDeals"
-
-        super().__init__(handler=_list_deals, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_deals, **kwargs)
 
 
-class GetDeal(Tool):
+class HubSpotGetDeal(Tool):
     name: str = "hubspot_get_deal"
     description: str | None = "Retrieve a specific HubSpot deal by ID with detailed information."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -768,27 +711,23 @@ class GetDeal(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/deals/{deal_id}",
+                    f"{_API_BASE}/crm/v3/objects/deals/{deal_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetDeal"
-
-        super().__init__(handler=_get_deal, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_deal, **kwargs)
 
 
-class CreateDeal(Tool):
+class HubSpotCreateDeal(Tool):
     name: str = "hubspot_create_deal"
     description: str | None = "Create a new HubSpot deal."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -826,27 +765,23 @@ class CreateDeal(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/deals",
+                    f"{_API_BASE}/crm/v3/objects/deals",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/CreateDeal"
-
-        super().__init__(handler=_create_deal, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_deal, **kwargs)
 
 
-class UpdateDeal(Tool):
+class HubSpotUpdateDeal(Tool):
     name: str = "hubspot_update_deal"
     description: str | None = "Update an existing HubSpot deal."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -887,27 +822,23 @@ class UpdateDeal(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/deals/{deal_id}",
+                    f"{_API_BASE}/crm/v3/objects/deals/{deal_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/UpdateDeal"
-
-        super().__init__(handler=_update_deal, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_deal, **kwargs)
 
 
-class GetDealPipelines(Tool):
+class HubSpotGetDealPipelines(Tool):
     name: str = "hubspot_get_deal_pipelines"
     description: str | None = "Get all deal pipelines and their stages. Use this before creating a deal to discover valid pipeline and dealstage IDs."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -923,31 +854,22 @@ class GetDealPipelines(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/pipelines/deals",
+                    f"{_API_BASE}/crm/v3/pipelines/deals",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetDealPipelines"
-
-        super().__init__(handler=_get_deal_pipelines, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_deal_pipelines, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Tickets
-# ---------------------------------------------------------------------------
-
-
-class ListTickets(Tool):
+class HubSpotListTickets(Tool):
     name: str = "hubspot_list_tickets"
     description: str | None = "List HubSpot tickets with optional filtering."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -974,27 +896,23 @@ class ListTickets(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/tickets",
+                    f"{_API_BASE}/crm/v3/objects/tickets",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/ListTickets"
-
-        super().__init__(handler=_list_tickets, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_tickets, **kwargs)
 
 
-class GetTicket(Tool):
+class HubSpotGetTicket(Tool):
     name: str = "hubspot_get_ticket"
     description: str | None = "Get a specific HubSpot ticket by ID."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1020,27 +938,23 @@ class GetTicket(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
+                    f"{_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetTicket"
-
-        super().__init__(handler=_get_ticket, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_ticket, **kwargs)
 
 
-class CreateTicket(Tool):
+class HubSpotCreateTicket(Tool):
     name: str = "hubspot_create_ticket"
     description: str | None = "Create a new HubSpot ticket."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1075,27 +989,23 @@ class CreateTicket(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/tickets",
+                    f"{_API_BASE}/crm/v3/objects/tickets",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/CreateTicket"
-
-        super().__init__(handler=_create_ticket, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_ticket, **kwargs)
 
 
-class UpdateTicket(Tool):
+class HubSpotUpdateTicket(Tool):
     name: str = "hubspot_update_ticket"
     description: str | None = "Update an existing HubSpot ticket."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1133,27 +1043,23 @@ class UpdateTicket(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
+                    f"{_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/UpdateTicket"
-
-        super().__init__(handler=_update_ticket, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_ticket, **kwargs)
 
 
-class DeleteTicket(Tool):
+class HubSpotDeleteTicket(Tool):
     name: str = "hubspot_delete_ticket"
     description: str | None = "Archive/delete a HubSpot ticket."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1169,26 +1075,22 @@ class DeleteTicket(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
+                    f"{_API_BASE}/crm/v3/objects/tickets/{ticket_id}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return {"deleted": True, "ticket_id": ticket_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/DeleteTicket"
-
-        super().__init__(handler=_delete_ticket, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_ticket, **kwargs)
 
 
-class MergeTickets(Tool):
+class HubSpotMergeTickets(Tool):
     name: str = "hubspot_merge_tickets"
     description: str | None = "Merge two HubSpot tickets into one."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1207,32 +1109,23 @@ class MergeTickets(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/tickets/merge",
+                    f"{_API_BASE}/crm/v3/objects/tickets/merge",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"primaryObjectId": primary_object_id, "objectIdToMerge": object_id_to_merge},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/MergeTickets"
-
-        super().__init__(handler=_merge_tickets, metadata=metadata, **kwargs)
+        super().__init__(handler=_merge_tickets, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Products
-# ---------------------------------------------------------------------------
-
-
-class ListProducts(Tool):
+class HubSpotListProducts(Tool):
     name: str = "hubspot_list_products"
     description: str | None = "List HubSpot products with optional filtering."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1259,27 +1152,23 @@ class ListProducts(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/products",
+                    f"{_API_BASE}/crm/v3/objects/products",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/ListProducts"
-
-        super().__init__(handler=_list_products, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_products, **kwargs)
 
 
-class GetProduct(Tool):
+class HubSpotGetProduct(Tool):
     name: str = "hubspot_get_product"
     description: str | None = "Get a specific HubSpot product by ID."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1302,27 +1191,23 @@ class GetProduct(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/products/{product_id}",
+                    f"{_API_BASE}/crm/v3/objects/products/{product_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetProduct"
-
-        super().__init__(handler=_get_product, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_product, **kwargs)
 
 
-class CreateProduct(Tool):
+class HubSpotCreateProduct(Tool):
     name: str = "hubspot_create_product"
     description: str | None = "Create a new HubSpot product."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1357,27 +1242,23 @@ class CreateProduct(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/products",
+                    f"{_API_BASE}/crm/v3/objects/products",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/CreateProduct"
-
-        super().__init__(handler=_create_product, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_product, **kwargs)
 
 
-class UpdateProduct(Tool):
+class HubSpotUpdateProduct(Tool):
     name: str = "hubspot_update_product"
     description: str | None = "Update an existing HubSpot product."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1415,27 +1296,23 @@ class UpdateProduct(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/products/{product_id}",
+                    f"{_API_BASE}/crm/v3/objects/products/{product_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     json={"properties": properties},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/UpdateProduct"
-
-        super().__init__(handler=_update_product, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_product, **kwargs)
 
 
-class DeleteProduct(Tool):
+class HubSpotDeleteProduct(Tool):
     name: str = "hubspot_delete_product"
     description: str | None = "Archive/delete a HubSpot product."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1451,31 +1328,22 @@ class DeleteProduct(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/products/{product_id}",
+                    f"{_API_BASE}/crm/v3/objects/products/{product_id}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return {"deleted": True, "product_id": product_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/DeleteProduct"
-
-        super().__init__(handler=_delete_product, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_product, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Engagements
-# ---------------------------------------------------------------------------
-
-
-class GetEngagements(Tool):
+class HubSpotGetEngagements(Tool):
     name: str = "hubspot_get_engagements"
     description: str | None = "Get engagement data (calls, emails, meetings, etc.) for a contact."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1495,27 +1363,23 @@ class GetEngagements(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/engagements/v1/engagements/associated/contact/{contact_id}/paged",
+                    f"{_API_BASE}/engagements/v1/engagements/associated/contact/{contact_id}/paged",
                     headers={"Authorization": f"Bearer {token}"},
                     params={"limit": limit, "offset": offset},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetEngagements"
-
-        super().__init__(handler=_get_engagements, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_engagements, **kwargs)
 
 
-class GetEngagement(Tool):
+class HubSpotGetEngagement(Tool):
     name: str = "hubspot_get_engagement"
     description: str | None = "Get a specific HubSpot engagement by ID."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1531,26 +1395,22 @@ class GetEngagement(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/engagements/v1/engagements/{engagement_id}",
+                    f"{_API_BASE}/engagements/v1/engagements/{engagement_id}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetEngagement"
-
-        super().__init__(handler=_get_engagement, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_engagement, **kwargs)
 
 
-class ListEngagements(Tool):
+class HubSpotListEngagements(Tool):
     name: str = "hubspot_list_engagements"
     description: str | None = "List HubSpot engagements with optional filtering."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1569,27 +1429,23 @@ class ListEngagements(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/engagements/v1/engagements/paged",
+                    f"{_API_BASE}/engagements/v1/engagements/paged",
                     headers={"Authorization": f"Bearer {token}"},
                     params={"limit": limit, "offset": offset},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/ListEngagements"
-
-        super().__init__(handler=_list_engagements, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_engagements, **kwargs)
 
 
-class GetRecentEngagements(Tool):
+class HubSpotGetRecentEngagements(Tool):
     name: str = "hubspot_get_recent_engagements"
     description: str | None = "Get recently created or updated HubSpot engagements."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1613,27 +1469,23 @@ class GetRecentEngagements(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/engagements/v1/engagements/recent/modified",
+                    f"{_API_BASE}/engagements/v1/engagements/recent/modified",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetRecentEngagements"
-
-        super().__init__(handler=_get_recent_engagements, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_recent_engagements, **kwargs)
 
 
-class GetCallDispositions(Tool):
+class HubSpotGetCallDispositions(Tool):
     name: str = "hubspot_get_call_dispositions"
     description: str | None = "Get all possible dispositions for sales calls in HubSpot."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1649,26 +1501,22 @@ class GetCallDispositions(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/calling/v1/dispositions",
+                    f"{_API_BASE}/calling/v1/dispositions",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetCallDispositions"
-
-        super().__init__(handler=_get_call_dispositions, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_call_dispositions, **kwargs)
 
 
-class CreateEngagement(Tool):
+class HubSpotCreateEngagement(Tool):
     name: str = "hubspot_create_engagement"
     description: str | None = "Create a new HubSpot engagement (email, call, meeting, task, or note)."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1701,17 +1549,14 @@ class CreateEngagement(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/engagements/v1/engagements",
+                    f"{_API_BASE}/engagements/v1/engagements",
                     headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/CreateEngagement"
-
-        super().__init__(handler=_create_engagement, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_engagement, **kwargs)
 
 
 class UpdateEngagement(Tool):
@@ -1721,7 +1566,6 @@ class UpdateEngagement(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1747,27 +1591,23 @@ class UpdateEngagement(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
-                    f"{_HUBSPOT_API_BASE}/engagements/v1/engagements/{engagement_id}",
+                    f"{_API_BASE}/engagements/v1/engagements/{engagement_id}",
                     headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/UpdateEngagement"
-
-        super().__init__(handler=_update_engagement, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_engagement, **kwargs)
 
 
-class DeleteEngagement(Tool):
+class HubSpotDeleteEngagement(Tool):
     name: str = "hubspot_delete_engagement"
     description: str | None = "Delete a HubSpot engagement."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1783,31 +1623,22 @@ class DeleteEngagement(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
-                    f"{_HUBSPOT_API_BASE}/engagements/v1/engagements/{engagement_id}",
+                    f"{_API_BASE}/engagements/v1/engagements/{engagement_id}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return {"deleted": True, "engagement_id": engagement_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/DeleteEngagement"
-
-        super().__init__(handler=_delete_engagement, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_engagement, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Email
-# ---------------------------------------------------------------------------
-
-
-class SendEmail(Tool):
+class HubSpotSendEmail(Tool):
     name: str = "hubspot_send_email"
     description: str | None = "Send a transactional email to a HubSpot contact."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1841,32 +1672,23 @@ class SendEmail(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{_HUBSPOT_API_BASE}/marketing/v3/transactional/single-email/send",
+                    f"{_API_BASE}/marketing/v3/transactional/single-email/send",
                     headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/SendEmail"
-
-        super().__init__(handler=_send_email, metadata=metadata, **kwargs)
+        super().__init__(handler=_send_email, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Associations
-# ---------------------------------------------------------------------------
-
-
-class GetAssociations(Tool):
+class HubSpotGetAssociations(Tool):
     name: str = "hubspot_get_associations"
     description: str | None = "Get all associations for a specific object (contact, company, deal, ticket)."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1892,27 +1714,23 @@ class GetAssociations(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/{from_object_type}/{object_id}/associations/{to_object_type}",
+                    f"{_API_BASE}/crm/v3/objects/{from_object_type}/{object_id}/associations/{to_object_type}",
                     headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetAssociations"
-
-        super().__init__(handler=_get_associations, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_associations, **kwargs)
 
 
-class CreateAssociation(Tool):
+class HubSpotCreateAssociation(Tool):
     name: str = "hubspot_create_association"
     description: str | None = "Create an association between two HubSpot objects (e.g. link a contact to a company)."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1937,27 +1755,23 @@ class CreateAssociation(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.put(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/{from_object_type}/{from_object_id}"
+                    f"{_API_BASE}/crm/v3/objects/{from_object_type}/{from_object_id}"
                     f"/associations/{to_object_type}/{to_object_id}/{association_type}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/CreateAssociation"
-
-        super().__init__(handler=_create_association, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_association, **kwargs)
 
 
-class DeleteAssociation(Tool):
+class HubSpotDeleteAssociation(Tool):
     name: str = "hubspot_delete_association"
     description: str | None = "Remove an association between two HubSpot objects."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -1979,27 +1793,23 @@ class DeleteAssociation(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/objects/{from_object_type}/{from_object_id}"
+                    f"{_API_BASE}/crm/v3/objects/{from_object_type}/{from_object_id}"
                     f"/associations/{to_object_type}/{to_object_id}/{association_type}",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return {"deleted": True}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/DeleteAssociation"
-
-        super().__init__(handler=_delete_association, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_association, **kwargs)
 
 
-class GetAssociationTypes(Tool):
+class HubSpotGetAssociationTypes(Tool):
     name: str = "hubspot_get_association_types"
     description: str | None = "Get all available association types and labels between two HubSpot object types."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -2018,26 +1828,22 @@ class GetAssociationTypes(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/associations/{from_object_type}/{to_object_type}/types",
+                    f"{_API_BASE}/crm/v3/associations/{from_object_type}/{to_object_type}/types",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetAssociationTypes"
-
-        super().__init__(handler=_get_association_types, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_association_types, **kwargs)
 
 
-class GetUsers(Tool):
+class HubSpotGetUsers(Tool):
     name: str = "hubspot_get_users"
     description: str | None = "Get HubSpot users/owners with their IDs and information."
     integration: Annotated[str, Integration("hubspot")] | None = None
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
             **self._annotate_config(
@@ -2053,13 +1859,10 @@ class GetUsers(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_HUBSPOT_API_BASE}/crm/v3/owners",
+                    f"{_API_BASE}/crm/v3/owners",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "HubSpot/GetUsers"
-
-        super().__init__(handler=_get_users, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_users, **kwargs)

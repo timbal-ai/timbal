@@ -6,7 +6,7 @@ from pydantic import Field, SecretStr
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
-_SF_API_VERSION = "v60.0"
+_API_VERSION = "v60.0"
 
 
 async def _resolve_token(tool: Any) -> str:
@@ -26,15 +26,10 @@ async def _resolve_token(tool: Any) -> str:
 
 
 def _sf(instance_url: str, path: str) -> str:
-    return f"{instance_url}/services/data/{_SF_API_VERSION}/{path}"
+    return f"{instance_url}/services/data/{_API_VERSION}/{path}"
 
 
-# ---------------------------------------------------------------------------
-# Cases
-# ---------------------------------------------------------------------------
-
-
-class CreateCase(Tool):
+class SalesforceCreateCase(Tool):
     name: str = "salesforce_create_case"
     description: str | None = "Create a new case in Salesforce."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -44,10 +39,7 @@ class CreateCase(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -90,12 +82,10 @@ class CreateCase(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/CreateCase"
-        super().__init__(handler=_create_case, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_case, **kwargs)
 
 
-class UpdateCase(Tool):
+class SalesforceUpdateCase(Tool):
     name: str = "salesforce_update_case"
     description: str | None = "Update an existing Salesforce case."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -105,10 +95,7 @@ class UpdateCase(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -158,12 +145,10 @@ class UpdateCase(Tool):
                 response.raise_for_status()
                 return {"updated": True, "case_id": case_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/UpdateCase"
-        super().__init__(handler=_update_case, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_case, **kwargs)
 
 
-class DeleteCase(Tool):
+class SalesforceDeleteCase(Tool):
     name: str = "salesforce_delete_case"
     description: str | None = "Delete a Salesforce case."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -173,10 +158,7 @@ class DeleteCase(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -196,17 +178,10 @@ class DeleteCase(Tool):
                 response.raise_for_status()
                 return {"deleted": True, "case_id": case_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/DeleteCase"
-        super().__init__(handler=_delete_case, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_case, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Comments (CaseComment)
-# ---------------------------------------------------------------------------
-
-
-class CreateComment(Tool):
+class SalesforceCreateComment(Tool):
     name: str = "salesforce_create_comment"
     description: str | None = "Create a comment on a Salesforce case."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -216,10 +191,7 @@ class CreateComment(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -242,12 +214,10 @@ class CreateComment(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/CreateComment"
-        super().__init__(handler=_create_comment, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_comment, **kwargs)
 
 
-class UpdateComment(Tool):
+class SalesforceUpdateComment(Tool):
     name: str = "salesforce_update_comment"
     description: str | None = "Update a Salesforce case comment."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -257,10 +227,7 @@ class UpdateComment(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -289,12 +256,10 @@ class UpdateComment(Tool):
                 response.raise_for_status()
                 return {"updated": True, "comment_id": comment_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/UpdateComment"
-        super().__init__(handler=_update_comment, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_comment, **kwargs)
 
 
-class DeleteComment(Tool):
+class SalesforceDeleteComment(Tool):
     name: str = "salesforce_delete_comment"
     description: str | None = "Delete a Salesforce case comment."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -304,10 +269,7 @@ class DeleteComment(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -327,17 +289,10 @@ class DeleteComment(Tool):
                 response.raise_for_status()
                 return {"deleted": True, "comment_id": comment_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/DeleteComment"
-        super().__init__(handler=_delete_comment, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_comment, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Contacts
-# ---------------------------------------------------------------------------
-
-
-class CreateContact(Tool):
+class SalesforceCreateContact(Tool):
     name: str = "salesforce_create_contact"
     description: str | None = "Create a new contact in Salesforce."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -347,10 +302,7 @@ class CreateContact(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -397,12 +349,10 @@ class CreateContact(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/CreateContact"
-        super().__init__(handler=_create_contact, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_contact, **kwargs)
 
 
-class UpdateContact(Tool):
+class SalesforceUpdateContact(Tool):
     name: str = "salesforce_update_contact"
     description: str | None = "Update an existing Salesforce contact."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -412,10 +362,7 @@ class UpdateContact(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -465,12 +412,10 @@ class UpdateContact(Tool):
                 response.raise_for_status()
                 return {"updated": True, "contact_id": contact_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/UpdateContact"
-        super().__init__(handler=_update_contact, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_contact, **kwargs)
 
 
-class DeleteContact(Tool):
+class SalesforceDeleteContact(Tool):
     name: str = "salesforce_delete_contact"
     description: str | None = "Delete a Salesforce contact."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -480,10 +425,7 @@ class DeleteContact(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -503,17 +445,10 @@ class DeleteContact(Tool):
                 response.raise_for_status()
                 return {"deleted": True, "contact_id": contact_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/DeleteContact"
-        super().__init__(handler=_delete_contact, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_contact, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Leads
-# ---------------------------------------------------------------------------
-
-
-class CreateLead(Tool):
+class SalesforceCreateLead(Tool):
     name: str = "salesforce_create_lead"
     description: str | None = "Create a new lead in Salesforce."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -523,10 +458,7 @@ class CreateLead(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -582,12 +514,10 @@ class CreateLead(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/CreateLead"
-        super().__init__(handler=_create_lead, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_lead, **kwargs)
 
 
-class GetLead(Tool):
+class SalesforceGetLead(Tool):
     name: str = "salesforce_get_lead"
     description: str | None = "Retrieve a specific Salesforce lead by ID."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -597,10 +527,7 @@ class GetLead(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -625,12 +552,10 @@ class GetLead(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/GetLead"
-        super().__init__(handler=_get_lead, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_lead, **kwargs)
 
 
-class UpdateLead(Tool):
+class SalesforceUpdateLead(Tool):
     name: str = "salesforce_update_lead"
     description: str | None = "Update an existing Salesforce lead."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -640,10 +565,7 @@ class UpdateLead(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -696,12 +618,10 @@ class UpdateLead(Tool):
                 response.raise_for_status()
                 return {"updated": True, "lead_id": lead_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/UpdateLead"
-        super().__init__(handler=_update_lead, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_lead, **kwargs)
 
 
-class DeleteLead(Tool):
+class SalesforceDeleteLead(Tool):
     name: str = "salesforce_delete_lead"
     description: str | None = "Delete a Salesforce lead."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -711,10 +631,7 @@ class DeleteLead(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -734,12 +651,10 @@ class DeleteLead(Tool):
                 response.raise_for_status()
                 return {"deleted": True, "lead_id": lead_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/DeleteLead"
-        super().__init__(handler=_delete_lead, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_lead, **kwargs)
 
 
-class SearchLeads(Tool):
+class SalesforceSearchLeads(Tool):
     name: str = "salesforce_search_leads"
     description: str | None = "Search for Salesforce leads using a SOSL query."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -749,10 +664,7 @@ class SearchLeads(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -778,17 +690,10 @@ class SearchLeads(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/SearchLeads"
-        super().__init__(handler=_search_leads, metadata=metadata, **kwargs)
+        super().__init__(handler=_search_leads, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Opportunities
-# ---------------------------------------------------------------------------
-
-
-class CreateOpportunity(Tool):
+class SalesforceCreateOpportunity(Tool):
     name: str = "salesforce_create_opportunity"
     description: str | None = "Create a new opportunity in Salesforce."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -798,10 +703,7 @@ class CreateOpportunity(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -848,12 +750,10 @@ class CreateOpportunity(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/CreateOpportunity"
-        super().__init__(handler=_create_opportunity, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_opportunity, **kwargs)
 
 
-class UpdateOpportunity(Tool):
+class SalesforceUpdateOpportunity(Tool):
     name: str = "salesforce_update_opportunity"
     description: str | None = "Update an existing Salesforce opportunity."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -863,10 +763,7 @@ class UpdateOpportunity(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -913,12 +810,10 @@ class UpdateOpportunity(Tool):
                 response.raise_for_status()
                 return {"updated": True, "opportunity_id": opportunity_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/UpdateOpportunity"
-        super().__init__(handler=_update_opportunity, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_opportunity, **kwargs)
 
 
-class DeleteOpportunity(Tool):
+class SalesforceDeleteOpportunity(Tool):
     name: str = "salesforce_delete_opportunity"
     description: str | None = "Delete a Salesforce opportunity."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -928,10 +823,7 @@ class DeleteOpportunity(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -951,17 +843,10 @@ class DeleteOpportunity(Tool):
                 response.raise_for_status()
                 return {"deleted": True, "opportunity_id": opportunity_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/DeleteOpportunity"
-        super().__init__(handler=_delete_opportunity, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_opportunity, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Tasks
-# ---------------------------------------------------------------------------
-
-
-class CreateTask(Tool):
+class SalesforceCreateTask(Tool):
     name: str = "salesforce_create_task"
     description: str | None = "Create a new task in Salesforce."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -971,10 +856,7 @@ class CreateTask(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1017,12 +899,10 @@ class CreateTask(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/CreateTask"
-        super().__init__(handler=_create_task, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_task, **kwargs)
 
 
-class GetTask(Tool):
+class SalesforceGetTask(Tool):
     name: str = "salesforce_get_task"
     description: str | None = "Retrieve a specific Salesforce task by ID."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -1032,10 +912,7 @@ class GetTask(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1060,12 +937,10 @@ class GetTask(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/GetTask"
-        super().__init__(handler=_get_task, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_task, **kwargs)
 
 
-class UpdateTask(Tool):
+class SalesforceUpdateTask(Tool):
     name: str = "salesforce_update_task"
     description: str | None = "Update an existing Salesforce task."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -1075,10 +950,7 @@ class UpdateTask(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1119,12 +991,10 @@ class UpdateTask(Tool):
                 response.raise_for_status()
                 return {"updated": True, "task_id": task_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/UpdateTask"
-        super().__init__(handler=_update_task, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_task, **kwargs)
 
 
-class DeleteTask(Tool):
+class SalesforceDeleteTask(Tool):
     name: str = "salesforce_delete_task"
     description: str | None = "Delete a Salesforce task."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -1134,10 +1004,7 @@ class DeleteTask(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1157,12 +1024,10 @@ class DeleteTask(Tool):
                 response.raise_for_status()
                 return {"deleted": True, "task_id": task_id}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/DeleteTask"
-        super().__init__(handler=_delete_task, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_task, **kwargs)
 
 
-class SearchTasks(Tool):
+class SalesforceSearchTasks(Tool):
     name: str = "salesforce_search_tasks"
     description: str | None = "Search for Salesforce tasks using a SOSL query."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -1172,10 +1037,7 @@ class SearchTasks(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1201,17 +1063,10 @@ class SearchTasks(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/SearchTasks"
-        super().__init__(handler=_search_tasks, metadata=metadata, **kwargs)
+        super().__init__(handler=_search_tasks, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Generic / Query
-# ---------------------------------------------------------------------------
-
-
-class QuerySalesforce(Tool):
+class SalesforceQuery(Tool):
     name: str = "salesforce_query"
     description: str | None = "Execute a SOQL query against Salesforce and return matching records."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -1221,10 +1076,7 @@ class QuerySalesforce(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1248,12 +1100,10 @@ class QuerySalesforce(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/Query"
-        super().__init__(handler=_query_salesforce, metadata=metadata, **kwargs)
+        super().__init__(handler=_query_salesforce, **kwargs)
 
 
-class CreateRecord(Tool):
+class SalesforceCreateRecord(Tool):
     name: str = "salesforce_create_record"
     description: str | None = "Create a record for any Salesforce object type."
     integration: Annotated[str, Integration("salesforce")] | None = None
@@ -1263,10 +1113,7 @@ class CreateRecord(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "security_token": self.security_token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "security_token": self.security_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -1288,6 +1135,4 @@ class CreateRecord(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Salesforce/CreateRecord"
-        super().__init__(handler=_create_record, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_record, **kwargs)

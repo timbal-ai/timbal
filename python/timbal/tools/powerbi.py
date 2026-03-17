@@ -6,7 +6,7 @@ from pydantic import Field, SecretStr
 from ..core.tool import Tool
 from ..platform.integrations import Integration
 
-_POWERBI_API_BASE = "https://api.powerbi.com/v1.0/myorg"
+_BASE_URL = "https://api.powerbi.com/v1.0/myorg"
 
 
 async def _resolve_api_key(tool: Any) -> str:
@@ -27,17 +27,17 @@ async def _resolve_api_key(tool: Any) -> str:
 
 def _datasets_url(workspace_id: str | None, suffix: str = "") -> str:
     if workspace_id:
-        return f"{_POWERBI_API_BASE}/groups/{workspace_id}/datasets{suffix}"
-    return f"{_POWERBI_API_BASE}/datasets{suffix}"
+        return f"{_BASE_URL}/groups/{workspace_id}/datasets{suffix}"
+    return f"{_BASE_URL}/datasets{suffix}"
 
 
 def _reports_url(workspace_id: str | None, suffix: str = "") -> str:
     if workspace_id:
-        return f"{_POWERBI_API_BASE}/groups/{workspace_id}/reports{suffix}"
-    return f"{_POWERBI_API_BASE}/reports{suffix}"
+        return f"{_BASE_URL}/groups/{workspace_id}/reports{suffix}"
+    return f"{_BASE_URL}/reports{suffix}"
 
 
-class ListWorkspaces(Tool):
+class PowerBIListWorkspaces(Tool):
     name: str = "powerbi_list_workspaces"
     description: str | None = "List all Power BI workspaces (groups) the authenticated user has access to."
     integration: Annotated[str, Integration("powerbi")] | None = None
@@ -47,10 +47,7 @@ class ListWorkspaces(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -68,20 +65,17 @@ class ListWorkspaces(Tool):
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{_POWERBI_API_BASE}/groups",
+                    f"{_BASE_URL}/groups",
                     headers={"Authorization": f"Bearer {api_key}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "PowerBI/ListWorkspaces"
-
-        super().__init__(handler=_list_workspaces, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_workspaces, **kwargs)
 
 
-class ListDatasets(Tool):
+class PowerBIListDatasets(Tool):
     name: str = "powerbi_list_datasets"
     description: str | None = "List Power BI datasets in a workspace or in My Workspace."
     integration: Annotated[str, Integration("powerbi")] | None = None
@@ -91,14 +85,13 @@ class ListDatasets(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
-        async def _list_datasets(workspace_id: str | None = Field(None, description=" Power BI workspace (group) ID. If omitted, lists datasets in My Workspace.")) -> Any:
+        async def _list_datasets(
+            workspace_id: str | None = Field(None, description="Power BI workspace (group) ID. If omitted, lists datasets in My Workspace.")
+        ) -> Any:
             api_key = await _resolve_api_key(self)
             import httpx
 
@@ -110,13 +103,10 @@ class ListDatasets(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "PowerBI/ListDatasets"
-
-        super().__init__(handler=_list_datasets, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_datasets, **kwargs)
 
 
-class GetDataset(Tool):
+class PowerBIGetDataset(Tool):
     name: str = "powerbi_get_dataset"
     description: str | None = "Get metadata for a specific Power BI dataset."
     integration: Annotated[str, Integration("powerbi")] | None = None
@@ -126,15 +116,12 @@ class GetDataset(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_dataset(
-            dataset_id: str = Field(..., description=""),
+            dataset_id: str = Field(..., description="Power BI dataset ID"),
             workspace_id: str | None = Field(None, description="Power BI workspace (group) ID. If omitted, lists datasets in My Workspace."),
         ) -> Any:
             api_key = await _resolve_api_key(self)
@@ -148,13 +135,10 @@ class GetDataset(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "PowerBI/GetDataset"
-
-        super().__init__(handler=_get_dataset, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_dataset, **kwargs)
 
 
-class QueryDataset(Tool):
+class PowerBIQueryDataset(Tool):
     name: str = "powerbi_query_dataset"
     description: str | None = "Execute a DAX query against a Power BI dataset and return the results."
     integration: Annotated[str, Integration("powerbi")] | None = None
@@ -164,24 +148,16 @@ class QueryDataset(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _query_dataset(
-            dataset_id: str,
-            query: str,
-            workspace_id: str | None = None,
-            impersonated_user_name: str | None = None,
+            dataset_id: str = Field(..., description="Power BI dataset ID"),
+            query: str = Field(..., description="DAX query string, e.g. EVALUATE SUMMARIZECOLUMNS('Sales'[Region], \"Total\",[Total Sales])"),
+            workspace_id: str | None = Field(None, description="Power BI workspace (group) ID. If omitted, uses My Workspace."),
+            impersonated_user_name: str | None = Field(None, description="UPN of a user to impersonate for row-level security (RLS)."),
         ) -> Any:
-            """
-            query: DAX query string to execute against the dataset.
-              Example: "EVALUATE SUMMARIZECOLUMNS('Sales'[Region], \\"Total\\",[Total Sales])"
-            impersonated_user_name: UPN of a user to impersonate for row-level security (RLS).
-            """
             api_key = await _resolve_api_key(self)
             import httpx
 
@@ -198,13 +174,10 @@ class QueryDataset(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "PowerBI/QueryDataset"
-
-        super().__init__(handler=_query_dataset, metadata=metadata, **kwargs)
+        super().__init__(handler=_query_dataset, **kwargs)
 
 
-class ListReports(Tool):
+class PowerBIListReports(Tool):
     name: str = "powerbi_list_reports"
     description: str | None = "List Power BI reports in a workspace or in My Workspace."
     integration: Annotated[str, Integration("powerbi")] | None = None
@@ -214,10 +187,7 @@ class ListReports(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -233,13 +203,10 @@ class ListReports(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "PowerBI/ListReports"
-
-        super().__init__(handler=_list_reports, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_reports, **kwargs)
 
 
-class GetReport(Tool):
+class PowerBIGetReport(Tool):
     name: str = "powerbi_get_report"
     description: str | None = "Get metadata for a specific Power BI report, including its embed URL."
     integration: Annotated[str, Integration("powerbi")] | None = None
@@ -249,16 +216,13 @@ class GetReport(Tool):
         """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _get_report(
-            report_id: str,
-            workspace_id: str | None = None,
+            report_id: str = Field(..., description="Power BI report ID"),
+            workspace_id: str | None = Field(None, description="Power BI workspace (group) ID. If omitted, uses My Workspace."),
         ) -> Any:
             api_key = await _resolve_api_key(self)
             import httpx
@@ -271,7 +235,4 @@ class GetReport(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "PowerBI/GetReport"
-
-        super().__init__(handler=_get_report, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_report, **kwargs)
