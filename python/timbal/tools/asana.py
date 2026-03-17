@@ -1,6 +1,5 @@
-from typing import Annotated, Any
-
 import os
+from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
@@ -21,8 +20,7 @@ async def _resolve_token(tool: Any) -> str:
     if env_token:
         return env_token
     raise ValueError(
-        "Asana access token not found. Set ASANA_ACCESS_TOKEN environment variable, "
-        "pass token in config, or configure an integration."
+        "Asana access token not found. Set ASANA_ACCESS_TOKEN, pass token, or configure an integration."
     )
 
 
@@ -39,13 +37,9 @@ class AsanaCreateProject(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -84,10 +78,7 @@ class AsanaCreateProject(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/CreateProject"
-
-        super().__init__(handler=_create_project, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_project, **kwargs)
 
 
 class AsanaListWorkspaces(Tool):
@@ -97,13 +88,9 @@ class AsanaListWorkspaces(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -119,10 +106,7 @@ class AsanaListWorkspaces(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/ListWorkspaces"
-
-        super().__init__(handler=_list_workspaces, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_workspaces, **kwargs)
 
 
 class AsanaUpdateTask(Tool):
@@ -132,13 +116,9 @@ class AsanaUpdateTask(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -174,10 +154,7 @@ class AsanaUpdateTask(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/UpdateTask"
-
-        super().__init__(handler=_update_task, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_task, **kwargs)
 
 
 class AsanaListUserProjects(Tool):
@@ -187,13 +164,9 @@ class AsanaListUserProjects(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -223,10 +196,7 @@ class AsanaListUserProjects(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/ListUserProjects"
-
-        super().__init__(handler=_list_user_projects, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_user_projects, **kwargs)
 
 
 class AsanaListTeams(Tool):
@@ -236,13 +206,9 @@ class AsanaListTeams(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -270,10 +236,7 @@ class AsanaListTeams(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/ListTeams"
-
-        super().__init__(handler=_list_teams, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_teams, **kwargs)
 
 
 class AsanaSearchTasks(Tool):
@@ -283,13 +246,9 @@ class AsanaSearchTasks(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -318,10 +277,7 @@ class AsanaSearchTasks(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/SearchTasks"
-
-        super().__init__(handler=_search_tasks, metadata=metadata, **kwargs)
+        super().__init__(handler=_search_tasks, **kwargs)
 
 
 class AsanaSearchSections(Tool):
@@ -331,13 +287,9 @@ class AsanaSearchSections(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -358,10 +310,7 @@ class AsanaSearchSections(Tool):
                 filtered = [s for s in sections if name_query.lower() in s.get("name", "").lower()]
                 return {"data": filtered}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/SearchSections"
-
-        super().__init__(handler=_search_sections, metadata=metadata, **kwargs)
+        super().__init__(handler=_search_sections, **kwargs)
 
 
 class AsanaSearchProjects(Tool):
@@ -371,13 +320,9 @@ class AsanaSearchProjects(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -405,10 +350,7 @@ class AsanaSearchProjects(Tool):
                 filtered = [p for p in projects if name_query.lower() in p.get("name", "").lower()]
                 return {"data": filtered}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/SearchProjects"
-
-        super().__init__(handler=_search_projects, metadata=metadata, **kwargs)
+        super().__init__(handler=_search_projects, **kwargs)
 
 
 class AsanaListTaskStories(Tool):
@@ -418,13 +360,9 @@ class AsanaListTaskStories(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -442,10 +380,7 @@ class AsanaListTaskStories(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/ListTaskStories"
-
-        super().__init__(handler=_list_task_stories, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_task_stories, **kwargs)
 
 
 class AsanaGetTasksFromTaskList(Tool):
@@ -455,13 +390,9 @@ class AsanaGetTasksFromTaskList(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -506,10 +437,7 @@ class AsanaGetTasksFromTaskList(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/GetTasksFromTaskList"
-
-        super().__init__(handler=_get_tasks_from_task_list, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_tasks_from_task_list, **kwargs)
 
 
 class AsanaFindTaskById(Tool):
@@ -519,13 +447,9 @@ class AsanaFindTaskById(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -543,10 +467,7 @@ class AsanaFindTaskById(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/FindTaskById"
-
-        super().__init__(handler=_find_task_by_id, metadata=metadata, **kwargs)
+        super().__init__(handler=_find_task_by_id, **kwargs)
 
 
 class AsanaDeleteTask(Tool):
@@ -556,13 +477,9 @@ class AsanaDeleteTask(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -580,10 +497,7 @@ class AsanaDeleteTask(Tool):
                 response.raise_for_status()
                 return response.json() if response.content else {"success": True}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/DeleteTask"
-
-        super().__init__(handler=_delete_task, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_task, **kwargs)
 
 
 class AsanaCreateTask(Tool):
@@ -593,13 +507,9 @@ class AsanaCreateTask(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -639,10 +549,7 @@ class AsanaCreateTask(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/CreateTask"
-
-        super().__init__(handler=_create_task, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_task, **kwargs)
 
 
 class AsanaCreateTaskFromTemplate(Tool):
@@ -652,13 +559,9 @@ class AsanaCreateTaskFromTemplate(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -692,10 +595,7 @@ class AsanaCreateTaskFromTemplate(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/CreateTaskFromTemplate"
-
-        super().__init__(handler=_create_task_from_template, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_task_from_template, **kwargs)
 
 
 class AsanaCreateTaskComment(Tool):
@@ -705,13 +605,9 @@ class AsanaCreateTaskComment(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -735,10 +631,7 @@ class AsanaCreateTaskComment(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/CreateTaskComment"
-
-        super().__init__(handler=_create_task_comment, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_task_comment, **kwargs)
 
 
 class AsanaCreateSubtask(Tool):
@@ -748,13 +641,9 @@ class AsanaCreateSubtask(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -787,10 +676,7 @@ class AsanaCreateSubtask(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/CreateSubtask"
-
-        super().__init__(handler=_create_subtask, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_subtask, **kwargs)
 
 
 class AsanaAddTaskToSection(Tool):
@@ -800,13 +686,9 @@ class AsanaAddTaskToSection(Tool):
     token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "token": self.token},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "token": self.token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -830,8 +712,5 @@ class AsanaAddTaskToSection(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Asana/AddTaskToSection"
-
-        super().__init__(handler=_add_task_to_section, metadata=metadata, **kwargs)
+        super().__init__(handler=_add_task_to_section, **kwargs)
 

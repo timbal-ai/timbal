@@ -13,18 +13,18 @@ _BATCH_SIZE = 10  # Airtable hard limit per request
 
 
 async def _resolve_api_key(tool: Any) -> str:
-    """Resolve Airtable API key from integration, explicit field, or env var."""
+    """Resolve Airtable Personal Access Token from integration, explicit field, or env var."""
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
+        return credentials["personal_access_token"]
+    if tool.personal_access_token is not None:
+        return tool.personal_access_token.get_secret_value()
     env_key = os.getenv("AIRTABLE_API_KEY")
     if env_key:
         return env_key
     raise ValueError(
-        "Airtable API key not found. Set AIRTABLE_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
+        "Airtable personal_access_token not found. Set AIRTABLE_API_KEY, pass personal_access_token, "
+        "or configure an integration with personal_access_token."
     )
 
 
@@ -62,16 +62,12 @@ class ListRecords(Tool):
     name: str = "airtable_list_records"
     description: str | None = "List records in an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -88,7 +84,7 @@ class ListRecords(Tool):
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
             _validate_airtable_id(table_id_or_name, "tbl", "table_id_or_name")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             params: dict[str, Any] = {"pageSize": page_size}
@@ -110,32 +106,25 @@ class ListRecords(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/ListRecords"
-
-        super().__init__(handler=_list_records, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_records, **kwargs)
 
 
 class GetRecord(Tool):
     name: str = "airtable_get_record"
     description: str | None = "Get a single record by its ID from an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -146,37 +135,30 @@ class GetRecord(Tool):
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
             _validate_airtable_id(record_id, "rec", "record_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}/{record_id}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/GetRecord"
-
-        super().__init__(handler=_get_record, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_record, **kwargs)
 
 
 class CreateRecords(Tool):
     name: str = "airtable_create_records"
     description: str | None = "Create new records in an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -187,7 +169,7 @@ class CreateRecords(Tool):
             typecast: bool = Field(False, description="If True, Airtable will attempt to convert string values to the correct type."),
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             normalized = [{"fields": _normalize_fields(r["fields"])} for r in records]
@@ -198,7 +180,7 @@ class CreateRecords(Tool):
                     batch = normalized[i : i + _BATCH_SIZE]
                     response = await client.post(
                         f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}",
-                        headers={"Authorization": f"Bearer {api_key}"},
+                        headers={"Authorization": f"Bearer {token}"},
                         json={"records": batch, "typecast": typecast},
                     )
                     response.raise_for_status()
@@ -206,26 +188,19 @@ class CreateRecords(Tool):
 
             return {"records": all_created}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/CreateRecords"
-
-        super().__init__(handler=_create_records, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_records, **kwargs)
 
 
 class UpdateRecords(Tool):
     name: str = "airtable_update_records"
     description: str | None = "Update existing records in an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -237,7 +212,7 @@ class UpdateRecords(Tool):
             destructive: bool = Field(False, description="If True, uses PUT (replaces all fields); if False, uses PATCH (merges fields)."),
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             normalized = [{"id": r["id"], "fields": _normalize_fields(r["fields"])} for r in records]
@@ -246,32 +221,25 @@ class UpdateRecords(Tool):
             async with httpx.AsyncClient() as client:
                 response = await getattr(client, method)(
                     f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json={"records": normalized, "typecast": typecast},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/UpdateRecords"
-
-        super().__init__(handler=_update_records, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_records, **kwargs)
 
 
 class DeleteRecords(Tool):
     name: str = "airtable_delete_records"
     description: str | None = "Delete one or more records from an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -281,38 +249,31 @@ class DeleteRecords(Tool):
             record_ids: list[str] = Field(..., description="List of record IDs to delete (each starting with 'rec')."),
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
                     f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     params=[("records[]", rid) for rid in record_ids],
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/DeleteRecords"
-
-        super().__init__(handler=_delete_records, metadata=metadata, **kwargs)
+        super().__init__(handler=_delete_records, **kwargs)
 
 
 class ListComments(Tool):
     name: str = "airtable_list_comments"
     description: str | None = "List all comments for a specific Airtable record from newest to oldest."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -325,7 +286,7 @@ class ListComments(Tool):
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
             _validate_airtable_id(record_id, "rec", "record_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             params: dict[str, Any] = {"pageSize": page_size}
@@ -335,16 +296,13 @@ class ListComments(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_AIRTABLE_API_BASE}/{base_id}/{table_id_or_name}/{record_id}/comments",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/ListComments"
-
-        super().__init__(handler=_list_comments, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_comments, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -356,21 +314,17 @@ class ListBases(Tool):
     name: str = "airtable_list_bases"
     description: str | None = "List all accessible Airtable bases with their ID, name, and permission level."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_bases(offset: str | None = Field(None, description="Pagination offset for listing bases")) -> Any:
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             params: dict[str, Any] = {}
@@ -380,16 +334,13 @@ class ListBases(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_AIRTABLE_META_BASE}/bases",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     params=params,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/ListBases"
-
-        super().__init__(handler=_list_bases, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_bases, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -401,28 +352,24 @@ class ListTables(Tool):
     name: str = "airtable_list_tables"
     description: str | None = "List all tables in a given Airtable base."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_tables(base_id: str = Field(..., description="Airtable base ID starting with 'app' (not the base name). Use airtable_list_bases first if you only have the base name.")) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_AIRTABLE_META_BASE}/bases/{base_id}/tables",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     params={"include[]": "visibleFieldIds"},
                 )
                 response.raise_for_status()
@@ -432,62 +379,48 @@ class ListTables(Tool):
                     for t in data.get("tables", [])
                 ]
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/ListTables"
-
-        super().__init__(handler=_list_tables, metadata=metadata, **kwargs)
+        super().__init__(handler=_list_tables, **kwargs)
 
 
 class BaseSchema(Tool):
     name: str = "airtable_base_schema"
     description: str | None = "Get complete schema for all tables in an Airtable base, including fields and views."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _base_schema(base_id: str = Field(..., description="Airtable base ID starting with 'app'")) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_AIRTABLE_META_BASE}/bases/{base_id}/tables",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/BaseSchema"
-
-        super().__init__(handler=_base_schema, metadata=metadata, **kwargs)
+        super().__init__(handler=_base_schema, **kwargs)
 
 
 class CreateTable(Tool):
     name: str = "airtable_create_table"
     description: str | None = "Create a new table in an Airtable base with specified fields."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -498,7 +431,7 @@ class CreateTable(Tool):
             description: str | None = Field(None, description="Optional description for the table"),
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             body: dict[str, Any] = {"name": name, "fields": fields}
@@ -508,32 +441,25 @@ class CreateTable(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_AIRTABLE_META_BASE}/bases/{base_id}/tables",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/CreateTable"
-
-        super().__init__(handler=_create_table, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_table, **kwargs)
 
 
 class UpdateTable(Tool):
     name: str = "airtable_update_table"
     description: str | None = "Update an existing Airtable table's name or description."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -545,7 +471,7 @@ class UpdateTable(Tool):
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
             _validate_airtable_id(table_id, "tbl", "table_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             body: dict[str, Any] = {}
@@ -557,16 +483,13 @@ class UpdateTable(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{_AIRTABLE_META_BASE}/bases/{base_id}/tables/{table_id}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/UpdateTable"
-
-        super().__init__(handler=_update_table, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_table, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -578,16 +501,12 @@ class CreateField(Tool):
     name: str = "airtable_create_field"
     description: str | None = "Add a new field (column) to an existing Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -601,7 +520,7 @@ class CreateField(Tool):
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
             _validate_airtable_id(table_id, "tbl", "table_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             body: dict[str, Any] = {"name": name, "type": type}
@@ -613,32 +532,25 @@ class CreateField(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_AIRTABLE_META_BASE}/bases/{base_id}/tables/{table_id}/fields",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/CreateField"
-
-        super().__init__(handler=_create_field, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_field, **kwargs)
 
 
 class UpdateField(Tool):
     name: str = "airtable_update_field"
     description: str | None = "Update a field's metadata (name, description, or options) in an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
-    api_key: SecretStr | None = None
+    personal_access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "personal_access_token": self.personal_access_token}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -652,7 +564,7 @@ class UpdateField(Tool):
         ) -> Any:
             _validate_airtable_id(base_id, "app", "base_id")
             _validate_airtable_id(table_id, "tbl", "table_id")
-            api_key = await _resolve_api_key(self)
+            token = await _resolve_api_key(self)
             import httpx
 
             body: dict[str, Any] = {}
@@ -666,13 +578,10 @@ class UpdateField(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.patch(
                     f"{_AIRTABLE_META_BASE}/bases/{base_id}/tables/{table_id}/fields/{field_id}",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={"Authorization": f"Bearer {token}"},
                     json=body,
                 )
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "Airtable/UpdateField"
-
-        super().__init__(handler=_update_field, metadata=metadata, **kwargs)
+        super().__init__(handler=_update_field, **kwargs)

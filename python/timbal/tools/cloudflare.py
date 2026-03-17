@@ -11,36 +11,31 @@ _CF_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
 
 async def _resolve_credentials(tool: Any) -> tuple[str, str]:
     """Return (api_token, account_id) from integration, explicit fields, or env vars."""
-    api_token: str | None = None
-    account_id: str | None = None
-
+    api_token: str
+    account_id: str
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
-        print(credentials)
         api_token = credentials["api_token"]
         account_id = credentials["account_id"]
     else:
-        if getattr(tool, "api_token", None) is not None:
-            api_token = tool.api_token.get_secret_value()
-        if getattr(tool, "account_id", None) is not None:
-            account_id = tool.account_id
-
-    if not api_token:
-        api_token = os.getenv("CLOUDFLARE_API_TOKEN")
-    if not account_id:
-        account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID")
-
-    if not api_token:
-        raise ValueError(
-            "Cloudflare API token not found. Set CLOUDFLARE_API_TOKEN environment variable, "
-            "pass api_token in config, or configure an integration."
+        api_token = (
+            tool.api_token.get_secret_value()
+            if getattr(tool, "api_token", None) is not None
+            else (os.getenv("CLOUDFLARE_API_TOKEN") or "")
         )
-    if not account_id:
-        raise ValueError(
-            "Cloudflare account ID not found. Set CLOUDFLARE_ACCOUNT_ID environment variable, "
-            "pass account_id in config, or configure an integration."
+        account_id = (
+            tool.account_id
+            if getattr(tool, "account_id", None) is not None
+            else (os.getenv("CLOUDFLARE_ACCOUNT_ID") or "")
         )
-
+        if not api_token:
+            raise ValueError(
+                "Cloudflare API token not found. Set CLOUDFLARE_API_TOKEN, pass api_token, or configure an integration."
+            )
+        if not account_id:
+            raise ValueError(
+                "Cloudflare account ID not found. Set CLOUDFLARE_ACCOUNT_ID, pass account_id, or configure an integration."
+            )
     return api_token, account_id
 
 
@@ -62,17 +57,9 @@ class CloudflareCrawlStart(Tool):
     account_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {
-                    "integration": self.integration,
-                    "api_token": self.api_token,
-                    "account_id": self.account_id,
-                },
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_token": self.api_token, "account_id": self.account_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -163,10 +150,7 @@ class CloudflareCrawlStart(Tool):
                 data = response.json()
                 return {"job_id": data["result"], "success": data["success"]}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "CloudflareCrawl/Start"
-
-        super().__init__(handler=_crawl_start, metadata=metadata, **kwargs)
+        super().__init__(handler=_crawl_start, **kwargs)
 
 
 class CloudflareCrawlGet(Tool):
@@ -180,17 +164,9 @@ class CloudflareCrawlGet(Tool):
     account_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {
-                    "integration": self.integration,
-                    "api_token": self.api_token,
-                    "account_id": self.account_id,
-                },
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_token": self.api_token, "account_id": self.account_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -229,10 +205,7 @@ class CloudflareCrawlGet(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "CloudflareCrawl/Get"
-
-        super().__init__(handler=_crawl_get, metadata=metadata, **kwargs)
+        super().__init__(handler=_crawl_get, **kwargs)
 
 
 class CloudflareCrawlCancel(Tool):
@@ -243,17 +216,9 @@ class CloudflareCrawlCancel(Tool):
     account_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {
-                    "integration": self.integration,
-                    "api_token": self.api_token,
-                    "account_id": self.account_id,
-                },
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_token": self.api_token, "account_id": self.account_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -271,7 +236,4 @@ class CloudflareCrawlCancel(Tool):
                 response.raise_for_status()
                 return response.json() if response.content else {"success": True}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "CloudflareCrawl/Cancel"
-
-        super().__init__(handler=_crawl_cancel, metadata=metadata, **kwargs)
+        super().__init__(handler=_crawl_cancel, **kwargs)
