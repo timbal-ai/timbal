@@ -35,6 +35,35 @@ fn restoreWindowsConsole(orig_cp: u32) void {
 const is_windows = builtin.os.tag == .windows;
 const sep = if (is_windows) "\\" else "/";
 
+// Terminal state saved before spawning services so we can restore it on exit.
+// Child processes like `bun run dev` put the terminal in raw mode and may not
+// restore it if killed by Ctrl+C — we handle that here instead.
+var g_stdin_fd: i32 = -1;
+var g_termios_saved: bool = false;
+var g_original_termios: if (!is_windows) std.posix.termios else [0]u8 = undefined;
+
+fn restoreTermios() void {
+    if (comptime !is_windows) {
+        if (g_termios_saved) {
+            g_termios_saved = false;
+            std.posix.tcsetattr(g_stdin_fd, .FLUSH, g_original_termios) catch {};
+        }
+    }
+}
+
+var g_interrupted: bool = false;
+
+fn sigintHandler(_: c_int) callconv(.C) void {
+    if (g_interrupted) {
+        // Second Ctrl+C: force exit after restoring terminal.
+        restoreTermios();
+        std.process.exit(130);
+    }
+    g_interrupted = true;
+    // First Ctrl+C: let children die from their own SIGINT naturally.
+    // The normal exit path in run() restores termios after they've exited.
+}
+
 fn getHomePath(allocator: std.mem.Allocator) ![]u8 {
     return if (is_windows)
         std.process.getEnvVarOwned(allocator, "USERPROFILE")
@@ -264,6 +293,43 @@ fn findAvailablePort(start: u16) u16 {
         return port;
     }
     return start;
+}
+
+fn openBrowserUrl(allocator: std.mem.Allocator, url: []const u8) void {
+    var argv = std.ArrayList([]const u8).init(allocator);
+    defer argv.deinit();
+
+    if (builtin.os.tag == .macos) {
+        argv.append("open") catch return;
+        argv.append(url) catch return;
+    } else if (builtin.os.tag == .windows) {
+        argv.append("cmd") catch return;
+        argv.append("/c") catch return;
+        argv.append("start") catch return;
+        argv.append("") catch return;
+        argv.append(url) catch return;
+    } else {
+        argv.append("xdg-open") catch return;
+        argv.append(url) catch return;
+    }
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch return;
+    _ = child.wait() catch {};
+}
+
+const BrowserContext = struct {
+    allocator: std.mem.Allocator,
+    url: []u8,
+};
+
+fn openBrowserThread(ctx: BrowserContext) void {
+    defer ctx.allocator.free(ctx.url);
+    std.time.sleep(2 * std.time.ns_per_s);
+    openBrowserUrl(ctx.allocator, ctx.url);
 }
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -506,6 +572,21 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
+    // Save terminal state and install SIGINT handler (POSIX only).
+    if (comptime !is_windows) {
+        g_stdin_fd = std.io.getStdIn().handle;
+        if (std.posix.tcgetattr(g_stdin_fd)) |termios| {
+            g_original_termios = termios;
+            g_termios_saved = true;
+        } else |_| {}
+        const sa = std.posix.Sigaction{
+            .handler = .{ .handler = sigintHandler },
+            .mask = std.posix.empty_sigset,
+            .flags = 0,
+        };
+        std.posix.sigaction(std.posix.SIG.INT, &sa, null);
+    }
+
     // Start services.
     try stdout.print("\n{s}Starting services...{s}\n\n", .{ Color.bold, Color.reset });
 
@@ -605,6 +686,22 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         _ = &child;
     }
 
+    // Open browser after a short delay (UI takes priority over API).
+    {
+        const browser_url: ?[]u8 = if (has_ui)
+            std.fmt.allocPrint(allocator, "http://localhost:{d}", .{ui_port.?}) catch null
+        else if (has_api)
+            std.fmt.allocPrint(allocator, "http://localhost:{d}", .{api_port.?}) catch null
+        else
+            null;
+
+        if (browser_url) |url| {
+            const ctx = BrowserContext{ .allocator = allocator, .url = url };
+            const browser_thread = std.Thread.spawn(.{}, openBrowserThread, .{ctx}) catch null;
+            if (browser_thread) |t| t.detach();
+        }
+    }
+
     // Wait for all reader threads (blocks until all services exit).
     for (reader_threads.items) |thread| {
         thread.join();
@@ -614,6 +711,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     for (children.items) |*child| {
         _ = child.wait() catch {};
     }
+
+    restoreTermios();
 
     // Free member data.
     for (members.items) |*member| {
