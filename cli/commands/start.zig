@@ -546,7 +546,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         _ = &child;
     }
 
-    // Build TIMBAL_WORKFORCE env var: name:port,name:port,...
+    // Build workforce env vars: id:port,id:port,...
     {
         var workforce_buf = std.ArrayList(u8).init(allocator);
         defer workforce_buf.deinit();
@@ -557,8 +557,22 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             workforce_buf.appendSlice(entry) catch {};
         }
         if (workforce_buf.items.len > 0) {
+            service_env.put("TIMBAL_START_WORKFORCE", workforce_buf.items) catch {};
+            // TODO: Update the API blueprint to read TIMBAL_START_WORKFORCE, then remove TIMBAL_WORKFORCE.
             service_env.put("TIMBAL_WORKFORCE", workforce_buf.items) catch {};
         }
+    }
+
+    // Set API and UI port env vars for service discovery.
+    if (api_port) |p| {
+        const api_port_env = try std.fmt.allocPrint(allocator, "{d}", .{p});
+        defer allocator.free(api_port_env);
+        service_env.put("TIMBAL_START_API_PORT", api_port_env) catch {};
+    }
+    if (ui_port) |p| {
+        const ui_port_env = try std.fmt.allocPrint(allocator, "{d}", .{p});
+        defer allocator.free(ui_port_env);
+        service_env.put("TIMBAL_START_UI_PORT", ui_port_env) catch {};
     }
 
     if (has_ui) {

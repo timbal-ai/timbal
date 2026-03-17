@@ -138,6 +138,9 @@ def resolve_platform_config(
         elif file_config.base_url:
             host = _strip_scheme(file_config.base_url)
             logger.debug("Resolved host from config file.", host=host)
+        else:
+            host = "api.timbal.ai"
+            logger.debug("Defaulted host to 'api.timbal.ai'.")
 
         api_key = os.getenv("TIMBAL_API_KEY") or os.getenv("TIMBAL_API_TOKEN")
         if api_key:
