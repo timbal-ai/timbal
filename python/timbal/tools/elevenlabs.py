@@ -10,7 +10,6 @@ _ELEVENLABS_BASE = "https://api.elevenlabs.io/v1"
 
 
 async def _resolve_api_key(tool: Any) -> str:
-    """Resolve ElevenLabs API key from integration, explicit field, or env var."""
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
         return credentials["api_key"]
@@ -20,12 +19,11 @@ async def _resolve_api_key(tool: Any) -> str:
     if env_key:
         return env_key
     raise ValueError(
-        "ElevenLabs API key not found. Set ELEVENLABS_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
+        "ElevenLabs API key not found. Set ELEVENLABS_API_KEY, pass api_key, or configure an integration."
     )
 
 
-class TextToSpeech(Tool):
+class ElevenLabsTextToSpeech(Tool):
     name: str = "elevenlabs_text_to_speech"
     description: str | None = (
         "Convert text to speech using a specified ElevenLabs voice. "
@@ -35,13 +33,9 @@ class TextToSpeech(Tool):
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -57,6 +51,7 @@ class TextToSpeech(Tool):
         ) -> Any:
             api_key = await _resolve_api_key(self)
             import base64
+
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -83,46 +78,76 @@ class TextToSpeech(Tool):
                     "output_format": output_format,
                 }
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "ElevenLabs/TextToSpeech"
-        super().__init__(handler=_text_to_speech, metadata=metadata, **kwargs)
+        super().__init__(handler=_text_to_speech, **kwargs)
 
 
-class MakeOutboundCall(Tool):
-    name: str = "elevenlabs_make_outbound_call"
+class ElevenLabsListPhoneNumbers(Tool):
+    name: str = "elevenlabs_list_phone_numbers"
     description: str | None = (
-        "Initiate an outbound phone call via Twilio using an ElevenLabs conversational agent."
+        "List all phone numbers registered with ElevenLabs (Twilio, etc.). "
+        "Returns phone_number_id, phone_number, label, and assigned_agent. "
+        "Use phone_number_id as agent_phone_number_id when making outbound calls."
     )
     integration: Annotated[str, Integration("elevenlabs")] | None = None
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_phone_numbers() -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_ELEVENLABS_BASE}/convai/phone-numbers",
+                    headers={"xi-api-key": api_key},
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_phone_numbers, **kwargs)
+
+
+class ElevenLabsMakeOutboundCall(Tool):
+    name: str = "elevenlabs_make_outbound_call"
+    description: str | None = (
+        "Initiate an outbound phone call via Twilio using an ElevenLabs conversational agent. "
+        "Requires agent_phone_number_id from list_phone_numbers (not a raw phone number)."
+    )
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _make_outbound_call(
             agent_id: str = Field(..., description="The ElevenLabs conversational agent ID."),
-            to_number: str = Field(..., description="Destination phone number in E.164 format, e.g. '+14155552671'."),
-            from_number: str = Field(..., description="Twilio phone number in E.164 format to place the call from."),
-            agent_phone_number_id: str | None = Field(None, description="Optional phone number ID registered on the agent."),
+            agent_phone_number_id: str = Field(
+                ...,
+                description="Phone number ID from list_phone_numbers. Must be a number registered in ElevenLabs.",
+            ),
+            to_number: str = Field(
+                ...,
+                description="Destination phone number in E.164 format, e.g. '+14155552671'.",
+            ),
         ) -> Any:
             api_key = await _resolve_api_key(self)
             import httpx
 
             payload: dict[str, Any] = {
                 "agent_id": agent_id,
-                "to": to_number,
-                "from": from_number,
+                "agent_phone_number_id": agent_phone_number_id,
+                "to_number": to_number,
             }
-            if agent_phone_number_id:
-                payload["agent_phone_number_id"] = agent_phone_number_id
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -133,25 +158,49 @@ class MakeOutboundCall(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "ElevenLabs/MakeOutboundCall"
-        super().__init__(handler=_make_outbound_call, metadata=metadata, **kwargs)
+        super().__init__(handler=_make_outbound_call, **kwargs)
 
 
-class GetModels(Tool):
+class ElevenLabsListAgents(Tool):
+    name: str = "elevenlabs_list_agents"
+    description: str | None = (
+        "List all ElevenLabs conversational AI agents. Returns agent_id, name, and other metadata for each agent."
+    )
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_agents() -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_ELEVENLABS_BASE}/convai/agents",
+                    headers={"xi-api-key": api_key},
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_agents, **kwargs)
+
+
+class ElevenLabsGetModels(Tool):
     name: str = "elevenlabs_get_models"
     description: str | None = "List all available ElevenLabs TTS models with their capabilities."
     integration: Annotated[str, Integration("elevenlabs")] | None = None
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -167,12 +216,10 @@ class GetModels(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "ElevenLabs/GetModels"
-        super().__init__(handler=_get_models, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_models, **kwargs)
 
 
-class GetVoicesWithDescriptions(Tool):
+class ElevenLabsGetVoicesWithDescriptions(Tool):
     name: str = "elevenlabs_get_voices_with_descriptions"
     description: str | None = (
         "Fetch all available voices from ElevenLabs including metadata "
@@ -182,13 +229,9 @@ class GetVoicesWithDescriptions(Tool):
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -225,12 +268,50 @@ class GetVoicesWithDescriptions(Tool):
                 })
             return {"voices": enriched, "total": len(enriched)}
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "ElevenLabs/GetVoicesWithDescriptions"
-        super().__init__(handler=_get_voices_with_descriptions, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_voices_with_descriptions, **kwargs)
 
 
-class GetAudioFromHistoryItem(Tool):
+class ElevenLabsListHistory(Tool):
+    name: str = "elevenlabs_list_history"
+    description: str | None = (
+        "List generated audio history items (TTS, ConvAI, etc.). "
+        "Returns history_item_id, text, voice_name, date_unix, source for each item. "
+        "Use history_item_id with get_audio_from_history_item or download_history_items."
+    )
+    integration: Annotated[str, Integration("elevenlabs")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_history(
+            page_size: int = Field(100, description="Max items to return (default 100)."),
+            source: str | None = Field(None, description="Filter by source: 'TTS', 'STS', or 'ConvAI'."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            params: dict[str, Any] = {"page_size": page_size}
+            if source:
+                params["source"] = source
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_ELEVENLABS_BASE}/history",
+                    headers={"xi-api-key": api_key},
+                    params=params,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_history, **kwargs)
+
+
+class ElevenLabsGetAudioFromHistoryItem(Tool):
     name: str = "elevenlabs_get_audio_from_history_item"
     description: str | None = (
         "Retrieve the audio of a history item and return it as a base64-encoded file."
@@ -239,13 +320,9 @@ class GetAudioFromHistoryItem(Tool):
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -254,6 +331,7 @@ class GetAudioFromHistoryItem(Tool):
         ) -> Any:
             api_key = await _resolve_api_key(self)
             import base64
+
             import httpx
 
             async with httpx.AsyncClient() as client:
@@ -269,12 +347,10 @@ class GetAudioFromHistoryItem(Tool):
                     "content_type": response.headers.get("content-type", "audio/mpeg"),
                 }
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "ElevenLabs/GetAudioFromHistoryItem"
-        super().__init__(handler=_get_audio_from_history_item, metadata=metadata, **kwargs)
+        super().__init__(handler=_get_audio_from_history_item, **kwargs)
 
 
-class DownloadHistoryItems(Tool):
+class ElevenLabsDownloadHistoryItems(Tool):
     name: str = "elevenlabs_download_history_items"
     description: str | None = (
         "Download one or more history items. A single item returns an audio file (base64). "
@@ -284,13 +360,9 @@ class DownloadHistoryItems(Tool):
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -299,9 +371,10 @@ class DownloadHistoryItems(Tool):
         ) -> Any:
             api_key = await _resolve_api_key(self)
             import base64
-            import httpx
             import io
             import zipfile
+
+            import httpx
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -333,12 +406,10 @@ class DownloadHistoryItems(Tool):
                 "content_type": content_type or "audio/mpeg",
             }
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "ElevenLabs/DownloadHistoryItems"
-        super().__init__(handler=_download_history_items, metadata=metadata, **kwargs)
+        super().__init__(handler=_download_history_items, **kwargs)
 
 
-class CreateAgent(Tool):
+class ElevenLabsCreateAgent(Tool):
     name: str = "elevenlabs_create_agent"
     description: str | None = (
         "Create a new ElevenLabs conversational AI agent with a given name, "
@@ -348,13 +419,9 @@ class CreateAgent(Tool):
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -402,46 +469,61 @@ class CreateAgent(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "ElevenLabs/CreateAgent"
-        super().__init__(handler=_create_agent, metadata=metadata, **kwargs)
+        super().__init__(handler=_create_agent, **kwargs)
 
 
-class AddVoice(Tool):
+class ElevenLabsAddVoice(Tool):
     name: str = "elevenlabs_add_voice"
     description: str | None = (
-        "Clone or add a new voice to ElevenLabs from one or more base64-encoded audio files."
+        "Clone or add a new voice to ElevenLabs from audio files. "
+        "Use audio_file_paths for local files (recommended); use audio_files_base64 only for small pasted samples."
     )
     integration: Annotated[str, Integration("elevenlabs")] | None = None
     api_key: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        """See base class."""
         return {
             **super().get_config(),
-            **self._annotate_config(
-                {"integration": self.integration, "api_key": self.api_key},
-                required={"integration"},
-            ),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _add_voice(
             name: str = Field(..., description="Display name for the new voice."),
-            audio_files_base64: list[str] = Field(..., description="List of audio file contents encoded as base64 strings."),
-            filenames: list[str] | None = Field(None, description="Optional list of original filenames (e.g. ['sample1.mp3']). Must match the length of audio_files_base64 if provided."),
+            audio_file_paths: list[str] | None = Field(
+                None,
+                description="Paths to local audio files (e.g. ['/path/to/sample.mp3']). Preferred over base64 for large files.",
+            ),
+            audio_files_base64: list[str] | None = Field(
+                None,
+                description="List of audio file contents as base64 strings. Use audio_file_paths instead for large files.",
+            ),
+            filenames: list[str] | None = Field(None, description="Optional list of original filenames (e.g. ['sample1.mp3']). Must match the length of audio files if provided."),
             description: str | None = Field(None, description="Optional text description of the voice."),
-            labels: dict[str, str] | None = Field(None, description="Optional key-value metadata, e.g. {'accent': 'British', 'gender': 'female'}."),
+            labels: dict[str, str] | None = Field(
+                None,
+                description="Optional metadata. Keys: language (BCP-47: 'ca', 'es', 'en', 'fr'), accent, gender, age. E.g. {'language': 'ca', 'accent': 'British'}.",
+            ),
         ) -> Any:
             api_key = await _resolve_api_key(self)
-            import httpx
             import base64
 
-            resolved_names = filenames or [f"sample_{i}.mp3" for i in range(len(audio_files_base64))]
+            import httpx
+
+            if audio_file_paths:
+                audio_chunks: list[bytes] = []
+                for p in audio_file_paths:
+                    with open(p, "rb") as f:
+                        audio_chunks.append(f.read())
+                resolved_names = filenames or [os.path.basename(p) for p in audio_file_paths]
+            elif audio_files_base64:
+                audio_chunks = [base64.b64decode(b64) for b64 in audio_files_base64]
+                resolved_names = filenames or [f"sample_{i}.mp3" for i in range(len(audio_files_base64))]
+            else:
+                raise ValueError("Provide either audio_file_paths or audio_files_base64.")
 
             files: list[tuple[str, Any]] = []
-            for i, b64 in enumerate(audio_files_base64):
-                audio_bytes = base64.b64decode(b64)
+            for i, audio_bytes in enumerate(audio_chunks):
                 fname = resolved_names[i] if i < len(resolved_names) else f"sample_{i}.mp3"
                 files.append(("files", (fname, audio_bytes, "audio/mpeg")))
 
@@ -462,6 +544,4 @@ class AddVoice(Tool):
                 response.raise_for_status()
                 return response.json()
 
-        metadata = kwargs.pop("metadata", {})
-        metadata["type"] = "ElevenLabs/AddVoice"
-        super().__init__(handler=_add_voice, metadata=metadata, **kwargs)
+        super().__init__(handler=_add_voice, **kwargs)
