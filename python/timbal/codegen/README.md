@@ -66,15 +66,15 @@ python -m timbal.codegen add-tool --type WebSearch --step agent_a
 ### `remove-tool` — Remove a tool from an Agent
 
 ```bash
-python -m timbal.codegen remove-tool web_search
+python -m timbal.codegen remove-tool --name web_search
 
 # Remove a tool from a specific step in a Workflow
-python -m timbal.codegen remove-tool web_search --step agent_a
+python -m timbal.codegen remove-tool --name web_search --step agent_a
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `<tool_name>` | yes | Name of the tool variable or runtime name to remove |
+| `--name` | yes | Name of the tool variable or runtime name to remove |
 | `--step` | no | Target step name within a Workflow (removes tool from that step's tools list) |
 
 **Requires**: Agent entry point, or Workflow entry point when using `--step`.
@@ -162,12 +162,12 @@ Agent config fields are validated against the same set as `set-config`.
 ### `remove-step` — Remove a step from a Workflow
 
 ```bash
-python -m timbal.codegen remove-step agent_b
+python -m timbal.codegen remove-step --name agent_b
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `<step_name>` | yes | Name of the step to remove |
+| `--name` | yes | Name of the step to remove |
 
 **Requires**: Workflow entry point.
 
@@ -273,15 +273,15 @@ workflow.step(agent_a)
 
 ```bash
 # Rename a workflow step
-python -m timbal.codegen rename agent_a --to agent_b
+python -m timbal.codegen rename --old-name agent_a --to agent_b
 
 # Rename a tool
-python -m timbal.codegen rename web_search --to my_search
+python -m timbal.codegen rename --old-name web_search --to my_search
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `<old_name>` | yes | Current runtime name of the step or tool |
+| `--old-name` | yes | Current runtime name of the step or tool |
 | `--to` | yes | New name |
 
 **What it does**:
@@ -374,3 +374,119 @@ Operations fail with a non-zero exit code and a message to stderr when:
 - Required arguments are missing (`--definition` for Custom, `name` for Agent steps)
 - Config fields are unknown or invalid
 - JSON arguments are malformed
+
+---
+
+## HTTP API
+
+Codegen operations can also be invoked via the platform API. The endpoint runs the CLI on the server-side worktree for a given project branch.
+
+```
+POST /orgs/{org_id}/projects/{project_id}/codegen
+```
+
+**Requires**: `admin` role on the project.
+
+### Request Body
+
+```json
+{
+  "rev": "main",
+  "workforce": "my_agent",
+  "command": "add-tool",
+  "args": {
+    "type": "WebSearch",
+    "name": "my_search"
+  }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `rev` | yes | Branch name (must exist as a pushed branch) |
+| `workforce` | yes | Workforce component name (resolved to `workforce/{name}` in the worktree) |
+| `command` | yes | Codegen operation name (e.g. `add-tool`, `set-config`, `test`) |
+| `args` | no | JSON object of operation arguments (see below for mapping rules) |
+
+### Argument Mapping
+
+The `args` object is converted to CLI flags automatically:
+
+- Keys are converted from `snake_case` to `--kebab-case` (e.g. `old_name` → `--old-name`)
+- `true` booleans emit the flag alone (e.g. `"stream": true` → `--stream`)
+- `false` and `null` values are skipped
+- Objects and arrays are serialized as JSON strings (e.g. `"config": {"model": "openai/gpt-4o"}` → `--config '{"model":"openai/gpt-4o"}'`)
+- Strings and numbers are passed as-is
+
+### Examples
+
+**Add a tool:**
+```json
+{
+  "rev": "main",
+  "workforce": "my_agent",
+  "command": "add-tool",
+  "args": {"type": "WebSearch"}
+}
+```
+
+**Set agent config:**
+```json
+{
+  "rev": "main",
+  "workforce": "my_agent",
+  "command": "set-config",
+  "args": {"config": {"model": "openai/gpt-4o", "system_prompt": "You are helpful."}}
+}
+```
+
+**Add a workflow step:**
+```json
+{
+  "rev": "main",
+  "workforce": "my_pipeline",
+  "command": "add-step",
+  "args": {"type": "Agent", "config": {"name": "agent_b", "model": "openai/gpt-4o-mini"}}
+}
+```
+
+**Add an edge:**
+```json
+{
+  "rev": "main",
+  "workforce": "my_pipeline",
+  "command": "add-edge",
+  "args": {
+    "source": "agent_a",
+    "target": "agent_b",
+    "params": {"prompt": {"step": "agent_a"}}
+  }
+}
+```
+
+**Rename a step:**
+```json
+{
+  "rev": "main",
+  "workforce": "my_pipeline",
+  "command": "rename",
+  "args": {"old_name": "agent_a", "to": "agent_b"}
+}
+```
+
+**Test with streaming:**
+```json
+{
+  "rev": "main",
+  "workforce": "my_agent",
+  "command": "test",
+  "args": {"input": {"query": "hello"}, "stream": true}
+}
+```
+
+### Response
+
+- **Transformer operations** (`add-tool`, `set-config`, etc.): returns the transformed source code. `204 No Content` if the file was unchanged.
+- **Read-only operations** (`get-flow`, `list-tools`): returns JSON.
+- **Test with `--stream`**: returns an SSE stream (`text/event-stream`) where each line is a `data:` event containing a JSON event from the run.
+- **Errors**: returns the stderr message from the CLI.
