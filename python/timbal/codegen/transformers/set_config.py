@@ -6,7 +6,6 @@ import libcst as cst
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
-    has_import,
     resolve_entry_point_type,
     resolve_runnable_name,
 )
@@ -42,66 +41,20 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help='Configuration as a JSON object. E.g. \'{"model": "openai/gpt-4o-mini"}\'.',
     )
-    sp.add_argument(
-        "--params",
-        default=None,
-        help=(
-            "JSON mapping step input params to source step outputs (Workflow only). "
-            'E.g. \'{"prompt": {"step": "agent_a"}, "context": {"step": "agent_b", "key": "valor"}}\'.'
-        ),
-    )
-    sp.add_argument(
-        "--depends-on",
-        action="append",
-        default=None,
-        dest="depends_on",
-        help="Explicit ordering dependency for a step (Workflow only). Repeatable.",
-    )
-
-
-def _parse_params(raw_params: str) -> dict[str, dict]:
-    """Parse and validate --params JSON."""
-    param_map: dict[str, dict] = {}
-    raw = json.loads(raw_params)
-    for param_name, spec in raw.items():
-        if not isinstance(spec, dict) or "step" not in spec:
-            raise ValueError(
-                f"Invalid --params entry for '{param_name}'. "
-                'Each value must be a dict with at least a "step" key.'
-            )
-        param_map[param_name] = spec
-    return param_map
 
 
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
     ep_type = resolve_entry_point_type(tree, entry_point) if tree else None
 
     config = json.loads(args.config) if args.config else {}
-    param_map = _parse_params(args.params) if args.params else {}
-    depends_on = args.depends_on or []
 
     # --- Workflow entry point ---
     if ep_type == "Workflow":
         if not args.name:
-            # Configuring the workflow itself — not supported yet.
             raise ValueError("set-config on a Workflow entry point requires a step name.")
+        if not config:
+            raise ValueError("--config is required for set-config.")
 
-        if param_map or depends_on or not config:
-            # Step params/depends_on mode (may also include --config for the step's constructor).
-            assignments = collect_assignments(tree) if tree else {}
-            # Validate --config against AGENT_FIELDS if the step is an Agent.
-            if config:
-                step_class = _resolve_step_class(args.name, assignments)
-                if step_class == "Agent":
-                    unknown = set(config.keys()) - AGENT_FIELDS
-                    if unknown:
-                        raise ValueError(
-                            f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
-                            f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
-                        )
-            return StepConfigSetter(entry_point, args.name, config, param_map, depends_on, assignments)
-
-        # --config only, no --params or --depends-on: update the step's constructor kwargs.
         assignments = collect_assignments(tree) if tree else {}
         step_class = _resolve_step_class(args.name, assignments)
         if step_class == "Agent":
@@ -117,10 +70,6 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     if ep_type is not None and ep_type != "Agent":
         raise ValueError(f"set-config requires an Agent or Workflow entry point, but '{entry_point}' is a {ep_type}.")
 
-    # --params and --depends-on are only for Workflow steps.
-    if param_map or depends_on:
-        raise ValueError("--params and --depends-on are only supported for Workflow steps.")
-
     if args.name:
         assignments = collect_assignments(tree) if tree else {}
         tool_class = _resolve_tool_class(tree, entry_point, args.name, assignments)
@@ -131,7 +80,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         return ToolConfigSetter(entry_point, args.name, config, assignments, tool_class, var_name)
 
     if not config:
-        raise ValueError("--config is required when not using --params or --depends-on.")
+        raise ValueError("--config is required for set-config.")
 
     unknown = set(config.keys()) - AGENT_FIELDS
     if unknown:
@@ -341,149 +290,6 @@ class ToolConfigSetter(cst.CSTTransformer):
             if value is not None:
                 args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
         return existing_call.with_changes(args=args)
-
-
-# ---------------------------------------------------------------------------
-# Step config (Workflow)
-# ---------------------------------------------------------------------------
-
-
-class StepConfigSetter(cst.CSTTransformer):
-    """Set params, depends_on, and/or constructor config on a workflow step's .step() call."""
-
-    def __init__(
-        self,
-        entry_point: str,
-        step_name: str,
-        config: dict,
-        param_map: dict[str, dict],
-        depends_on: list[str],
-        assignments: dict[str, cst.Call],
-    ):
-        self.entry_point = entry_point
-        self.step_name = step_name
-        self.config = config  # step constructor kwargs to update
-        self.param_map = param_map  # {"input_param": {"step": "src", "key": "optional"}}
-        self.depends_on = depends_on
-        self.assignments = assignments
-
-    def _is_step_call(self, call: cst.Call) -> bool:
-        return (
-            isinstance(call.func, cst.Attribute)
-            and isinstance(call.func.value, cst.Name)
-            and call.func.value.value == self.entry_point
-            and call.func.attr.value == "step"
-        )
-
-    def _matches_step_name(self, call: cst.Call) -> bool:
-        if not call.args:
-            return False
-        first_arg = call.args[0].value
-        if isinstance(first_arg, cst.Name):
-            var_name = first_arg.value
-            if var_name in self.assignments:
-                resolved = resolve_runnable_name(self.assignments[var_name])
-                if resolved is not None:
-                    return resolved == self.step_name
-            return var_name == self.step_name
-        return False
-
-    def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
-        """Update the step's constructor kwargs if --config is provided."""
-        if not self.config:
-            return updated_node
-
-        for target in updated_node.targets:
-            if not isinstance(target.target, cst.Name):
-                continue
-            target_name = target.target.value
-            if target_name == self.entry_point:
-                continue
-            if isinstance(updated_node.value, cst.Call):
-                resolved = resolve_runnable_name(updated_node.value)
-                if resolved == self.step_name:
-                    # Update constructor kwargs.
-                    args = [
-                        a for a in updated_node.value.args
-                        if not (isinstance(a.keyword, cst.Name) and a.keyword.value in self.config)
-                    ]
-                    for key, value in self.config.items():
-                        if value is not None:
-                            args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
-                    return updated_node.with_changes(
-                        value=updated_node.value.with_changes(args=args),
-                    )
-        return updated_node
-
-    def leave_Expr(self, original_node: cst.Expr, updated_node: cst.Expr) -> cst.Expr:
-        """Update the .step() call's kwargs (params, depends_on)."""
-        call = updated_node.value
-        if not isinstance(call, cst.Call):
-            return updated_node
-        if not self._is_step_call(call) or not self._matches_step_name(call):
-            return updated_node
-
-        # Rebuild the .step() call with updated kwargs.
-        step_call_code = self._build_step_call_code(call)
-        parsed = cst.parse_module(step_call_code + "\n")
-        for stmt in parsed.body:
-            if isinstance(stmt, cst.SimpleStatementLine):
-                for item in stmt.body:
-                    if isinstance(item, cst.Expr) and isinstance(item.value, cst.Call):
-                        return updated_node.with_changes(value=item.value)
-        return updated_node
-
-    def leave_Module(self, original_node: cst.Module, updated_node: cst.Module) -> cst.Module:
-        # Add get_run_context import if params are used.
-        if self.param_map and not has_import(original_node, "timbal.state", "get_run_context"):
-            body = list(updated_node.body)
-            import_stmt = cst.parse_statement("from timbal.state import get_run_context\n")
-            import_insert_idx = 0
-            for i, stmt in enumerate(body):
-                if isinstance(stmt, cst.SimpleStatementLine):
-                    for item in stmt.body:
-                        if isinstance(item, (cst.Import, cst.ImportFrom)):
-                            import_insert_idx = i + 1
-            body.insert(import_insert_idx, import_stmt)
-            return updated_node.with_changes(body=body)
-        return updated_node
-
-    def _build_step_call_code(self, existing_call: cst.Call) -> str:
-        """Build the updated .step() call source code."""
-        # First positional arg (the step reference).
-        first_arg = existing_call.args[0]
-        step_ref = cst.parse_module("").code_for_node(first_arg.value)
-
-        parts = [step_ref]
-
-        # Collect existing kwargs that we're NOT overriding.
-        overridden_keys = set(self.param_map.keys())
-        if self.depends_on:
-            overridden_keys.add("depends_on")
-        for arg in existing_call.args[1:]:
-            if isinstance(arg.keyword, cst.Name) and arg.keyword.value not in overridden_keys:
-                kwarg_code = cst.parse_module("").code_for_node(arg)
-                parts.append(kwarg_code)
-
-        # depends_on kwarg
-        if self.depends_on:
-            deps = ", ".join(f'"{d}"' for d in self.depends_on)
-            parts.append(f"depends_on=[{deps}]")
-
-        # Param kwargs
-        for param_name, spec in self.param_map.items():
-            source_step = spec["step"]
-            key = spec.get("key")
-            if key:
-                parts.append(
-                    f'{param_name}=lambda: get_run_context().step_span("{source_step}").output["{key}"]'
-                )
-            else:
-                parts.append(
-                    f'{param_name}=lambda: get_run_context().step_span("{source_step}").output'
-                )
-
-        return f"{self.entry_point}.step({', '.join(parts)})"
 
 
 class StepConstructorConfigSetter(cst.CSTTransformer):

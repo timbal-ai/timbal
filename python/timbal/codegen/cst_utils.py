@@ -24,8 +24,13 @@ def resolve_entry_point_type(tree: cst.Module, entry_point: str) -> str | None:
                 if isinstance(item, cst.Assign):
                     for target in item.targets:
                         if isinstance(target.target, cst.Name) and target.target.value == entry_point:
-                            if isinstance(item.value, cst.Call) and isinstance(item.value.func, cst.Name):
-                                cls_name = item.value.func.value
+                            # Walk down chained method calls (e.g. Workflow(...).step(...).step(...))
+                            # to find the root constructor.
+                            call = item.value
+                            while isinstance(call, cst.Call) and isinstance(call.func, cst.Attribute):
+                                call = call.func.value
+                            if isinstance(call, cst.Call) and isinstance(call.func, cst.Name):
+                                cls_name = call.func.value
                                 if cls_name in ENTRY_POINT_TYPES:
                                     return cls_name
     return None

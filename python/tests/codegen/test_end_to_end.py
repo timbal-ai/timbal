@@ -5,9 +5,9 @@ TestFullLifecycle:
 
 TestComplexWorkflow:
     Multi-step workflow with custom function steps, framework tool steps, chained params
-    with key indexing, depends_on ordering, combined config+params+depends_on, tool
-    management on individual steps, renames that propagate across step_span and depends_on
-    references, and sequential removal that validates cleanup.
+    with key indexing via add-edge, ordering edges, tool management on individual steps,
+    renames that propagate across step_span and depends_on references, and sequential
+    removal that validates cleanup.
 """
 
 import json
@@ -237,7 +237,7 @@ class TestFullLifecycle:
         # Step 12: Set step params (wire agent_b's prompt)
         # ---------------------------------------------------------------
         params = json.dumps({"prompt": {"step": "agent"}})
-        _run(ws, "set-config", "--name", "agent_b", "--params", params)
+        _run(ws, "add-edge", "--source", "agent", "--target", "agent_b", "--params", params)
         source = _read_source(ws)
 
         assert 'step_span("agent")' in source
@@ -503,7 +503,7 @@ class TestComplexWorkflow:
 
         # -- 5a. Wire reviewer's prompt to preprocessor's output with key --
         params = json.dumps({"prompt": {"step": "preprocessor", "key": "cleaned"}})
-        _run(ws, "set-config", "--name", "reviewer", "--params", params)
+        _run(ws, "add-edge", "--source", "preprocessor", "--target", "reviewer", "--params", params)
         source = _read_source(ws)
 
         assert 'step_span("preprocessor")' in source
@@ -511,26 +511,18 @@ class TestComplexWorkflow:
         assert "get_run_context" in source
         assert "from timbal.state import get_run_context" in source
 
-        # -- 5b. Wire summarizer_agent with multiple params and depends_on --
-        multi_params = json.dumps({
-            "prompt": {"step": "reviewer"},
-            "context": {"step": "preprocessor", "key": "word_count"},
-        })
-        _run(
-            ws, "set-config", "--name", "summarizer_agent",
-            "--params", multi_params,
-            "--depends-on", "reviewer",
-            "--depends-on", "preprocessor",
-        )
+        # -- 5b. Wire summarizer_agent with multiple params --
+        reviewer_params = json.dumps({"prompt": {"step": "reviewer"}})
+        _run(ws, "add-edge", "--source", "reviewer", "--target", "summarizer_agent", "--params", reviewer_params)
+        preprocessor_params = json.dumps({"context": {"step": "preprocessor", "key": "word_count"}})
+        _run(ws, "add-edge", "--source", "preprocessor", "--target", "summarizer_agent", "--params", preprocessor_params)
         source = _read_source(ws)
-        normalized = " ".join(source.split())
 
         assert 'step_span("reviewer").output' in source
         assert 'step_span("preprocessor").output["word_count"]' in source
-        assert 'depends_on=["reviewer", "preprocessor"]' in normalized
 
         # -- 5c. Set postprocessor depends_on preprocessor (ordering only) --
-        _run(ws, "set-config", "--name", "postprocessor", "--depends-on", "preprocessor")
+        _run(ws, "add-edge", "--source", "preprocessor", "--target", "postprocessor")
         source = _read_source(ws)
         normalized = " ".join(source.split())
 
@@ -540,14 +532,11 @@ class TestComplexWorkflow:
         # Phase 6: Update step configs (combined config + params)
         # ===============================================================
 
-        # -- 6a. Update reviewer: change model and update params in one call --
+        # -- 6a. Update reviewer: change model, then update params --
         new_config = json.dumps({"model": "openai/gpt-4o", "max_iter": 5})
+        _run(ws, "set-config", "--name", "reviewer", "--config", new_config)
         new_params = json.dumps({"prompt": {"step": "preprocessor"}})
-        _run(
-            ws, "set-config", "--name", "reviewer",
-            "--config", new_config,
-            "--params", new_params,
-        )
+        _run(ws, "add-edge", "--source", "preprocessor", "--target", "reviewer", "--params", new_params)
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -555,8 +544,6 @@ class TestComplexWorkflow:
         assert ns["reviewer"].max_iter == 5
         # Params updated: no more key indexing.
         assert 'step_span("preprocessor").output' in source
-        # The old ["cleaned"] key should be gone from the reviewer's .step() call.
-        # (The postprocessor or summarizer may still have key indexing.)
         # Tools should still be there.
         assert len(ns["reviewer"].tools) == 2
         # system_prompt should be preserved.
@@ -724,26 +711,17 @@ class TestComplexWorkflow:
         result = ns["preprocessor"]("  Hello   World  ")
         assert result == {"cleaned": "hello world", "length": 11}
 
-        # -- 12b. Add a new agent step with combined config + params + depends_on --
+        # -- 12b. Add a new agent step, wire edges separately --
         final_config = json.dumps({"name": "final_agent", "model": "openai/gpt-4o"})
         final_params = json.dumps({"prompt": {"step": "preprocessor", "key": "cleaned"}})
-        _run(
-            ws, "add-step", "--type", "Agent", "--config", final_config,
-        )
-        _run(
-            ws, "set-config", "--name", "final_agent",
-            "--params", final_params,
-            "--depends-on", "agent",
-            "--depends-on", "preprocessor",
-        )
+        _run(ws, "add-step", "--type", "Agent", "--config", final_config)
+        _run(ws, "add-edge", "--source", "preprocessor", "--target", "final_agent", "--params", final_params)
+        _run(ws, "add-edge", "--source", "agent", "--target", "final_agent")
         source = _read_source(ws)
         ns = _exec_code(source)
 
         assert ns["final_agent"].model == "openai/gpt-4o"
         assert 'step_span("preprocessor").output["cleaned"]' in source
-        normalized = " ".join(source.split())
-        assert '"agent"' in normalized
-        assert '"preprocessor"' in normalized
         assert _count_step_calls(source) == 3
 
         # ===============================================================

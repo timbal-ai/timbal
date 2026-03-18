@@ -1,9 +1,31 @@
 import contextlib
+import inspect
 import io
+import textwrap
 from pathlib import Path
 from typing import Any
 
 from timbal.codegen import parse_fqn
+
+
+def _get_when_source(step: Any) -> str | None:
+    """Extract the source code of a step's when callable."""
+    if not step.when or "callable" not in step.when:
+        return None
+    fn = step.when["callable"]
+    try:
+        source = inspect.getsource(fn)
+        source = textwrap.dedent(source).strip()
+        # For inline lambdas (e.g. `when=lambda: ...`), extract just the lambda.
+        if "lambda" in source:
+            idx = source.find("lambda")
+            if idx >= 0:
+                source = source[idx:]
+                # Strip trailing comma or paren from inline usage.
+                source = source.rstrip(" ,)")
+        return source
+    except (OSError, TypeError):
+        return f"<{fn.__name__}>" if hasattr(fn, "__name__") else None
 
 
 def _build_node(runnable: Any, *, include_tools: bool = True) -> dict[str, Any]:
@@ -72,15 +94,17 @@ def get_flow(workspace_path: str | Path) -> dict[str, Any]:
             nodes.append(_build_node(step, include_tools=isinstance(step, Agent)))
 
         for _step_name, step in runnable._steps.items():
+            when_source = _get_when_source(step) if step.when else None
             for prev_name in step.previous_steps:
                 prev_step = runnable._steps[prev_name]
-                edges.append(
-                    {
-                        "id": f"{prev_step._path}->{step._path}",
-                        "source": prev_step._path,
-                        "target": step._path,
-                    }
-                )
+                edge: dict[str, Any] = {
+                    "id": f"{prev_step._path}->{step._path}",
+                    "source": prev_step._path,
+                    "target": step._path,
+                }
+                if when_source is not None:
+                    edge["when"] = when_source
+                edges.append(edge)
     else:
         nodes.append(_build_node(runnable, include_tools=isinstance(runnable, Agent)))
 
