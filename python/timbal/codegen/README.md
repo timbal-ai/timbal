@@ -105,7 +105,7 @@ python -m timbal.codegen set-config --config '{"system_prompt": null}'
 #### Configure a tool on an Agent
 
 ```bash
-python -m timbal.codegen set-config web_search --config '{"timeout": 30}'
+python -m timbal.codegen set-config --name web_search --config '{"timeout": 30}'
 ```
 
 Config fields are validated against the tool's schema. Supported configurable tools: `WebSearch`, `CalaSearch`, `Tool` (custom).
@@ -113,76 +113,15 @@ Config fields are validated against the tool's schema. Supported configurable to
 #### Configure a workflow step's constructor
 
 ```bash
-python -m timbal.codegen set-config agent_b --config '{"model": "openai/gpt-4o"}'
+python -m timbal.codegen set-config --name agent_b --config '{"model": "openai/gpt-4o"}'
 ```
 
 Updates the step's variable assignment (e.g. `agent_b = Agent(model="openai/gpt-4o")`).
 
-#### Wire workflow step inputs (`--params`)
-
-```bash
-python -m timbal.codegen set-config agent_b \
-  --params '{"prompt": {"step": "agent_a"}}'
-```
-
-This generates a lambda that reads from the source step's output:
-
-```python
-workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
-```
-
-To index into the output with a key:
-
-```bash
-python -m timbal.codegen set-config agent_b \
-  --params '{"prompt": {"step": "agent_a", "key": "result"}}'
-```
-
-Generates:
-
-```python
-workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output["result"])
-```
-
-Multiple params can be set at once:
-
-```bash
-python -m timbal.codegen set-config agent_b \
-  --params '{"prompt": {"step": "agent_a"}, "context": {"step": "input_handler", "key": "data"}}'
-```
-
-#### Set step dependencies (`--depends-on`)
-
-```bash
-python -m timbal.codegen set-config agent_b --depends-on agent_a
-python -m timbal.codegen set-config agent_c --depends-on agent_a --depends-on agent_b
-```
-
-Generates:
-
-```python
-workflow.step(agent_c, depends_on=["agent_a", "agent_b"])
-```
-
-#### Combined: constructor config + params + dependencies
-
-All flags can be used together:
-
-```bash
-python -m timbal.codegen set-config agent_b \
-  --config '{"model": "openai/gpt-4o"}' \
-  --params '{"prompt": {"step": "agent_a"}}' \
-  --depends-on agent_a
-```
-
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `<name>` | no | Target tool or step name. Omit to configure the entry point itself. |
+| `--name` | no | Target tool or step name. Omit to configure the entry point itself. |
 | `--config` | depends | JSON object with constructor kwargs |
-| `--params` | no | JSON object mapping input params to source steps (Workflow only) |
-| `--depends-on` | no | Step dependency name, repeatable (Workflow only) |
-
-**Removing params or dependencies**: To remove a `--params` mapping or `--depends-on` entry, re-send the full set without the one you want to remove. The provided values replace the existing ones entirely — there is no separate "remove" operation.
 
 ---
 
@@ -233,6 +172,63 @@ python -m timbal.codegen remove-step agent_b
 **Requires**: Workflow entry point.
 
 Removes the `workflow.step(...)` call for the named step. Unused variables, functions, and imports are cleaned up automatically. If the step doesn't exist, the operation is a no-op.
+
+---
+
+### `add-edge` — Add an edge between two workflow steps
+
+```bash
+# Pure ordering (adds source to target's depends_on)
+python -m timbal.codegen add-edge --source agent_a --target agent_b
+
+# Data flow (wires source output into target params)
+python -m timbal.codegen add-edge --source agent_a --target agent_b \
+  --params '{"prompt": {"step": "agent_a"}}'
+
+# Data flow with key
+python -m timbal.codegen add-edge --source agent_a --target agent_b \
+  --params '{"prompt": {"step": "agent_a", "key": "result"}}'
+
+# Conditional edge
+python -m timbal.codegen add-edge --source agent_a --target agent_b \
+  --when 'lambda: get_run_context().step_span("agent_a").output.content != ""'
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--source` | yes | Source step name |
+| `--target` | yes | Target step name |
+| `--params` | no | JSON mapping target input params to source step outputs |
+| `--when` | no | Python expression for a conditional edge |
+
+**Requires**: Workflow entry point.
+
+**What it does**:
+- Without `--params`: merges the source into the target's `depends_on=[...]` list
+- With `--params`: adds lambda kwargs that read from the source step's output via `get_run_context().step_span("source").output`
+- With `--when`: adds a `when=` kwarg to the target's `.step()` call
+- Adds `from timbal.state import get_run_context` import when needed
+- Idempotent — re-running updates rather than duplicates
+
+---
+
+### `remove-edge` — Remove an edge between two workflow steps
+
+```bash
+python -m timbal.codegen remove-edge --source agent_a --target agent_b
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--source` | yes | Source step name |
+| `--target` | yes | Target step name |
+
+**Requires**: Workflow entry point.
+
+Removes all references to the source step from the target's `.step()` call:
+- Removes the source from `depends_on=[...]`
+- Removes param kwargs that reference the source via `step_span("source")`
+- Removes the `when=` kwarg if it references the source
 
 ---
 
