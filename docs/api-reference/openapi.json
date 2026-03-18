@@ -6,7 +6,10 @@
     "license": { "name": "" },
     "version": "1.3.0"
   },
-  "servers": [{ "url": "https://api.timbal.ai" }],
+  "servers": [
+    { "url": "https://api.timbal.ai", "description": "Production" },
+    { "url": "https://api.dev.timbal.ai", "description": "Development" }
+  ],
   "paths": {
     "/me/orgs": {
       "get": {
@@ -421,6 +424,381 @@
                 "schema": { "$ref": "#/components/schemas/File" }
               }
             }
+          }
+        },
+        "security": [{ "bearer_auth": [] }]
+      }
+    },
+    "/orgs/{org_id}/k2": {
+      "get": {
+        "tags": ["k2"],
+        "description": "List knowledge bases in an organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Page token for pagination",
+            "required": false,
+            "schema": { "type": ["string", "null"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge bases listed successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ListK2Response" }
+              }
+            }
+          }
+        },
+        "security": [{ "bearer_auth": [] }]
+      },
+      "post": {
+        "tags": ["k2"],
+        "description": "Create a new knowledge base",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateK2Request" }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Knowledge base created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CreateK2Response" }
+              }
+            }
+          }
+        },
+        "security": [{ "bearer_auth": [] }]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}": {
+      "get": {
+        "tags": ["k2"],
+        "description": "Get knowledge base details",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge base details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/K2Detail" }
+              }
+            }
+          }
+        },
+        "security": [{ "bearer_auth": [] }]
+      },
+      "delete": {
+        "tags": ["k2"],
+        "description": "Delete a knowledge base",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "204": { "description": "Knowledge base deleted" } },
+        "security": [{ "bearer_auth": [] }]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/files": {
+      "get": {
+        "tags": ["k2"],
+        "description": "List files in a knowledge base",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Page token for pagination",
+            "required": false,
+            "schema": { "type": ["string", "null"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Files listed successfully",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ListK2FilesResponse" }
+              }
+            }
+          }
+        },
+        "security": [{ "bearer_auth": [] }]
+      },
+      "post": {
+        "tags": ["k2"],
+        "description": "Upload a file to a knowledge base for parsing and embedding",
+        "operationId": "add",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "description": "File upload with optional metadata JSON field",
+          "content": { "multipart/form-data": {} }
+        },
+        "responses": {
+          "201": {
+            "description": "File uploaded",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/K2File" }
+              }
+            }
+          }
+        },
+        "security": [{ "bearer_auth": [] }]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/files/{file_id}": {
+      "get": {
+        "tags": ["k2"],
+        "description": "Get a file with its parsings and embeddings metadata",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File details with parsings and embeddings",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/GetK2FileResponse" }
+              }
+            }
+          }
+        },
+        "security": [{ "bearer_auth": [] }]
+      },
+      "delete": {
+        "tags": ["k2"],
+        "description": "Delete a file from a knowledge base",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": { "204": { "description": "File deleted" } },
+        "security": [{ "bearer_auth": [] }]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/query": {
+      "post": {
+        "tags": ["k2"],
+        "description": "Execute a SQL query against the knowledge base",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/QueryK2Request" }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Query results as JSON",
+            "content": { "application/json": {} }
+          }
+        },
+        "security": [{ "bearer_auth": [] }]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/schema": {
+      "get": {
+        "tags": ["k2"],
+        "description": "Get the schema for a knowledge base",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "Response format: \"structured\" (default) or \"sql\"",
+            "required": false,
+            "schema": { "type": "string", "enum": ["structured", "sql"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schema (structured by default, or SQL DDL statements when ?format=sql)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/K2Schema",
+                      "description": "Structured schema with tables, columns, indexes, and constraints (default)"
+                    },
+                    {
+                      "$ref": "#/components/schemas/K2SchemaSql",
+                      "description": "SQL DDL statements (CREATE TABLE, CREATE INDEX, etc.)"
+                    }
+                  ],
+                  "description": "Response for the schema endpoint — structured (default) or SQL DDL."
+                }
+              }
+            }
+          }
+        },
+        "security": [{ "bearer_auth": [] }]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/upload": {
+      "post": {
+        "tags": ["k2"],
+        "description": "Upload a data file (CSV, Parquet, JSON) into the knowledge base",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "description": "File upload with optional table_name and mode fields",
+          "content": { "multipart/form-data": {} }
+        },
+        "responses": {
+          "200": {
+            "description": "Upload result",
+            "content": { "application/json": {} }
           }
         },
         "security": [{ "bearer_auth": [] }]
@@ -1976,6 +2354,25 @@
           }
         }
       },
+      "CreateK2Request": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": ["string", "null"],
+            "description": "Name for the new knowledge base"
+          }
+        }
+      },
+      "CreateK2Response": {
+        "type": "object",
+        "required": ["id", "uid", "name", "path"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "uid": { "type": "string" }
+        }
+      },
       "CreateProjectReqBody": {
         "type": "object",
         "required": ["origin"],
@@ -2273,6 +2670,25 @@
           }
         }
       },
+      "GetK2FileResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/K2File" },
+          {
+            "type": "object",
+            "required": ["parsings", "embeddings"],
+            "properties": {
+              "embeddings": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/K2FileEmbedding" }
+              },
+              "parsings": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/K2FileParsing" }
+              }
+            }
+          }
+        ]
+      },
       "GetOrgResBody": {
         "type": "object",
         "required": ["org"],
@@ -2305,6 +2721,242 @@
         "type": "object",
         "required": ["email"],
         "properties": { "email": { "type": "string" } }
+      },
+      "K2Column": {
+        "type": "object",
+        "required": ["name", "data_type", "is_nullable"],
+        "properties": {
+          "data_type": { "type": "string" },
+          "is_nullable": { "type": "boolean" },
+          "name": { "type": "string" }
+        }
+      },
+      "K2Constraint": {
+        "type": "object",
+        "required": ["constraint_type"],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Columns involved (for PK, UNIQUE, NOT_NULL). Empty for CHECK."
+          },
+          "constraint_type": {
+            "$ref": "#/components/schemas/K2ConstraintType"
+          },
+          "expression": {
+            "type": ["string", "null"],
+            "description": "CHECK expression, if applicable."
+          },
+          "foreign_keys": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/K2ForeignKey" },
+            "description": "Foreign key references, if applicable."
+          }
+        }
+      },
+      "K2ConstraintType": {
+        "type": "string",
+        "enum": ["PRIMARY_KEY", "UNIQUE", "FOREIGN_KEY", "CHECK", "NOT_NULL"]
+      },
+      "K2Detail": {
+        "type": "object",
+        "required": [
+          "id",
+          "uid",
+          "name",
+          "data_size_bytes",
+          "table_count",
+          "row_count",
+          "vector_count",
+          "index_count",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": { "type": "string", "format": "date-time" },
+          "data_size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "description": { "type": ["string", "null"] },
+          "id": { "type": "integer", "format": "int64" },
+          "index_count": { "type": "integer", "format": "int64", "minimum": 0 },
+          "name": { "type": "string" },
+          "row_count": { "type": "integer", "format": "int64", "minimum": 0 },
+          "table_count": { "type": "integer", "format": "int64", "minimum": 0 },
+          "uid": { "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "vector_count": { "type": "integer", "format": "int64", "minimum": 0 }
+        }
+      },
+      "K2File": {
+        "type": "object",
+        "required": [
+          "id",
+          "uid",
+          "kb_id",
+          "name",
+          "content_type",
+          "content_length",
+          "metadata",
+          "url",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "content_length": { "type": "integer", "format": "int64" },
+          "content_type": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "id": { "type": "integer", "format": "int64" },
+          "kb_id": { "type": "integer", "format": "int64" },
+          "metadata": {},
+          "name": { "type": "string" },
+          "uid": { "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "url": { "type": "string" }
+        }
+      },
+      "K2FileEmbedding": {
+        "type": "object",
+        "required": [
+          "id",
+          "kb_file_id",
+          "provider",
+          "model",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "chunk_count": { "type": ["integer", "null"], "format": "int32" },
+          "cost_usd": { "type": ["number", "null"], "format": "double" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "error": { "type": ["string", "null"] },
+          "id": { "type": "integer", "format": "int64" },
+          "kb_file_id": { "type": "integer", "format": "int64" },
+          "model": { "type": "string" },
+          "parsing_id": { "type": ["integer", "null"], "format": "int64" },
+          "provider": { "type": "string" },
+          "status": { "type": "string" },
+          "token_count": { "type": ["integer", "null"], "format": "int32" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "K2FileParsing": {
+        "type": "object",
+        "required": [
+          "id",
+          "kb_file_id",
+          "provider",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "chunk_count": { "type": ["integer", "null"], "format": "int32" },
+          "cost_usd": { "type": ["number", "null"], "format": "double" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "error": { "type": ["string", "null"] },
+          "id": { "type": "integer", "format": "int64" },
+          "kb_file_id": { "type": "integer", "format": "int64" },
+          "num_pages": { "type": ["integer", "null"], "format": "int32" },
+          "provider": { "type": "string" },
+          "provider_job_id": { "type": ["string", "null"] },
+          "s3_bucket": { "type": ["string", "null"] },
+          "s3_key": { "type": ["string", "null"] },
+          "status": { "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "K2ForeignKey": {
+        "type": "object",
+        "required": ["column", "ref_table", "ref_column"],
+        "properties": {
+          "column": { "type": "string" },
+          "ref_column": { "type": "string" },
+          "ref_table": { "type": "string" }
+        }
+      },
+      "K2Index": {
+        "type": "object",
+        "required": ["name", "table_name", "columns", "is_unique"],
+        "properties": {
+          "columns": { "type": "array", "items": { "type": "string" } },
+          "is_unique": { "type": "boolean" },
+          "name": { "type": "string" },
+          "table_name": { "type": "string" }
+        }
+      },
+      "K2Preview": {
+        "type": "object",
+        "required": ["id", "uid", "name", "created_at", "updated_at"],
+        "properties": {
+          "created_at": { "type": "string", "format": "date-time" },
+          "data_size_bytes": {
+            "type": ["integer", "null"],
+            "format": "int64",
+            "minimum": 0
+          },
+          "description": { "type": ["string", "null"] },
+          "id": { "type": "integer", "format": "int64" },
+          "name": { "type": "string" },
+          "uid": { "type": "string" },
+          "updated_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "K2Schema": {
+        "type": "object",
+        "required": ["tables"],
+        "properties": {
+          "tables": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/K2Table" }
+          }
+        }
+      },
+      "K2SchemaSql": {
+        "type": "object",
+        "required": ["statements"],
+        "properties": {
+          "statements": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "DDL statements (CREATE TABLE, CREATE INDEX, etc.)"
+          }
+        }
+      },
+      "K2Table": {
+        "type": "object",
+        "required": [
+          "name",
+          "schema",
+          "columns",
+          "indexes",
+          "constraints",
+          "estimated_row_count"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/K2Column" }
+          },
+          "constraints": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/K2Constraint" }
+          },
+          "estimated_row_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "indexes": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/K2Index" }
+          },
+          "name": { "type": "string" },
+          "schema": { "type": "string" }
+        }
       },
       "ListConnectionsResBody": {
         "type": "object",
@@ -2374,6 +3026,28 @@
             "type": "array",
             "items": { "$ref": "#/components/schemas/Index" }
           }
+        }
+      },
+      "ListK2FilesResponse": {
+        "type": "object",
+        "required": ["files"],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/K2File" }
+          },
+          "next_page_token": { "type": ["string", "null"] }
+        }
+      },
+      "ListK2Response": {
+        "type": "object",
+        "required": ["k2"],
+        "properties": {
+          "k2": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/K2Preview" }
+          },
+          "next_page_token": { "type": ["string", "null"] }
         }
       },
       "ListOrgUsersResBody": {
@@ -2757,6 +3431,16 @@
           }
         }
       },
+      "QueryK2Request": {
+        "type": "object",
+        "required": ["sql"],
+        "properties": {
+          "sql": {
+            "type": "string",
+            "description": "SQL query to execute against the knowledge base"
+          }
+        }
+      },
       "RemoveOrgUserReqBody": {
         "type": "object",
         "required": ["email"],
@@ -3066,6 +3750,7 @@
     }
   },
   "tags": [
+    { "name": "k2", "description": "Knowledge Bases v2 operations" },
     { "name": "orgs", "description": "Organization operations" },
     { "name": "embeddings", "description": "KB Embeddings operations" },
     { "name": "files", "description": "File operations" },

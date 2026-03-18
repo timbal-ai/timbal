@@ -263,6 +263,28 @@
             ]
           },
           {
+            "group": "K2",
+            "tag": "Beta",
+            "pages": [
+              "api-reference/k2/list",
+              "api-reference/k2/create",
+              "api-reference/k2/get",
+              "api-reference/k2/delete",
+              "api-reference/k2/query",
+              "api-reference/k2/schema",
+              "api-reference/k2/upload",
+              {
+                "group": "Files",
+                "pages": [
+                  "api-reference/k2/files/list",
+                  "api-reference/k2/files/add",
+                  "api-reference/k2/files/get",
+                  "api-reference/k2/files/delete"
+                ]
+              }
+            ]
+          },
+          {
             "group": "Knowledge Bases",
             "pages": [
               {
