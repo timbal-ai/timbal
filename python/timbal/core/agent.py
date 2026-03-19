@@ -36,6 +36,7 @@ from ..types.events import BaseEvent, OutputEvent
 from ..types.message import Message
 from ..utils import coerce_to_dict, dump
 from .llm_router import Model, _llm_router
+from .memory_compaction import MemoryCompactor
 from .runnable import Runnable, RunnableLike
 from .skill import ReadSkill, Skill
 from .tool import Tool
@@ -110,6 +111,13 @@ class Agent(Runnable):
     """Maximum number of LLM->tool call iterations before stopping."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
+    memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
+    """Memory compaction strategies applied after resolve_memory. Reduces context window usage.
+    Can be a single compactor or list (applied in order). Built-in: drop_tool_use_and_results(threshold=0, keep_last_n=None),
+    keep_last_n_messages(n), keep_last_n_tokens(max_tokens, encoding=None), keep_last_n_turns(n),
+    truncate_message_tokens(max_tokens_per_message, encoding=None, keep_last_n=0),
+    replace_tool_results_with_placeholder(template='[Tool result: {tool_name}]'),
+    summarize_old_messages(threshold, model='openai/gpt-4.1-nano', keep_last_n=4)."""
     temperature: float | None = None
     """Sampling temperature for the LLM response."""
     output_model: type[BaseModel] | None = None
@@ -634,6 +642,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = await self._resolve_system_prompt()
 
         await self.resolve_memory()
+
+        # Apply memory compaction if configured
+        if self.memory_compaction is not None:
+            compactors = (
+                [self.memory_compaction]
+                if not isinstance(self.memory_compaction, list)
+                else self.memory_compaction
+            )
+            memory = current_span.memory
+            for compactor in compactors:
+                if asyncio.iscoroutinefunction(compactor):
+                    memory = await compactor(memory)
+                else:
+                    memory = compactor(memory)
+            current_span.memory = memory
+
         # Span memory will also be modified with messages array modification (it's the same object)
         # current_span.memory = messages
         current_span._memory_dump = await dump(
