@@ -44,11 +44,12 @@ if TIMBAL_OPENAI_API != "responses":
 # Model type with provider prefixes
 Model = Literal[
     "openai/gpt-5.4",
+    "openai/gpt-5.4-mini",
+    "openai/gpt-5.4-nano",
     "openai/gpt-5.3-chat-latest",
     "openai/gpt-5.2",
     "openai/gpt-5.2-pro",
     "openai/gpt-5.1",
-    "openai/gpt-5.1-mini",
     "openai/gpt-5.1-codex",
     "openai/gpt-5",
     "openai/gpt-5-mini",

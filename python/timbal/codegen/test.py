@@ -26,7 +26,7 @@ async def run_test(
         if event.type == "OUTPUT":
             output_event = event_dict
         if stream:
-            print(event_dict)
+            print(event_dict, flush=True)
 
     if not stream:
         print(output_event)
