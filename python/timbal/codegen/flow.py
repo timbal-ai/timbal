@@ -1,6 +1,7 @@
 import contextlib
 import inspect
 import io
+import re
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,66 @@ def _get_when_source(step: Any) -> str | None:
         return f"<{fn.__name__}>" if hasattr(fn, "__name__") else None
 
 
+def _extract_key_from_lambda(fn: Any, source_step: str) -> str | None:
+    """Extract the dot-notation key path from a runtime lambda's source.
+
+    Given a lambda like:
+        lambda: get_run_context().step_span("agent_a").output[0].something
+    Returns:
+        "output.0.something"
+
+    Returns None if the lambda just accesses `.output` with no further path.
+    """
+    try:
+        source = inspect.getsource(fn)
+    except (OSError, TypeError):
+        return None
+
+    # Find everything after step_span("source_step")
+    pattern = rf'step_span\("{re.escape(source_step)}"\)(\..*?)(?:\s*[,)]|$)'
+    match = re.search(pattern, source)
+    if not match:
+        return None
+
+    accessor = match.group(1)  # e.g. ".output[0].something" or ".output"
+    if accessor == ".output":
+        return None
+
+    # Convert Python accessor syntax to dot notation.
+    from timbal.codegen.transformers.set_param import accessor_to_key
+
+    return accessor_to_key(accessor)
+
+
+def _enrich_params_schema(runnable: Any) -> dict[str, Any]:
+    """Enrich the params JSON schema with default info from fixed and runtime params."""
+    schema = runnable.params_model_schema
+    properties = schema.get("properties", {})
+
+    for param_name, prop in properties.items():
+        if param_name in runnable._default_runtime_params:
+            info = runnable._default_runtime_params[param_name]
+            deps = info.get("dependencies", [])
+            source = deps[0] if deps else None
+            entry: dict[str, Any] = {
+                "type": "map",
+                "source": source,
+            }
+            if source:
+                key = _extract_key_from_lambda(info["callable"], source)
+                if key:
+                    entry["key"] = key
+            prop["value"] = entry
+        elif param_name in runnable._default_fixed_params:
+            value = runnable._default_fixed_params[param_name]
+            prop["value"] = {
+                "type": "value",
+                "value": value,
+            }
+
+    return schema
+
+
 def _build_node(runnable: Any, *, include_tools: bool = True) -> dict[str, Any]:
     """Build a ReactFlow-compatible node dict from a live Runnable instance."""
     from timbal.core.agent import Agent
@@ -51,7 +112,7 @@ def _build_node(runnable: Any, *, include_tools: bool = True) -> dict[str, Any]:
         "type": node_type,
         "data": {
             "config": config,
-            "params": runnable.params_model_schema,
+            "params": _enrich_params_schema(runnable),
             "return": runnable.return_model_schema,
             "metadata": runnable.metadata,
         },

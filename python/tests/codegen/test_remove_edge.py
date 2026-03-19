@@ -71,6 +71,38 @@ class TestRemoveDataFlowEdge:
         output = _run(ws, source="agent_a", target="agent_b")
         assert "step_span" not in output
 
+    def test_remove_dot_notation_accessor(self, wf_workspace):
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_a)
+        workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output.cleaned)
+        """)
+        output = _run(ws, source="agent_a", target="agent_b")
+        assert "step_span" not in output
+        assert "prompt=" not in output
+
+    def test_remove_nested_dot_notation_accessor(self, wf_workspace):
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_a)
+        workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output[0].items.name)
+        """)
+        output = _run(ws, source="agent_a", target="agent_b")
+        assert "step_span" not in output
+        assert "prompt=" not in output
+
 
 class TestRemoveConditionalEdge:
     def test_remove_when_referencing_source(self, wf_workspace):

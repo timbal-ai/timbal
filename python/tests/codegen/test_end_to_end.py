@@ -5,7 +5,7 @@ TestFullLifecycle:
 
 TestComplexWorkflow:
     Multi-step workflow with custom function steps, framework tool steps, chained params
-    with key indexing via add-edge, ordering edges, tool management on individual steps,
+    with key indexing via set-param, ordering edges, tool management on individual steps,
     renames that propagate across step_span and depends_on references, and sequential
     removal that validates cleanup.
 """
@@ -236,8 +236,7 @@ class TestFullLifecycle:
         # ---------------------------------------------------------------
         # Step 12: Set step params (wire agent_b's prompt)
         # ---------------------------------------------------------------
-        params = json.dumps({"prompt": {"step": "agent"}})
-        _run(ws, "add-edge", "--source", "agent", "--target", "agent_b", "--params", params)
+        _run(ws, "set-param", "--target", "agent_b", "--name", "prompt", "--type", "map", "--source", "agent")
         source = _read_source(ws)
 
         assert 'step_span("agent")' in source
@@ -502,24 +501,21 @@ class TestComplexWorkflow:
         # ===============================================================
 
         # -- 5a. Wire reviewer's prompt to preprocessor's output with key --
-        params = json.dumps({"prompt": {"step": "preprocessor", "key": "cleaned"}})
-        _run(ws, "add-edge", "--source", "preprocessor", "--target", "reviewer", "--params", params)
+        _run(ws, "set-param", "--target", "reviewer", "--name", "prompt", "--type", "map", "--source", "preprocessor", "--key", "output.cleaned")
         source = _read_source(ws)
 
         assert 'step_span("preprocessor")' in source
-        assert '["cleaned"]' in source
+        assert ".output.cleaned" in source
         assert "get_run_context" in source
         assert "from timbal.state import get_run_context" in source
 
         # -- 5b. Wire summarizer_agent with multiple params --
-        reviewer_params = json.dumps({"prompt": {"step": "reviewer"}})
-        _run(ws, "add-edge", "--source", "reviewer", "--target", "summarizer_agent", "--params", reviewer_params)
-        preprocessor_params = json.dumps({"context": {"step": "preprocessor", "key": "word_count"}})
-        _run(ws, "add-edge", "--source", "preprocessor", "--target", "summarizer_agent", "--params", preprocessor_params)
+        _run(ws, "set-param", "--target", "summarizer_agent", "--name", "prompt", "--type", "map", "--source", "reviewer")
+        _run(ws, "set-param", "--target", "summarizer_agent", "--name", "context", "--type", "map", "--source", "preprocessor", "--key", "output.word_count")
         source = _read_source(ws)
 
         assert 'step_span("reviewer").output' in source
-        assert 'step_span("preprocessor").output["word_count"]' in source
+        assert 'step_span("preprocessor").output.word_count' in source
 
         # -- 5c. Set postprocessor depends_on preprocessor (ordering only) --
         _run(ws, "add-edge", "--source", "preprocessor", "--target", "postprocessor")
@@ -535,8 +531,7 @@ class TestComplexWorkflow:
         # -- 6a. Update reviewer: change model, then update params --
         new_config = json.dumps({"model": "openai/gpt-4o", "max_iter": 5})
         _run(ws, "set-config", "--name", "reviewer", "--config", new_config)
-        new_params = json.dumps({"prompt": {"step": "preprocessor"}})
-        _run(ws, "add-edge", "--source", "preprocessor", "--target", "reviewer", "--params", new_params)
+        _run(ws, "set-param", "--target", "reviewer", "--name", "prompt", "--type", "map", "--source", "preprocessor")
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -713,15 +708,14 @@ class TestComplexWorkflow:
 
         # -- 12b. Add a new agent step, wire edges separately --
         final_config = json.dumps({"name": "final_agent", "model": "openai/gpt-4o"})
-        final_params = json.dumps({"prompt": {"step": "preprocessor", "key": "cleaned"}})
         _run(ws, "add-step", "--type", "Agent", "--config", final_config)
-        _run(ws, "add-edge", "--source", "preprocessor", "--target", "final_agent", "--params", final_params)
+        _run(ws, "set-param", "--target", "final_agent", "--name", "prompt", "--type", "map", "--source", "preprocessor", "--key", "output.cleaned")
         _run(ws, "add-edge", "--source", "agent", "--target", "final_agent")
         source = _read_source(ws)
         ns = _exec_code(source)
 
         assert ns["final_agent"].model == "openai/gpt-4o"
-        assert 'step_span("preprocessor").output["cleaned"]' in source
+        assert 'step_span("preprocessor").output.cleaned' in source
         assert _count_step_calls(source) == 3
 
         # ===============================================================

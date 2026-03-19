@@ -175,21 +175,70 @@ Removes the `workflow.step(...)` call for the named step. Unused variables, func
 
 ---
 
-### `add-edge` — Add an edge between two workflow steps
+### `set-param` — Set a parameter on a workflow step
+
+Sets a parameter on a workflow step. Two modes: **map** wires a param from another step's output, **value** sets a static value.
+
+```bash
+# Map a param from another step's output
+python -m timbal.codegen set-param --target agent_b --name prompt \
+  --type map --source agent_a
+
+# Map with a dot-notation key path into the source output
+python -m timbal.codegen set-param --target agent_b --name prompt \
+  --type map --source agent_a --key output.cleaned
+
+# Map with nested index and attribute access
+python -m timbal.codegen set-param --target agent_b --name prompt \
+  --type map --source agent_a --key output.0.items.name
+
+# Set a static value
+python -m timbal.codegen set-param --target agent_a --name prompt \
+  --type value --value '"Hello world"'
+
+# Remove a param (set value to null)
+python -m timbal.codegen set-param --target agent_b --name prompt \
+  --type value --value 'null'
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--target` | yes | Target step name |
+| `--name` | yes | Parameter name to set |
+| `--type` | yes | `map` (wire from another step's output) or `value` (static value) |
+| `--source` | map only | Source step name |
+| `--key` | no | Dot-notation path into the source step's output (e.g. `output.cleaned`, `output.0.items.name`) |
+| `--value` | value only | JSON literal for the static value. Use `null` to remove the param. |
+
+**Requires**: Workflow entry point.
+
+**Key path syntax**: The `--key` uses dot-notation where numeric segments become index access and string segments become attribute access:
+
+| Key path | Generated Python |
+|----------|-----------------|
+| `output.cleaned` | `.output.cleaned` |
+| `output.0.items` | `.output[0].items` |
+| `output.0.data.name.2` | `.output[0].data.name[2]` |
+
+**What it does**:
+- `type=map`: adds a lambda kwarg that reads from the source step's output via `get_run_context().step_span("source").output`
+- `type=map` with `--key`: traverses into the output using the dot-notation path
+- `type=value`: sets a static value on the step's `.step()` call
+- `type=value` with `null`: removes the param
+- Adds `from timbal.state import get_run_context` import when needed (map type)
+- Idempotent — re-running updates rather than duplicates
+
+---
+
+### `add-edge` — Add an ordering or conditional edge between workflow steps
+
+Adds an execution ordering dependency between two steps. For wiring data between steps, use `set-param` instead.
 
 ```bash
 # Pure ordering (adds source to target's depends_on)
 python -m timbal.codegen add-edge --source agent_a --target agent_b
 
-# Data flow (wires source output into target params)
-python -m timbal.codegen add-edge --source agent_a --target agent_b \
-  --params '{"prompt": {"step": "agent_a"}}'
-
-# Data flow with key
-python -m timbal.codegen add-edge --source agent_a --target agent_b \
-  --params '{"prompt": {"step": "agent_a", "key": "result"}}'
-
-# Conditional edge
+# Conditional edge (ordering + condition)
 python -m timbal.codegen add-edge --source agent_a --target agent_b \
   --when 'lambda: get_run_context().step_span("agent_a").output.content != ""'
 ```
@@ -198,14 +247,12 @@ python -m timbal.codegen add-edge --source agent_a --target agent_b \
 |----------|----------|-------------|
 | `--source` | yes | Source step name |
 | `--target` | yes | Target step name |
-| `--params` | no | JSON mapping target input params to source step outputs |
 | `--when` | no | Python expression for a conditional edge |
 
 **Requires**: Workflow entry point.
 
 **What it does**:
-- Without `--params`: merges the source into the target's `depends_on=[...]` list
-- With `--params`: adds lambda kwargs that read from the source step's output via `get_run_context().step_span("source").output`
+- Merges the source into the target's `depends_on=[...]` list
 - With `--when`: adds a `when=` kwarg to the target's `.step()` call
 - Adds `from timbal.state import get_run_context` import when needed
 - Idempotent — re-running updates rather than duplicates
@@ -316,7 +363,24 @@ Outputs a JSON array of framework tools discovered from `timbal.tools`:
 python -m timbal.codegen get-flow
 ```
 
-Outputs a JSON representation of the entry point's execution graph.
+Outputs a JSON representation of the entry point's execution graph with `nodes` and `edges`.
+
+Each node's `data.params.properties` includes OpenAPI-style schema fields (`type`, `title`, `description`, etc.) plus a `value` field describing how the param is set:
+
+```json
+{
+  "prompt": {
+    "title": "Prompt",
+    "type": "string",
+    "value": {"type": "map", "source": "agent_a", "key": "output.cleaned"}
+  }
+}
+```
+
+The `value` field has two forms:
+- **Map**: `{"type": "map", "source": "<step_name>"}` with an optional `"key"` for dot-notation path
+- **Static**: `{"type": "value", "value": <json_value>}`
+- **Absent**: param has no default set
 
 ---
 
@@ -352,7 +416,7 @@ Every code transformation follows this pipeline:
 timbal.yaml → parse entry point FQN
     → load source file
     → parse to CST (libcst)
-    → apply transformer (add/remove/set-config)
+    → apply transformer (add/remove/set-config/set-param)
     → remove unused code (iterative dead code elimination)
     → format with ruff
     → write to file (or stdout with --dry-run)
@@ -371,122 +435,6 @@ Operations fail with a non-zero exit code and a message to stderr when:
 - `timbal.yaml` is missing or has no `fqn` field
 - The source file doesn't exist
 - The entry point type doesn't match the operation (Agent vs Workflow)
-- Required arguments are missing (`--definition` for Custom, `name` for Agent steps)
+- Required arguments are missing (`--definition` for Custom, `name` for Agent steps, `--source` for map params)
 - Config fields are unknown or invalid
 - JSON arguments are malformed
-
----
-
-## HTTP API
-
-Codegen operations can also be invoked via the platform API. The endpoint runs the CLI on the server-side worktree for a given project branch.
-
-```
-POST /orgs/{org_id}/projects/{project_id}/codegen
-```
-
-**Requires**: `admin` role on the project.
-
-### Request Body
-
-```json
-{
-  "rev": "main",
-  "workforce": "my_agent",
-  "command": "add-tool",
-  "args": {
-    "type": "WebSearch",
-    "name": "my_search"
-  }
-}
-```
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `rev` | yes | Branch name (must exist as a pushed branch) |
-| `workforce` | yes | Workforce component name (resolved to `workforce/{name}` in the worktree) |
-| `command` | yes | Codegen operation name (e.g. `add-tool`, `set-config`, `test`) |
-| `args` | no | JSON object of operation arguments (see below for mapping rules) |
-
-### Argument Mapping
-
-The `args` object is converted to CLI flags automatically:
-
-- Keys are converted from `snake_case` to `--kebab-case` (e.g. `old_name` → `--old-name`)
-- `true` booleans emit the flag alone (e.g. `"stream": true` → `--stream`)
-- `false` and `null` values are skipped
-- Objects and arrays are serialized as JSON strings (e.g. `"config": {"model": "openai/gpt-4o"}` → `--config '{"model":"openai/gpt-4o"}'`)
-- Strings and numbers are passed as-is
-
-### Examples
-
-**Add a tool:**
-```json
-{
-  "rev": "main",
-  "workforce": "my_agent",
-  "command": "add-tool",
-  "args": {"type": "WebSearch"}
-}
-```
-
-**Set agent config:**
-```json
-{
-  "rev": "main",
-  "workforce": "my_agent",
-  "command": "set-config",
-  "args": {"config": {"model": "openai/gpt-4o", "system_prompt": "You are helpful."}}
-}
-```
-
-**Add a workflow step:**
-```json
-{
-  "rev": "main",
-  "workforce": "my_pipeline",
-  "command": "add-step",
-  "args": {"type": "Agent", "config": {"name": "agent_b", "model": "openai/gpt-4o-mini"}}
-}
-```
-
-**Add an edge:**
-```json
-{
-  "rev": "main",
-  "workforce": "my_pipeline",
-  "command": "add-edge",
-  "args": {
-    "source": "agent_a",
-    "target": "agent_b",
-    "params": {"prompt": {"step": "agent_a"}}
-  }
-}
-```
-
-**Rename a step:**
-```json
-{
-  "rev": "main",
-  "workforce": "my_pipeline",
-  "command": "rename",
-  "args": {"old_name": "agent_a", "to": "agent_b"}
-}
-```
-
-**Test with streaming:**
-```json
-{
-  "rev": "main",
-  "workforce": "my_agent",
-  "command": "test",
-  "args": {"input": {"query": "hello"}, "stream": true}
-}
-```
-
-### Response
-
-- **Transformer operations** (`add-tool`, `set-config`, etc.): returns the transformed source code. `204 No Content` if the file was unchanged.
-- **Read-only operations** (`get-flow`, `list-tools`): returns JSON.
-- **Test with `--stream`**: returns an SSE stream (`text/event-stream`) where each line is a `data:` event containing a JSON event from the run.
-- **Errors**: returns the stderr message from the CLI.

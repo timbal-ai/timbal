@@ -1,5 +1,4 @@
 import argparse
-import json
 
 import libcst as cst
 
@@ -14,7 +13,7 @@ from ..cst_utils import (
 def register(subparsers: argparse._SubParsersAction) -> None:
     sp = subparsers.add_parser(
         "add-edge",
-        help="Add an edge between two workflow steps (data flow, ordering, or conditional).",
+        help="Add an ordering or conditional edge between two workflow steps.",
     )
     sp.add_argument(
         "--source",
@@ -27,14 +26,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Target step name.",
     )
     sp.add_argument(
-        "--params",
-        default=None,
-        help=(
-            "JSON mapping target input params to source step outputs. "
-            'E.g. \'{"prompt": {"step": "agent_a"}, "context": {"step": "agent_b", "key": "valor"}}\'.'
-        ),
-    )
-    sp.add_argument(
         "--when",
         default=None,
         help=(
@@ -44,49 +35,32 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
 
 
-def _parse_params(raw_params: str) -> dict[str, dict]:
-    """Parse and validate --params JSON."""
-    param_map: dict[str, dict] = {}
-    raw = json.loads(raw_params)
-    for param_name, spec in raw.items():
-        if not isinstance(spec, dict) or "step" not in spec:
-            raise ValueError(
-                f"Invalid --params entry for '{param_name}'. "
-                'Each value must be a dict with at least a "step" key.'
-            )
-        param_map[param_name] = spec
-    return param_map
-
-
 def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None = None) -> cst.CSTTransformer:
     ep_type = resolve_entry_point_type(tree, entry_point) if tree else None
 
     if ep_type != "Workflow":
         raise ValueError("add-edge requires a Workflow entry point.")
 
-    param_map = _parse_params(args.params) if args.params else {}
     when_expr = args.when if args.when else None
     assignments = collect_assignments(tree) if tree else {}
 
-    return EdgeAdder(entry_point, args.source, args.target, param_map, when_expr, assignments)
+    return EdgeAdder(entry_point, args.source, args.target, when_expr, assignments)
 
 
 class EdgeAdder(cst.CSTTransformer):
-    """Add an edge between two workflow steps by modifying the target's .step() call."""
+    """Add an ordering or conditional edge between two workflow steps."""
 
     def __init__(
         self,
         entry_point: str,
         source: str,
         target: str,
-        param_map: dict[str, dict],
         when_expr: str | None,
         assignments: dict[str, cst.Call],
     ):
         self.entry_point = entry_point
         self.source = source
         self.target = target
-        self.param_map = param_map
         self.when_expr = when_expr
         self.assignments = assignments
 
@@ -141,8 +115,7 @@ class EdgeAdder(cst.CSTTransformer):
         return updated_node
 
     def leave_Module(self, original_node: cst.Module, updated_node: cst.Module) -> cst.Module:
-        needs_import = self.param_map or self.when_expr
-        if needs_import and not has_import(original_node, "timbal.state", "get_run_context"):
+        if self.when_expr and not has_import(original_node, "timbal.state", "get_run_context"):
             body = list(updated_node.body)
             import_stmt = cst.parse_statement("from timbal.state import get_run_context\n")
             import_insert_idx = 0
@@ -163,10 +136,7 @@ class EdgeAdder(cst.CSTTransformer):
         parts = [step_ref]
 
         # Keys we'll be overriding.
-        overridden_keys = set(self.param_map.keys())
-        if not self.param_map:
-            # Pure ordering or when-only edge: merge into depends_on.
-            overridden_keys.add("depends_on")
+        overridden_keys = {"depends_on"}
         if self.when_expr:
             overridden_keys.add("when")
 
@@ -176,28 +146,14 @@ class EdgeAdder(cst.CSTTransformer):
                 value_code = cst.parse_module("").code_for_node(arg.value).strip()
                 parts.append(f"{arg.keyword.value}={value_code}")
 
-        # For pure ordering (no params), merge source into depends_on.
-        if not self.param_map:
-            existing_deps = self._get_existing_depends_on(existing_call)
-            all_deps = list(dict.fromkeys(existing_deps + [self.source]))  # dedupe, preserve order
-            deps = ", ".join(f'"{d}"' for d in all_deps)
-            parts.append(f"depends_on=[{deps}]")
+        # Merge source into depends_on.
+        existing_deps = self._get_existing_depends_on(existing_call)
+        all_deps = list(dict.fromkeys(existing_deps + [self.source]))  # dedupe, preserve order
+        deps = ", ".join(f'"{d}"' for d in all_deps)
+        parts.append(f"depends_on=[{deps}]")
 
         # when kwarg
         if self.when_expr:
             parts.append(f"when={self.when_expr}")
-
-        # Param kwargs (data flow)
-        for param_name, spec in self.param_map.items():
-            source_step = spec["step"]
-            key = spec.get("key")
-            if key:
-                parts.append(
-                    f'{param_name}=lambda: get_run_context().step_span("{source_step}").output["{key}"]'
-                )
-            else:
-                parts.append(
-                    f'{param_name}=lambda: get_run_context().step_span("{source_step}").output'
-                )
 
         return f"{self.entry_point}.step({', '.join(parts)})"
