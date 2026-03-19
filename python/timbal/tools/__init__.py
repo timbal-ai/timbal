@@ -10,6 +10,14 @@ if TYPE_CHECKING:
     from .edit import Edit
     from .firecrawl import FirecrawlCrawl, FirecrawlExtract, FirecrawlMap, FirecrawlScrape, FirecrawlSearch
     from .gmail import GmailAddLabel, GmailListLabels, GmailRemoveLabel, GmailReply, GmailSearch, GmailSend
+    from .google_calendar import (
+        GoogleCalendarCheckFreeSlots,
+        GoogleCalendarCreateEvent,
+        GoogleCalendarDeleteEvent,
+        GoogleCalendarListEvents,
+        GoogleCalendarUpdateAttendeeStatus,
+        GoogleCalendarUpdateEvent,
+    )
     from .google_maps import (
         GoogleMapsNearbySearch,
         GoogleMapsPlaceDetails,
@@ -62,6 +70,12 @@ __all__ = [
     "GmailReply",
     "GmailSearch",
     "GmailSend",
+    "GoogleCalendarCheckFreeSlots",
+    "GoogleCalendarCreateEvent",
+    "GoogleCalendarDeleteEvent",
+    "GoogleCalendarListEvents",
+    "GoogleCalendarUpdateAttendeeStatus",
+    "GoogleCalendarUpdateEvent",
     "GoogleMapsNearbySearch",
     "GoogleMapsPlaceDetails",
     "GoogleMapsTextSearch",
@@ -110,6 +124,12 @@ _LAZY_IMPORTS = {
     "GmailReply": ".gmail",
     "GmailSearch": ".gmail",
     "GmailSend": ".gmail",
+    "GoogleCalendarCheckFreeSlots": ".google_calendar",
+    "GoogleCalendarCreateEvent": ".google_calendar",
+    "GoogleCalendarDeleteEvent": ".google_calendar",
+    "GoogleCalendarListEvents": ".google_calendar",
+    "GoogleCalendarUpdateAttendeeStatus": ".google_calendar",
+    "GoogleCalendarUpdateEvent": ".google_calendar",
     "GoogleMapsNearbySearch": ".google_maps",
     "GoogleMapsPlaceDetails": ".google_maps",
     "GoogleMapsTextSearch": ".google_maps",
