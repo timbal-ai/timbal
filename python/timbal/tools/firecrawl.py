@@ -57,10 +57,33 @@ class FirecrawlScrape(Tool):
             exclude_tags: list[str] | None = Field(
                 None, description="HTML tags, IDs, or classes to exclude from the output"
             ),
+            headers: dict[str, str] | None = Field(
+                None, description="Custom HTTP headers to send with the request (e.g. cookies, user-agent)"
+            ),
             wait_for: int | None = Field(
                 None, description="Milliseconds to wait for the page to load before scraping"
             ),
-            timeout: int = Field(30000, description="Request timeout in milliseconds"),
+            mobile: bool = Field(False, description="Emulate a mobile device when scraping"),
+            skip_tls_verification: bool = Field(True, description="Skip TLS certificate verification"),
+            location_country: str | None = Field(
+                None, description="ISO 3166-1 alpha-2 country code for geo-located scraping (e.g. 'US', 'DE')"
+            ),
+            location_languages: list[str] | None = Field(
+                None, description="Preferred languages/locales in priority order (e.g. ['en-US', 'de-DE'])"
+            ),
+            remove_base64_images: bool = Field(
+                True, description="Remove base64-encoded images from the markdown output"
+            ),
+            block_ads: bool = Field(True, description="Block ads and cookie popups during scraping"),
+            actions: list[dict] | None = Field(
+                None,
+                description=(
+                    "Browser actions to perform before scraping. Each action is a dict with a 'type' key. "
+                    'Types: "wait" (milliseconds or selector), "click" (selector), "write" (text), '
+                    '"press" (key), "scroll" (direction), "screenshot", "scrape", "executeJavascript" (script).'
+                ),
+            ),
+            timeout: int = Field(30000, description="Request timeout in milliseconds (1000-300000)"),
         ) -> dict:
             api_key = await _resolve_api_key(self)
             import httpx
@@ -69,14 +92,29 @@ class FirecrawlScrape(Tool):
                 "url": url,
                 "formats": formats,
                 "onlyMainContent": only_main_content,
+                "mobile": mobile,
+                "skipTlsVerification": skip_tls_verification,
+                "removeBase64Images": remove_base64_images,
+                "blockAds": block_ads,
                 "timeout": timeout,
             }
             if include_tags:
                 payload["includeTags"] = include_tags
             if exclude_tags:
                 payload["excludeTags"] = exclude_tags
+            if headers:
+                payload["headers"] = headers
             if wait_for is not None:
                 payload["waitFor"] = wait_for
+            if location_country or location_languages:
+                loc: dict[str, Any] = {}
+                if location_country:
+                    loc["country"] = location_country
+                if location_languages:
+                    loc["languages"] = location_languages
+                payload["location"] = loc
+            if actions:
+                payload["actions"] = actions
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -114,15 +152,29 @@ class FirecrawlSearch(Tool):
             sources: list[str] = Field(
                 ["web"], description='Content sources: "web", "news", "images"'
             ),
+            categories: list[str] | None = Field(
+                None, description='Filter by category: "github", "research", "pdf"'
+            ),
             tbs: str | None = Field(
                 None, description='Time filter: "qdr:h" (hour), "qdr:d" (day), "qdr:w" (week), "qdr:m" (month), "qdr:y" (year)'
             ),
-            location: str | None = Field(None, description="ISO 3166-1 alpha-2 country code for localized results"),
+            location: str | None = Field(None, description="Geo-targeted location (e.g. 'Germany', 'San Francisco')"),
+            country: str | None = Field(None, description="ISO 3166-1 alpha-2 country code for localized results (e.g. 'US', 'DE')"),
+            ignore_invalid_urls: bool = Field(False, description="Exclude invalid URLs from search results"),
             scrape_formats: list[str] | None = Field(
                 None,
-                description='Scrape each result in these formats: "markdown", "html", "links". Omit to skip scraping.',
+                description='Scrape each result in these formats: "markdown", "html", "rawHtml", "links". Omit to skip scraping.',
             ),
-            timeout: int = Field(30000, description="Request timeout in milliseconds"),
+            scrape_only_main_content: bool = Field(
+                True, description="When scraping results, extract only the main content"
+            ),
+            scrape_include_tags: list[str] | None = Field(
+                None, description="When scraping results, HTML tags/IDs/classes to include exclusively"
+            ),
+            scrape_exclude_tags: list[str] | None = Field(
+                None, description="When scraping results, HTML tags/IDs/classes to exclude"
+            ),
+            timeout: int = Field(60000, description="Request timeout in milliseconds"),
         ) -> dict:
             api_key = await _resolve_api_key(self)
             import httpx
@@ -132,20 +184,33 @@ class FirecrawlSearch(Tool):
                 "limit": limit,
                 "sources": sources,
                 "timeout": timeout,
+                "ignoreInvalidURLs": ignore_invalid_urls,
             }
+            if categories:
+                payload["categories"] = categories
             if tbs:
                 payload["tbs"] = tbs
             if location:
-                payload["location"] = {"country": location}
+                payload["location"] = location
+            if country:
+                payload["country"] = country
             if scrape_formats:
-                payload["scrapeOptions"] = {"formats": scrape_formats}
+                scrape_opts: dict[str, Any] = {
+                    "formats": scrape_formats,
+                    "onlyMainContent": scrape_only_main_content,
+                }
+                if scrape_include_tags:
+                    scrape_opts["includeTags"] = scrape_include_tags
+                if scrape_exclude_tags:
+                    scrape_opts["excludeTags"] = scrape_exclude_tags
+                payload["scrapeOptions"] = scrape_opts
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_BASE_URL}/search",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                     json=payload,
-                    timeout=httpx.Timeout(60.0, read=None),
+                    timeout=httpx.Timeout(90.0, read=None),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -188,6 +253,10 @@ class FirecrawlCrawl(Tool):
             only_main_content: bool = Field(
                 True, description="Extract only main content, excluding navigation, headers, and footers"
             ),
+            remove_base64_images: bool = Field(
+                True, description="Remove base64-encoded images from the markdown output"
+            ),
+            block_ads: bool = Field(True, description="Block ads and cookie popups during scraping"),
         ) -> dict:
             api_key = await _resolve_api_key(self)
             import asyncio
@@ -202,6 +271,8 @@ class FirecrawlCrawl(Tool):
                 "scrapeOptions": {
                     "formats": formats,
                     "onlyMainContent": only_main_content,
+                    "removeBase64Images": remove_base64_images,
+                    "blockAds": block_ads,
                 },
             }
             if max_depth is not None:
