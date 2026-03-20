@@ -46,6 +46,7 @@ class ZapierCheckAuth(Tool):
                 response = await client.get(
                     f"{_BASE_URL}/api/v2/auth/check/",
                     headers={"x-api-key": api_key, "Content-Type": "application/json"},
+                    timeout=httpx.Timeout(10.0, read=None),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -82,6 +83,7 @@ class ZapierTriggerWebhook(Tool):
                     webhook_url,
                     json=payload,
                     headers={"Content-Type": "application/json"},
+                    timeout=httpx.Timeout(10.0, read=None),
                 )
                 response.raise_for_status()
                 try:
