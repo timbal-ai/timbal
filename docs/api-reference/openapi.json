@@ -3,17 +3,27 @@
   "info": {
     "title": "Timbal Platform API",
     "description": "Public API documentation for the Timbal platform",
-    "license": { "name": "" },
+    "license": {
+      "name": ""
+    },
     "version": "1.3.0"
   },
   "servers": [
-    { "url": "https://api.timbal.ai", "description": "Production" },
-    { "url": "https://api.dev.timbal.ai", "description": "Development" }
+    {
+      "url": "https://api.timbal.ai",
+      "description": "Production"
+    },
+    {
+      "url": "https://api.dev.timbal.ai",
+      "description": "Development"
+    }
   ],
   "paths": {
     "/me/orgs": {
       "get": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "List organizations the authenticated user belongs to",
         "operationId": "handler",
         "parameters": [
@@ -22,14 +32,18 @@
             "in": "query",
             "description": "Optional search query to filter orgs by name",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "page_token",
             "in": "query",
             "description": "Page token",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -37,17 +51,25 @@
             "description": "Organizations listed successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ListOrgsResult" }
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgsResult"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}": {
       "get": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "Get an organization by ID",
         "operationId": "handler",
         "parameters": [
@@ -55,7 +77,9 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -63,15 +87,23 @@
             "description": "Organization details",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/GetOrgResBody" }
+                "schema": {
+                  "$ref": "#/components/schemas/GetOrgResBody"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "patch": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "Partially update an organization",
         "operationId": "handler",
         "parameters": [
@@ -79,26 +111,38 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/EditOrgReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/EditOrgReqBody"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "204": { "description": "Organization updated successfully" }
+          "204": {
+            "description": "Organization updated successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/apps/{app_id}/runs": {
       "get": {
-        "tags": ["runs"],
+        "tags": [
+          "runs"
+        ],
         "description": "List runs for a specific application",
         "operationId": "handler",
         "parameters": [
@@ -106,55 +150,95 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "app_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "user_id",
             "in": "query",
             "description": "Filter runs by user ID",
             "required": false,
-            "schema": { "type": ["integer", "null"], "format": "int64" }
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
           },
           {
             "name": "version_id",
             "in": "query",
             "description": "Filter runs by version ID",
             "required": false,
-            "schema": { "type": ["integer", "null"], "format": "int64" }
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
           },
           {
             "name": "status",
             "in": "query",
             "description": "Filter runs by status",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           },
           {
             "name": "sentiment",
             "in": "query",
             "description": "Filter runs by sentiment",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           },
           {
             "name": "group_id",
             "in": "query",
             "description": "Filter runs by group ID",
             "required": false,
-            "schema": { "type": ["integer", "null"], "format": "int64" }
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
           },
           {
             "name": "from",
             "in": "query",
             "description": "Filter runs by start time (epoch timestamp in milliseconds)",
             "required": false,
-            "schema": { "type": ["integer", "null"], "format": "int64" },
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
             "example": 1729540800000
           },
           {
@@ -162,7 +246,13 @@
             "in": "query",
             "description": "Filter runs by end time (epoch timestamp in milliseconds)",
             "required": false,
-            "schema": { "type": ["integer", "null"], "format": "int64" },
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
             "example": 1729627200000
           },
           {
@@ -170,14 +260,25 @@
             "in": "query",
             "description": "Filter runs by metadata",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           },
           {
             "name": "page_token",
             "in": "query",
             "description": "Page token",
             "required": false,
-            "schema": { "type": ["integer", "null"], "format": "int64" }
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
           }
         ],
         "responses": {
@@ -185,17 +286,25 @@
             "description": "Runs listed successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ListRunsResBody" }
+                "schema": {
+                  "$ref": "#/components/schemas/ListRunsResBody"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/apps/{app_id}/runs/{run_id}": {
       "patch": {
-        "tags": ["runs"],
+        "tags": [
+          "runs"
+        ],
         "description": "Update an existing platform run or link a local run with the platform",
         "operationId": "handler",
         "parameters": [
@@ -203,26 +312,36 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "app_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "run_id",
             "in": "path",
             "description": "This can be a platform-defined id or a custom id.\nThe platform will map the custom id to an internal one afterwards.",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/UpdateRunReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRunReqBody"
+              }
             }
           },
           "required": true
@@ -232,17 +351,25 @@
             "description": "Run updated successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/RunPreview" }
+                "schema": {
+                  "$ref": "#/components/schemas/RunPreview"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/domains": {
       "get": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "List connected domains for an organization",
         "operationId": "handler",
         "parameters": [
@@ -250,7 +377,9 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -258,15 +387,23 @@
             "description": "Domains listed successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ListDomainsResBody" }
+                "schema": {
+                  "$ref": "#/components/schemas/ListDomainsResBody"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "Add a custom domain to an organization",
         "operationId": "handler",
         "parameters": [
@@ -274,26 +411,38 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/CreateDomainReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/CreateDomainReqBody"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "204": { "description": "Domain created successfully" }
+          "204": {
+            "description": "Domain created successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/domains/{domain_id}": {
       "get": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "Get a domain by ID. This endpoint triggers DNS validation and returns the live certificate status.",
         "operationId": "handler",
         "parameters": [
@@ -301,13 +450,17 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "domain_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -315,15 +468,23 @@
             "description": "Domain details",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Domain" }
+                "schema": {
+                  "$ref": "#/components/schemas/Domain"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "delete": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "Delete a domain",
         "operationId": "handler",
         "parameters": [
@@ -331,24 +492,36 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "domain_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
-          "204": { "description": "Domain deleted successfully" }
+          "204": {
+            "description": "Domain deleted successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/embedding-models": {
       "get": {
-        "tags": ["embeddings"],
+        "tags": [
+          "embeddings"
+        ],
         "description": "List all available embedding models for the organization",
         "operationId": "handler",
         "parameters": [
@@ -356,7 +529,10 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           }
         ],
         "responses": {
@@ -378,12 +554,18 @@
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/files": {
       "post": {
-        "tags": ["files"],
+        "tags": [
+          "files"
+        ],
         "description": "Upload a file to an org",
         "operationId": "handler",
         "parameters": [
@@ -391,7 +573,9 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -399,7 +583,9 @@
             "multipart/form-data": {
               "schema": {
                 "type": "object",
-                "required": ["file"],
+                "required": [
+                  "file"
+                ],
                 "properties": {
                   "file": {
                     "type": "array",
@@ -421,17 +607,25 @@
             "description": "File uploaded successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/File" }
+                "schema": {
+                  "$ref": "#/components/schemas/File"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/k2": {
       "get": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "List knowledge bases in an organization",
         "operationId": "handler",
         "parameters": [
@@ -439,14 +633,21 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "page_token",
             "in": "query",
             "description": "Page token for pagination",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -454,15 +655,23 @@
             "description": "Knowledge bases listed successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ListK2Response" }
+                "schema": {
+                  "$ref": "#/components/schemas/ListK2Response"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "Create a new knowledge base",
         "operationId": "handler",
         "parameters": [
@@ -470,13 +679,17 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/CreateK2Request" }
+              "schema": {
+                "$ref": "#/components/schemas/CreateK2Request"
+              }
             }
           },
           "required": true
@@ -486,17 +699,25 @@
             "description": "Knowledge base created",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/CreateK2Response" }
+                "schema": {
+                  "$ref": "#/components/schemas/CreateK2Response"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/k2/{kb_id}": {
       "get": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "Get knowledge base details",
         "operationId": "handler",
         "parameters": [
@@ -504,13 +725,17 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -518,15 +743,23 @@
             "description": "Knowledge base details",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/K2Detail" }
+                "schema": {
+                  "$ref": "#/components/schemas/K2Detail"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "delete": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "Delete a knowledge base",
         "operationId": "handler",
         "parameters": [
@@ -534,22 +767,36 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
-        "responses": { "204": { "description": "Knowledge base deleted" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "204": {
+            "description": "Knowledge base deleted"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/k2/{kb_id}/files": {
       "get": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "List files in a knowledge base",
         "operationId": "list",
         "parameters": [
@@ -557,20 +804,29 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "page_token",
             "in": "query",
             "description": "Page token for pagination",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -578,15 +834,23 @@
             "description": "Files listed successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ListK2FilesResponse" }
+                "schema": {
+                  "$ref": "#/components/schemas/ListK2FilesResponse"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "Upload a file to a knowledge base for parsing and embedding",
         "operationId": "add",
         "parameters": [
@@ -594,35 +858,49 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "description": "File upload with optional metadata JSON field",
-          "content": { "multipart/form-data": {} }
+          "content": {
+            "multipart/form-data": {}
+          }
         },
         "responses": {
           "201": {
             "description": "File uploaded",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/K2File" }
+                "schema": {
+                  "$ref": "#/components/schemas/K2File"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/k2/{kb_id}/files/{file_id}": {
       "get": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "Get a file with its parsings and embeddings metadata",
         "operationId": "get",
         "parameters": [
@@ -630,19 +908,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "file_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -650,15 +934,23 @@
             "description": "File details with parsings and embeddings",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/GetK2FileResponse" }
+                "schema": {
+                  "$ref": "#/components/schemas/GetK2FileResponse"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "delete": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "Delete a file from a knowledge base",
         "operationId": "delete",
         "parameters": [
@@ -666,28 +958,44 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "file_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
-        "responses": { "204": { "description": "File deleted" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "204": {
+            "description": "File deleted"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/k2/{kb_id}/query": {
       "post": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "Execute a SQL query against the knowledge base",
         "operationId": "handler",
         "parameters": [
@@ -695,19 +1003,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/QueryK2Request" }
+              "schema": {
+                "$ref": "#/components/schemas/QueryK2Request"
+              }
             }
           },
           "required": true
@@ -715,15 +1029,23 @@
         "responses": {
           "200": {
             "description": "Query results as JSON",
-            "content": { "application/json": {} }
+            "content": {
+              "application/json": {}
+            }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/k2/{kb_id}/schema": {
       "get": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "Get the schema for a knowledge base",
         "operationId": "handler",
         "parameters": [
@@ -731,20 +1053,30 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "format",
             "in": "query",
             "description": "Response format: \"structured\" (default) or \"sql\"",
             "required": false,
-            "schema": { "type": "string", "enum": ["structured", "sql"] }
+            "schema": {
+              "type": "string",
+              "enum": [
+                "structured",
+                "sql"
+              ]
+            }
           }
         ],
         "responses": {
@@ -769,12 +1101,18 @@
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/k2/{kb_id}/upload": {
       "post": {
-        "tags": ["k2"],
+        "tags": [
+          "k2"
+        ],
         "description": "Upload a data file (CSV, Parquet, JSON) into the knowledge base",
         "operationId": "handler",
         "parameters": [
@@ -782,31 +1120,45 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "description": "File upload with optional table_name and mode fields",
-          "content": { "multipart/form-data": {} }
+          "content": {
+            "multipart/form-data": {}
+          }
         },
         "responses": {
           "200": {
             "description": "Upload result",
-            "content": { "application/json": {} }
+            "content": {
+              "application/json": {}
+            }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/embeddings": {
       "get": {
-        "tags": ["embeddings"],
+        "tags": [
+          "embeddings"
+        ],
         "description": "List embeddings",
         "operationId": "handler",
         "parameters": [
@@ -814,19 +1166,30 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "table_name",
             "in": "query",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -841,10 +1204,16 @@
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["embeddings"],
+        "tags": [
+          "embeddings"
+        ],
         "description": "Create a new embedding",
         "operationId": "handler",
         "parameters": [
@@ -852,13 +1221,19 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           }
         ],
         "requestBody": {
@@ -872,14 +1247,22 @@
           "required": true
         },
         "responses": {
-          "204": { "description": "Embedding created successfully" }
+          "204": {
+            "description": "Embedding created successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/embeddings/{embedding_name}": {
       "delete": {
-        "tags": ["embeddings"],
+        "tags": [
+          "embeddings"
+        ],
         "description": "Delete an embedding",
         "operationId": "handler",
         "parameters": [
@@ -887,30 +1270,46 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "embedding_name",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
-          "204": { "description": "Embedding deleted successfully" }
+          "204": {
+            "description": "Embedding deleted successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/indexes": {
       "get": {
-        "tags": ["indexes"],
+        "tags": [
+          "indexes"
+        ],
         "description": "List indexes for a KB",
         "operationId": "handler",
         "parameters": [
@@ -918,20 +1317,31 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "table_name",
             "in": "query",
             "description": "Table name to filter indexes by",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -939,15 +1349,23 @@
             "description": "Array of indexes",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ListIndexesResBody" }
+                "schema": {
+                  "$ref": "#/components/schemas/ListIndexesResBody"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["indexes"],
+        "tags": [
+          "indexes"
+        ],
         "description": "Create a new index on a table",
         "operationId": "handler",
         "parameters": [
@@ -955,30 +1373,48 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/CreateIndexReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/CreateIndexReqBody"
+              }
             }
           },
           "required": true
         },
-        "responses": { "204": { "description": "Index created successfully" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "204": {
+            "description": "Index created successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/indexes/{index_name}": {
       "delete": {
-        "tags": ["indexes"],
+        "tags": [
+          "indexes"
+        ],
         "description": "Delete an index",
         "operationId": "handler",
         "parameters": [
@@ -986,28 +1422,46 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "index_name",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
-        "responses": { "204": { "description": "Index deleted successfully" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "204": {
+            "description": "Index deleted successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/csv": {
       "post": {
-        "tags": ["tables"],
+        "tags": [
+          "tables"
+        ],
         "description": "Insert or update rows into a table from a CSV file",
         "operationId": "handler",
         "parameters": [
@@ -1015,29 +1469,51 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "table_name",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
-        "requestBody": { "content": { "application/csv": {} } },
-        "responses": { "204": { "description": "Rows inserted successfully" } },
-        "security": [{ "bearer_auth": [] }]
+        "requestBody": {
+          "content": {
+            "application/csv": {}
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Rows inserted successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/records": {
       "post": {
-        "tags": ["tables"],
+        "tags": [
+          "tables"
+        ],
         "description": "Insert or update records into a table",
         "operationId": "handler",
         "parameters": [
@@ -1045,38 +1521,56 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "table_name",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/UpsertRecordsReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/UpsertRecordsReqBody"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "204": { "description": "Records upserted successfully" }
+          "204": {
+            "description": "Records upserted successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search": {
       "post": {
-        "tags": ["tables"],
+        "tags": [
+          "tables"
+        ],
         "description": "Search for records in a table",
         "operationId": "handler",
         "parameters": [
@@ -1084,25 +1578,35 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "kb_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64" }
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           {
             "name": "table_name",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/SearchTableReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/SearchTableReqBody"
+              }
             }
           },
           "required": true
@@ -1112,26 +1616,43 @@
             "description": "Array of records matching the search query. Structure depends on the table schema and selected columns.",
             "content": {
               "application/json": {
-                "schema": { "type": "array", "items": {} },
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                },
                 "example": [
                   {
                     "id": 1,
                     "name": "Alice Johnson",
                     "email": "alice@example.com"
                   },
-                  { "id": 2, "name": null, "email": "bob@example.com" },
-                  { "id": 3, "name": "Carol", "email": "carol@example.com" }
+                  {
+                    "id": 2,
+                    "name": null,
+                    "email": "bob@example.com"
+                  },
+                  {
+                    "id": 3,
+                    "name": "Carol",
+                    "email": "carol@example.com"
+                  }
                 ]
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects": {
       "get": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "List projects for an organization",
         "operationId": "handler",
         "parameters": [
@@ -1139,7 +1660,9 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1147,15 +1670,23 @@
             "description": "Projects listed successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ListProjectsResBody" }
+                "schema": {
+                  "$ref": "#/components/schemas/ListProjectsResBody"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Create a new project",
         "operationId": "handler",
         "parameters": [
@@ -1163,13 +1694,17 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/CreateProjectReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectReqBody"
+              }
             }
           },
           "required": true
@@ -1186,12 +1721,18 @@
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}": {
       "get": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Get a project by ID",
         "operationId": "handler",
         "parameters": [
@@ -1199,13 +1740,17 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1213,15 +1758,23 @@
             "description": "Project details",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ProjectDetail" }
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectDetail"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "delete": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Delete a project",
         "operationId": "handler",
         "parameters": [
@@ -1229,22 +1782,34 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
-          "204": { "description": "Project deleted successfully" }
+          "204": {
+            "description": "Project deleted successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "patch": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Update a project",
         "operationId": "handler",
         "parameters": [
@@ -1252,32 +1817,207 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/EditProjectReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/EditProjectReqBody"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "204": { "description": "Project updated successfully" }
+          "204": {
+            "description": "Project updated successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/compose": {
+      "post": {
+        "tags": [
+          "compose"
+        ],
+        "description": "Send a prompt and stream the response as Server-Sent Events",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComposeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream of Claude responses",
+            "content": {
+              "text/event-stream": {}
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/compose/sessions": {
+      "get": {
+        "tags": [
+          "compose"
+        ],
+        "description": "List sessions for a project, most recent first",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "description": "Filter sessions by user ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sessions listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectSession"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/compose/sessions/{session_id}": {
+      "get": {
+        "tags": [
+          "compose"
+        ],
+        "description": "Get session details including token usage and cost",
+        "operationId": "single",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectSession"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/connections": {
       "get": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "List connections for a project",
         "operationId": "handler",
         "parameters": [
@@ -1285,13 +2025,17 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1306,10 +2050,16 @@
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Connect a resource (KB or integration) to a project",
         "operationId": "handler",
         "parameters": [
@@ -1317,32 +2067,46 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/ConnectToProject" }
+              "schema": {
+                "$ref": "#/components/schemas/ConnectToProject"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "201": { "description": "Connection created successfully" }
+          "201": {
+            "description": "Connection created successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/connections/{connection_id}": {
       "delete": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Delete a project connection",
         "operationId": "handler",
         "parameters": [
@@ -1350,30 +2114,44 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "connection_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
-          "204": { "description": "Connection deleted successfully" }
+          "204": {
+            "description": "Connection deleted successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/deployments": {
       "get": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "List deployments for a project",
         "operationId": "handler",
         "parameters": [
@@ -1381,31 +2159,50 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_env_id",
             "in": "query",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           },
           {
             "name": "manifest_id",
             "in": "query",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           },
           {
             "name": "status",
             "in": "query",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -1420,12 +2217,18 @@
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/deployments/{deployment_id}": {
       "get": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Get a deployment by ID",
         "operationId": "handler",
         "parameters": [
@@ -1433,19 +2236,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "deployment_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1453,17 +2262,25 @@
             "description": "Deployment details",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Deployment" }
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs": {
       "get": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "List environments for a project",
         "operationId": "handler",
         "parameters": [
@@ -1471,13 +2288,17 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1485,15 +2306,23 @@
             "description": "Environments listed successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ListEnvsResBody" }
+                "schema": {
+                  "$ref": "#/components/schemas/ListEnvsResBody"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Create a new environment",
         "operationId": "handler",
         "parameters": [
@@ -1501,32 +2330,46 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/CreateEnvReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/CreateEnvReqBody"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "201": { "description": "Environment created successfully" }
+          "201": {
+            "description": "Environment created successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}": {
       "delete": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Delete an environment",
         "operationId": "handler",
         "parameters": [
@@ -1534,30 +2377,44 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
-          "204": { "description": "Environment deleted successfully" }
+          "204": {
+            "description": "Environment deleted successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/branch": {
       "patch": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Set or clear the branch for an environment",
         "operationId": "handler",
         "parameters": [
@@ -1565,38 +2422,54 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/SetEnvBranchReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/SetEnvBranchReqBody"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "200": { "description": "Branch updated successfully" }
+          "200": {
+            "description": "Branch updated successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/config": {
       "patch": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Update environment configuration (CPU, memory, etc.)",
         "operationId": "handler",
         "parameters": [
@@ -1604,19 +2477,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -1630,14 +2509,22 @@
           "required": true
         },
         "responses": {
-          "200": { "description": "Configuration updated successfully" }
+          "200": {
+            "description": "Configuration updated successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/deploy": {
       "post": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Deploy an environment",
         "operationId": "handler",
         "parameters": [
@@ -1645,36 +2532,54 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/DeployEnvReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/DeployEnvReqBody"
+              }
             }
           },
           "required": true
         },
-        "responses": { "202": { "description": "Deployment initiated" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "202": {
+            "description": "Deployment initiated"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/domain": {
       "patch": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Associate or disassociate a custom domain with an environment",
         "operationId": "handler",
         "parameters": [
@@ -1682,38 +2587,54 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/SetEnvDomainReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/SetEnvDomainReqBody"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "200": { "description": "Domain updated successfully" }
+          "200": {
+            "description": "Domain updated successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/metrics/{metric_type}": {
       "get": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Query environment metrics",
         "operationId": "handler",
         "parameters": [
@@ -1721,46 +2642,76 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "metric_type",
             "in": "path",
             "required": true,
-            "schema": { "$ref": "#/components/schemas/MetricType" }
+            "schema": {
+              "$ref": "#/components/schemas/MetricType"
+            }
           },
           {
             "name": "start_time",
             "in": "query",
             "required": false,
-            "schema": { "type": ["integer", "null"], "format": "int64" }
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
           },
           {
             "name": "end_time",
             "in": "query",
             "required": false,
-            "schema": { "type": ["integer", "null"], "format": "int64" }
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
           }
         ],
-        "responses": { "200": { "description": "Metrics data" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "200": {
+            "description": "Metrics data"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/stop": {
       "post": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Stop an environment",
         "operationId": "handler",
         "parameters": [
@@ -1768,28 +2719,44 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "env_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
-        "responses": { "202": { "description": "Stop initiated" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "202": {
+            "description": "Stop initiated"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/users": {
       "get": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "List users for a project",
         "operationId": "handler",
         "parameters": [
@@ -1797,13 +2764,17 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1818,10 +2789,16 @@
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Add a user to a project",
         "operationId": "handler",
         "parameters": [
@@ -1829,30 +2806,46 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/AddProjectUserReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/AddProjectUserReqBody"
+              }
             }
           },
           "required": true
         },
-        "responses": { "204": { "description": "User added successfully" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "204": {
+            "description": "User added successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/users/{user_id}": {
       "delete": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Remove a user from a project",
         "operationId": "handler",
         "parameters": [
@@ -1860,26 +2853,42 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "user_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
-        "responses": { "204": { "description": "User removed successfully" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "204": {
+            "description": "User removed successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "patch": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Update a user's role in a project",
         "operationId": "handler",
         "parameters": [
@@ -1887,19 +2896,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "user_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -1913,14 +2928,22 @@
           "required": true
         },
         "responses": {
-          "204": { "description": "User role updated successfully" }
+          "204": {
+            "description": "User role updated successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/vars": {
       "get": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "List variables for a project",
         "operationId": "handler",
         "parameters": [
@@ -1928,20 +2951,29 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "env_ids",
             "in": "query",
             "description": "Comma-separated list of environment IDs to filter by",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -1949,15 +2981,23 @@
             "description": "Variables listed successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ListVarsResBody" }
+                "schema": {
+                  "$ref": "#/components/schemas/ListVarsResBody"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Create a new variable",
         "operationId": "handler",
         "parameters": [
@@ -1965,32 +3005,46 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/CreateVarReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/CreateVarReqBody"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "201": { "description": "Variable created successfully" }
+          "201": {
+            "description": "Variable created successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/vars/batch": {
       "post": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Batch create variables",
         "operationId": "handler",
         "parameters": [
@@ -1998,13 +3052,17 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -2018,14 +3076,22 @@
           "required": true
         },
         "responses": {
-          "201": { "description": "Variables created successfully" }
+          "201": {
+            "description": "Variables created successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/projects/{project_id}/vars/{var_id}": {
       "get": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Get a variable by ID",
         "operationId": "handler",
         "parameters": [
@@ -2033,19 +3099,25 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "var_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2053,15 +3125,23 @@
             "description": "Variable details",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Var" }
+                "schema": {
+                  "$ref": "#/components/schemas/Var"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "delete": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Delete a variable",
         "operationId": "handler",
         "parameters": [
@@ -2069,28 +3149,42 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "var_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
-          "204": { "description": "Variable deleted successfully" }
+          "204": {
+            "description": "Variable deleted successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "patch": {
-        "tags": ["projects"],
+        "tags": [
+          "projects"
+        ],
         "description": "Update a variable",
         "operationId": "handler",
         "parameters": [
@@ -2098,38 +3192,54 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "project_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "var_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/UpdateVarReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/UpdateVarReqBody"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "204": { "description": "Variable updated successfully" }
+          "204": {
+            "description": "Variable updated successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/users": {
       "get": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "List users in an organization",
         "operationId": "handler",
         "parameters": [
@@ -2137,21 +3247,33 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "q",
             "in": "query",
             "description": "Optional search query to filter users by name",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           },
           {
             "name": "page_token",
             "in": "query",
             "description": "Page token for pagination",
             "required": false,
-            "schema": { "type": ["string", "null"] }
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -2159,15 +3281,23 @@
             "description": "Users listed successfully",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ListOrgUsersResBody" }
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgUsersResBody"
+                }
               }
             }
           }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "post": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "Invite a user to an organization",
         "operationId": "handler",
         "parameters": [
@@ -2175,22 +3305,36 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/InviteOrgUserReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/InviteOrgUserReqBody"
+              }
             }
           },
           "required": true
         },
-        "responses": { "204": { "description": "User invited successfully" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "204": {
+            "description": "User invited successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "delete": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "Remove a user from an organization",
         "operationId": "handler",
         "parameters": [
@@ -2198,22 +3342,36 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/RemoveOrgUserReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/RemoveOrgUserReqBody"
+              }
             }
           },
           "required": true
         },
-        "responses": { "204": { "description": "User removed successfully" } },
-        "security": [{ "bearer_auth": [] }]
+        "responses": {
+          "204": {
+            "description": "User removed successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       },
       "patch": {
-        "tags": ["orgs"],
+        "tags": [
+          "orgs"
+        ],
         "description": "Update a user's role in an organization",
         "operationId": "handler",
         "parameters": [
@@ -2221,21 +3379,31 @@
             "name": "org_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/EditOrgUserReqBody" }
+              "schema": {
+                "$ref": "#/components/schemas/EditOrgUserReqBody"
+              }
             }
           },
           "required": true
         },
         "responses": {
-          "204": { "description": "User role updated successfully" }
+          "204": {
+            "description": "User role updated successfully"
+          }
         },
-        "security": [{ "bearer_auth": [] }]
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     }
   },
@@ -2243,21 +3411,86 @@
     "schemas": {
       "AddProjectUserReqBody": {
         "type": "object",
-        "required": ["user_id"],
-        "properties": { "user_id": { "type": "integer", "format": "int64" } }
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
-      "AppType": { "type": "string", "enum": ["agent", "workflow"] },
+      "AppType": {
+        "type": "string",
+        "enum": [
+          "agent",
+          "workflow"
+        ]
+      },
       "BatchCreateVarsReqBody": {
         "type": "object",
-        "required": ["vars"],
+        "required": [
+          "vars"
+        ],
         "properties": {
           "env_ids": {
-            "type": ["array", "null"],
-            "items": { "type": "integer", "format": "int64" }
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
           },
           "vars": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/VarInput" }
+            "items": {
+              "$ref": "#/components/schemas/VarInput"
+            }
+          }
+        }
+      },
+      "ComposeRequest": {
+        "type": "object",
+        "required": [
+          "rev",
+          "prompt"
+        ],
+        "properties": {
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Effort level: low, medium, high, max",
+            "example": "high"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model alias or full name (e.g. \"sonnet\", \"opus\", \"claude-sonnet-4-6\")",
+            "example": "sonnet"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "The prompt to send to Claude",
+            "example": "Add error handling to the upload endpoint"
+          },
+          "rev": {
+            "type": "string",
+            "description": "Branch to run against (worktree is checked out at this rev)",
+            "example": "main"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Existing session ID to continue a conversation. Omit to start a new session."
           }
         }
       },
@@ -2265,25 +3498,49 @@
         "oneOf": [
           {
             "type": "object",
-            "required": ["id", "type"],
+            "required": [
+              "id",
+              "type"
+            ],
             "properties": {
-              "id": { "type": "integer", "format": "int64" },
-              "type": { "type": "string", "enum": ["kb"] }
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "kb"
+                ]
+              }
             }
           },
           {
             "type": "object",
-            "required": ["id", "type"],
+            "required": [
+              "id",
+              "type"
+            ],
             "properties": {
-              "id": { "type": "integer", "format": "int64" },
-              "type": { "type": "string", "enum": ["integration"] }
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "integration"
+                ]
+              }
             }
           }
         ]
       },
       "CreateDomainReqBody": {
         "type": "object",
-        "required": ["domain"],
+        "required": [
+          "domain"
+        ],
         "properties": {
           "domain": {
             "type": "string",
@@ -2310,7 +3567,10 @@
             "$ref": "#/components/schemas/EmbeddingModel",
             "description": "Embedding model to use. See the list embedding models endpoint for available options."
           },
-          "name": { "type": "string", "description": "Name of the embedding" },
+          "name": {
+            "type": "string",
+            "description": "Name of the embedding"
+          },
           "table_name": {
             "type": "string",
             "description": "Name of the source table"
@@ -2323,20 +3583,40 @@
       },
       "CreateEnvReqBody": {
         "type": "object",
-        "required": ["name", "color"],
+        "required": [
+          "name",
+          "color"
+        ],
         "properties": {
-          "color": { "type": "string" },
-          "description": { "type": ["string", "null"] },
-          "name": { "type": "string" }
+          "color": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
         }
       },
       "CreateIndexReqBody": {
         "type": "object",
-        "required": ["table_name", "name", "column_names", "type", "is_unique"],
+        "required": [
+          "table_name",
+          "name",
+          "column_names",
+          "type",
+          "is_unique"
+        ],
         "properties": {
           "column_names": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "List of column names to index. At least one column is required. Multiple columns will create a composite index"
           },
           "is_unique": {
@@ -2347,7 +3627,10 @@
             "type": "string",
             "description": "Index name. This must be unique in the entire Knowledge Base"
           },
-          "table_name": { "type": "string", "description": "Table name" },
+          "table_name": {
+            "type": "string",
+            "description": "Table name"
+          },
           "type": {
             "$ref": "#/components/schemas/IndexType",
             "description": "Index type"
@@ -2358,54 +3641,115 @@
         "type": "object",
         "properties": {
           "name": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Name for the new knowledge base"
           }
         }
       },
       "CreateK2Response": {
         "type": "object",
-        "required": ["id", "uid", "name", "path"],
+        "required": [
+          "id",
+          "uid",
+          "name",
+          "path"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "name": { "type": "string" },
-          "path": { "type": "string" },
-          "uid": { "type": "string" }
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
+          }
         }
       },
       "CreateProjectReqBody": {
         "type": "object",
-        "required": ["origin"],
+        "required": [
+          "origin"
+        ],
         "properties": {
-          "name": { "type": ["string", "null"] },
-          "origin": { "$ref": "#/components/schemas/ProjectOrigin" }
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "$ref": "#/components/schemas/ProjectOrigin"
+          }
         }
       },
       "CreateProjectResBody": {
         "type": "object",
-        "required": ["id", "name"],
+        "required": [
+          "id",
+          "name"
+        ],
         "properties": {
-          "id": { "type": "integer", "format": "int64" },
-          "name": { "type": "string" }
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          }
         }
       },
       "CreateVarReqBody": {
         "type": "object",
-        "required": ["type", "name", "value"],
+        "required": [
+          "type",
+          "name",
+          "value"
+        ],
         "properties": {
-          "description": { "type": ["string", "null"] },
-          "env_ids": {
-            "type": ["array", "null"],
-            "items": { "type": "integer", "format": "int64" }
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
-          "name": { "type": "string" },
-          "type": { "$ref": "#/components/schemas/VarType" },
-          "value": { "type": "string" }
+          "env_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/VarType"
+          },
+          "value": {
+            "type": "string"
+          }
         }
       },
       "DeployEnvReqBody": {
         "type": "object",
-        "properties": { "rev": { "type": ["string", "null"] } }
+        "properties": {
+          "rev": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "Deployment": {
         "type": "object",
@@ -2420,30 +3764,90 @@
         ],
         "properties": {
           "build_finished_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
-          "build_logs": { "type": ["string", "null"] },
+          "build_logs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "build_started_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
-          "cpu": { "type": ["integer", "null"], "format": "int32" },
-          "created_at": { "type": "string", "format": "date-time" },
-          "desired_count": { "type": ["integer", "null"], "format": "int32" },
-          "domain": { "type": ["string", "null"] },
-          "ephemeral_storage": {
-            "type": ["integer", "null"],
+          "cpu": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32"
           },
-          "id": { "type": "integer", "format": "int64" },
-          "memory": { "type": ["integer", "null"], "format": "int32" },
-          "project_env_id": { "type": "integer", "format": "int64" },
-          "status": { "type": "string" },
-          "status_detail": { "type": ["string", "null"] },
-          "target": { "$ref": "#/components/schemas/Target" },
-          "type": { "type": "string" },
-          "updated_at": { "type": "string", "format": "date-time" }
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "desired_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ephemeral_storage": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "memory": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "project_env_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "type": "string"
+          },
+          "status_detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "$ref": "#/components/schemas/Target"
+          },
+          "type": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "Domain": {
@@ -2462,8 +3866,14 @@
             "format": "int64",
             "description": "Creation timestamp in epoch milliseconds"
           },
-          "domain": { "type": "string", "description": "Custom domain name" },
-          "id": { "type": "string", "description": "Unique domain identifier" },
+          "domain": {
+            "type": "string",
+            "description": "Custom domain name"
+          },
+          "id": {
+            "type": "string",
+            "description": "Unique domain identifier"
+          },
           "project_env": {
             "description": "Project environment this domain is linked to, if any"
           },
@@ -2474,7 +3884,9 @@
           },
           "validation_records": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/ValidationRecord" },
+            "items": {
+              "$ref": "#/components/schemas/ValidationRecord"
+            },
             "description": "DNS records required for SSL certificate validation"
           },
           "validation_status": {
@@ -2487,45 +3899,75 @@
         "type": "object",
         "properties": {
           "banner_url": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "URL of the organization's banner image",
             "deprecated": true
           },
           "contact_email": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Contact email address"
           },
           "contact_name": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Contact person's name"
           },
           "contact_phone": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Contact phone number"
           },
           "country": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "ISO 3166-1 alpha-2 country code"
           },
           "description": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Organization description"
           },
           "name": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Organization name"
           },
           "photo_url": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "URL of the organization's profile photo"
           }
         }
       },
       "EditOrgUserReqBody": {
         "type": "object",
-        "required": ["email", "role"],
+        "required": [
+          "email",
+          "role"
+        ],
         "properties": {
-          "email": { "type": "string", "description": "User's email address" },
+          "email": {
+            "type": "string",
+            "description": "User's email address"
+          },
           "role": {
             "type": "string",
             "description": "User's role in the organization. Standard values are `admin` and `user`. Custom roles are available — contact sales for more information",
@@ -2536,22 +3978,60 @@
       "EditProjectReqBody": {
         "type": "object",
         "properties": {
-          "banner_url": { "type": ["string", "null"] },
-          "default_role": { "type": ["string", "null"] },
-          "description": { "type": ["string", "null"] },
-          "is_public_template": { "type": ["boolean", "null"] },
-          "name": { "type": ["string", "null"] },
-          "use_platform_iam": { "type": ["boolean", "null"] }
+          "banner_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_role": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_public_template": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "use_platform_iam": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
         }
       },
       "EditProjectUserReqBody": {
         "type": "object",
-        "required": ["role"],
-        "properties": { "role": { "type": "string" } }
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "type": "string"
+          }
+        }
       },
       "Embedding": {
         "allOf": [
-          { "$ref": "#/components/schemas/EmbeddingStatus" },
+          {
+            "$ref": "#/components/schemas/EmbeddingStatus"
+          },
           {
             "type": "object",
             "required": [
@@ -2564,66 +4044,133 @@
               "updated_at"
             ],
             "properties": {
-              "column_name": { "type": "string" },
-              "created_at": { "type": "string", "format": "date-time" },
-              "id": { "type": "integer", "format": "int64" },
-              "model": { "$ref": "#/components/schemas/EmbeddingModel" },
-              "name": { "type": "string" },
-              "table_name": { "type": "string" },
-              "updated_at": { "type": "string", "format": "date-time" }
+              "column_name": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "model": {
+                "$ref": "#/components/schemas/EmbeddingModel"
+              },
+              "name": {
+                "type": "string"
+              },
+              "table_name": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string",
+                "format": "date-time"
+              }
             }
           }
         ]
       },
-      "EmbeddingModel": { "type": "string" },
+      "EmbeddingModel": {
+        "type": "string"
+      },
       "EmbeddingStatus": {
         "oneOf": [
           {
             "type": "object",
-            "required": ["details", "status"],
+            "required": [
+              "details",
+              "status"
+            ],
             "properties": {
-              "details": { "type": "object" },
-              "status": { "type": "string", "enum": ["pending"] }
+              "details": {
+                "type": "object"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending"
+                ]
+              }
             }
           },
           {
             "type": "object",
-            "required": ["details", "status"],
+            "required": [
+              "details",
+              "status"
+            ],
             "properties": {
               "details": {
                 "type": "object",
                 "properties": {
                   "processed_rows": {
-                    "type": ["integer", "null"],
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
                     "format": "int64"
                   },
                   "total_rows": {
-                    "type": ["integer", "null"],
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
                     "format": "int64"
                   }
                 }
               },
-              "status": { "type": "string", "enum": ["processing"] }
+              "status": {
+                "type": "string",
+                "enum": [
+                  "processing"
+                ]
+              }
             }
           },
           {
             "type": "object",
-            "required": ["details", "status"],
+            "required": [
+              "details",
+              "status"
+            ],
             "properties": {
-              "details": { "type": "object" },
-              "status": { "type": "string", "enum": ["success"] }
+              "details": {
+                "type": "object"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "success"
+                ]
+              }
             }
           },
           {
             "type": "object",
-            "required": ["details", "status"],
+            "required": [
+              "details",
+              "status"
+            ],
             "properties": {
               "details": {
                 "type": "object",
-                "required": ["error"],
-                "properties": { "error": { "type": "string" } }
+                "required": [
+                  "error"
+                ],
+                "properties": {
+                  "error": {
+                    "type": "string"
+                  }
+                }
               },
-              "status": { "type": "string", "enum": ["error"] }
+              "status": {
+                "type": "string",
+                "enum": [
+                  "error"
+                ]
+              }
             }
           }
         ]
@@ -2654,7 +4201,10 @@
             "description": "The time the file was created"
           },
           "expires_at": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time",
             "description": "The time the file expires at"
           },
@@ -2663,7 +4213,10 @@
             "format": "int64",
             "description": "Unique identifier for the file"
           },
-          "name": { "type": "string", "description": "The name of the file" },
+          "name": {
+            "type": "string",
+            "description": "The name of the file"
+          },
           "url": {
             "type": "string",
             "description": "The URL where the file can be accessed"
@@ -2672,18 +4225,27 @@
       },
       "GetK2FileResponse": {
         "allOf": [
-          { "$ref": "#/components/schemas/K2File" },
+          {
+            "$ref": "#/components/schemas/K2File"
+          },
           {
             "type": "object",
-            "required": ["parsings", "embeddings"],
+            "required": [
+              "parsings",
+              "embeddings"
+            ],
             "properties": {
               "embeddings": {
                 "type": "array",
-                "items": { "$ref": "#/components/schemas/K2FileEmbedding" }
+                "items": {
+                  "$ref": "#/components/schemas/K2FileEmbedding"
+                }
               },
               "parsings": {
                 "type": "array",
-                "items": { "$ref": "#/components/schemas/K2FileParsing" }
+                "items": {
+                  "$ref": "#/components/schemas/K2FileParsing"
+                }
               }
             }
           }
@@ -2691,8 +4253,14 @@
       },
       "GetOrgResBody": {
         "type": "object",
-        "required": ["org"],
-        "properties": { "org": { "$ref": "#/components/schemas/Org" } }
+        "required": [
+          "org"
+        ],
+        "properties": {
+          "org": {
+            "$ref": "#/components/schemas/Org"
+          }
+        }
       },
       "Index": {
         "type": "object",
@@ -2705,58 +4273,111 @@
           "definition"
         ],
         "properties": {
-          "columns": { "type": "array", "items": { "type": "string" } },
-          "definition": { "type": "string" },
-          "is_unique": { "type": "boolean" },
-          "name": { "type": "string" },
-          "table": { "type": "string" },
-          "type": { "$ref": "#/components/schemas/IndexType" }
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "definition": {
+            "type": "string"
+          },
+          "is_unique": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/IndexType"
+          }
         }
       },
       "IndexType": {
         "type": "string",
-        "enum": ["btree", "hash", "gin", "gist", "brin", "hnsw"]
+        "enum": [
+          "btree",
+          "hash",
+          "gin",
+          "gist",
+          "brin",
+          "hnsw"
+        ]
       },
       "InviteOrgUserReqBody": {
         "type": "object",
-        "required": ["email"],
-        "properties": { "email": { "type": "string" } }
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        }
       },
       "K2Column": {
         "type": "object",
-        "required": ["name", "data_type", "is_nullable"],
+        "required": [
+          "name",
+          "data_type",
+          "is_nullable"
+        ],
         "properties": {
-          "data_type": { "type": "string" },
-          "is_nullable": { "type": "boolean" },
-          "name": { "type": "string" }
+          "data_type": {
+            "type": "string"
+          },
+          "is_nullable": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
         }
       },
       "K2Constraint": {
         "type": "object",
-        "required": ["constraint_type"],
+        "required": [
+          "constraint_type"
+        ],
         "properties": {
           "columns": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Columns involved (for PK, UNIQUE, NOT_NULL). Empty for CHECK."
           },
           "constraint_type": {
             "$ref": "#/components/schemas/K2ConstraintType"
           },
           "expression": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "CHECK expression, if applicable."
           },
           "foreign_keys": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/K2ForeignKey" },
+            "items": {
+              "$ref": "#/components/schemas/K2ForeignKey"
+            },
             "description": "Foreign key references, if applicable."
           }
         }
       },
       "K2ConstraintType": {
         "type": "string",
-        "enum": ["PRIMARY_KEY", "UNIQUE", "FOREIGN_KEY", "CHECK", "NOT_NULL"]
+        "enum": [
+          "PRIMARY_KEY",
+          "UNIQUE",
+          "FOREIGN_KEY",
+          "CHECK",
+          "NOT_NULL"
+        ]
       },
       "K2Detail": {
         "type": "object",
@@ -2773,21 +4394,55 @@
           "updated_at"
         ],
         "properties": {
-          "created_at": { "type": "string", "format": "date-time" },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
           "data_size_bytes": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
           },
-          "description": { "type": ["string", "null"] },
-          "id": { "type": "integer", "format": "int64" },
-          "index_count": { "type": "integer", "format": "int64", "minimum": 0 },
-          "name": { "type": "string" },
-          "row_count": { "type": "integer", "format": "int64", "minimum": 0 },
-          "table_count": { "type": "integer", "format": "int64", "minimum": 0 },
-          "uid": { "type": "string" },
-          "updated_at": { "type": "string", "format": "date-time" },
-          "vector_count": { "type": "integer", "format": "int64", "minimum": 0 }
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "index_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "row_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "table_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "uid": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "vector_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
         }
       },
       "K2File": {
@@ -2805,16 +4460,39 @@
           "updated_at"
         ],
         "properties": {
-          "content_length": { "type": "integer", "format": "int64" },
-          "content_type": { "type": "string" },
-          "created_at": { "type": "string", "format": "date-time" },
-          "id": { "type": "integer", "format": "int64" },
-          "kb_id": { "type": "integer", "format": "int64" },
+          "content_length": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kb_id": {
+            "type": "integer",
+            "format": "int64"
+          },
           "metadata": {},
-          "name": { "type": "string" },
-          "uid": { "type": "string" },
-          "updated_at": { "type": "string", "format": "date-time" },
-          "url": { "type": "string" }
+          "name": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "url": {
+            "type": "string"
+          }
         }
       },
       "K2FileEmbedding": {
@@ -2829,18 +4507,65 @@
           "updated_at"
         ],
         "properties": {
-          "chunk_count": { "type": ["integer", "null"], "format": "int32" },
-          "cost_usd": { "type": ["number", "null"], "format": "double" },
-          "created_at": { "type": "string", "format": "date-time" },
-          "error": { "type": ["string", "null"] },
-          "id": { "type": "integer", "format": "int64" },
-          "kb_file_id": { "type": "integer", "format": "int64" },
-          "model": { "type": "string" },
-          "parsing_id": { "type": ["integer", "null"], "format": "int64" },
-          "provider": { "type": "string" },
-          "status": { "type": "string" },
-          "token_count": { "type": ["integer", "null"], "format": "int32" },
-          "updated_at": { "type": "string", "format": "date-time" }
+          "chunk_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "cost_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kb_file_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "model": {
+            "type": "string"
+          },
+          "parsing_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "token_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "K2FileParsing": {
@@ -2854,74 +4579,189 @@
           "updated_at"
         ],
         "properties": {
-          "chunk_count": { "type": ["integer", "null"], "format": "int32" },
-          "cost_usd": { "type": ["number", "null"], "format": "double" },
-          "created_at": { "type": "string", "format": "date-time" },
-          "error": { "type": ["string", "null"] },
-          "id": { "type": "integer", "format": "int64" },
-          "kb_file_id": { "type": "integer", "format": "int64" },
-          "num_pages": { "type": ["integer", "null"], "format": "int32" },
-          "provider": { "type": "string" },
-          "provider_job_id": { "type": ["string", "null"] },
-          "s3_bucket": { "type": ["string", "null"] },
-          "s3_key": { "type": ["string", "null"] },
-          "status": { "type": "string" },
-          "updated_at": { "type": "string", "format": "date-time" }
+          "chunk_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "cost_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kb_file_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "num_pages": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "provider_job_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "s3_bucket": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "s3_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "K2ForeignKey": {
         "type": "object",
-        "required": ["column", "ref_table", "ref_column"],
+        "required": [
+          "column",
+          "ref_table",
+          "ref_column"
+        ],
         "properties": {
-          "column": { "type": "string" },
-          "ref_column": { "type": "string" },
-          "ref_table": { "type": "string" }
+          "column": {
+            "type": "string"
+          },
+          "ref_column": {
+            "type": "string"
+          },
+          "ref_table": {
+            "type": "string"
+          }
         }
       },
       "K2Index": {
         "type": "object",
-        "required": ["name", "table_name", "columns", "is_unique"],
+        "required": [
+          "name",
+          "table_name",
+          "columns",
+          "is_unique"
+        ],
         "properties": {
-          "columns": { "type": "array", "items": { "type": "string" } },
-          "is_unique": { "type": "boolean" },
-          "name": { "type": "string" },
-          "table_name": { "type": "string" }
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "is_unique": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "table_name": {
+            "type": "string"
+          }
         }
       },
       "K2Preview": {
         "type": "object",
-        "required": ["id", "uid", "name", "created_at", "updated_at"],
+        "required": [
+          "id",
+          "uid",
+          "name",
+          "created_at",
+          "updated_at"
+        ],
         "properties": {
-          "created_at": { "type": "string", "format": "date-time" },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
           "data_size_bytes": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "minimum": 0
           },
-          "description": { "type": ["string", "null"] },
-          "id": { "type": "integer", "format": "int64" },
-          "name": { "type": "string" },
-          "uid": { "type": "string" },
-          "updated_at": { "type": "string", "format": "date-time" }
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "K2Schema": {
         "type": "object",
-        "required": ["tables"],
+        "required": [
+          "tables"
+        ],
         "properties": {
           "tables": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/K2Table" }
+            "items": {
+              "$ref": "#/components/schemas/K2Table"
+            }
           }
         }
       },
       "K2SchemaSql": {
         "type": "object",
-        "required": ["statements"],
+        "required": [
+          "statements"
+        ],
         "properties": {
           "statements": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "DDL statements (CREATE TABLE, CREATE INDEX, etc.)"
           }
         }
@@ -2930,7 +4770,7 @@
         "type": "object",
         "required": [
           "name",
-          "schema",
+          "source",
           "columns",
           "indexes",
           "constraints",
@@ -2939,11 +4779,15 @@
         "properties": {
           "columns": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/K2Column" }
+            "items": {
+              "$ref": "#/components/schemas/K2Column"
+            }
           },
           "constraints": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/K2Constraint" }
+            "items": {
+              "$ref": "#/components/schemas/K2Constraint"
+            }
           },
           "estimated_row_count": {
             "type": "integer",
@@ -2952,175 +4796,275 @@
           },
           "indexes": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/K2Index" }
+            "items": {
+              "$ref": "#/components/schemas/K2Index"
+            }
           },
-          "name": { "type": "string" },
-          "schema": { "type": "string" }
+          "name": {
+            "type": "string"
+          },
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "$ref": "#/components/schemas/K2TableSource"
+          }
         }
+      },
+      "K2TableSource": {
+        "type": "string",
+        "enum": [
+          "primary",
+          "vectors"
+        ]
       },
       "ListConnectionsResBody": {
         "type": "object",
-        "required": ["connections"],
+        "required": [
+          "connections"
+        ],
         "properties": {
           "connections": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/ProjectConnection" }
+            "items": {
+              "$ref": "#/components/schemas/ProjectConnection"
+            }
           }
         }
       },
       "ListDeploymentsResBody": {
         "type": "object",
-        "required": ["deployments"],
+        "required": [
+          "deployments"
+        ],
         "properties": {
           "deployments": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/Deployment" }
+            "items": {
+              "$ref": "#/components/schemas/Deployment"
+            }
           }
         }
       },
       "ListDomainsResBody": {
         "type": "object",
-        "required": ["domains"],
+        "required": [
+          "domains"
+        ],
         "properties": {
           "domains": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/Domain" }
+            "items": {
+              "$ref": "#/components/schemas/Domain"
+            }
           }
         }
       },
       "ListEmbeddingModelsResBody": {
         "type": "object",
-        "required": ["embedding_models"],
+        "required": [
+          "embedding_models"
+        ],
         "properties": {
           "embedding_models": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/EmbeddingModel" }
+            "items": {
+              "$ref": "#/components/schemas/EmbeddingModel"
+            }
           }
         }
       },
       "ListEmbeddingsResBody": {
         "type": "object",
-        "required": ["embeddings"],
+        "required": [
+          "embeddings"
+        ],
         "properties": {
           "embeddings": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/Embedding" }
+            "items": {
+              "$ref": "#/components/schemas/Embedding"
+            }
           }
         }
       },
       "ListEnvsResBody": {
         "type": "object",
-        "required": ["envs"],
+        "required": [
+          "envs"
+        ],
         "properties": {
           "envs": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/ProjectEnv" }
+            "items": {
+              "$ref": "#/components/schemas/ProjectEnv"
+            }
           }
         }
       },
       "ListIndexesResBody": {
         "type": "object",
-        "required": ["indexes"],
+        "required": [
+          "indexes"
+        ],
         "properties": {
           "indexes": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/Index" }
+            "items": {
+              "$ref": "#/components/schemas/Index"
+            }
           }
         }
       },
       "ListK2FilesResponse": {
         "type": "object",
-        "required": ["files"],
+        "required": [
+          "files"
+        ],
         "properties": {
           "files": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/K2File" }
+            "items": {
+              "$ref": "#/components/schemas/K2File"
+            }
           },
-          "next_page_token": { "type": ["string", "null"] }
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       },
       "ListK2Response": {
         "type": "object",
-        "required": ["k2"],
+        "required": [
+          "k2"
+        ],
         "properties": {
           "k2": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/K2Preview" }
+            "items": {
+              "$ref": "#/components/schemas/K2Preview"
+            }
           },
-          "next_page_token": { "type": ["string", "null"] }
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       },
       "ListOrgUsersResBody": {
         "type": "object",
-        "required": ["org_users"],
+        "required": [
+          "org_users"
+        ],
         "properties": {
           "next_page_token": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Token to fetch the next page, or null if this is the last page"
           },
           "org_users": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/OrgUser" },
+            "items": {
+              "$ref": "#/components/schemas/OrgUser"
+            },
             "description": "List of users in the organization"
           }
         }
       },
       "ListOrgsResult": {
         "type": "object",
-        "required": ["orgs"],
+        "required": [
+          "orgs"
+        ],
         "properties": {
           "next_page_token": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Next page token"
           },
           "orgs": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/OrgPreview" },
+            "items": {
+              "$ref": "#/components/schemas/OrgPreview"
+            },
             "description": "List of organizations"
           }
         }
       },
       "ListProjectUsersResBody": {
         "type": "object",
-        "required": ["users"],
+        "required": [
+          "users"
+        ],
         "properties": {
           "users": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/UserWithRole" }
+            "items": {
+              "$ref": "#/components/schemas/UserWithRole"
+            }
           }
         }
       },
       "ListProjectsResBody": {
         "type": "object",
-        "required": ["projects"],
+        "required": [
+          "projects"
+        ],
         "properties": {
           "projects": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/ProjectPreview" }
+            "items": {
+              "$ref": "#/components/schemas/ProjectPreview"
+            }
           }
         }
       },
       "ListRunsResBody": {
         "type": "object",
-        "required": ["runs"],
+        "required": [
+          "runs"
+        ],
         "properties": {
           "group_id": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "The `group_id` filter applied to the query"
           },
           "next_page_token": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Cursor for the next page"
           },
           "runs": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/RunPreview" },
+            "items": {
+              "$ref": "#/components/schemas/RunPreview"
+            },
             "description": "List of runs"
           },
           "user_id": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "The `user_id` filter applied to the query"
           }
@@ -3128,11 +5072,15 @@
       },
       "ListVarsResBody": {
         "type": "object",
-        "required": ["vars"],
+        "required": [
+          "vars"
+        ],
         "properties": {
           "vars": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/Var" }
+            "items": {
+              "$ref": "#/components/schemas/Var"
+            }
           }
         }
       },
@@ -3148,29 +5096,94 @@
           "role"
         ],
         "properties": {
-          "banner_url": { "type": ["string", "null"] },
-          "contact_email": { "type": ["string", "null"] },
-          "contact_name": { "type": ["string", "null"] },
-          "contact_phone": { "type": ["string", "null"] },
-          "country": { "type": ["string", "null"] },
-          "created_at": { "type": "string", "format": "date-time" },
-          "credits_per_usd": { "type": "number", "format": "double" },
-          "description": { "type": ["string", "null"] },
-          "id": { "type": "integer", "format": "int64" },
-          "name": { "type": "string" },
-          "photo_url": { "type": ["string", "null"] },
-          "plan": { "type": "string" },
+          "banner_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contact_email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contact_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contact_phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "credits_per_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "type": "string"
+          },
           "plan_metadata": {},
-          "role": { "type": "string" },
-          "stripe_customer_id": { "type": ["string", "null"] }
+          "role": {
+            "type": "string"
+          },
+          "stripe_customer_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       },
       "OrgPreview": {
         "type": "object",
-        "required": ["id", "name", "plan", "n_projects", "role", "created_at"],
+        "required": [
+          "id",
+          "name",
+          "plan",
+          "n_projects",
+          "role",
+          "created_at"
+        ],
         "properties": {
           "banner_url": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "URL of the organization's banner image",
             "deprecated": true
           },
@@ -3180,7 +5193,10 @@
             "description": "Creation timestamp in epoch milliseconds"
           },
           "description": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Organization description"
           },
           "id": {
@@ -3192,12 +5208,21 @@
             "format": "int64",
             "description": "Number of projects in the organization"
           },
-          "name": { "type": "string", "description": "Organization name" },
+          "name": {
+            "type": "string",
+            "description": "Organization name"
+          },
           "photo_url": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "URL of the organization's profile photo"
           },
-          "plan": { "type": "string", "description": "Subscription plan" },
+          "plan": {
+            "type": "string",
+            "description": "Subscription plan"
+          },
           "role": {
             "type": "string",
             "description": "Authenticated user's role in the organization"
@@ -3206,19 +5231,34 @@
       },
       "OrgUser": {
         "type": "object",
-        "required": ["email", "role"],
+        "required": [
+          "email",
+          "role"
+        ],
         "properties": {
-          "email": { "type": "string", "description": "User's email address" },
+          "email": {
+            "type": "string",
+            "description": "User's email address"
+          },
           "id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Unique user identifier. Null for pending invites that haven't been accepted yet"
           },
           "name": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "User's display name"
           },
           "photo_url": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "URL of the user's profile photo"
           },
           "role": {
@@ -3238,13 +5278,32 @@
           "updated_at"
         ],
         "properties": {
-          "created_at": { "type": "string", "format": "date-time" },
-          "id": { "type": "integer", "format": "int64" },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
           "resource_data": {},
-          "resource_id": { "type": "integer", "format": "int64" },
-          "resource_name": { "type": ["string", "null"] },
-          "type": { "type": "string" },
-          "updated_at": { "type": "string", "format": "date-time" }
+          "resource_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "resource_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "ProjectDetail": {
@@ -3266,7 +5325,9 @@
         "properties": {
           "apps": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/WorkforcePreview" },
+            "items": {
+              "$ref": "#/components/schemas/WorkforcePreview"
+            },
             "description": "List of workforce items in this project.\n\n**Deprecated:** Use `workforce` instead. This field will be removed in a future version.",
             "deprecated": true
           },
@@ -3276,11 +5337,17 @@
             "description": "Creation timestamp in epoch milliseconds"
           },
           "default_role": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Project's default role. All organization members will be assigned this role by default for this project"
           },
           "description": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Project description"
           },
           "has_ui": {
@@ -3295,13 +5362,19 @@
             "type": "boolean",
             "description": "Whether the project is a public template"
           },
-          "name": { "type": "string", "description": "Project name" },
+          "name": {
+            "type": "string",
+            "description": "Project name"
+          },
           "publishable_api_key": {
             "type": "string",
             "description": "Publishable API key for this project"
           },
           "repository_url": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "URL of the project's source code repository. When null, the project does not have source code available"
           },
           "role": {
@@ -3309,7 +5382,10 @@
             "description": "Authenticated user's role in the project"
           },
           "screenshot_url": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "URL of the project's screenshot image"
           },
           "template_uses": {
@@ -3328,7 +5404,9 @@
           },
           "workforce": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/WorkforcePreview" },
+            "items": {
+              "$ref": "#/components/schemas/WorkforcePreview"
+            },
             "description": "List of workforce items in this project"
           }
         }
@@ -3344,41 +5422,111 @@
           "updated_at"
         ],
         "properties": {
-          "branch": { "type": ["string", "null"] },
-          "color": { "type": "string" },
-          "cpu": { "type": ["integer", "null"], "format": "int32" },
-          "created_at": { "type": "string", "format": "date-time" },
-          "custom_domain": {},
-          "description": { "type": ["string", "null"] },
-          "desired_count": { "type": ["integer", "null"], "format": "int32" },
-          "ephemeral_storage": {
-            "type": ["integer", "null"],
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": "string"
+          },
+          "cpu": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32"
           },
-          "id": { "type": "integer", "format": "int64" },
-          "memory": { "type": ["integer", "null"], "format": "int32" },
-          "name": { "type": "string" },
-          "subdomain": { "type": "string" },
-          "updated_at": { "type": "string", "format": "date-time" }
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "custom_domain": {},
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "desired_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "ephemeral_storage": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "memory": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "subdomain": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "ProjectOrigin": {
         "oneOf": [
           {
             "type": "object",
-            "required": ["project_id", "type"],
+            "required": [
+              "project_id",
+              "type"
+            ],
             "properties": {
-              "project_id": { "type": "integer", "format": "int64" },
-              "type": { "type": "string", "enum": ["Template"] }
+              "project_id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "Template"
+                ]
+              }
             }
           },
           {
             "type": "object",
-            "required": ["has_ui", "app_type", "type"],
+            "required": [
+              "has_ui",
+              "app_type",
+              "type"
+            ],
             "properties": {
-              "app_type": { "$ref": "#/components/schemas/AppType" },
-              "has_ui": { "type": "boolean" },
-              "type": { "type": "string", "enum": ["Scratch"] }
+              "app_type": {
+                "$ref": "#/components/schemas/AppType"
+              },
+              "has_ui": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "Scratch"
+                ]
+              }
             }
           }
         ]
@@ -3400,11 +5548,17 @@
             "description": "Creation timestamp in epoch milliseconds"
           },
           "default_role": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Project's default role. All organization members will be assigned this role by default for this project"
           },
           "description": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Project description"
           },
           "id": {
@@ -3415,13 +5569,19 @@
             "type": "boolean",
             "description": "Whether the project is a public template"
           },
-          "name": { "type": "string", "description": "Project name" },
+          "name": {
+            "type": "string",
+            "description": "Project name"
+          },
           "role": {
             "type": "string",
             "description": "Authenticated user's role in the project"
           },
           "screenshot_url": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "URL of the project's screenshot image"
           },
           "template_uses": {
@@ -3431,19 +5591,134 @@
           }
         }
       },
+      "ProjectSession": {
+        "type": "object",
+        "required": [
+          "id",
+          "uid",
+          "project_id",
+          "user_id",
+          "rev",
+          "status",
+          "turn_count",
+          "iteration_count",
+          "tool_call_count",
+          "input_tokens",
+          "output_tokens",
+          "cache_creation_tokens",
+          "cache_read_tokens",
+          "cost_usd",
+          "model_usage",
+          "created_at",
+          "last_active_at"
+        ],
+        "properties": {
+          "cache_creation_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total cache creation tokens"
+          },
+          "cache_read_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total cache read tokens"
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Accumulated cost in USD"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total input tokens across all turns"
+          },
+          "iteration_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Total LLM calls (including mid-turn iterations)"
+          },
+          "last_active_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model used in this session"
+          },
+          "model_usage": {
+            "description": "Per-model token and cost breakdown"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total output tokens across all turns"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "string",
+            "description": "Git branch the session is scoped to"
+          },
+          "status": {
+            "type": "string",
+            "description": "Session status: \"active\" or \"idle\""
+          },
+          "tool_call_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Total tool_use blocks across all calls"
+          },
+          "turn_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of user prompts sent"
+          },
+          "uid": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
       "QueryK2Request": {
         "type": "object",
-        "required": ["sql"],
+        "required": [
+          "sql"
+        ],
         "properties": {
+          "explain": {
+            "type": "boolean",
+            "description": "When true, runs EXPLAIN ANALYZE and includes the query plan in the response."
+          },
+          "params": {
+            "type": "array",
+            "items": {},
+            "description": "Optional parameters for the query. Parameters used inside Lance vector\nsearch functions (lance_vector_search, lance_hybrid_search) are\nautomatically embedded into vectors."
+          },
           "sql": {
             "type": "string",
-            "description": "SQL query to execute against the knowledge base"
+            "description": "SQL query to execute against the knowledge base.\nUse $1, $2, etc. for parameter placeholders."
           }
         }
       },
       "RemoveOrgUserReqBody": {
         "type": "object",
-        "required": ["email"],
+        "required": [
+          "email"
+        ],
         "properties": {
           "email": {
             "type": "string",
@@ -3464,35 +5739,88 @@
           "idempotency_key"
         ],
         "properties": {
-          "cost_credits": { "type": "number", "format": "double" },
-          "cost_usd": { "type": "number", "format": "double" },
-          "created_at": { "type": "string", "format": "date-time" },
-          "duration_ms": { "type": ["integer", "null"], "format": "int64" },
-          "group_id": { "type": ["integer", "null"], "format": "int64" },
-          "id": { "type": "integer", "format": "int64" },
-          "idempotency_key": { "type": "string" },
-          "last_reaction_sentiment": { "type": ["string", "null"] },
-          "parent_id": { "type": ["integer", "null"], "format": "int64" },
-          "status": { "type": "string" },
+          "cost_credits": {
+            "type": "number",
+            "format": "double"
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "group_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "last_reaction_sentiment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "status": {
+            "type": "string"
+          },
           "status_detail": {},
           "trace": {},
-          "user": { "$ref": "#/components/schemas/UserRef" },
-          "version": { "$ref": "#/components/schemas/VersionRef" }
+          "user": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "version": {
+            "$ref": "#/components/schemas/VersionRef"
+          }
         },
         "additionalProperties": {}
       },
       "SearchTableReqBody": {
         "type": "object",
-        "required": ["query", "embedding_names"],
+        "required": [
+          "query",
+          "embedding_names"
+        ],
         "properties": {
           "embedding_names": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "List of embedding names to use for semantic search. Only a single column is supported at the moment."
           },
           "fts_columns": {
-            "type": ["array", "null"],
-            "items": { "type": "string" },
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
             "description": "List of column names to use for full-text search. When specified together with embedding_names, search will be hybrid (both semantic and full-text)."
           },
           "limit": {
@@ -3512,12 +5840,20 @@
             "description": "Semantic search query."
           },
           "select_columns": {
-            "type": ["array", "null"],
-            "items": { "type": "string" },
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
             "description": "List of column names to return in the search results. When not specified, all columns will be returned."
           },
           "where": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "SQL WHERE expression to apply to the search. This feature is _experimental_ and may be removed or changed in the future."
           }
         }
@@ -3526,7 +5862,10 @@
         "type": "object",
         "properties": {
           "name": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "When null, the branch will be cleared"
           }
         }
@@ -3534,43 +5873,99 @@
       "SetEnvDomainReqBody": {
         "type": "object",
         "properties": {
-          "domain_id": { "type": ["integer", "null"], "format": "int64" }
+          "domain_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
         }
       },
       "Target": {
         "type": "object",
-        "required": ["type", "id"],
+        "required": [
+          "type",
+          "id"
+        ],
         "properties": {
           "commit": {},
-          "id": { "type": "integer", "format": "int64" },
-          "manifest_id": { "type": ["string", "null"] },
-          "type": { "type": "string" },
-          "version_id": { "type": ["integer", "null"], "format": "int64" }
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "manifest_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          },
+          "version_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
         }
       },
       "UpdateEnvConfigReqBody": {
         "type": "object",
         "properties": {
-          "cpu": { "type": ["integer", "null"], "format": "int32" },
-          "desired_count": { "type": ["integer", "null"], "format": "int32" },
-          "ephemeral_storage": {
-            "type": ["integer", "null"],
+          "cpu": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32"
           },
-          "memory": { "type": ["integer", "null"], "format": "int32" }
+          "desired_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "ephemeral_storage": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "memory": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
         }
       },
       "UpdateRunReqBody": {
         "type": "object",
         "properties": {
-          "metadata": { "description": "Custom metadata" },
+          "metadata": {
+            "description": "Custom metadata"
+          },
           "parent_id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "This can be a platform-defined id or a custom id.\nThe platform will map the custom id to an internal one afterwards."
           },
-          "trace": { "description": "Trace data" },
+          "trace": {
+            "description": "Trace data"
+          },
           "version_id": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Version identifier (if any)"
           }
         }
@@ -3578,24 +5973,44 @@
       "UpdateVarReqBody": {
         "type": "object",
         "properties": {
-          "description": { "type": ["string", "null"] },
-          "env_ids": {
-            "type": ["array", "null"],
-            "items": { "type": "integer", "format": "int64" }
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
-          "value": { "type": ["string", "null"] }
+          "env_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       },
       "UpsertRecordsReqBody": {
         "type": "object",
-        "required": ["records"],
+        "required": [
+          "records"
+        ],
         "properties": {
           "records": {
             "type": "array",
             "items": {
               "type": "object",
               "additionalProperties": {},
-              "propertyNames": { "type": "string" }
+              "propertyNames": {
+                "type": "string"
+              }
             },
             "description": "Array of records to insert or update (at least one record is required)"
           }
@@ -3603,35 +6018,80 @@
       },
       "UserRef": {
         "type": "object",
-        "required": ["id", "name", "email"],
+        "required": [
+          "id",
+          "name",
+          "email"
+        ],
         "properties": {
-          "email": { "type": "string" },
-          "id": { "type": "integer", "format": "int64" },
-          "name": { "type": "string" },
-          "photo_url": { "type": ["string", "null"] }
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       },
       "UserWithRole": {
         "type": "object",
-        "required": ["id", "email", "name", "role"],
+        "required": [
+          "id",
+          "email",
+          "name",
+          "role"
+        ],
         "properties": {
-          "email": { "type": "string" },
-          "id": { "type": "integer", "format": "int64" },
-          "name": { "type": "string" },
-          "photo_url": { "type": ["string", "null"] },
-          "role": { "type": "string" }
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string"
+          }
         }
       },
       "ValidationRecord": {
         "type": "object",
-        "required": ["type", "name", "value"],
+        "required": [
+          "type",
+          "name",
+          "value"
+        ],
         "properties": {
-          "name": { "type": "string", "description": "DNS record name" },
+          "name": {
+            "type": "string",
+            "description": "DNS record name"
+          },
           "type": {
             "type": "string",
             "description": "DNS record type (e.g. `CNAME`)"
           },
-          "value": { "type": "string", "description": "DNS record value" }
+          "value": {
+            "type": "string",
+            "description": "DNS record value"
+          }
         }
       },
       "ValidationStatus": {
@@ -3649,93 +6109,199 @@
       },
       "Var": {
         "type": "object",
-        "required": ["id", "name", "value", "envs"],
+        "required": [
+          "id",
+          "name",
+          "value",
+          "envs"
+        ],
         "properties": {
-          "description": { "type": ["string", "null"] },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "envs": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/VarEnv" }
+            "items": {
+              "$ref": "#/components/schemas/VarEnv"
+            }
           },
-          "id": { "type": "integer", "format": "int64" },
-          "name": { "type": "string" },
-          "value": { "$ref": "#/components/schemas/VarValue" }
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/VarValue"
+          }
         }
       },
       "VarEnv": {
         "type": "object",
-        "required": ["id", "name", "color"],
+        "required": [
+          "id",
+          "name",
+          "color"
+        ],
         "properties": {
-          "color": { "type": "string" },
-          "id": { "type": "integer", "format": "int64" },
-          "name": { "type": "string" }
+          "color": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          }
         }
       },
       "VarInput": {
         "type": "object",
-        "required": ["type", "name", "value"],
+        "required": [
+          "type",
+          "name",
+          "value"
+        ],
         "properties": {
-          "description": { "type": ["string", "null"] },
-          "name": { "type": "string" },
-          "type": { "$ref": "#/components/schemas/VarType" },
-          "value": { "type": "string" }
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/VarType"
+          },
+          "value": {
+            "type": "string"
+          }
         }
       },
-      "VarType": { "type": "string", "enum": ["plain", "secret"] },
+      "VarType": {
+        "type": "string",
+        "enum": [
+          "plain",
+          "secret"
+        ]
+      },
       "VarValue": {
         "oneOf": [
           {
             "type": "object",
-            "required": ["value", "type"],
+            "required": [
+              "value",
+              "type"
+            ],
             "properties": {
-              "type": { "type": "string", "enum": ["plain"] },
-              "value": { "type": "string" }
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plain"
+                ]
+              },
+              "value": {
+                "type": "string"
+              }
             }
           },
           {
             "type": "object",
-            "required": ["type"],
+            "required": [
+              "type"
+            ],
             "properties": {
-              "decrypted": { "type": ["string", "null"] },
-              "preview": { "type": ["string", "null"] },
-              "type": { "type": "string", "enum": ["secret"] }
+              "decrypted": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "preview": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "secret"
+                ]
+              }
             }
           }
         ]
       },
       "VersionRef": {
         "type": "object",
-        "required": ["id", "name", "is_prod"],
+        "required": [
+          "id",
+          "name",
+          "is_prod"
+        ],
         "properties": {
           "deployment": {
             "oneOf": [
-              { "type": "null" },
-              { "$ref": "#/components/schemas/Deployment" }
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Deployment"
+              }
             ]
           },
-          "id": { "type": "integer", "format": "int64" },
-          "is_prod": { "type": "boolean" },
-          "name": { "type": "string" }
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "is_prod": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
         }
       },
       "WorkforcePreview": {
         "type": "object",
-        "required": ["id", "type", "name"],
+        "required": [
+          "id",
+          "type",
+          "name"
+        ],
         "properties": {
           "description": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Workforce item description"
           },
           "id": {
             "type": "string",
             "description": "Unique workforce item identifier"
           },
-          "name": { "type": "string", "description": "Workforce item name" },
+          "name": {
+            "type": "string",
+            "description": "Workforce item name"
+          },
           "type": {
             "$ref": "#/components/schemas/AppType",
             "description": "Workforce item type"
           },
           "uid": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Unique identifier from the project manifest (timbal.yaml)"
           }
         }
@@ -3750,13 +6316,41 @@
     }
   },
   "tags": [
-    { "name": "k2", "description": "Knowledge Bases v2 operations" },
-    { "name": "orgs", "description": "Organization operations" },
-    { "name": "embeddings", "description": "KB Embeddings operations" },
-    { "name": "files", "description": "File operations" },
-    { "name": "indexes", "description": "KB Indexes operations" },
-    { "name": "projects", "description": "Project operations" },
-    { "name": "runs", "description": "Execution operations" },
-    { "name": "tables", "description": "KB Tables operations" }
+    {
+      "name": "k2",
+      "description": "Knowledge Bases v2 operations"
+    },
+    {
+      "name": "orgs",
+      "description": "Organization operations"
+    },
+    {
+      "name": "embeddings",
+      "description": "KB Embeddings operations"
+    },
+    {
+      "name": "files",
+      "description": "File operations"
+    },
+    {
+      "name": "indexes",
+      "description": "KB Indexes operations"
+    },
+    {
+      "name": "projects",
+      "description": "Project operations"
+    },
+    {
+      "name": "runs",
+      "description": "Execution operations"
+    },
+    {
+      "name": "compose",
+      "description": "Compose — AI coding agent sessions"
+    },
+    {
+      "name": "tables",
+      "description": "KB Tables operations"
+    }
   ]
 }

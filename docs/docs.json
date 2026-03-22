@@ -15,7 +15,11 @@
         "groups": [
           {
             "group": "Getting started",
-            "pages": ["index", "installation", "quickstart"]
+            "pages": [
+              "index",
+              "installation",
+              "quickstart"
+            ]
           },
           {
             "group": "Core Concepts",
@@ -91,7 +95,9 @@
         "pages": [
           {
             "group": "Examples",
-            "pages": ["examples/index"]
+            "pages": [
+              "examples/index"
+            ]
           },
           {
             "group": "Guides",
@@ -190,7 +196,9 @@
               },
               {
                 "group": "Files",
-                "pages": ["api-reference/files/upload"]
+                "pages": [
+                  "api-reference/files/upload"
+                ]
               },
               {
                 "group": "Users",
@@ -211,6 +219,15 @@
               "api-reference/projects/get",
               "api-reference/projects/update",
               "api-reference/projects/delete",
+              {
+                "group": "Compose",
+                "tag": "Beta",
+                "pages": [
+                  "api-reference/projects/compose/prompt",
+                  "api-reference/projects/compose/list",
+                  "api-reference/projects/compose/single"
+                ]
+              },
               {
                 "group": "Connections",
                 "pages": [
@@ -316,7 +333,10 @@
           },
           {
             "group": "Runs",
-            "pages": ["api-reference/runs/list", "api-reference/runs/upsert"]
+            "pages": [
+              "api-reference/runs/list",
+              "api-reference/runs/upsert"
+            ]
           }
         ]
       },
@@ -343,7 +363,9 @@
         "pages": [
           {
             "group": "MCP Integration",
-            "pages": ["mcp-integration/index"]
+            "pages": [
+              "mcp-integration/index"
+            ]
           },
           {
             "group": "Connecting Timbal",
