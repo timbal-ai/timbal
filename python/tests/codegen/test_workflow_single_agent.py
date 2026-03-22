@@ -4,6 +4,8 @@ The codegen pipeline (get_flow) wraps a standalone Agent into a single-node flow
 These tests ensure the two execution paths produce equivalent results.
 """
 
+import os
+
 import pytest
 from timbal import Agent, Workflow
 from timbal.state import get_run_context
@@ -12,6 +14,11 @@ from timbal.types.events.start import StartEvent
 from timbal.types.message import Message
 
 from ..conftest import assert_has_output_event, assert_no_errors, skip_if_agent_error
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("OPENAI_API_KEY"),
+    reason="OPENAI_API_KEY not set",
+)
 
 
 # ==============================================================================

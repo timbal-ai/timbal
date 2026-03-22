@@ -6,7 +6,7 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="python -m timbal.codegen",
+        prog="timbal-codegen",
         description="Modify timbal agent/workflow source files.",
     )
     parser.add_argument(

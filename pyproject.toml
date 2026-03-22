@@ -63,7 +63,7 @@ dev = [
 ]
 
 [project.scripts]
-timbal-codegen = "timbal.codegen.mcp:main"
+timbal-codegen = "timbal.codegen.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["python/timbal"]
