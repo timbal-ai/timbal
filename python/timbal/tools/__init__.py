@@ -45,6 +45,12 @@ if TYPE_CHECKING:
         ElevenLabsCreateAgent,
         ElevenLabsAddVoice,
     )
+    from .fal import (
+        FalQueueSubmit,
+        FalQueueStatus,
+        FalQueueResult,
+        FalQueueCancel,
+    )
     from .firecrawl import FirecrawlCrawl, FirecrawlExtract, FirecrawlMap, FirecrawlScrape, FirecrawlSearch
     from .gmail import GmailAddLabel, GmailListLabels, GmailRemoveLabel, GmailReply, GmailSearch, GmailSend
     from .google_calendar import (
@@ -1373,6 +1379,10 @@ __all__ = [
     "ZendeskCountActivities",
     "ZendeskListActivities",
     "ZendeskShowActivity",
+    "FalQueueSubmit",
+    "FalQueueStatus",
+    "FalQueueResult",
+    "FalQueueCancel",
 ]
 
 _LAZY_IMPORTS = {
@@ -2050,6 +2060,10 @@ _LAZY_IMPORTS = {
     "ZendeskCountActivities": ".zendesk",
     "ZendeskListActivities": ".zendesk",
     "ZendeskShowActivity": ".zendesk",
+    "FalQueueSubmit": ".fal",
+    "FalQueueStatus": ".fal",
+    "FalQueueResult": ".fal",
+    "FalQueueCancel": ".fal",
 }
 
 
