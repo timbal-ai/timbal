@@ -114,9 +114,17 @@ def build_cst_value(value: object) -> cst.BaseExpression:
     if isinstance(value, bool):
         return cst.Name("True" if value else "False")
     if isinstance(value, int):
+        if value < 0:
+            return cst.UnaryOperation(operator=cst.Minus(), expression=cst.Integer(str(-value)))
         return cst.Integer(str(value))
     if isinstance(value, float):
-        return cst.Float(str(value))
+        # Ensure the string representation has a decimal point (cst.Float rejects "0").
+        s = str(value)
+        if "." not in s and "e" not in s and "E" not in s:
+            s += ".0"
+        if value < 0:
+            return cst.UnaryOperation(operator=cst.Minus(), expression=cst.Float(s[1:]))
+        return cst.Float(s)
     if isinstance(value, str):
         # Use repr() to properly escape special characters (newlines, quotes, etc.)
         # then wrap as a SimpleString CST node.

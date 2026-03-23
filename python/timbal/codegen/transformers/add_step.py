@@ -59,14 +59,23 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             raise ValueError("--definition must contain a function definition.")
         func_name = func_def.name.value
         runtime_name = args.step_name if args.step_name else func_name
+        var_name = runtime_name
+        # When the function name collides with the Tool variable name, add
+        # a _fn suffix to the function to avoid shadowing.
+        if func_name == var_name:
+            func_name = f"{func_name}_fn"
+            # Rewrite the definition with the renamed function.
+            definition = args.definition.replace(f"def {func_def.name.value}(", f"def {func_name}(", 1)
+        else:
+            definition = args.definition
         return StepAdder(
             entry_point, assignments,
             step_type="Custom",
-            class_name=None,
+            class_name="Tool",
             func_name=func_name,
-            var_name=None,
+            var_name=var_name,
             runtime_name=runtime_name,
-            definition=args.definition,
+            definition=definition,
             step_name=args.step_name,
             config=config,
         )
@@ -128,8 +137,8 @@ class StepAdder(cst.CSTTransformer):
         self.assignments = assignments
         self.step_type = step_type
         self.class_name = class_name  # e.g. "WebSearch", "Agent" (None for Custom)
-        self.func_name = func_name  # e.g. "process" (None for framework/Agent)
-        self.var_name = var_name  # variable name for assignment (None for Custom)
+        self.func_name = func_name  # e.g. "process_fn" (None for framework/Agent)
+        self.var_name = var_name  # variable name for Tool wrapper assignment
         self.runtime_name = runtime_name  # name used for identification
         self.definition = definition
         self.step_name = step_name  # explicit --name override
@@ -153,9 +162,6 @@ class StepAdder(cst.CSTTransformer):
     # -- Assign: update existing variable assignments for idempotency ------
 
     def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
-        if self.step_type == "Custom":
-            return updated_node
-
         for target in updated_node.targets:
             if not isinstance(target.target, cst.Name):
                 continue
@@ -202,7 +208,10 @@ class StepAdder(cst.CSTTransformer):
         if self.step_type == "Agent":
             if not has_import(original_node, "timbal", "Agent"):
                 imports_to_add.append(cst.parse_statement("from timbal import Agent\n"))
-        elif self.step_type != "Custom":
+        elif self.step_type == "Custom":
+            if not has_import(original_node, "timbal.core", "Tool"):
+                imports_to_add.append(cst.parse_statement("from timbal.core import Tool\n"))
+        else:
             module = get_framework_tools()[self.class_name].module
             if not has_import(original_node, module, self.class_name):
                 imports_to_add.append(cst.parse_statement(f"from {module} import {self.class_name}\n"))
@@ -216,8 +225,8 @@ class StepAdder(cst.CSTTransformer):
             if not already_defined:
                 stmts_to_add.append(cst.parse_statement(self.definition + "\n"))
 
-        # --- Variable assignment (Agent / framework tool types) ---
-        if self.step_type != "Custom" and not self._assignment_updated:
+        # --- Variable assignment (Agent / framework tool / Custom Tool wrapper) ---
+        if not self._assignment_updated:
             assignment_code = f"{self.var_name} = {self._build_assignment_code()}\n"
             stmts_to_add.append(cst.parse_statement(assignment_code))
 
@@ -308,6 +317,13 @@ class StepAdder(cst.CSTTransformer):
                 args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
             return cst.Call(func=cst.Name("Agent"), args=args)
 
+        if self.step_type == "Custom":
+            args: list[cst.Arg] = [
+                cst.Arg(keyword=cst.Name("name"), value=cst.SimpleString(f'"{self.runtime_name}"')),
+                cst.Arg(keyword=cst.Name("handler"), value=cst.Name(self.func_name)),
+            ]
+            return cst.Call(func=cst.Name("Tool"), args=args)
+
         # Framework tool.
         args = []
         if self.step_name:
@@ -322,6 +338,9 @@ class StepAdder(cst.CSTTransformer):
                 for k, v in self.config.items()
             )
             return f"Agent({config_parts})"
+
+        if self.step_type == "Custom":
+            return f'Tool(name="{self.runtime_name}", handler={self.func_name})'
 
         # Framework tool.
         name_part = f'name="{self.step_name}"' if self.step_name else ""
@@ -340,5 +359,4 @@ class StepAdder(cst.CSTTransformer):
 
     def _build_step_call_code(self) -> str:
         """Build the source code string for workflow.step(...)."""
-        step_ref = self.func_name if self.step_type == "Custom" else self.var_name
-        return f"{self.entry_point}.step({step_ref})"
+        return f"{self.entry_point}.step({self.var_name})"

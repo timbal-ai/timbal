@@ -402,13 +402,14 @@ class TestComplexWorkflow:
         _run(ws, "add-step", "--type", "Custom", "--definition", preprocess_def)
         source = _read_source(ws)
 
-        assert "def preprocessor(text: str) -> dict:" in source
+        assert "def preprocessor_fn(text: str) -> dict:" in source
+        assert 'preprocessor = Tool(name="preprocessor", handler=preprocessor_fn)' in source
         assert _has_step_call(source, "preprocessor")
         assert _count_step_calls(source) == 2
 
         # Verify the function works.
         ns = _exec_code(source)
-        result = ns["preprocessor"]("  Hello World  ")
+        result = ns["preprocessor_fn"]("  Hello World  ")
         assert result == {"cleaned": "hello world", "word_count": 2}
 
         # -- 3b. Add another custom function step (postprocessor) --
@@ -420,13 +421,13 @@ class TestComplexWorkflow:
         _run(ws, "add-step", "--type", "Custom", "--definition", postprocess_def)
         source = _read_source(ws)
 
-        assert "def postprocessor(data: dict" in source
+        assert "def postprocessor_fn(data: dict" in source
         assert _has_step_call(source, "postprocessor")
         assert _count_step_calls(source) == 3
 
         # Verify the function works.
         ns = _exec_code(source)
-        result = ns["postprocessor"]({"a": 1, "b": 2})
+        result = ns["postprocessor_fn"]({"a": 1, "b": 2})
         assert result == "Result: a=1\nResult: b=2"
 
         # -- 3c. Add a second Agent step (reviewer) --
@@ -656,7 +657,8 @@ class TestComplexWorkflow:
         _run(ws, "remove-step", "--name", "preprocessor")
         source = _read_source(ws)
 
-        assert "def preprocessor" not in source
+        assert "def preprocessor_fn" not in source
+        assert "preprocessor" not in source
         assert _count_step_calls(source) == 2
 
         # -- 10d. Remove validator --
@@ -697,13 +699,13 @@ class TestComplexWorkflow:
         _run(ws, "add-step", "--type", "Custom", "--definition", new_preprocess_def)
         source = _read_source(ws)
 
-        assert "def preprocessor(text: str) -> dict:" in source
+        assert "def preprocessor_fn(text: str) -> dict:" in source
         assert _has_step_call(source, "preprocessor")
         assert _count_step_calls(source) == 2
 
         # Verify the updated function body.
         ns = _exec_code(source)
-        result = ns["preprocessor"]("  Hello   World  ")
+        result = ns["preprocessor_fn"]("  Hello   World  ")
         assert result == {"cleaned": "hello world", "length": 11}
 
         # -- 12b. Add a new agent step, wire edges separately --

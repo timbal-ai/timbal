@@ -107,7 +107,7 @@ class TestAgentStep:
 
 class TestCustomStep:
     def test_adds_custom_function_step(self, workspace):
-        """Custom steps add the function definition and a .step() call."""
+        """Custom steps wrap the function in a Tool() and add a .step() call."""
         ws = workspace("""\
         from timbal import Workflow
 
@@ -115,7 +115,9 @@ class TestCustomStep:
         """)
         definition = "def process(x: str) -> str:\n    return x.upper()"
         output = _run_dry(ws, "--type", "Custom", "--definition", definition)
-        assert "def process(x: str) -> str:" in output
+        assert "from timbal.core import Tool" in output
+        assert "def process_fn(x: str) -> str:" in output
+        assert 'process = Tool(name="process", handler=process_fn)' in output
         assert "workflow.step(process)" in output
 
     def test_custom_step_requires_definition(self, workspace):
@@ -128,12 +130,15 @@ class TestCustomStep:
         _run_dry_expect_error(ws, "--type", "Custom")
 
     def test_custom_step_idempotent(self, workspace):
-        """Re-adding a custom step updates the function body."""
+        """Re-adding a custom step updates the function body and Tool wrapper."""
         ws = workspace("""\
         from timbal import Workflow
+        from timbal.core import Tool
 
-        def process(x: str) -> str:
+        def process_fn(x: str) -> str:
             return x.upper()
+
+        process = Tool(name="process", handler=process_fn)
 
         workflow = Workflow(name="my_workflow")
         workflow.step(process)
@@ -142,6 +147,7 @@ class TestCustomStep:
         output = _run_dry(ws, "--type", "Custom", "--definition", definition)
         assert "return x.lower()" in output
         assert output.count("workflow.step(process)") == 1
+        assert 'process = Tool(name="process", handler=process_fn)' in output
 
 
 class TestFrameworkToolStep:
