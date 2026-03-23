@@ -48,6 +48,19 @@ if TYPE_CHECKING:
         GoogleMapsTextSearch,
         GoogleMapsValidateAddress,
     )
+    from .lancedb import (
+        LanceDBListTables,
+        LanceDBCreateTable,
+        LanceDBDropTable,
+        LanceDBInsertRecords,
+        LanceDBVectorSearch,
+        LanceDBFullTextSearch,
+        LanceDBHybridSearch,
+        LanceDBCreateFTSIndex,
+        LanceDBDropFTSIndex,
+        LanceDBDeleteRecords,
+        LanceDBDescribeTable,
+    )
     from .outlook import (
         OutlookArchive,
         OutlookCreateDraft,
@@ -309,6 +322,17 @@ __all__ = [
     "SlackDownloadFile",
     "SlackDeleteFile",
     "SlackSendAndWaitForResponse",
+    "LanceDBListTables",
+    "LanceDBCreateTable",
+    "LanceDBDropTable",
+    "LanceDBInsertRecords",
+    "LanceDBVectorSearch",
+    "LanceDBFullTextSearch",
+    "LanceDBHybridSearch",
+    "LanceDBCreateFTSIndex",
+    "LanceDBDropFTSIndex",
+    "LanceDBDeleteRecords",
+    "LanceDBDescribeTable",
 ]
 
 _LAZY_IMPORTS = {
@@ -460,6 +484,17 @@ _LAZY_IMPORTS = {
     "SlackDownloadFile": ".slack",
     "SlackDeleteFile": ".slack",
     "SlackSendAndWaitForResponse": ".slack",
+    "LanceDBListTables": ".lancedb",
+    "LanceDBCreateTable": ".lancedb",
+    "LanceDBDropTable": ".lancedb",
+    "LanceDBInsertRecords": ".lancedb",
+    "LanceDBVectorSearch": ".lancedb",
+    "LanceDBFullTextSearch": ".lancedb",
+    "LanceDBHybridSearch": ".lancedb",
+    "LanceDBCreateFTSIndex": ".lancedb",
+    "LanceDBDropFTSIndex": ".lancedb",
+    "LanceDBDeleteRecords": ".lancedb",
+    "LanceDBDescribeTable": ".lancedb",
 }
 
 
