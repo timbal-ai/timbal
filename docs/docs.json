@@ -225,7 +225,8 @@
                 "pages": [
                   "api-reference/projects/compose/prompt",
                   "api-reference/projects/compose/list",
-                  "api-reference/projects/compose/single"
+                  "api-reference/projects/compose/single",
+                  "api-reference/projects/compose/stop"
                 ]
               },
               {

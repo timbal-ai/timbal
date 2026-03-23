@@ -1966,7 +1966,7 @@
         "tags": [
           "compose"
         ],
-        "description": "Get session details including token usage and cost",
+        "description": "Get session details including token usage, cost, and message history",
         "operationId": "single",
         "parameters": [
           {
@@ -1988,22 +1988,76 @@
           {
             "name": "session_id",
             "in": "path",
+            "description": "Session UUID (e.g. \"019d1bbe-2f61-7393-afa7-6bb770878c9b\")",
             "required": true,
             "schema": {
-              "type": "string"
-            }
+              "type": "string",
+              "format": "uuid"
+            },
+            "example": "019d1bbe-2f61-7393-afa7-6bb770878c9b"
           }
         ],
         "responses": {
           "200": {
-            "description": "Session details",
+            "description": "Session details with messages",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProjectSession"
+                  "$ref": "#/components/schemas/SessionDetail"
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/compose/sessions/{session_id}/stop": {
+      "post": {
+        "tags": [
+          "compose"
+        ],
+        "description": "Stop a running compose session by sending SIGTERM to the Claude process",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session UUID (e.g. \"019d1bbe-2f61-7393-afa7-6bb770878c9b\")",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "example": "019d1bbe-2f61-7393-afa7-6bb770878c9b"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Session stopped"
+          },
+          "404": {
+            "description": "No active process for this session"
           }
         },
         "security": [
@@ -5857,6 +5911,26 @@
             "description": "SQL WHERE expression to apply to the search. This feature is _experimental_ and may be removed or changed in the future."
           }
         }
+      },
+      "SessionDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ProjectSession"
+          },
+          {
+            "type": "object",
+            "required": [
+              "messages"
+            ],
+            "properties": {
+              "messages": {
+                "type": "array",
+                "items": {},
+                "description": "Message history from the Claude session file (same format as compose stream events)"
+              }
+            }
+          }
+        ]
       },
       "SetEnvBranchReqBody": {
         "type": "object",
