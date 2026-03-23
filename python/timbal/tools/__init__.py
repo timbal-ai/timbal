@@ -193,6 +193,16 @@ if TYPE_CHECKING:
         LinkedInSearchJobs,
         LinkedInSearch,
     )
+    from .mongodb import (
+        MongoCreateDocument,
+        MongoFindDocumentById,
+        MongoFindDocument,
+        MongoSearchDocuments,
+        MongoUpdateDocument,
+        MongoUpdateDocuments,
+        MongoDeleteDocument,
+        MongoExecuteAggregation,
+    )
     from .outlook import (
         OutlookArchive,
         OutlookCreateDraft,
@@ -1465,6 +1475,14 @@ __all__ = [
     "LinkedInSearchCompanies",
     "LinkedInSearchJobs",
     "LinkedInSearch",
+    "MongoCreateDocument",
+    "MongoFindDocumentById",
+    "MongoFindDocument",
+    "MongoSearchDocuments",
+    "MongoUpdateDocument",
+    "MongoUpdateDocuments",
+    "MongoDeleteDocument",
+    "MongoExecuteAggregation",
 ]
 
 _LAZY_IMPORTS = {
@@ -2183,6 +2201,14 @@ _LAZY_IMPORTS = {
     "LinkedInSearchCompanies": ".linkedin",
     "LinkedInSearchJobs": ".linkedin",
     "LinkedInSearch": ".linkedin",
+    "MongoCreateDocument": ".mongodb",
+    "MongoFindDocumentById": ".mongodb",
+    "MongoFindDocument": ".mongodb",
+    "MongoSearchDocuments": ".mongodb",
+    "MongoUpdateDocument": ".mongodb",
+    "MongoUpdateDocuments": ".mongodb",
+    "MongoDeleteDocument": ".mongodb",
+    "MongoExecuteAggregation": ".mongodb",
 }
 
 
