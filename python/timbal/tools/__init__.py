@@ -32,6 +32,19 @@ if TYPE_CHECKING:
         CloudflareCrawlCancel,
     )
     from .edit import Edit
+    from .elasticsearch import (
+        ElasticsearchIngestAttachment,
+        ElasticsearchBulkOperations,
+        ElasticsearchDeleteDocument,
+        ElasticsearchGetDocument,
+        ElasticsearchIndexDocument,
+        ElasticsearchUpdateDocument,
+        ElasticsearchCreateIndex,
+        ElasticsearchUpdateIndexSettings,
+        ElasticsearchListIndices,
+        ElasticsearchListDocuments,
+        ElasticsearchSearchDocuments,
+    )
     from .elevenlabs import (
         ElevenLabsTextToSpeech,
         ElevenLabsListPhoneNumbers,
@@ -1383,6 +1396,17 @@ __all__ = [
     "FalQueueStatus",
     "FalQueueResult",
     "FalQueueCancel",
+    "ElasticsearchIngestAttachment",
+    "ElasticsearchBulkOperations",
+    "ElasticsearchDeleteDocument",
+    "ElasticsearchGetDocument",
+    "ElasticsearchIndexDocument",
+    "ElasticsearchUpdateDocument",
+    "ElasticsearchCreateIndex",
+    "ElasticsearchUpdateIndexSettings",
+    "ElasticsearchListIndices",
+    "ElasticsearchListDocuments",
+    "ElasticsearchSearchDocuments",
 ]
 
 _LAZY_IMPORTS = {
@@ -2064,6 +2088,17 @@ _LAZY_IMPORTS = {
     "FalQueueStatus": ".fal",
     "FalQueueResult": ".fal",
     "FalQueueCancel": ".fal",
+    "ElasticsearchIngestAttachment": ".elasticsearch",
+    "ElasticsearchBulkOperations": ".elasticsearch",
+    "ElasticsearchDeleteDocument": ".elasticsearch",
+    "ElasticsearchGetDocument": ".elasticsearch",
+    "ElasticsearchIndexDocument": ".elasticsearch",
+    "ElasticsearchUpdateDocument": ".elasticsearch",
+    "ElasticsearchCreateIndex": ".elasticsearch",
+    "ElasticsearchUpdateIndexSettings": ".elasticsearch",
+    "ElasticsearchListIndices": ".elasticsearch",
+    "ElasticsearchListDocuments": ".elasticsearch",
+    "ElasticsearchSearchDocuments": ".elasticsearch",
 }
 
 
