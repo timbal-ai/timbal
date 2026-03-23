@@ -230,6 +230,14 @@ if TYPE_CHECKING:
         PineconeQuery,
         PineconeUpsertVectors,
     )
+    from .powerbi import (
+        PowerBIListWorkspaces,
+        PowerBIListDatasets,
+        PowerBIGetDataset,
+        PowerBIQueryDataset,
+        PowerBIListReports,
+        PowerBIGetReport,
+    )
     from .read import Read
     from .scraperapi import (
         ScraperAPIAmazonProduct,
@@ -1497,6 +1505,12 @@ __all__ = [
     "OneDriveGetFile",
     "OneDriveFindFile",
     "OneDriveDownloadFile",
+    "PowerBIListWorkspaces",
+    "PowerBIListDatasets",
+    "PowerBIGetDataset",
+    "PowerBIQueryDataset",
+    "PowerBIListReports",
+    "PowerBIGetReport",
 ]
 
 _LAZY_IMPORTS = {
@@ -2229,6 +2243,12 @@ _LAZY_IMPORTS = {
     "OneDriveGetFile": ".onedrive",
     "OneDriveFindFile": ".onedrive",
     "OneDriveDownloadFile": ".onedrive",
+    "PowerBIListWorkspaces": ".powerbi",
+    "PowerBIListDatasets": ".powerbi",
+    "PowerBIGetDataset": ".powerbi",
+    "PowerBIQueryDataset": ".powerbi",
+    "PowerBIListReports": ".powerbi",
+    "PowerBIGetReport": ".powerbi",
 }
 
 
