@@ -107,9 +107,10 @@ def _build_node(runnable: Any, *, include_tools: bool = True) -> dict[str, Any]:
     if node_type == "agent" and include_tools:
         config["tools"] = [_build_node(t, include_tools=False) for t in runnable.tools if isinstance(t, Runnable)]
 
-    return {
+    node: dict[str, Any] = {
         "id": runnable._path,
         "type": node_type,
+        "position": runnable.metadata.get("position", {"x": 0, "y": 0}),
         "data": {
             "config": config,
             "params": _enrich_params_schema(runnable),
@@ -117,6 +118,8 @@ def _build_node(runnable: Any, *, include_tools: bool = True) -> dict[str, Any]:
             "metadata": runnable.metadata,
         },
     }
+
+    return node
 
 
 def get_flow(workspace_path: str | Path) -> dict[str, Any]:

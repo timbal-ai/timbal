@@ -230,6 +230,31 @@ python -m timbal.codegen set-param --target agent_b --name prompt \
 
 ---
 
+### `set-position` — Set the canvas position for a node
+
+Sets the `(x, y)` position for a node on the ReactFlow canvas. The position is stored inside the runnable's `metadata` dict and surfaced as a top-level `position` key in `get-flow` output.
+
+```bash
+# Set position on the Agent entry point
+python -m timbal.codegen set-position --x 100 --y 200
+
+# Set position on a workflow step
+python -m timbal.codegen set-position --name agent_a --x 150 --y 250
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--x` | yes | X coordinate (float) |
+| `--y` | yes | Y coordinate (float) |
+| `--name` | no | Step name (required for Workflow, rejected for Agent) |
+
+**What it does**:
+- Upserts `metadata={"position": {"x": ..., "y": ...}}` on the constructor
+- Preserves existing metadata keys — only the `"position"` key is touched
+- Idempotent — re-running updates the position in place
+
+---
+
 ### `add-edge` — Add an ordering or conditional edge between workflow steps
 
 Adds an execution ordering dependency between two steps. For wiring data between steps, use `set-param` instead.
@@ -365,6 +390,8 @@ python -m timbal.codegen get-flow
 
 Outputs a JSON representation of the entry point's execution graph with `nodes` and `edges`.
 
+Each node has a top-level `position` key (`{"x": ..., "y": ...}`) for ReactFlow canvas placement, defaulting to `{"x": 0, "y": 0}` when not set. Use `set-position` to configure it.
+
 Each node's `data.params.properties` includes OpenAPI-style schema fields (`type`, `title`, `description`, etc.) plus a `value` field describing how the param is set:
 
 ```json
@@ -416,7 +443,7 @@ Every code transformation follows this pipeline:
 timbal.yaml → parse entry point FQN
     → load source file
     → parse to CST (libcst)
-    → apply transformer (add/remove/set-config/set-param)
+    → apply transformer (add/remove/set-config/set-param/set-position)
     → remove unused code (iterative dead code elimination)
     → format with ruff
     → write to file (or stdout with --dry-run)
