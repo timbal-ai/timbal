@@ -5,6 +5,25 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .asana import (
+        AsanaCreateProject,
+        AsanaListWorkspaces,
+        AsanaUpdateTask,
+        AsanaListUserProjects,
+        AsanaListTeams,
+        AsanaSearchTasks,
+        AsanaSearchSections,
+        AsanaSearchProjects,
+        AsanaListTaskStories,
+        AsanaGetTasksFromTaskList,
+        AsanaFindTaskById,
+        AsanaDeleteTask,
+        AsanaCreateTask,
+        AsanaCreateTaskFromTemplate,
+        AsanaCreateTaskComment,
+        AsanaCreateSubtask,
+        AsanaAddTaskToSection,
+    )
     from .bash import Bash
     from .cala import CalaSearch
     from .cloudflare import (
@@ -451,6 +470,23 @@ __all__ = [
     "CloudflareCrawlStart",
     "CloudflareCrawlGet",
     "CloudflareCrawlCancel",
+    "AsanaCreateProject",
+    "AsanaListWorkspaces",
+    "AsanaUpdateTask",
+    "AsanaListUserProjects",
+    "AsanaListTeams",
+    "AsanaSearchTasks",
+    "AsanaSearchSections",
+    "AsanaSearchProjects",
+    "AsanaListTaskStories",
+    "AsanaGetTasksFromTaskList",
+    "AsanaFindTaskById",
+    "AsanaDeleteTask",
+    "AsanaCreateTask",
+    "AsanaCreateTaskFromTemplate",
+    "AsanaCreateTaskComment",
+    "AsanaCreateSubtask",
+    "AsanaAddTaskToSection",
 ]
 
 _LAZY_IMPORTS = {
@@ -669,6 +705,23 @@ _LAZY_IMPORTS = {
     "CloudflareCrawlStart": ".cloudflare",
     "CloudflareCrawlGet": ".cloudflare",
     "CloudflareCrawlCancel": ".cloudflare",
+    "AsanaCreateProject": ".asana",
+    "AsanaListWorkspaces": ".asana",
+    "AsanaUpdateTask": ".asana",
+    "AsanaListUserProjects": ".asana",
+    "AsanaListTeams": ".asana",
+    "AsanaSearchTasks": ".asana",
+    "AsanaSearchSections": ".asana",
+    "AsanaSearchProjects": ".asana",
+    "AsanaListTaskStories": ".asana",
+    "AsanaGetTasksFromTaskList": ".asana",
+    "AsanaFindTaskById": ".asana",
+    "AsanaDeleteTask": ".asana",
+    "AsanaCreateTask": ".asana",
+    "AsanaCreateTaskFromTemplate": ".asana",
+    "AsanaCreateTaskComment": ".asana",
+    "AsanaCreateSubtask": ".asana",
+    "AsanaAddTaskToSection": ".asana",
 }
 
 
