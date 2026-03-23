@@ -370,14 +370,88 @@ python -m timbal.codegen rename --old-name web_search --to my_search
 python -m timbal.codegen list-tools
 ```
 
-Outputs a JSON array of framework tools discovered from `timbal.tools`:
+Outputs all framework tools as a flat JSON array. **Note:** with 700+ tools this can be slow. Prefer `get-tools` for paginated, filtered access.
 
 ```json
-[
-  {"type": "Bash", "module": "timbal.tools", "name": "bash", "description": null},
-  {"type": "CalaSearch", "module": "timbal.tools", "name": "cala_search", "description": "Search for verified knowledge..."},
-  ...
-]
+{
+  "tools": [
+    {"type": "Bash", "module": "timbal.tools", "name": "bash", "description": null, "provider": null, "provider_logo": null},
+    ...
+  ]
+}
+```
+
+---
+
+### `get-tools` — Browse and search tools (paginated)
+
+Two-tier tool discovery with pagination to avoid loading all tools at once.
+
+#### Default: list providers
+
+```bash
+python -m timbal.codegen get-tools
+```
+
+Returns provider summaries sorted by tool count:
+
+```json
+{
+  "providers": [
+    {"name": "zendesk", "logo": "https://content.timbal.ai/assets/zendesk_favicon.svg", "tool_count": 442},
+    {"name": "slack", "logo": "https://content.timbal.ai/assets/slack_favicon.svg", "tool_count": 27},
+    {"name": "system", "logo": null, "tool_count": 6}
+  ]
+}
+```
+
+Tools with no provider appear under `"system"`.
+
+#### Filter by provider
+
+```bash
+python -m timbal.codegen get-tools --provider slack
+python -m timbal.codegen get-tools --provider system
+```
+
+#### Search across all tools
+
+```bash
+python -m timbal.codegen get-tools --search "create ticket"
+```
+
+Case-insensitive substring match on tool name, type (class name), and description.
+
+#### Combined filters
+
+```bash
+python -m timbal.codegen get-tools --provider stripe --search invoice
+```
+
+`--provider` and `--search` compose as AND.
+
+#### Pagination
+
+```bash
+python -m timbal.codegen get-tools --provider zendesk --limit 10 --offset 20
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--provider` | none | Filter by provider name (`"system"` for tools with no provider) |
+| `--search` | none | Case-insensitive substring search on name, type, description |
+| `--limit` | 50 | Max tools to return |
+| `--offset` | 0 | Number of tools to skip |
+
+Response includes pagination metadata:
+
+```json
+{
+  "tools": [...],
+  "total": 442,
+  "limit": 10,
+  "offset": 20
+}
 ```
 
 ---

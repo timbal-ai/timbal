@@ -24,7 +24,26 @@ def main() -> None:
 
     # Read-only operations (not CST transformers)
     subparsers.add_parser("get-flow", help="Print the graph for the workspace entry point.")
-    subparsers.add_parser("list-tools", help="List available framework tool types.")
+    list_tools_parser = subparsers.add_parser("list-tools", help="List available framework tool types.")
+    list_tools_parser.add_argument(
+        "--no-cache", action="store_true", help="Skip the disk cache and force a full rediscovery."
+    )
+
+    get_tools_parser = subparsers.add_parser(
+        "get-tools",
+        help="Browse tools by provider, or search/filter with pagination.",
+    )
+    get_tools_parser.add_argument(
+        "--provider", default=None, help="Filter tools by provider name (use 'system' for tools with no provider)."
+    )
+    get_tools_parser.add_argument(
+        "--search", default=None, help="Case-insensitive substring search on tool name, type, and description."
+    )
+    get_tools_parser.add_argument("--limit", type=int, default=50, help="Max tools to return (default 50).")
+    get_tools_parser.add_argument("--offset", type=int, default=0, help="Number of tools to skip (default 0).")
+    get_tools_parser.add_argument(
+        "--no-cache", action="store_true", help="Skip the disk cache and force a full rediscovery."
+    )
 
     # Test run operation
     test_parser = subparsers.add_parser("test", help="Execute a single test run of the workspace entry point.")
@@ -39,7 +58,7 @@ def main() -> None:
     # Defer transformer module loading (pulls in libcst + timbal.codegen which
     # are expensive) — only needed for transformer operations, not for
     # list-tools, get-flow, or test.
-    _lightweight_ops = {"list-tools", "get-flow", "test"}
+    _lightweight_ops = {"list-tools", "get-tools", "get-flow", "test"}
     if not (_lightweight_ops & set(sys.argv[1:])):
         from timbal.codegen.transformers import load_modules
 
@@ -64,10 +83,57 @@ def main() -> None:
                 "provider": ft.provider,
                 "provider_logo": ft.provider_logo,
             }
-            for cls, ft in sorted(get_framework_tools().items())
+            for cls, ft in sorted(get_framework_tools(no_cache=args.no_cache).items())
         ]
         tools = {"tools": tools}
         print(json.dumps(tools, indent=2))
+        return
+
+    if operation == "get-tools":
+        from timbal.codegen.tool_discovery import get_framework_tools, get_provider_summaries
+
+        no_cache = args.no_cache
+        provider_filter = args.provider
+        search_filter = args.search
+
+        # No filters → return provider summaries.
+        if provider_filter is None and search_filter is None:
+            print(json.dumps({"providers": get_provider_summaries(no_cache=no_cache)}, indent=2))
+            return
+
+        # Build filtered tool list.
+        tools = [
+            {
+                "type": cls,
+                "module": ft.module,
+                "name": ft.name,
+                "description": ft.description,
+                "provider": ft.provider,
+                "provider_logo": ft.provider_logo,
+            }
+            for cls, ft in sorted(get_framework_tools(no_cache=no_cache).items())
+        ]
+
+        if provider_filter is not None:
+            if provider_filter == "system":
+                tools = [t for t in tools if t["provider"] is None]
+            else:
+                tools = [t for t in tools if t["provider"] == provider_filter]
+
+        if search_filter is not None:
+            q = search_filter.lower()
+            tools = [
+                t
+                for t in tools
+                if q in (t["name"] or "").lower()
+                or q in (t["type"] or "").lower()
+                or q in (t["description"] or "").lower()
+            ]
+
+        total = len(tools)
+        tools = tools[args.offset : args.offset + args.limit]
+
+        print(json.dumps({"tools": tools, "total": total, "limit": args.limit, "offset": args.offset}, indent=2))
         return
 
     if operation == "get-flow":
