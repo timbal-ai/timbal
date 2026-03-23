@@ -203,6 +203,14 @@ if TYPE_CHECKING:
         MongoDeleteDocument,
         MongoExecuteAggregation,
     )
+    from .onedrive import (
+        OneDriveSearchFiles,
+        OneDriveUploadFile,
+        OneDriveListFiles,
+        OneDriveGetFile,
+        OneDriveFindFile,
+        OneDriveDownloadFile,
+    )
     from .outlook import (
         OutlookArchive,
         OutlookCreateDraft,
@@ -1483,6 +1491,12 @@ __all__ = [
     "MongoUpdateDocuments",
     "MongoDeleteDocument",
     "MongoExecuteAggregation",
+    "OneDriveSearchFiles",
+    "OneDriveUploadFile",
+    "OneDriveListFiles",
+    "OneDriveGetFile",
+    "OneDriveFindFile",
+    "OneDriveDownloadFile",
 ]
 
 _LAZY_IMPORTS = {
@@ -2209,6 +2223,12 @@ _LAZY_IMPORTS = {
     "MongoUpdateDocuments": ".mongodb",
     "MongoDeleteDocument": ".mongodb",
     "MongoExecuteAggregation": ".mongodb",
+    "OneDriveSearchFiles": ".onedrive",
+    "OneDriveUploadFile": ".onedrive",
+    "OneDriveListFiles": ".onedrive",
+    "OneDriveGetFile": ".onedrive",
+    "OneDriveFindFile": ".onedrive",
+    "OneDriveDownloadFile": ".onedrive",
 }
 
 
