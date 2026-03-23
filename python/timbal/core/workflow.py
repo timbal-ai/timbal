@@ -205,7 +205,8 @@ class Workflow(Runnable):
                     await queue.put(None)
                     return
 
-            resolved_input = await step._resolve_input_params(kwargs)
+            step_kwargs = {k: v for k, v in kwargs.items() if k not in step._default_runtime_params}
+            resolved_input = await step._resolve_input_params(step_kwargs)
 
         except SpanNotFound as e:
             logger.info(f"Skipping {step.name} because it needs span from skipped step {e.step_name}.")
