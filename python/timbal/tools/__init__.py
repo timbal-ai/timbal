@@ -187,6 +187,12 @@ if TYPE_CHECKING:
         LanceDBDeleteRecords,
         LanceDBDescribeTable,
     )
+    from .linkedin import (
+        LinkedInSearchPeople,
+        LinkedInSearchCompanies,
+        LinkedInSearchJobs,
+        LinkedInSearch,
+    )
     from .outlook import (
         OutlookArchive,
         OutlookCreateDraft,
@@ -1455,6 +1461,10 @@ __all__ = [
     "GeminiImagesAnalyzeImage",
     "GeminiImagesGenerateImageWithReference",
     "GeminiImagesImageToBase64",
+    "LinkedInSearchPeople",
+    "LinkedInSearchCompanies",
+    "LinkedInSearchJobs",
+    "LinkedInSearch",
 ]
 
 _LAZY_IMPORTS = {
@@ -2169,6 +2179,10 @@ _LAZY_IMPORTS = {
     "GeminiImagesAnalyzeImage": ".gemini_images",
     "GeminiImagesGenerateImageWithReference": ".gemini_images",
     "GeminiImagesImageToBase64": ".gemini_images",
+    "LinkedInSearchPeople": ".linkedin",
+    "LinkedInSearchCompanies": ".linkedin",
+    "LinkedInSearchJobs": ".linkedin",
+    "LinkedInSearch": ".linkedin",
 }
 
 
