@@ -31,7 +31,7 @@ def _repo(owner: str, repo: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-class GetReference(Tool):
+class GitHubGetReference(Tool):
     name: str = "github_get_reference"
     description: str | None = "Get a single git reference (branch, tag, or HEAD) from a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -63,7 +63,7 @@ class GetReference(Tool):
         super().__init__(handler=_get_reference, **kwargs)
 
 
-class CreateReference(Tool):
+class GitHubCreateReference(Tool):
     name: str = "github_create_reference"
     description: str | None = "Create a git reference (branch or tag) in a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -99,7 +99,7 @@ class CreateReference(Tool):
         super().__init__(handler=_create_reference, **kwargs)
 
 
-class UpdateReference(Tool):
+class GitHubUpdateReference(Tool):
     name: str = "github_update_reference"
     description: str | None = "Update a git reference to point to a new commit SHA."
     integration: Annotated[str, Integration("github")] | None = None
@@ -136,7 +136,7 @@ class UpdateReference(Tool):
         super().__init__(handler=_update_reference, **kwargs)
 
 
-class DeleteReference(Tool):
+class GitHubDeleteReference(Tool):
     name: str = "github_delete_reference"
     description: str | None = "Delete a git reference (branch or tag) from a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -170,7 +170,7 @@ class DeleteReference(Tool):
         super().__init__(handler=_delete_reference, **kwargs)
 
 
-class GetGitCommit(Tool):
+class GitHubGetGitCommit(Tool):
     name: str = "github_get_git_commit"
     description: str | None = "Get a git commit object (tree, parents, author, committer) by SHA."
     integration: Annotated[str, Integration("github")] | None = None
@@ -209,7 +209,7 @@ class GetGitCommit(Tool):
 # ---------------------------------------------------------------------------
 
 
-class AddUserToOrganization(Tool):
+class GitHubAddUserToOrganization(Tool):
     name: str = "github_add_user_to_organization"
     description: str | None = "Add or update a user's membership in a GitHub organization."
     integration: Annotated[str, Integration("github")] | None = None
@@ -244,7 +244,7 @@ class AddUserToOrganization(Tool):
         super().__init__(handler=_add_user_to_organization, **kwargs)
 
 
-class RemoveUserFromOrganization(Tool):
+class GitHubRemoveUserFromOrganization(Tool):
     name: str = "github_remove_user_from_organization"
     description: str | None = "Remove a user's membership from a GitHub organization."
     integration: Annotated[str, Integration("github")] | None = None
@@ -277,7 +277,7 @@ class RemoveUserFromOrganization(Tool):
         super().__init__(handler=_remove_user_from_organization, **kwargs)
 
 
-class AddUserToTeam(Tool):
+class GitHubAddUserToTeam(Tool):
     name: str = "github_add_user_to_team"
     description: str | None = "Add or update a user's membership in a GitHub team."
     integration: Annotated[str, Integration("github")] | None = None
@@ -318,7 +318,7 @@ class AddUserToTeam(Tool):
 # ---------------------------------------------------------------------------
 
 
-class ListPullRequests(Tool):
+class GitHubListPullRequests(Tool):
     name: str = "github_list_pull_requests"
     description: str | None = "List pull requests for a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -371,7 +371,7 @@ class ListPullRequests(Tool):
         super().__init__(handler=_list_pull_requests, **kwargs)
 
 
-class GetPullRequest(Tool):
+class GitHubGetPullRequest(Tool):
     name: str = "github_get_pull_request"
     description: str | None = "Get a specific pull request by number."
     integration: Annotated[str, Integration("github")] | None = None
@@ -405,7 +405,7 @@ class GetPullRequest(Tool):
         super().__init__(handler=_get_pull_request, **kwargs)
 
 
-class GetPullRequestPreview(Tool):
+class GitHubGetPullRequestPreview(Tool):
     name: str = "github_get_pull_request_preview"
     description: str | None = "Get the unified diff (patch) of a pull request."
     integration: Annotated[str, Integration("github")] | None = None
@@ -442,7 +442,7 @@ class GetPullRequestPreview(Tool):
         super().__init__(handler=_get_pull_request_preview, **kwargs)
 
 
-class CreatePullRequest(Tool):
+class GitHubCreatePullRequest(Tool):
     name: str = "github_create_pull_request"
     description: str | None = "Create a new pull request."
     integration: Annotated[str, Integration("github")] | None = None
@@ -492,7 +492,7 @@ class CreatePullRequest(Tool):
         super().__init__(handler=_create_pull_request, **kwargs)
 
 
-class MergePullRequest(Tool):
+class GitHubMergePullRequest(Tool):
     name: str = "github_merge_pull_request"
     description: str | None = "Merge a pull request."
     integration: Annotated[str, Integration("github")] | None = None
@@ -536,7 +536,7 @@ class MergePullRequest(Tool):
         super().__init__(handler=_merge_pull_request, **kwargs)
 
 
-class CheckIfPullRequestIsMerged(Tool):
+class GitHubCheckIfPullRequestIsMerged(Tool):
     name: str = "github_check_if_pull_request_is_merged"
     description: str | None = "Check whether a pull request has been merged."
     integration: Annotated[str, Integration("github")] | None = None
@@ -569,7 +569,7 @@ class CheckIfPullRequestIsMerged(Tool):
         super().__init__(handler=_check_if_pull_request_is_merged, **kwargs)
 
 
-class ListPullRequestCommits(Tool):
+class GitHubListPullRequestCommits(Tool):
     name: str = "github_list_pull_request_commits"
     description: str | None = "List commits on a pull request."
     integration: Annotated[str, Integration("github")] | None = None
@@ -606,7 +606,7 @@ class ListPullRequestCommits(Tool):
         super().__init__(handler=_list_pull_request_commits, **kwargs)
 
 
-class ListPullRequestFiles(Tool):
+class GitHubListPullRequestFiles(Tool):
     name: str = "github_list_pull_request_files"
     description: str | None = "List files changed in a pull request."
     integration: Annotated[str, Integration("github")] | None = None
@@ -643,7 +643,7 @@ class ListPullRequestFiles(Tool):
         super().__init__(handler=_list_pull_request_files, **kwargs)
 
 
-class ListPullRequestReviews(Tool):
+class GitHubListPullRequestReviews(Tool):
     name: str = "github_list_pull_request_reviews"
     description: str | None = "List reviews for a pull request."
     integration: Annotated[str, Integration("github")] | None = None
@@ -680,7 +680,7 @@ class ListPullRequestReviews(Tool):
         super().__init__(handler=_list_pull_request_reviews, **kwargs)
 
 
-class ListPRReviewComments(Tool):
+class GitHubListPRReviewComments(Tool):
     name: str = "github_list_pr_review_comments"
     description: str | None = "List all inline review comments on a pull request."
     integration: Annotated[str, Integration("github")] | None = None
@@ -719,7 +719,7 @@ class ListPRReviewComments(Tool):
         super().__init__(handler=_list_pr_review_comments, **kwargs)
 
 
-class GetReviewComment(Tool):
+class GitHubGetReviewComment(Tool):
     name: str = "github_get_review_comment"
     description: str | None = "Get a single inline review comment on a pull request."
     integration: Annotated[str, Integration("github")] | None = None
@@ -753,7 +753,7 @@ class GetReviewComment(Tool):
         super().__init__(handler=_get_review_comment, **kwargs)
 
 
-class ListCommentsForReview(Tool):
+class GitHubListCommentsForReview(Tool):
     name: str = "github_list_comments_for_review"
     description: str | None = "List all comments for a specific pull request review."
     integration: Annotated[str, Integration("github")] | None = None
@@ -791,7 +791,7 @@ class ListCommentsForReview(Tool):
         super().__init__(handler=_list_comments_for_review, **kwargs)
 
 
-class ListPullRequestsForCommit(Tool):
+class GitHubListPullRequestsForCommit(Tool):
     name: str = "github_list_pull_requests_for_commit"
     description: str | None = "List pull requests associated with a specific commit."
     integration: Annotated[str, Integration("github")] | None = None
@@ -836,7 +836,7 @@ class ListPullRequestsForCommit(Tool):
 # ---------------------------------------------------------------------------
 
 
-class GetRepositoryDetails(Tool):
+class GitHubGetRepositoryDetails(Tool):
     name: str = "github_get_repository_details"
     description: str | None = "Get metadata and details for a GitHub repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -869,7 +869,7 @@ class GetRepositoryDetails(Tool):
         super().__init__(handler=_get_repository_details, **kwargs)
 
 
-class CompareBranches(Tool):
+class GitHubCompareBranches(Tool):
     name: str = "github_compare_branches"
     description: str | None = "Compare two branches, tags, or commits and return their diff."
     integration: Annotated[str, Integration("github")] | None = None
@@ -904,7 +904,7 @@ class CompareBranches(Tool):
         super().__init__(handler=_compare_branches, **kwargs)
 
 
-class GetFileContent(Tool):
+class GitHubGetFileContent(Tool):
     name: str = "github_get_file_content"
     description: str | None = "Get the content of a file or directory in a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -944,7 +944,7 @@ class GetFileContent(Tool):
         super().__init__(handler=_get_file_content, **kwargs)
 
 
-class CreateOrUpdateFile(Tool):
+class GitHubCreateOrUpdateFile(Tool):
     name: str = "github_create_or_update_file"
     description: str | None = "Create or update a file in a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -993,7 +993,7 @@ class CreateOrUpdateFile(Tool):
         super().__init__(handler=_create_or_update_file, **kwargs)
 
 
-class GetReadme(Tool):
+class GitHubGetReadme(Tool):
     name: str = "github_get_readme"
     description: str | None = "Get the README file of a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1032,7 +1032,7 @@ class GetReadme(Tool):
         super().__init__(handler=_get_readme, **kwargs)
 
 
-class ListBranches(Tool):
+class GitHubListBranches(Tool):
     name: str = "github_list_branches"
     description: str | None = "List branches in a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1073,7 +1073,7 @@ class ListBranches(Tool):
         super().__init__(handler=_list_branches, **kwargs)
 
 
-class SearchBranches(Tool):
+class GitHubSearchBranches(Tool):
     name: str = "github_search_branches"
     description: str | None = "Search branches in a repository by name pattern."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1117,7 +1117,7 @@ class SearchBranches(Tool):
         super().__init__(handler=_search_branches, **kwargs)
 
 
-class ListCommits(Tool):
+class GitHubListCommits(Tool):
     name: str = "github_list_commits"
     description: str | None = "List commits for a repository, optionally filtered by branch, path, or author."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1170,7 +1170,7 @@ class ListCommits(Tool):
         super().__init__(handler=_list_commits, **kwargs)
 
 
-class ListCommitStatuses(Tool):
+class GitHubListCommitStatuses(Tool):
     name: str = "github_list_commit_statuses"
     description: str | None = "List commit statuses (CI checks) for a specific ref."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1203,7 +1203,7 @@ class ListCommitStatuses(Tool):
         super().__init__(handler=_list_commit_statuses, **kwargs)
 
 
-class ListContributors(Tool):
+class GitHubListContributors(Tool):
     name: str = "github_list_contributors"
     description: str | None = "List contributors to a repository sorted by number of commits."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1240,7 +1240,7 @@ class ListContributors(Tool):
         super().__init__(handler=_list_contributors, **kwargs)
 
 
-class ListCollaborators(Tool):
+class GitHubListCollaborators(Tool):
     name: str = "github_list_collaborators"
     description: str | None = "List collaborators for a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1282,7 +1282,7 @@ class ListCollaborators(Tool):
         super().__init__(handler=_list_collaborators, **kwargs)
 
 
-class ListTags(Tool):
+class GitHubListTags(Tool):
     name: str = "github_list_tags"
     description: str | None = "List tags in a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1318,7 +1318,7 @@ class ListTags(Tool):
         super().__init__(handler=_list_tags, **kwargs)
 
 
-class ListForks(Tool):
+class GitHubListForks(Tool):
     name: str = "github_list_forks"
     description: str | None = "List forks of a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1355,7 +1355,7 @@ class ListForks(Tool):
         super().__init__(handler=_list_forks, **kwargs)
 
 
-class ListDeployments(Tool):
+class GitHubListDeployments(Tool):
     name: str = "github_list_deployments"
     description: str | None = "List deployments for a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1405,7 +1405,7 @@ class ListDeployments(Tool):
         super().__init__(handler=_list_deployments, **kwargs)
 
 
-class ListActivities(Tool):
+class GitHubListActivities(Tool):
     name: str = "github_list_activities"
     description: str | None = "List activity events for a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1458,7 +1458,7 @@ class ListActivities(Tool):
         super().__init__(handler=_list_activities, **kwargs)
 
 
-class ListTeams(Tool):
+class GitHubListTeams(Tool):
     name: str = "github_list_teams"
     description: str | None = "List teams that have access to a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1499,7 +1499,7 @@ class ListTeams(Tool):
 # ---------------------------------------------------------------------------
 
 
-class ListReleases(Tool):
+class GitHubListReleases(Tool):
     name: str = "github_list_releases"
     description: str | None = "List releases for a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1535,7 +1535,7 @@ class ListReleases(Tool):
         super().__init__(handler=_list_releases, **kwargs)
 
 
-class GetRelease(Tool):
+class GitHubGetRelease(Tool):
     name: str = "github_get_release"
     description: str | None = "Get a specific release by ID."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1569,7 +1569,7 @@ class GetRelease(Tool):
         super().__init__(handler=_get_release, **kwargs)
 
 
-class GetLatestRelease(Tool):
+class GitHubGetLatestRelease(Tool):
     name: str = "github_get_latest_release"
     description: str | None = "Get the latest published release for a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1602,7 +1602,7 @@ class GetLatestRelease(Tool):
         super().__init__(handler=_get_latest_release, **kwargs)
 
 
-class GetPages(Tool):
+class GitHubGetPages(Tool):
     name: str = "github_get_pages"
     description: str | None = "Get information about a repository's GitHub Pages site."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1640,7 +1640,7 @@ class GetPages(Tool):
 # ---------------------------------------------------------------------------
 
 
-class ListWebhooks(Tool):
+class GitHubListWebhooks(Tool):
     name: str = "github_list_webhooks"
     description: str | None = "List webhooks for a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1676,7 +1676,7 @@ class ListWebhooks(Tool):
         super().__init__(handler=_list_webhooks, **kwargs)
 
 
-class GetWebhook(Tool):
+class GitHubGetWebhook(Tool):
     name: str = "github_get_webhook"
     description: str | None = "Get a specific webhook for a repository."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1715,7 +1715,7 @@ class GetWebhook(Tool):
 # ---------------------------------------------------------------------------
 
 
-class GetWorkflowRun(Tool):
+class GitHubGetWorkflowRun(Tool):
     name: str = "github_get_workflow_run"
     description: str | None = "Get details for a specific GitHub Actions workflow run."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1749,7 +1749,7 @@ class GetWorkflowRun(Tool):
         super().__init__(handler=_get_workflow_run, **kwargs)
 
 
-class RunWorkflow(Tool):
+class GitHubRunWorkflow(Tool):
     name: str = "github_run_workflow"
     description: str | None = "Trigger a GitHub Actions workflow dispatch event."
     integration: Annotated[str, Integration("github")] | None = None
@@ -1790,7 +1790,7 @@ class RunWorkflow(Tool):
         super().__init__(handler=_run_workflow, **kwargs)
 
 
-class SearchWorkflowRuns(Tool):
+class GitHubSearchWorkflowRuns(Tool):
     name: str = "github_search_workflow_runs"
     description: str | None = "List and filter GitHub Actions workflow runs for a repository."
     integration: Annotated[str, Integration("github")] | None = None

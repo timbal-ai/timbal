@@ -58,7 +58,7 @@ def _normalize_fields(fields: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-class ListRecords(Tool):
+class AirtableListRecords(Tool):
     name: str = "airtable_list_records"
     description: str | None = "List records in an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -115,7 +115,7 @@ class ListRecords(Tool):
         super().__init__(handler=_list_records, **kwargs)
 
 
-class GetRecord(Tool):
+class AirtableGetRecord(Tool):
     name: str = "airtable_get_record"
     description: str | None = "Get a single record by its ID from an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -149,7 +149,7 @@ class GetRecord(Tool):
         super().__init__(handler=_get_record, **kwargs)
 
 
-class CreateRecords(Tool):
+class AirtableCreateRecords(Tool):
     name: str = "airtable_create_records"
     description: str | None = "Create new records in an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -191,7 +191,7 @@ class CreateRecords(Tool):
         super().__init__(handler=_create_records, **kwargs)
 
 
-class UpdateRecords(Tool):
+class AirtableUpdateRecords(Tool):
     name: str = "airtable_update_records"
     description: str | None = "Update existing records in an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -230,7 +230,7 @@ class UpdateRecords(Tool):
         super().__init__(handler=_update_records, **kwargs)
 
 
-class DeleteRecords(Tool):
+class AirtableDeleteRecords(Tool):
     name: str = "airtable_delete_records"
     description: str | None = "Delete one or more records from an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -264,7 +264,7 @@ class DeleteRecords(Tool):
         super().__init__(handler=_delete_records, **kwargs)
 
 
-class ListComments(Tool):
+class AirtableListComments(Tool):
     name: str = "airtable_list_comments"
     description: str | None = "List all comments for a specific Airtable record from newest to oldest."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -310,7 +310,7 @@ class ListComments(Tool):
 # ---------------------------------------------------------------------------
 
 
-class ListBases(Tool):
+class AirtableListBases(Tool):
     name: str = "airtable_list_bases"
     description: str | None = "List all accessible Airtable bases with their ID, name, and permission level."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -348,7 +348,7 @@ class ListBases(Tool):
 # ---------------------------------------------------------------------------
 
 
-class ListTables(Tool):
+class AirtableListTables(Tool):
     name: str = "airtable_list_tables"
     description: str | None = "List all tables in a given Airtable base."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -382,7 +382,7 @@ class ListTables(Tool):
         super().__init__(handler=_list_tables, **kwargs)
 
 
-class BaseSchema(Tool):
+class AirtableBaseSchema(Tool):
     name: str = "airtable_base_schema"
     description: str | None = "Get complete schema for all tables in an Airtable base, including fields and views."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -411,7 +411,7 @@ class BaseSchema(Tool):
         super().__init__(handler=_base_schema, **kwargs)
 
 
-class CreateTable(Tool):
+class AirtableCreateTable(Tool):
     name: str = "airtable_create_table"
     description: str | None = "Create a new table in an Airtable base with specified fields."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -450,7 +450,7 @@ class CreateTable(Tool):
         super().__init__(handler=_create_table, **kwargs)
 
 
-class UpdateTable(Tool):
+class AirtableUpdateTable(Tool):
     name: str = "airtable_update_table"
     description: str | None = "Update an existing Airtable table's name or description."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -497,7 +497,7 @@ class UpdateTable(Tool):
 # ---------------------------------------------------------------------------
 
 
-class CreateField(Tool):
+class AirtableCreateField(Tool):
     name: str = "airtable_create_field"
     description: str | None = "Add a new field (column) to an existing Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
@@ -541,7 +541,7 @@ class CreateField(Tool):
         super().__init__(handler=_create_field, **kwargs)
 
 
-class UpdateField(Tool):
+class AirtableUpdateField(Tool):
     name: str = "airtable_update_field"
     description: str | None = "Update a field's metadata (name, description, or options) in an Airtable table."
     integration: Annotated[str, Integration("airtable")] | None = None
