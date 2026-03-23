@@ -148,6 +148,7 @@ class ParamSetter(cst.CSTTransformer):
         self.key = key
         self.value = value
         self.assignments = assignments or {}
+        self.needs_reorder = param_type == "map"
 
     def _is_step_call(self, call: cst.Call) -> bool:
         return (
