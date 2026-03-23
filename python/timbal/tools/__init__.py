@@ -7,6 +7,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .bash import Bash
     from .cala import CalaSearch
+    from .cloudflare import (
+        CloudflareCrawlStart,
+        CloudflareCrawlGet,
+        CloudflareCrawlCancel,
+    )
     from .edit import Edit
     from .elevenlabs import (
         ElevenLabsTextToSpeech,
@@ -443,6 +448,9 @@ __all__ = [
     "ElevenLabsDownloadHistoryItems",
     "ElevenLabsCreateAgent",
     "ElevenLabsAddVoice",
+    "CloudflareCrawlStart",
+    "CloudflareCrawlGet",
+    "CloudflareCrawlCancel",
 ]
 
 _LAZY_IMPORTS = {
@@ -658,6 +666,9 @@ _LAZY_IMPORTS = {
     "ElevenLabsDownloadHistoryItems": ".elevenlabs",
     "ElevenLabsCreateAgent": ".elevenlabs",
     "ElevenLabsAddVoice": ".elevenlabs",
+    "CloudflareCrawlStart": ".cloudflare",
+    "CloudflareCrawlGet": ".cloudflare",
+    "CloudflareCrawlCancel": ".cloudflare",
 }
 
 
