@@ -459,10 +459,11 @@ class TestConfigSchema:
         agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         config = _single_node(_flow(ws))["data"]["config"]
-        # model is Model | str — should have anyOf with an enum variant
-        assert "anyOf" in config["model"]
-        has_enum = any("enum" in v for v in config["model"]["anyOf"])
-        assert has_enum
+        # model enum is compacted — full Literal list is stripped, replaced with a ref marker
+        assert config["model"]["x-timbal-ref"] == "models"
+        assert config["model"]["type"] == "string"
+        assert "enum" not in config["model"]
+        assert "anyOf" not in config["model"]
 
     def test_callable_type_in_schema(self, workspace):
         ws = workspace("""\

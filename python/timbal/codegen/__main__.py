@@ -44,6 +44,18 @@ def main() -> None:
     get_tools_parser.add_argument(
         "--no-cache", action="store_true", help="Skip the disk cache and force a full rediscovery."
     )
+    get_models_parser = subparsers.add_parser(
+        "get-models",
+        help="Browse models by provider, or search/filter with pagination.",
+    )
+    get_models_parser.add_argument(
+        "--provider", default=None, help="Filter models by provider name."
+    )
+    get_models_parser.add_argument(
+        "--search", default=None, help="Case-insensitive substring search on model id, display_name, and description."
+    )
+    get_models_parser.add_argument("--limit", type=int, default=50, help="Max models to return (default 50).")
+    get_models_parser.add_argument("--offset", type=int, default=0, help="Number of models to skip (default 0).")
 
     # Test run operation
     test_parser = subparsers.add_parser("test", help="Execute a single test run of the workspace entry point.")
@@ -58,7 +70,7 @@ def main() -> None:
     # Defer transformer module loading (pulls in libcst + timbal.codegen which
     # are expensive) — only needed for transformer operations, not for
     # list-tools, get-flow, or test.
-    _lightweight_ops = {"list-tools", "get-tools", "get-flow", "test"}
+    _lightweight_ops = {"list-tools", "get-models", "get-tools", "get-flow", "test"}
     if not (_lightweight_ops & set(sys.argv[1:])):
         from timbal.codegen.transformers import load_modules
 
@@ -70,6 +82,39 @@ def main() -> None:
 
     workspace_path = Path(args.path)
     operation = args.operation
+
+    if operation == "get-models":
+        from timbal.codegen.model_discovery import get_models, get_provider_summaries
+
+        provider_filter = args.provider
+        search_filter = args.search
+
+        # No filters → return provider summaries.
+        if provider_filter is None and search_filter is None:
+            print(json.dumps({"providers": get_provider_summaries()}, indent=2))
+            return
+
+        # Build filtered model list.
+        models = get_models()
+
+        if provider_filter is not None:
+            models = [m for m in models if m.get("provider") == provider_filter]
+
+        if search_filter is not None:
+            q = search_filter.lower()
+            models = [
+                m
+                for m in models
+                if q in (m.get("id") or "").lower()
+                or q in (m.get("display_name") or "").lower()
+                or q in (m.get("description") or "").lower()
+            ]
+
+        total = len(models)
+        models = models[args.offset : args.offset + args.limit]
+
+        print(json.dumps({"models": models, "total": total, "limit": args.limit, "offset": args.offset}, indent=2))
+        return
 
     if operation == "list-tools":
         from timbal.codegen.tool_discovery import get_framework_tools

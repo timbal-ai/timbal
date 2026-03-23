@@ -368,9 +368,14 @@ python -m timbal.codegen rename --old-name web_search --to my_search
 
 ```bash
 python -m timbal.codegen list-tools
+python -m timbal.codegen list-tools --no-cache   # skip disk cache
 ```
 
 Outputs all framework tools as a flat JSON array. **Note:** with 700+ tools this can be slow. Prefer `get-tools` for paginated, filtered access.
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--no-cache` | off | Skip the disk cache and force a full rediscovery |
 
 ```json
 {
@@ -456,6 +461,108 @@ Response includes pagination metadata:
 
 ---
 
+### `get-models` — Browse and search LLM models (paginated)
+
+Two-tier model discovery with pagination, following the same pattern as `get-tools`.
+
+#### Default: list providers
+
+```bash
+python -m timbal.codegen get-models
+```
+
+Returns provider summaries sorted by model count:
+
+```json
+{
+  "providers": [
+    {"name": "togetherai", "logo": "https://content.timbal.ai/assets/togetherai_favicon.svg", "model_count": 30},
+    {"name": "openai", "logo": "https://content.timbal.ai/assets/openai_favicon.svg", "model_count": 20},
+    {"name": "anthropic", "logo": "https://content.timbal.ai/assets/anthropic_favicon.svg", "model_count": 10}
+  ]
+}
+```
+
+#### Filter by provider
+
+```bash
+python -m timbal.codegen get-models --provider anthropic
+```
+
+#### Search across all models
+
+```bash
+python -m timbal.codegen get-models --search "vision"
+```
+
+Case-insensitive substring match on model `id`, `display_name`, and `description`.
+
+#### Combined filters
+
+```bash
+python -m timbal.codegen get-models --provider openai --search "gpt-4"
+```
+
+`--provider` and `--search` compose as AND.
+
+#### Pagination
+
+```bash
+python -m timbal.codegen get-models --provider togetherai --limit 10 --offset 20
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--provider` | none | Filter by provider name |
+| `--search` | none | Case-insensitive substring search on id, display_name, description |
+| `--limit` | 50 | Max models to return |
+| `--offset` | 0 | Number of models to skip |
+
+When filtering, response includes pagination metadata and full model objects:
+
+```json
+{
+  "models": [
+    {
+      "id": "anthropic/claude-opus-4-6",
+      "provider": "anthropic",
+      "display_name": "Claude Opus 4.6",
+      "description": "Anthropic's most capable model, excelling at planning and debugging within large codebases.",
+      "input_price": 5.0,
+      "output_price": 25.0,
+      "context_window": 200000,
+      "capabilities": ["vision", "tools", "reasoning"]
+    }
+  ],
+  "total": 10,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+**Model fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Full routing ID passed to `model=` (e.g. `"anthropic/claude-opus-4-6"`) |
+| `provider` | string | Provider key (`anthropic`, `openai`, `google`, `togetherai`, `xai`, `groq`, `fireworks`) |
+| `display_name` | string | Human-readable name for UI |
+| `description` | string | One-sentence description from provider docs |
+| `input_price` | float \| null | USD per 1M input tokens (`null` if not publicly listed) |
+| `output_price` | float \| null | USD per 1M output tokens |
+| `context_window` | int \| null | Maximum context in tokens |
+| `capabilities` | string[] | Subset of `vision`, `tools`, `reasoning`, `audio`, `video`, `image_generation` |
+
+**Model registry (`models.yaml`):**
+
+Model metadata lives in `python/timbal/models.yaml`. To add or update a model, edit the YAML — it is the single source of truth. The `model=` type annotation in `llm_router.py` is derived from it via `scripts/generate_models.py`:
+
+```bash
+uv run python scripts/generate_models.py
+```
+
+---
+
 ### `get-flow` — Print the execution graph
 
 ```bash
@@ -482,6 +589,18 @@ The `value` field has two forms:
 - **Map**: `{"type": "map", "source": "<step_name>"}` with an optional `"key"` for dot-notation path
 - **Static**: `{"type": "value", "value": <json_value>}`
 - **Absent**: param has no default set
+
+Config fields that reference the model registry use `"x-timbal-ref": "models"` instead of inlining the full enum. Call `get-models` to get the available options:
+
+```json
+{
+  "model": {
+    "type": "string",
+    "x-timbal-ref": "models",
+    "value": "anthropic/claude-haiku-4-5"
+  }
+}
+```
 
 ---
 

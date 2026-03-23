@@ -60,9 +60,62 @@ def _extract_key_from_lambda(fn: Any, source_step: str) -> str | None:
     return accessor_to_key(accessor)
 
 
+def _is_model_enum(values: list) -> bool:
+    """Return True if a list of enum values looks like LLM model IDs (provider/name)."""
+    return len(values) > 5 and all(isinstance(v, str) and "/" in v for v in values[:5])
+
+
+def _compact_field(field: dict) -> dict:
+    """Replace a large model-ID enum in a single field schema with an x-timbal-ref marker.
+
+    Handles both direct enums and enums nested inside anyOf (e.g. Literal | str).
+    Preserves all other keys (value, description, default, …) on the field.
+    """
+    field = dict(field)
+    if _is_model_enum(field.get("enum", [])):
+        field = {k: v for k, v in field.items() if k != "enum"}
+        field["x-timbal-ref"] = "models"
+    elif "anyOf" in field:
+        for item in field["anyOf"]:
+            if _is_model_enum(item.get("enum", [])):
+                field = {k: v for k, v in field.items() if k not in ("anyOf", "$ref")}
+                field["type"] = "string"
+                field["x-timbal-ref"] = "models"
+                break
+    return field
+
+
+def _compact_params_schema(schema: dict) -> dict:
+    """Apply _compact_field to every property in a params JSON schema."""
+    schema = dict(schema)
+    if "properties" in schema:
+        schema["properties"] = {name: _compact_field(prop) for name, prop in schema["properties"].items()}
+
+    # Drop $defs entries that are no longer referenced after compaction.
+    if "$defs" in schema:
+        import json
+
+        schema_without_defs = {k: v for k, v in schema.items() if k != "$defs"}
+        body = json.dumps(schema_without_defs)
+        schema["$defs"] = {k: v for k, v in schema["$defs"].items() if f'"#/$defs/{k}"' in body}
+        if not schema["$defs"]:
+            del schema["$defs"]
+
+    return schema
+
+
+def _compact_config(config: dict) -> dict:
+    """Apply _compact_field to every field in an _annotate_config result.
+
+    Config is a flat dict of {field_name: field_schema} where each value
+    is a schema dict (with anyOf / enum / type / …) plus a 'value' key.
+    """
+    return {name: _compact_field(field) for name, field in config.items()}
+
+
 def _enrich_params_schema(runnable: Any) -> dict[str, Any]:
     """Enrich the params JSON schema with default info from fixed and runtime params."""
-    schema = runnable.params_model_schema
+    schema = _compact_params_schema(runnable.params_model_schema)
     properties = schema.get("properties", {})
 
     for param_name, prop in properties.items():
@@ -102,7 +155,7 @@ def _build_node(runnable: Any, *, include_tools: bool = True) -> dict[str, Any]:
     else:
         node_type = "tool"
 
-    config = runnable.get_config()
+    config = _compact_config(runnable.get_config())
 
     if node_type == "agent" and include_tools:
         config["tools"] = [_build_node(t, include_tools=False) for t in runnable.tools if isinstance(t, Runnable)]

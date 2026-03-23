@@ -1,0 +1,1001 @@
+# Source of truth for all supported LLM models.
+# Pricing is in USD per 1M tokens (input / output). null = unknown or not publicly listed.
+# context_window is in tokens. null = unknown.
+# Run scripts/generate_models.py to regenerate the Model Literal in llm_router.py.
+
+models:
+
+  # ── Anthropic ────────────────────────────────────────────────────────────────
+
+  - id: "anthropic/claude-opus-4-6"
+    provider: anthropic
+    display_name: "Claude Opus 4.6"
+    description: "Anthropic's most capable model, excelling at planning and debugging within large codebases."
+    input_price: 5.00
+    output_price: 25.00
+    context_window: 200000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "anthropic/claude-opus-4-5"
+    provider: anthropic
+    display_name: "Claude Opus 4.5"
+    description: "Previous-generation Opus model with high intelligence for complex reasoning tasks."
+    input_price: 5.00
+    output_price: 25.00
+    context_window: 200000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "anthropic/claude-opus-4-1"
+    provider: anthropic
+    display_name: "Claude Opus 4.1"
+    description: "Previous-generation Opus model with high intelligence for complex reasoning tasks."
+    input_price: 5.00
+    output_price: 25.00
+    context_window: 200000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "anthropic/claude-opus-4-0"
+    provider: anthropic
+    display_name: "Claude Opus 4.0"
+    description: "Earlier Opus generation model for demanding reasoning and analysis tasks."
+    input_price: 5.00
+    output_price: 25.00
+    context_window: 200000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "anthropic/claude-sonnet-4-6"
+    provider: anthropic
+    display_name: "Claude Sonnet 4.6"
+    description: "Best combination of speed and intelligence with enhanced computer use capabilities for software interaction tasks."
+    input_price: 3.00
+    output_price: 15.00
+    context_window: 200000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "anthropic/claude-sonnet-4-5"
+    provider: anthropic
+    display_name: "Claude Sonnet 4.5"
+    description: "Balanced speed and intelligence for a wide range of tasks."
+    input_price: 3.00
+    output_price: 15.00
+    context_window: 200000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "anthropic/claude-sonnet-4-0"
+    provider: anthropic
+    display_name: "Claude Sonnet 4.0"
+    description: "Balanced speed and intelligence for a wide range of tasks."
+    input_price: 3.00
+    output_price: 15.00
+    context_window: 200000
+    capabilities: [vision, tools]
+
+  - id: "anthropic/claude-haiku-4-5"
+    provider: anthropic
+    display_name: "Claude Haiku 4.5"
+    description: "Fastest Claude model, designed for office document processing and high-volume business analysis."
+    input_price: 1.00
+    output_price: 5.00
+    context_window: 200000
+    capabilities: [vision, tools]
+
+  - id: "anthropic/claude-3-7-sonnet-latest"
+    provider: anthropic
+    display_name: "Claude 3.7 Sonnet"
+    description: "Claude 3.7 Sonnet with extended thinking for complex reasoning tasks."
+    input_price: 3.00
+    output_price: 15.00
+    context_window: 200000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "anthropic/claude-3-5-haiku-latest"
+    provider: anthropic
+    display_name: "Claude 3.5 Haiku"
+    description: "Fast and affordable legacy model for everyday tasks."
+    input_price: 0.80
+    output_price: 4.00
+    context_window: 200000
+    capabilities: [vision, tools]
+
+  - id: "anthropic/claude-3-opus-latest"
+    provider: anthropic
+    display_name: "Claude 3 Opus"
+    description: "Legacy flagship Claude 3 Opus for highly complex tasks."
+    input_price: 15.00
+    output_price: 75.00
+    context_window: 200000
+    capabilities: [vision, tools]
+
+  - id: "anthropic/claude-3-haiku-20240307"
+    provider: anthropic
+    display_name: "Claude 3 Haiku"
+    description: "Fast and compact legacy model for lightweight, high-volume workloads."
+    input_price: 0.25
+    output_price: 1.25
+    context_window: 200000
+    capabilities: [vision, tools]
+
+  # ── OpenAI ───────────────────────────────────────────────────────────────────
+
+  - id: "openai/gpt-5.4"
+    provider: openai
+    display_name: "GPT-5.4"
+    description: "OpenAI's most capable and efficient frontier model for professional work, with native computer-use abilities."
+    input_price: 2.50
+    output_price: 15.00
+    context_window: 1050000
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-5.4-mini"
+    provider: openai
+    display_name: "GPT-5.4 Mini"
+    description: "Compact GPT-5.4 variant balancing frontier capability and cost."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-5.4-nano"
+    provider: openai
+    display_name: "GPT-5.4 Nano"
+    description: "Ultra-lightweight GPT-5.4 variant targeting cost-sensitive, high-volume tasks."
+    input_price: 0.20
+    output_price: 1.25
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-5.3-chat-latest"
+    provider: openai
+    display_name: "GPT-5.3 Chat"
+    description: "Latest GPT-5.3 chat-optimized model."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-5.2"
+    provider: openai
+    display_name: "GPT-5.2"
+    description: "GPT-5.2 general-purpose model."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-5.2-pro"
+    provider: openai
+    display_name: "GPT-5.2 Pro"
+    description: "GPT-5.2 Pro allocates additional compute for the most complex problem-solving tasks."
+    input_price: 21.00
+    output_price: 168.00
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-5.1"
+    provider: openai
+    display_name: "GPT-5.1"
+    description: "GPT-5.1 general-purpose model."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-5.1-codex"
+    provider: openai
+    display_name: "GPT-5.1 Codex"
+    description: "GPT-5.1 specialized for code generation and software engineering tasks."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-5"
+    provider: openai
+    display_name: "GPT-5"
+    description: "OpenAI GPT-5 base model."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-5-mini"
+    provider: openai
+    display_name: "GPT-5 Mini"
+    description: "Compact GPT-5 variant for everyday tasks."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-5-nano"
+    provider: openai
+    display_name: "GPT-5 Nano"
+    description: "Ultra-lightweight GPT-5 variant for cost-sensitive use cases."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-4.1"
+    provider: openai
+    display_name: "GPT-4.1"
+    description: "Improved instruction-following and multimodal model with a 1M token context window."
+    input_price: null
+    output_price: null
+    context_window: 1000000
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-4.1-mini"
+    provider: openai
+    display_name: "GPT-4.1 Mini"
+    description: "Compact GPT-4.1 variant for everyday multimodal tasks."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-4.1-nano"
+    provider: openai
+    display_name: "GPT-4.1 Nano"
+    description: "Smallest GPT-4.1 variant for high-volume, cost-sensitive workloads."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-4o"
+    provider: openai
+    display_name: "GPT-4o"
+    description: "Omni model combining vision, audio, and text understanding in a 128K context."
+    input_price: null
+    output_price: null
+    context_window: 128000
+    capabilities: [vision, tools]
+
+  - id: "openai/gpt-4o-mini"
+    provider: openai
+    display_name: "GPT-4o Mini"
+    description: "Fast, affordable small model for focused tasks."
+    input_price: 0.15
+    output_price: 0.60
+    context_window: 128000
+    capabilities: [vision, tools]
+
+  - id: "openai/o4-mini"
+    provider: openai
+    display_name: "o4 Mini"
+    description: "Compact reasoning model balancing speed and deep thinking."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [tools, reasoning]
+
+  - id: "openai/o4-mini-deep-research"
+    provider: openai
+    display_name: "o4 Mini Deep Research"
+    description: "o4 Mini variant optimized for in-depth web research tasks."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [tools, reasoning]
+
+  - id: "openai/o3"
+    provider: openai
+    display_name: "o3"
+    description: "Advanced reasoning model for complex math, science, and coding."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [tools, reasoning]
+
+  - id: "openai/o3-mini"
+    provider: openai
+    display_name: "o3 Mini"
+    description: "Compact o3 variant for efficient deep reasoning."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [tools, reasoning]
+
+  - id: "openai/o3-pro"
+    provider: openai
+    display_name: "o3 Pro"
+    description: "High-compute o3 variant for the most demanding reasoning tasks."
+    input_price: 20.00
+    output_price: 80.00
+    context_window: null
+    capabilities: [tools, reasoning]
+
+  - id: "openai/o3-deep-research"
+    provider: openai
+    display_name: "o3 Deep Research"
+    description: "o3 variant optimized for comprehensive, multi-step web research."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [tools, reasoning]
+
+  - id: "openai/o1"
+    provider: openai
+    display_name: "o1"
+    description: "First-generation reasoning model with extended thinking for complex problems."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [tools, reasoning]
+
+  - id: "openai/o1-mini"
+    provider: openai
+    display_name: "o1 Mini"
+    description: "Compact o1 reasoning model for cost-efficient deep thinking."
+    input_price: 1.10
+    output_price: 4.40
+    context_window: null
+    capabilities: [tools, reasoning]
+
+  # ── TogetherAI ───────────────────────────────────────────────────────────────
+
+  - id: "togetherai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+    provider: togetherai
+    display_name: "Llama 4 Maverick 17B"
+    description: "Natively multimodal MoE with 128 experts (400B total), outperforms GPT-4o and Gemini 2.0 Flash across multimodal benchmarks."
+    input_price: 0.27
+    output_price: 0.85
+    context_window: 1000000
+    capabilities: [vision, tools]
+
+  - id: "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo"
+    provider: togetherai
+    display_name: "Llama 3.3 70B Instruct Turbo"
+    description: "Multilingual 70B model delivering enhanced performance and matching Llama 3.2 90B on text-only tasks."
+    input_price: 0.88
+    output_price: 0.88
+    context_window: 128000
+    capabilities: [tools]
+
+  - id: "togetherai/meta-llama/Llama-3.2-3B-Instruct-Turbo"
+    provider: togetherai
+    display_name: "Llama 3.2 3B Instruct Turbo"
+    description: "Lightweight 3B model optimized for on-device summarization, instruction following, and rewriting."
+    input_price: 0.06
+    output_price: 0.06
+    context_window: 128000
+    capabilities: [tools]
+
+  - id: "togetherai/Qwen/Qwen3.5-397B-A17B"
+    provider: togetherai
+    display_name: "Qwen 3.5 397B"
+    description: "Multimodal MoE foundation model, state-of-the-art across chat, RAG, vision-language, and agentic workflows."
+    input_price: 0.30
+    output_price: 1.20
+    context_window: 262000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "togetherai/Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
+    provider: togetherai
+    display_name: "Qwen3 235B Instruct"
+    description: "High-throughput MoE in non-thinking mode, supporting multilingual dialogue across 100+ languages."
+    input_price: 0.20
+    output_price: 0.60
+    context_window: 262000
+    capabilities: [tools]
+
+  - id: "togetherai/Qwen/Qwen3-235B-A22B-Thinking-2507"
+    provider: togetherai
+    display_name: "Qwen3 235B Thinking"
+    description: "Always-on thinking variant of Qwen3-235B for deep chain-of-thought on complex math, coding, and analytical tasks."
+    input_price: 0.65
+    output_price: 3.00
+    context_window: 262000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
+    provider: togetherai
+    display_name: "Qwen3 Coder 480B"
+    description: "Qwen's most agentic code model, achieving results comparable to Claude Sonnet on agentic coding and repository-scale tasks."
+    input_price: 0.22
+    output_price: 1.00
+    context_window: 262000
+    capabilities: [tools]
+
+  - id: "togetherai/Qwen/Qwen3-Coder-Next-FP8"
+    provider: togetherai
+    display_name: "Qwen3 Coder Next"
+    description: "Next-generation coding model with hybrid thinking mode for adaptive reasoning depth."
+    input_price: null
+    output_price: null
+    context_window: 256000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/Qwen/Qwen3-Next-80B-A3B-Instruct"
+    provider: togetherai
+    display_name: "Qwen3 Next 80B"
+    description: "Efficient 80B MoE matching Qwen3-235B performance while using less than 10% of its training cost."
+    input_price: 0.15
+    output_price: 1.50
+    context_window: 262000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/Qwen/Qwen2.5-7B-Instruct-Turbo"
+    provider: togetherai
+    display_name: "Qwen2.5 7B Instruct Turbo"
+    description: "Compact 7B model with strong improvements in coding, math, and instruction following."
+    input_price: 0.30
+    output_price: 1.20
+    context_window: 128000
+    capabilities: [tools]
+
+  - id: "togetherai/deepseek-ai/DeepSeek-V3.1"
+    provider: togetherai
+    display_name: "DeepSeek V3.1"
+    description: "Hybrid thinking/non-thinking model with significantly improved tool usage and agent task performance."
+    input_price: 0.60
+    output_price: 1.70
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/deepseek-ai/DeepSeek-R1"
+    provider: togetherai
+    display_name: "DeepSeek R1"
+    description: "Open reasoning model with 671B parameters, achieving performance comparable to OpenAI o1 on math, code, and reasoning."
+    input_price: 3.00
+    output_price: 7.00
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/moonshotai/Kimi-K2.5"
+    provider: togetherai
+    display_name: "Kimi K2.5"
+    description: "Multimodal 1T-parameter MoE with Agent Swarm technology for coordinating up to 100 specialized AI agents simultaneously."
+    input_price: 0.50
+    output_price: 2.80
+    context_window: 256000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "togetherai/moonshotai/Kimi-K2-Instruct-0905"
+    provider: togetherai
+    display_name: "Kimi K2 Instruct"
+    description: "Reflex-grade agentic model optimized for fast autonomous tool-calling without long thinking."
+    input_price: 1.00
+    output_price: 3.00
+    context_window: 256000
+    capabilities: [tools]
+
+  - id: "togetherai/moonshotai/Kimi-K2-Thinking"
+    provider: togetherai
+    display_name: "Kimi K2 Thinking"
+    description: "Thinking agent that reasons step-by-step while invoking tools, state-of-the-art on Humanity's Last Exam and BrowseComp."
+    input_price: 1.20
+    output_price: 4.00
+    context_window: 256000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/MiniMaxAI/MiniMax-M2.5"
+    provider: togetherai
+    display_name: "MiniMax M2.5"
+    description: "RL-trained MoE achieving state-of-the-art in coding (80.2% SWE-Bench Verified) and agentic tool use."
+    input_price: 0.30
+    output_price: 1.20
+    context_window: 200000
+    capabilities: [tools]
+
+  - id: "togetherai/zai-org/GLM-5"
+    provider: togetherai
+    display_name: "GLM-5"
+    description: "Zhipu AI's fifth-generation ~745B MoE model designed for complex system engineering and long-range agent tasks."
+    input_price: 1.00
+    output_price: 3.20
+    context_window: 200000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/zai-org/GLM-4.7"
+    provider: togetherai
+    display_name: "GLM-4.7"
+    description: "Zhipu AI ~400B foundation model with strong coding, reasoning, and agentic capabilities."
+    input_price: 0.45
+    output_price: 2.00
+    context_window: 200000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/openai/gpt-oss-120b"
+    provider: togetherai
+    display_name: "GPT OSS 120B (TogetherAI)"
+    description: "OpenAI's open-weight 120B MoE achieving near-parity with o4-mini on core reasoning benchmarks."
+    input_price: 0.15
+    output_price: 0.60
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/google/gemma-3n-E4B-it"
+    provider: togetherai
+    display_name: "Gemma 3n E4B"
+    description: "Google's on-device multimodal model with an effective 4B memory footprint, first sub-10B model to exceed 1300 on LMArena."
+    input_price: 0.02
+    output_price: 0.04
+    context_window: 32000
+    capabilities: [vision, audio, video]
+
+  - id: "togetherai/google/gemma-3-27b-it"
+    provider: togetherai
+    display_name: "Gemma 3 27B"
+    description: "Google's 27B open multimodal model built from Gemini 2.0 technology, supporting 128K context and 140+ languages."
+    input_price: 0.10
+    output_price: 0.10
+    context_window: 128000
+    capabilities: [vision]
+
+  - id: "togetherai/deepcogito/cogito-v2-1-671b"
+    provider: togetherai
+    display_name: "Cogito v2.1 671B"
+    description: "DeepCogito 671B MoE trained via process supervision, competitive with frontier closed models while using fewer reasoning tokens."
+    input_price: 1.25
+    output_price: 1.25
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/mistralai/Mistral-Small-24B-Instruct-2501"
+    provider: togetherai
+    display_name: "Mistral Small 24B"
+    description: "24B dense model with native function calling, JSON output, and dozens of languages — fits on a single RTX 4090."
+    input_price: null
+    output_price: null
+    context_window: 32000
+    capabilities: [tools]
+
+  # ── Google ───────────────────────────────────────────────────────────────────
+
+  - id: "google/gemini-3.1-pro-preview"
+    provider: google
+    display_name: "Gemini 3.1 Pro"
+    description: "Upgraded core intelligence model representing a step forward in reasoning for complex problem-solving across consumer and developer products."
+    input_price: 2.00
+    output_price: 12.00
+    context_window: 1000000
+    capabilities: [vision, audio, video, tools, reasoning]
+
+  - id: "google/gemini-3.1-flash-lite-preview"
+    provider: google
+    display_name: "Gemini 3.1 Flash Lite"
+    description: "Fastest and most cost-efficient Gemini 3 model for high-volume developer workloads, with 2.5x faster time to first token versus 2.5 Flash."
+    input_price: 0.25
+    output_price: 1.50
+    context_window: 1000000
+    capabilities: [vision, audio, tools, reasoning]
+
+  - id: "google/gemini-3-flash-preview"
+    provider: google
+    display_name: "Gemini 3 Flash"
+    description: "Combines Gemini 3 Pro reasoning with Flash latency and cost, designed for the most complex agentic workflows."
+    input_price: 0.50
+    output_price: 3.00
+    context_window: 1000000
+    capabilities: [vision, audio, tools, reasoning]
+
+  - id: "google/gemini-2.5-pro"
+    provider: google
+    display_name: "Gemini 2.5 Pro"
+    description: "Most advanced reasoning Gemini model, capable of solving complex problems across text, audio, images, video, and code repositories."
+    input_price: 1.25
+    output_price: 10.00
+    context_window: 1000000
+    capabilities: [vision, audio, video, tools, reasoning]
+
+  - id: "google/gemini-2.5-pro-preview-tts"
+    provider: google
+    display_name: "Gemini 2.5 Pro TTS"
+    description: "Text-to-speech variant of Gemini 2.5 Pro for generating audio output from text input."
+    input_price: 1.25
+    output_price: 10.00
+    context_window: 1000000
+    capabilities: [audio]
+
+  - id: "google/gemini-2.5-flash"
+    provider: google
+    display_name: "Gemini 2.5 Flash"
+    description: "Best price-to-performance Gemini model with well-rounded capabilities, the first Flash model featuring thinking."
+    input_price: 0.30
+    output_price: 2.50
+    context_window: 1000000
+    capabilities: [vision, audio, video, tools, reasoning]
+
+  - id: "google/gemini-2.5-flash-lite"
+    provider: google
+    display_name: "Gemini 2.5 Flash Lite"
+    description: "Fastest and most budget-friendly multimodal reasoning in the 2.5 family, ideal for classification, translation, and high-scale operations."
+    input_price: 0.10
+    output_price: 0.40
+    context_window: 1000000
+    capabilities: [vision, audio, video, tools, reasoning]
+
+  - id: "google/gemini-2.5-flash-native-audio-preview-12-2025"
+    provider: google
+    display_name: "Gemini 2.5 Flash Native Audio"
+    description: "Native audio dialog model for real-time voice conversations with thinking support."
+    input_price: 0.30
+    output_price: 2.50
+    context_window: 1000000
+    capabilities: [audio, reasoning]
+
+  - id: "google/gemini-2.5-flash-image"
+    provider: google
+    display_name: "Gemini 2.5 Flash Image"
+    description: "Specialized model for image generation and editing from text and image prompts (~$0.039 per image output)."
+    input_price: 0.30
+    output_price: 30.00
+    context_window: 32000
+    capabilities: [vision, image_generation]
+
+  - id: "google/gemini-2.5-flash-preview-tts"
+    provider: google
+    display_name: "Gemini 2.5 Flash TTS"
+    description: "Text-to-speech variant of Gemini 2.5 Flash for audio generation at lower cost."
+    input_price: 0.15
+    output_price: 0.60
+    context_window: 1000000
+    capabilities: [audio]
+
+  # ── xAI ─────────────────────────────────────────────────────────────────────
+
+  - id: "xai/grok-4"
+    provider: xai
+    display_name: "Grok 4"
+    description: "xAI's flagship reasoning model for advanced math, logic, code, and scientific thinking, trained with RL to use tools like code interpreter and web browsing."
+    input_price: 3.00
+    output_price: 15.00
+    context_window: 256000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "xai/grok-4-fast-reasoning"
+    provider: xai
+    display_name: "Grok 4 Fast Reasoning"
+    description: "Cost-efficient Grok 4 variant achieving comparable performance using 40% fewer thinking tokens, with a 2M token context window."
+    input_price: 0.20
+    output_price: 0.50
+    context_window: 2000000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "xai/grok-4-fast-non-reasoning"
+    provider: xai
+    display_name: "Grok 4 Fast"
+    description: "Non-reasoning Grok 4 Fast variant offering frontier-level performance with exceptional token efficiency."
+    input_price: 0.20
+    output_price: 0.50
+    context_window: 2000000
+    capabilities: [vision, tools]
+
+  - id: "xai/grok-4-1-fast-reasoning"
+    provider: xai
+    display_name: "Grok 4.1 Fast Reasoning"
+    description: "Grok 4.1 reasoning variant with MCP and Agent Tools API support for building agentic applications."
+    input_price: 0.20
+    output_price: 0.50
+    context_window: 2000000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "xai/grok-4-1-fast-non-reasoning"
+    provider: xai
+    display_name: "Grok 4.1 Fast"
+    description: "Grok 4.1 non-reasoning variant with MCP and Agent Tools API support, optimized for high-throughput agentic workloads."
+    input_price: 0.20
+    output_price: 0.50
+    context_window: 2000000
+    capabilities: [vision, tools]
+
+  # ── Groq ─────────────────────────────────────────────────────────────────────
+
+  - id: "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+    provider: groq
+    display_name: "Llama 4 Scout 17B (Groq)"
+    description: "Natively multimodal MoE with an industry-leading 10M token context, delivered at Groq's ultra-low latency."
+    input_price: 0.11
+    output_price: 0.34
+    context_window: 10000000
+    capabilities: [vision, tools]
+
+  - id: "groq/llama-3.3-70b-versatile"
+    provider: groq
+    display_name: "Llama 3.3 70B Versatile (Groq)"
+    description: "Multilingual 70B model for versatile tasks, delivered at Groq's ultra-low latency."
+    input_price: 0.59
+    output_price: 0.79
+    context_window: 128000
+    capabilities: [tools]
+
+  - id: "groq/llama-3.1-8b-instant"
+    provider: groq
+    display_name: "Llama 3.1 8B Instant (Groq)"
+    description: "Most compact Llama 3.1 model, optimized for instant responses on Groq's LPU hardware."
+    input_price: 0.05
+    output_price: 0.08
+    context_window: 128000
+    capabilities: [tools]
+
+  - id: "groq/qwen/qwen3-32b"
+    provider: groq
+    display_name: "Qwen3 32B (Groq)"
+    description: "Largest dense Qwen3 model with hybrid thinking mode, delivered at Groq's ultra-low latency for seamless switching between reasoning and fast chat."
+    input_price: 0.29
+    output_price: 0.59
+    context_window: 131000
+    capabilities: [tools, reasoning]
+
+  - id: "groq/openai/gpt-oss-120b"
+    provider: groq
+    display_name: "GPT OSS 120B (Groq)"
+    description: "OpenAI's open-weight 120B MoE near-parity with o4-mini on reasoning benchmarks, running at Groq speeds."
+    input_price: 0.15
+    output_price: 0.75
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "groq/openai/gpt-oss-20b"
+    provider: groq
+    display_name: "GPT OSS 20B (Groq)"
+    description: "OpenAI's compact 20B MoE delivering o3-mini-level results at Groq's ultra-low latency."
+    input_price: 0.075
+    output_price: 0.30
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "groq/moonshotai/kimi-k2-instruct-0905"
+    provider: groq
+    display_name: "Kimi K2 Instruct (Groq)"
+    description: "Moonshot AI's 1T-parameter agentic model running at Groq speeds for rapid tool-calling and autonomous task execution."
+    input_price: 1.00
+    output_price: 3.00
+    context_window: 256000
+    capabilities: [tools]
+
+  # ── Fireworks ────────────────────────────────────────────────────────────────
+
+  - id: "fireworks/accounts/fireworks/models/llama4-maverick-instruct-basic"
+    provider: fireworks
+    display_name: "Llama 4 Maverick (Fireworks)"
+    description: "Natively multimodal MoE with 17B active parameters and 128 experts (400B total), supporting 1M token context for multimodal tasks."
+    input_price: 0.27
+    output_price: 0.85
+    context_window: 1000000
+    capabilities: [vision, tools]
+
+  - id: "fireworks/accounts/fireworks/models/llama4-scout-instruct-basic"
+    provider: fireworks
+    display_name: "Llama 4 Scout (Fireworks)"
+    description: "Natively multimodal MoE with 17B active parameters and 16 experts, featuring an industry-leading 10M token context on a single GPU."
+    input_price: null
+    output_price: null
+    context_window: 10000000
+    capabilities: [vision, tools]
+
+  - id: "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct"
+    provider: fireworks
+    display_name: "Llama 3.3 70B (Fireworks)"
+    description: "Multilingual 70B model matching Llama 3.2 90B on text-only tasks with broad language support."
+    input_price: 0.90
+    output_price: 0.90
+    context_window: 128000
+    capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/llama-v3p1-405b-instruct"
+    provider: fireworks
+    display_name: "Llama 3.1 405B (Fireworks)"
+    description: "Largest Llama 3.1 model with 405B parameters, optimized for synthetic data generation, LLM-as-a-Judge, and distillation."
+    input_price: 3.00
+    output_price: 3.00
+    context_window: 128000
+    capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct"
+    provider: fireworks
+    display_name: "Llama 3.1 70B (Fireworks)"
+    description: "Multilingual 70B model designed for large-scale AI-native applications with 128K context and 8-language support."
+    input_price: 0.90
+    output_price: 0.90
+    context_window: 128000
+    capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/llama-v3p1-8b-instruct"
+    provider: fireworks
+    display_name: "Llama 3.1 8B (Fireworks)"
+    description: "Most compact Llama 3.1 model for efficient deployment on consumer GPUs with multilingual support."
+    input_price: 0.20
+    output_price: 0.20
+    context_window: 128000
+    capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/qwen3-coder-480b-a35b-instruct"
+    provider: fireworks
+    display_name: "Qwen3 Coder 480B (Fireworks)"
+    description: "Qwen's most agentic code model, a 480B MoE (35B active) for agentic coding, browser-use, and repository-scale tasks."
+    input_price: 0.45
+    output_price: 1.80
+    context_window: 262000
+    capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/qwen3-235b-a22b"
+    provider: fireworks
+    display_name: "Qwen3 235B (Fireworks)"
+    description: "MoE with 235B total parameters (22B active), supporting seamless switching between thinking and non-thinking modes across 100+ languages."
+    input_price: null
+    output_price: null
+    context_window: 262000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/qwen3-32b"
+    provider: fireworks
+    display_name: "Qwen3 32B (Fireworks)"
+    description: "Largest dense Qwen3 model with hybrid thinking mode, performing on par with Qwen2.5-72B despite being less than half the size."
+    input_price: null
+    output_price: null
+    context_window: 131000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/qwen3-8b"
+    provider: fireworks
+    display_name: "Qwen3 8B (Fireworks)"
+    description: "Dense 8B model with seamless switching between thinking and non-thinking modes."
+    input_price: 0.20
+    output_price: 0.20
+    context_window: 131000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/qwen2p5-72b-instruct"
+    provider: fireworks
+    display_name: "Qwen2.5 72B (Fireworks)"
+    description: "Flagship Qwen2.5 dense model with 72B parameters, strong across coding, math, and instruction following with 29+ language support."
+    input_price: null
+    output_price: null
+    context_window: 128000
+    capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/deepseek-v3p2"
+    provider: fireworks
+    display_name: "DeepSeek V3.2 (Fireworks)"
+    description: "MoE harmonizing efficiency with superior reasoning and agent performance, featuring DeepSeek Sparse Attention for long-context efficiency."
+    input_price: 0.56
+    output_price: 1.68
+    context_window: 163000
+    capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/deepseek-v3p1"
+    provider: fireworks
+    display_name: "DeepSeek V3.1 (Fireworks)"
+    description: "Hybrid thinking/non-thinking model with significantly improved tool usage and agent task performance."
+    input_price: 0.56
+    output_price: 1.68
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/deepseek-r1"
+    provider: fireworks
+    display_name: "DeepSeek R1 (Fireworks)"
+    description: "Open reasoning model with 671B parameters, achieving performance comparable to OpenAI o1 across math, code, and reasoning."
+    input_price: 3.00
+    output_price: 8.00
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/deepseek-r1-0528"
+    provider: fireworks
+    display_name: "DeepSeek R1 0528 (Fireworks)"
+    description: "Updated R1 with improved RL, reduced hallucinations, JSON output, and function calling — performance approaching o3 and Gemini 2.5 Pro."
+    input_price: 3.00
+    output_price: 8.00
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/deepseek-r1-distill-llama-70b"
+    provider: fireworks
+    display_name: "DeepSeek R1 Distill Llama 70B (Fireworks)"
+    description: "70B dense model fine-tuned on DeepSeek-R1 reasoning data for strong chain-of-thought in a smaller form factor."
+    input_price: null
+    output_price: null
+    context_window: 128000
+    capabilities: [reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/kimi-k2p5"
+    provider: fireworks
+    display_name: "Kimi K2.5 (Fireworks)"
+    description: "Moonshot AI's open-source multimodal 1T-parameter MoE with Agent Swarm technology for coordinating up to 100 specialized AI agents."
+    input_price: 0.60
+    output_price: 3.00
+    context_window: 256000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/kimi-k2-instruct-0905"
+    provider: fireworks
+    display_name: "Kimi K2 Instruct (Fireworks)"
+    description: "Reflex-grade agentic model optimized for fast autonomous tool-calling without long thinking."
+    input_price: null
+    output_price: null
+    context_window: 256000
+    capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/kimi-k2-thinking"
+    provider: fireworks
+    display_name: "Kimi K2 Thinking (Fireworks)"
+    description: "Open-source thinking agent that reasons step-by-step while dynamically invoking tools, supporting 200–300 sequential tool calls without drift."
+    input_price: 0.60
+    output_price: 2.50
+    context_window: 256000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/minimax-m2p5"
+    provider: fireworks
+    display_name: "MiniMax M2.5 (Fireworks)"
+    description: "MoE with 230B total parameters (10B active), achieving SOTA in coding and agentic tool use, completing tasks 37% faster than its predecessor."
+    input_price: null
+    output_price: null
+    context_window: 200000
+    capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/gpt-oss-120b"
+    provider: fireworks
+    display_name: "GPT OSS 120B (Fireworks)"
+    description: "OpenAI's open-weight 120B MoE achieving near-parity with o4-mini on reasoning benchmarks."
+    input_price: 0.15
+    output_price: 0.60
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/gpt-oss-20b"
+    provider: fireworks
+    display_name: "GPT OSS 20B (Fireworks)"
+    description: "OpenAI's compact 20B MoE similar to o3-mini, running on edge devices with 16GB memory."
+    input_price: 0.07
+    output_price: 0.30
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/mistral-large-3-fp8"
+    provider: fireworks
+    display_name: "Mistral Large 3 (Fireworks)"
+    description: "Mistral's open-weight multimodal frontier model with a granular MoE architecture (41B active, 675B total) and 256K context."
+    input_price: null
+    output_price: null
+    context_window: 256000
+    capabilities: [vision, tools]
+
+  - id: "fireworks/accounts/fireworks/models/mistral-small-24b-instruct-2501"
+    provider: fireworks
+    display_name: "Mistral Small 24B (Fireworks)"
+    description: "24B dense model with native function calling, JSON output, and dozens of languages — fits on a single RTX 4090."
+    input_price: null
+    output_price: null
+    context_window: 32000
+    capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/gemma-3-27b-it"
+    provider: fireworks
+    display_name: "Gemma 3 27B (Fireworks)"
+    description: "Google's 27B multimodal open model supporting 128K context and 140+ languages on a single GPU/TPU."
+    input_price: 0.10
+    output_price: 0.10
+    context_window: 128000
+    capabilities: [vision]
+
+  - id: "fireworks/accounts/fireworks/models/glm-5"
+    provider: fireworks
+    display_name: "GLM-5 (Fireworks)"
+    description: "Zhipu AI's fifth-generation ~745B MoE model designed for complex system engineering and long-range agent tasks."
+    input_price: 1.00
+    output_price: 3.20
+    context_window: 200000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/glm-4p5"
+    provider: fireworks
+    display_name: "GLM-4.5 (Fireworks)"
+    description: "Zhipu AI foundation model with strong coding, reasoning, and agentic capabilities for real-world development environments."
+    input_price: 0.22
+    output_price: 0.88
+    context_window: 128000
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/qwq-32b"
+    provider: fireworks
+    display_name: "QwQ 32B (Fireworks)"
+    description: "Qwen's dedicated 32B reasoning model trained via RL with outcome-based rewards, competitive with DeepSeek-R1 and o1-mini."
+    input_price: null
+    output_price: null
+    context_window: 131000
+    capabilities: [tools, reasoning]
