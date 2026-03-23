@@ -278,6 +278,17 @@ if TYPE_CHECKING:
         ScraperAPIGoogleSearch,
         ScraperAPIScrape,
     )
+    from .shopify import (
+        ShopifyGetShopDetails,
+        ShopifyGetProducts,
+        ShopifyGetProduct,
+        ShopifyCreateProduct,
+        ShopifyDeleteProduct,
+        ShopifyGetInventoryLevel,
+        ShopifyAdjustInventory,
+        ShopifyUpdateInventoryTracking,
+        ShopifyGetVariantInventoryItem,
+    )
     from .slack import (
         SlackReadMessages,
         SlackSendMessage,
@@ -1571,6 +1582,15 @@ __all__ = [
     "SalesforceSearchTasks",
     "SalesforceQuery",
     "SalesforceCreateRecord",
+    "ShopifyGetShopDetails",
+    "ShopifyGetProducts",
+    "ShopifyGetProduct",
+    "ShopifyCreateProduct",
+    "ShopifyDeleteProduct",
+    "ShopifyGetInventoryLevel",
+    "ShopifyAdjustInventory",
+    "ShopifyUpdateInventoryTracking",
+    "ShopifyGetVariantInventoryItem",
 ]
 
 _LAZY_IMPORTS = {
@@ -2337,6 +2357,15 @@ _LAZY_IMPORTS = {
     "SalesforceSearchTasks": ".salesforce",
     "SalesforceQuery": ".salesforce",
     "SalesforceCreateRecord": ".salesforce",
+    "ShopifyGetShopDetails": ".shopify",
+    "ShopifyGetProducts": ".shopify",
+    "ShopifyGetProduct": ".shopify",
+    "ShopifyCreateProduct": ".shopify",
+    "ShopifyDeleteProduct": ".shopify",
+    "ShopifyGetInventoryLevel": ".shopify",
+    "ShopifyAdjustInventory": ".shopify",
+    "ShopifyUpdateInventoryTracking": ".shopify",
+    "ShopifyGetVariantInventoryItem": ".shopify",
 }
 
 
