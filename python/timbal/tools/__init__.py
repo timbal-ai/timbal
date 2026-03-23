@@ -239,6 +239,12 @@ if TYPE_CHECKING:
         PowerBIGetReport,
     )
     from .read import Read
+    from .replicate import (
+        ReplicateCreatePrediction,
+        ReplicateGetPrediction,
+        ReplicateCancelPrediction,
+        ReplicateSearchModels,
+    )
     from .scraperapi import (
         ScraperAPIAmazonProduct,
         ScraperAPIAmazonSearch,
@@ -1511,6 +1517,10 @@ __all__ = [
     "PowerBIQueryDataset",
     "PowerBIListReports",
     "PowerBIGetReport",
+    "ReplicateCreatePrediction",
+    "ReplicateGetPrediction",
+    "ReplicateCancelPrediction",
+    "ReplicateSearchModels",
 ]
 
 _LAZY_IMPORTS = {
@@ -2249,6 +2259,10 @@ _LAZY_IMPORTS = {
     "PowerBIQueryDataset": ".powerbi",
     "PowerBIListReports": ".powerbi",
     "PowerBIGetReport": ".powerbi",
+    "ReplicateCreatePrediction": ".replicate",
+    "ReplicateGetPrediction": ".replicate",
+    "ReplicateCancelPrediction": ".replicate",
+    "ReplicateSearchModels": ".replicate",
 }
 
 
