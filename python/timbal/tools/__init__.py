@@ -84,6 +84,13 @@ if TYPE_CHECKING:
         FalQueueCancel,
     )
     from .firecrawl import FirecrawlCrawl, FirecrawlExtract, FirecrawlMap, FirecrawlScrape, FirecrawlSearch
+    from .gemini_images import (
+        GeminiImagesEditImage,
+        GeminiImagesGenerateImage,
+        GeminiImagesAnalyzeImage,
+        GeminiImagesGenerateImageWithReference,
+        GeminiImagesImageToBase64,
+    )
     from .gmail import GmailAddLabel, GmailListLabels, GmailRemoveLabel, GmailReply, GmailSearch, GmailSend
     from .google_calendar import (
         GoogleCalendarCheckFreeSlots,
@@ -1443,6 +1450,11 @@ __all__ = [
     "MicrosoftExcelListWorkbooks",
     "MicrosoftExcelGetSheetById",
     "MicrosoftExcelRenameSheet",
+    "GeminiImagesEditImage",
+    "GeminiImagesGenerateImage",
+    "GeminiImagesAnalyzeImage",
+    "GeminiImagesGenerateImageWithReference",
+    "GeminiImagesImageToBase64",
 ]
 
 _LAZY_IMPORTS = {
@@ -2152,6 +2164,11 @@ _LAZY_IMPORTS = {
     "MicrosoftExcelListWorkbooks": ".excel",
     "MicrosoftExcelGetSheetById": ".excel",
     "MicrosoftExcelRenameSheet": ".excel",
+    "GeminiImagesEditImage": ".gemini_images",
+    "GeminiImagesGenerateImage": ".gemini_images",
+    "GeminiImagesAnalyzeImage": ".gemini_images",
+    "GeminiImagesGenerateImageWithReference": ".gemini_images",
+    "GeminiImagesImageToBase64": ".gemini_images",
 }
 
 
