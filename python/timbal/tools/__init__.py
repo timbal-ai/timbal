@@ -8,6 +8,19 @@ if TYPE_CHECKING:
     from .bash import Bash
     from .cala import CalaSearch
     from .edit import Edit
+    from .elevenlabs import (
+        ElevenLabsTextToSpeech,
+        ElevenLabsListPhoneNumbers,
+        ElevenLabsMakeOutboundCall,
+        ElevenLabsListAgents,
+        ElevenLabsGetModels,
+        ElevenLabsGetVoicesWithDescriptions,
+        ElevenLabsListHistory,
+        ElevenLabsGetAudioFromHistoryItem,
+        ElevenLabsDownloadHistoryItems,
+        ElevenLabsCreateAgent,
+        ElevenLabsAddVoice,
+    )
     from .firecrawl import FirecrawlCrawl, FirecrawlExtract, FirecrawlMap, FirecrawlScrape, FirecrawlSearch
     from .gmail import GmailAddLabel, GmailListLabels, GmailRemoveLabel, GmailReply, GmailSearch, GmailSend
     from .google_calendar import (
@@ -419,6 +432,17 @@ __all__ = [
     "HubSpotDeleteAssociation",
     "HubSpotGetAssociationTypes",
     "HubSpotGetUsers",
+    "ElevenLabsTextToSpeech",
+    "ElevenLabsListPhoneNumbers",
+    "ElevenLabsMakeOutboundCall",
+    "ElevenLabsListAgents",
+    "ElevenLabsGetModels",
+    "ElevenLabsGetVoicesWithDescriptions",
+    "ElevenLabsListHistory",
+    "ElevenLabsGetAudioFromHistoryItem",
+    "ElevenLabsDownloadHistoryItems",
+    "ElevenLabsCreateAgent",
+    "ElevenLabsAddVoice",
 ]
 
 _LAZY_IMPORTS = {
@@ -623,6 +647,17 @@ _LAZY_IMPORTS = {
     "HubSpotDeleteAssociation": ".hubspot",
     "HubSpotGetAssociationTypes": ".hubspot",
     "HubSpotGetUsers": ".hubspot",
+    "ElevenLabsTextToSpeech": ".elevenlabs",
+    "ElevenLabsListPhoneNumbers": ".elevenlabs",
+    "ElevenLabsMakeOutboundCall": ".elevenlabs",
+    "ElevenLabsListAgents": ".elevenlabs",
+    "ElevenLabsGetModels": ".elevenlabs",
+    "ElevenLabsGetVoicesWithDescriptions": ".elevenlabs",
+    "ElevenLabsListHistory": ".elevenlabs",
+    "ElevenLabsGetAudioFromHistoryItem": ".elevenlabs",
+    "ElevenLabsDownloadHistoryItems": ".elevenlabs",
+    "ElevenLabsCreateAgent": ".elevenlabs",
+    "ElevenLabsAddVoice": ".elevenlabs",
 }
 
 
