@@ -29,8 +29,8 @@ models:
     provider: anthropic
     display_name: "Claude Opus 4.1"
     description: "Previous-generation Opus model with high intelligence for complex reasoning tasks."
-    input_price: 5.00
-    output_price: 25.00
+    input_price: 15.00
+    output_price: 75.00
     context_window: 200000
     capabilities: [vision, tools, reasoning]
 
@@ -38,8 +38,8 @@ models:
     provider: anthropic
     display_name: "Claude Opus 4.0"
     description: "Earlier Opus generation model for demanding reasoning and analysis tasks."
-    input_price: 5.00
-    output_price: 25.00
+    input_price: 15.00
+    output_price: 75.00
     context_window: 200000
     capabilities: [vision, tools, reasoning]
 
@@ -222,7 +222,7 @@ models:
     description: "Improved instruction-following and multimodal model with a 1M token context window."
     input_price: 2.00
     output_price: 8.00
-    context_window: 1000000
+    context_window: 1050000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-4.1-mini"
@@ -402,8 +402,8 @@ models:
     provider: togetherai
     display_name: "Qwen3 Coder Next"
     description: "Next-generation coding model with hybrid thinking mode for adaptive reasoning depth."
-    input_price: null
-    output_price: null
+    input_price: 0.50
+    output_price: 1.20
     context_window: 256000
     capabilities: [tools, reasoning]
 
@@ -537,8 +537,8 @@ models:
     provider: togetherai
     display_name: "Mistral Small 24B"
     description: "24B dense model with native function calling, JSON output, and dozens of languages — fits on a single RTX 4090."
-    input_price: null
-    output_price: null
+    input_price: 0.10
+    output_price: 0.30
     context_window: 32000
     capabilities: [tools]
 
@@ -761,8 +761,8 @@ models:
     provider: fireworks
     display_name: "Llama 4 Scout (Fireworks)"
     description: "Natively multimodal MoE with 17B active parameters and 16 experts, featuring an industry-leading 10M token context on a single GPU."
-    input_price: null
-    output_price: null
+    input_price: 1.20
+    output_price: 1.20
     context_window: 10000000
     capabilities: [vision, tools]
 
@@ -815,8 +815,8 @@ models:
     provider: fireworks
     display_name: "Qwen3 235B (Fireworks)"
     description: "MoE with 235B total parameters (22B active), supporting seamless switching between thinking and non-thinking modes across 100+ languages."
-    input_price: null
-    output_price: null
+    input_price: 1.20
+    output_price: 1.20
     context_window: 262000
     capabilities: [tools, reasoning]
 
@@ -824,8 +824,8 @@ models:
     provider: fireworks
     display_name: "Qwen3 32B (Fireworks)"
     description: "Largest dense Qwen3 model with hybrid thinking mode, performing on par with Qwen2.5-72B despite being less than half the size."
-    input_price: null
-    output_price: null
+    input_price: 0.90
+    output_price: 0.90
     context_window: 131000
     capabilities: [tools, reasoning]
 
@@ -842,8 +842,8 @@ models:
     provider: fireworks
     display_name: "Qwen2.5 72B (Fireworks)"
     description: "Flagship Qwen2.5 dense model with 72B parameters, strong across coding, math, and instruction following with 29+ language support."
-    input_price: null
-    output_price: null
+    input_price: 0.90
+    output_price: 0.90
     context_window: 128000
     capabilities: [tools]
 
@@ -887,8 +887,8 @@ models:
     provider: fireworks
     display_name: "DeepSeek R1 Distill Llama 70B (Fireworks)"
     description: "70B dense model fine-tuned on DeepSeek-R1 reasoning data for strong chain-of-thought in a smaller form factor."
-    input_price: null
-    output_price: null
+    input_price: 0.90
+    output_price: 0.90
     context_window: 128000
     capabilities: [reasoning]
 
@@ -905,8 +905,8 @@ models:
     provider: fireworks
     display_name: "Kimi K2 Instruct (Fireworks)"
     description: "Reflex-grade agentic model optimized for fast autonomous tool-calling without long thinking."
-    input_price: null
-    output_price: null
+    input_price: 0.60
+    output_price: 2.50
     context_window: 256000
     capabilities: [tools]
 
@@ -923,8 +923,8 @@ models:
     provider: fireworks
     display_name: "MiniMax M2.5 (Fireworks)"
     description: "MoE with 230B total parameters (10B active), achieving SOTA in coding and agentic tool use, completing tasks 37% faster than its predecessor."
-    input_price: null
-    output_price: null
+    input_price: 0.30
+    output_price: 1.20
     context_window: 200000
     capabilities: [tools]
 
@@ -950,8 +950,8 @@ models:
     provider: fireworks
     display_name: "Mistral Large 3 (Fireworks)"
     description: "Mistral's open-weight multimodal frontier model with a granular MoE architecture (41B active, 675B total) and 256K context."
-    input_price: null
-    output_price: null
+    input_price: 0.90
+    output_price: 0.90
     context_window: 256000
     capabilities: [vision, tools]
 
@@ -959,8 +959,8 @@ models:
     provider: fireworks
     display_name: "Mistral Small 24B (Fireworks)"
     description: "24B dense model with native function calling, JSON output, and dozens of languages — fits on a single RTX 4090."
-    input_price: null
-    output_price: null
+    input_price: 0.90
+    output_price: 0.90
     context_window: 32000
     capabilities: [tools]
 
@@ -995,8 +995,8 @@ models:
     provider: fireworks
     display_name: "QwQ 32B (Fireworks)"
     description: "Qwen's dedicated 32B reasoning model trained via RL with outcome-based rewards, competitive with DeepSeek-R1 and o1-mini."
-    input_price: null
-    output_price: null
+    input_price: 0.90
+    output_price: 0.90
     context_window: 131000
     capabilities: [tools, reasoning]
 
@@ -1026,7 +1026,7 @@ models:
     description: "Lightweight open-source MoE model (309B total, 15B active) optimized for high-speed reasoning and agentic workflows."
     input_price: 0.09
     output_price: 0.29
-    context_window: null
+    context_window: 262144
     capabilities: [tools, reasoning]
 
   # ── BytePlus ────────────────────────────────────────────────────────────────
@@ -1035,8 +1035,8 @@ models:
     provider: byteplus
     display_name: "Seed 2.0 Pro"
     description: "BytePlus's flagship Seed 2.0 model excelling at complex reasoning, coding, and agentic tasks with deep thinking and multimodal understanding."
-    input_price: null
-    output_price: null
+    input_price: 0.47
+    output_price: 2.37
     context_window: 256000
     capabilities: [vision, tools, reasoning, video]
 
@@ -1053,8 +1053,8 @@ models:
     provider: byteplus
     display_name: "Seed 2.0 Mini"
     description: "Lightweight Seed 2.0 model designed for edge deployments and cost-sensitive scenarios requiring fast responses."
-    input_price: null
-    output_price: null
+    input_price: 0.10
+    output_price: 0.40
     context_window: 256000
     capabilities: [tools, reasoning]
 
@@ -1071,7 +1071,7 @@ models:
     provider: byteplus
     display_name: "Seed 1.6"
     description: "Stable text generation model from the Seed 1.x series, suited for general-purpose NLP tasks and instruction following."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 0.25
+    output_price: 2.00
+    context_window: 262144
     capabilities: [tools]
