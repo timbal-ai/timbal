@@ -371,6 +371,7 @@
           {
             "group": "Connecting Timbal",
             "pages": [
+              "mcp-integration/claude",
               "mcp-integration/cursor",
               "mcp-integration/vscode",
               "mcp-integration/windsurf",
