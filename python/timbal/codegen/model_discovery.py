@@ -12,6 +12,8 @@ _PROVIDER_LOGOS = {
     "xai": "https://content.timbal.ai/assets/xai_favicon.svg",
     "groq": "https://content.timbal.ai/assets/groq_favicon.svg",
     "fireworks": "https://content.timbal.ai/assets/fireworks_favicon.svg",
+    "xiaomi": "https://content.timbal.ai/assets/xiaomi_favicon.svg",
+    "byteplus": "https://content.timbal.ai/assets/byteplus_favicon.svg",
 }
 
 

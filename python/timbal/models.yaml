@@ -130,9 +130,9 @@ models:
     provider: openai
     display_name: "GPT-5.4 Mini"
     description: "Compact GPT-5.4 variant balancing frontier capability and cost."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 0.75
+    output_price: 4.50
+    context_window: 400000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-5.4-nano"
@@ -141,25 +141,25 @@ models:
     description: "Ultra-lightweight GPT-5.4 variant targeting cost-sensitive, high-volume tasks."
     input_price: 0.20
     output_price: 1.25
-    context_window: null
+    context_window: 400000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-5.3-chat-latest"
     provider: openai
     display_name: "GPT-5.3 Chat"
     description: "Latest GPT-5.3 chat-optimized model."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 1.75
+    output_price: 14.00
+    context_window: 400000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-5.2"
     provider: openai
     display_name: "GPT-5.2"
     description: "GPT-5.2 general-purpose model."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 1.75
+    output_price: 14.00
+    context_window: 400000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-5.2-pro"
@@ -168,60 +168,60 @@ models:
     description: "GPT-5.2 Pro allocates additional compute for the most complex problem-solving tasks."
     input_price: 21.00
     output_price: 168.00
-    context_window: null
+    context_window: 400000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-5.1"
     provider: openai
     display_name: "GPT-5.1"
     description: "GPT-5.1 general-purpose model."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 1.25
+    output_price: 10.00
+    context_window: 400000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-5.1-codex"
     provider: openai
     display_name: "GPT-5.1 Codex"
     description: "GPT-5.1 specialized for code generation and software engineering tasks."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 1.25
+    output_price: 10.00
+    context_window: 400000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-5"
     provider: openai
     display_name: "GPT-5"
     description: "OpenAI GPT-5 base model."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 1.25
+    output_price: 10.00
+    context_window: 400000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-5-mini"
     provider: openai
     display_name: "GPT-5 Mini"
     description: "Compact GPT-5 variant for everyday tasks."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 0.25
+    output_price: 2.00
+    context_window: 400000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-5-nano"
     provider: openai
     display_name: "GPT-5 Nano"
     description: "Ultra-lightweight GPT-5 variant for cost-sensitive use cases."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 0.05
+    output_price: 0.40
+    context_window: 400000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-4.1"
     provider: openai
     display_name: "GPT-4.1"
     description: "Improved instruction-following and multimodal model with a 1M token context window."
-    input_price: null
-    output_price: null
+    input_price: 2.00
+    output_price: 8.00
     context_window: 1000000
     capabilities: [vision, tools]
 
@@ -229,26 +229,26 @@ models:
     provider: openai
     display_name: "GPT-4.1 Mini"
     description: "Compact GPT-4.1 variant for everyday multimodal tasks."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 0.40
+    output_price: 1.60
+    context_window: 1000000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-4.1-nano"
     provider: openai
     display_name: "GPT-4.1 Nano"
     description: "Smallest GPT-4.1 variant for high-volume, cost-sensitive workloads."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 0.10
+    output_price: 0.40
+    context_window: 1000000
     capabilities: [vision, tools]
 
   - id: "openai/gpt-4o"
     provider: openai
     display_name: "GPT-4o"
     description: "Omni model combining vision, audio, and text understanding in a 128K context."
-    input_price: null
-    output_price: null
+    input_price: 2.50
+    output_price: 10.00
     context_window: 128000
     capabilities: [vision, tools]
 
@@ -265,36 +265,36 @@ models:
     provider: openai
     display_name: "o4 Mini"
     description: "Compact reasoning model balancing speed and deep thinking."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 1.10
+    output_price: 4.40
+    context_window: 200000
     capabilities: [tools, reasoning]
 
   - id: "openai/o4-mini-deep-research"
     provider: openai
     display_name: "o4 Mini Deep Research"
     description: "o4 Mini variant optimized for in-depth web research tasks."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 2.00
+    output_price: 8.00
+    context_window: 200000
     capabilities: [tools, reasoning]
 
   - id: "openai/o3"
     provider: openai
     display_name: "o3"
     description: "Advanced reasoning model for complex math, science, and coding."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 2.00
+    output_price: 8.00
+    context_window: 200000
     capabilities: [tools, reasoning]
 
   - id: "openai/o3-mini"
     provider: openai
     display_name: "o3 Mini"
     description: "Compact o3 variant for efficient deep reasoning."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 1.10
+    output_price: 4.40
+    context_window: 200000
     capabilities: [tools, reasoning]
 
   - id: "openai/o3-pro"
@@ -303,25 +303,25 @@ models:
     description: "High-compute o3 variant for the most demanding reasoning tasks."
     input_price: 20.00
     output_price: 80.00
-    context_window: null
+    context_window: 200000
     capabilities: [tools, reasoning]
 
   - id: "openai/o3-deep-research"
     provider: openai
     display_name: "o3 Deep Research"
     description: "o3 variant optimized for comprehensive, multi-step web research."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 10.00
+    output_price: 40.00
+    context_window: 200000
     capabilities: [tools, reasoning]
 
   - id: "openai/o1"
     provider: openai
     display_name: "o1"
     description: "First-generation reasoning model with extended thinking for complex problems."
-    input_price: null
-    output_price: null
-    context_window: null
+    input_price: 15.00
+    output_price: 60.00
+    context_window: 200000
     capabilities: [tools, reasoning]
 
   - id: "openai/o1-mini"
@@ -330,7 +330,7 @@ models:
     description: "Compact o1 reasoning model for cost-efficient deep thinking."
     input_price: 1.10
     output_price: 4.40
-    context_window: null
+    context_window: 128000
     capabilities: [tools, reasoning]
 
   # ── TogetherAI ───────────────────────────────────────────────────────────────
@@ -999,3 +999,79 @@ models:
     output_price: null
     context_window: 131000
     capabilities: [tools, reasoning]
+
+  # ── Xiaomi ──────────────────────────────────────────────────────────────────
+
+  - id: "xiaomi/mimo-v2-pro"
+    provider: xiaomi
+    display_name: "MiMo v2 Pro"
+    description: "Xiaomi's flagship reasoning model with ~1 trillion parameters (42B active, MoE). Approaches Claude Opus performance on agent and coding tasks at lower costs."
+    input_price: 1.00
+    output_price: 3.00
+    context_window: 1000000
+    capabilities: [tools, reasoning]
+
+  - id: "xiaomi/mimo-v2-omni"
+    provider: xiaomi
+    display_name: "MiMo v2 Omni"
+    description: "Multimodal reasoning model capable of natively processing text, images, video, and over 10 hours of continuous audio."
+    input_price: 0.40
+    output_price: 2.00
+    context_window: 256000
+    capabilities: [vision, tools, reasoning, audio, video]
+
+  - id: "xiaomi/mimo-v2-flash"
+    provider: xiaomi
+    display_name: "MiMo v2 Flash"
+    description: "Lightweight open-source MoE model (309B total, 15B active) optimized for high-speed reasoning and agentic workflows."
+    input_price: 0.09
+    output_price: 0.29
+    context_window: null
+    capabilities: [tools, reasoning]
+
+  # ── BytePlus ────────────────────────────────────────────────────────────────
+
+  - id: "byteplus/seed-2-0-pro-260215"
+    provider: byteplus
+    display_name: "Seed 2.0 Pro"
+    description: "BytePlus's flagship Seed 2.0 model excelling at complex reasoning, coding, and agentic tasks with deep thinking and multimodal understanding."
+    input_price: null
+    output_price: null
+    context_window: 256000
+    capabilities: [vision, tools, reasoning, video]
+
+  - id: "byteplus/seed-2-0-lite-260228"
+    provider: byteplus
+    display_name: "Seed 2.0 Lite"
+    description: "Cost-efficient Seed 2.0 variant optimised for high-concurrency and latency-sensitive workloads with multimodal input."
+    input_price: 0.25
+    output_price: 1.00
+    context_window: 256000
+    capabilities: [vision, tools, video]
+
+  - id: "byteplus/seed-2-0-mini-260215"
+    provider: byteplus
+    display_name: "Seed 2.0 Mini"
+    description: "Lightweight Seed 2.0 model designed for edge deployments and cost-sensitive scenarios requiring fast responses."
+    input_price: null
+    output_price: null
+    context_window: 256000
+    capabilities: [tools, reasoning]
+
+  - id: "byteplus/seed-1-8-251228"
+    provider: byteplus
+    display_name: "Seed 1.8"
+    description: "Advanced multimodal model with deep thinking and strong agent capabilities supporting text, image, video, and document understanding."
+    input_price: 0.25
+    output_price: 2.00
+    context_window: 256000
+    capabilities: [vision, tools, reasoning, video]
+
+  - id: "byteplus/seed-1-6-250915"
+    provider: byteplus
+    display_name: "Seed 1.6"
+    description: "Stable text generation model from the Seed 1.x series, suited for general-purpose NLP tasks and instruction following."
+    input_price: null
+    output_price: null
+    context_window: null
+    capabilities: [tools]
