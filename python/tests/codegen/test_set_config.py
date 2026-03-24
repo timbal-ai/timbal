@@ -191,6 +191,60 @@ class TestAgentConfig:
         assert result.returncode != 0
         assert "Unknown agent config field(s)" in result.stderr
 
+    def test_name_matching_entry_point_configures_agent(self, workspace):
+        """When --name matches the entry point variable, configure the agent itself (not a tool)."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"system_prompt": "You are helpful."})
+        output = _run_dry(ws, "--name", "agent", "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].system_prompt == "You are helpful."
+
+    def test_name_matching_entry_point_sets_model(self, workspace):
+        """--name equal to entry point should set model on the agent."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"model": "openai/gpt-4o"})
+        output = _run_dry(ws, "--name", "agent", "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].model == "openai/gpt-4o"
+
+    def test_name_matching_entry_point_with_tools(self, workspace):
+        """--name matching entry point configures the agent even when tools exist."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch()
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        config = json.dumps({"system_prompt": "Be concise.", "max_iter": 5})
+        output = _run_dry(ws, "--name", "agent", "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].system_prompt == "Be concise."
+        assert ns["agent"].max_iter == 5
+        # Tools should be untouched.
+        assert len(ns["agent"].tools) == 1
+
+    def test_name_matching_entry_point_rejects_unknown_fields(self, workspace):
+        """--name matching entry point still validates against AGENT_FIELDS."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"invalid_field": "value"})
+        result = _run_dry_fail(ws, "--name", "agent", "--config", config)
+        assert result.returncode != 0
+        assert "Unknown agent config field(s)" in result.stderr
+
 
 # ---------------------------------------------------------------------------
 # Tool config

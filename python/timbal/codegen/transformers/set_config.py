@@ -70,7 +70,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     if ep_type is not None and ep_type != "Agent":
         raise ValueError(f"set-config requires an Agent or Workflow entry point, but '{entry_point}' is a {ep_type}.")
 
-    if args.name:
+    if args.name and args.name != entry_point:
         assignments = collect_assignments(tree) if tree else {}
         tool_class = _resolve_tool_class(tree, entry_point, args.name, assignments)
         if tool_class is None:
