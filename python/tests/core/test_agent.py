@@ -430,6 +430,25 @@ class TestAgentMemory:
         assert "alice" in response_content
 
 
+    @pytest.mark.asyncio
+    async def test_assistant_message_as_prompt_normalized_to_user(self):
+        """When an assistant Message is passed as prompt (e.g. mapped from another
+        agent's output in a workflow), it should be normalized to role='user' so
+        the LLM doesn't receive an invalid conversation structure."""
+        agent = Agent(
+            name="receiving_agent",
+            model="openai/gpt-4o-mini",
+        )
+
+        # Simulate what happens when agent output is mapped as another agent's prompt.
+        assistant_msg = Message.validate({"role": "assistant", "content": "The answer is 42."})
+        result = agent(prompt=assistant_msg)
+        output = await result.collect()
+
+        skip_if_agent_error(output, "test_assistant_message_as_prompt_normalized_to_user")
+        assert isinstance(output.output, Message)
+
+
 class TestAgentPerformance:
     """Test Agent performance characteristics."""
     

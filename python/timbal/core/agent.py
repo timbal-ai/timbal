@@ -444,7 +444,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         current_span = run_context.current_span()
         if current_span.memory:
             return
-        current_span.memory = [Message.validate(current_span.input.get("prompt", ""))]
+        prompt = Message.validate(current_span.input.get("prompt", ""))
+        if prompt.role != "user":
+            prompt = Message(role="user", content=prompt.content)
+        current_span.memory = [prompt]
 
         # Subagents have isolated context
         if current_span.parent_call_id is not None:
