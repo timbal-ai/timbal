@@ -341,29 +341,6 @@ workflow.step(agent_a)
 
 ---
 
-### `rename` — Rename a step or tool
-
-```bash
-# Rename a workflow step
-python -m timbal.codegen rename --old-name agent_a --to agent_b
-
-# Rename a tool
-python -m timbal.codegen rename --old-name web_search --to my_search
-```
-
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--old-name` | yes | Current runtime name of the step or tool |
-| `--to` | yes | New name |
-
-**What it does**:
-- Renames the variable and updates the `name=` kwarg in the constructor
-- Updates all references: `tools=[...]` list entries, `.step()` call arguments
-- Updates string references in `depends_on=["..."]` and `step_span("...")` calls
-- Cannot rename the entry point variable (referenced by `timbal.yaml`)
-
----
-
 ### `list-tools` — List available framework tool types
 
 ```bash

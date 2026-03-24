@@ -293,7 +293,11 @@ class ToolConfigSetter(cst.CSTTransformer):
 
 
 class StepConstructorConfigSetter(cst.CSTTransformer):
-    """Update a step's constructor kwargs (e.g. model, system_prompt) without touching .step() call."""
+    """Update a step's constructor kwargs (e.g. model, system_prompt) without touching .step() call.
+
+    When the config includes a ``name`` change, references in ``depends_on``
+    lists and ``step_span()`` calls are updated to match the new runtime name.
+    """
 
     def __init__(
         self,
@@ -306,6 +310,13 @@ class StepConstructorConfigSetter(cst.CSTTransformer):
         self.step_name = step_name
         self.config = config
         self.assignments = assignments
+        # When renaming, track the old→new runtime name for reference updates.
+        self._new_runtime_name: str | None = config.get("name")
+        # Context tracking for string replacement (mirrors Renamer).
+        self._in_depends_on = False
+        self._in_step_span = False
+
+    # -- Constructor kwargs update ---------------------------------------------
 
     def leave_Assign(self, original_node: cst.Assign, updated_node: cst.Assign) -> cst.Assign:
         for target in updated_node.targets:
@@ -327,4 +338,37 @@ class StepConstructorConfigSetter(cst.CSTTransformer):
                     return updated_node.with_changes(
                         value=updated_node.value.with_changes(args=args),
                     )
+        return updated_node
+
+    # -- Context tracking for depends_on / step_span string replacement --------
+
+    def visit_Arg(self, node: cst.Arg) -> bool:
+        if isinstance(node.keyword, cst.Name) and node.keyword.value == "depends_on":
+            self._in_depends_on = True
+        return True
+
+    def leave_Arg(self, original_node: cst.Arg, updated_node: cst.Arg) -> cst.Arg:
+        self._in_depends_on = False
+        return updated_node
+
+    def visit_Call(self, node: cst.Call) -> bool:
+        if isinstance(node.func, cst.Attribute) and node.func.attr.value == "step_span":
+            self._in_step_span = True
+        return True
+
+    def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.Call:
+        if isinstance(original_node.func, cst.Attribute) and original_node.func.attr.value == "step_span":
+            self._in_step_span = False
+        return updated_node
+
+    def leave_SimpleString(
+        self, original_node: cst.SimpleString, updated_node: cst.SimpleString
+    ) -> cst.SimpleString:
+        if self._new_runtime_name is None:
+            return updated_node
+        if not (self._in_depends_on or self._in_step_span):
+            return updated_node
+        evaluated = updated_node.evaluated_value
+        if evaluated == self.step_name:
+            return updated_node.with_changes(value=f'"{self._new_runtime_name}"')
         return updated_node

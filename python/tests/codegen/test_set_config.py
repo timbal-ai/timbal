@@ -469,3 +469,88 @@ class TestStepConstructorConfig:
         """)
         output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"model": "openai/gpt-4o"}')
         assert 'model="openai/gpt-4o"' in output
+
+    def test_rename_step_updates_depends_on(self, wf_workspace):
+        """Renaming a step via set-config updates depends_on references."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        workflow.step(agent_b, depends_on=["agent_a"])
+        """)
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"name": "first_agent"}')
+        assert 'name="first_agent"' in output
+        assert 'depends_on=["first_agent"]' in output
+        assert 'depends_on=["agent_a"]' not in output
+
+    def test_rename_step_updates_step_span(self, wf_workspace):
+        """Renaming a step via set-config updates step_span references."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
+        """)
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"name": "first_agent"}')
+        assert 'name="first_agent"' in output
+        assert 'step_span("first_agent")' in output
+        assert 'step_span("agent_a")' not in output
+
+    def test_rename_step_updates_multiple_depends_on(self, wf_workspace):
+        """Renaming updates depends_on even when mixed with other dependencies."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+        agent_c = Agent(name="agent_c", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        workflow.step(agent_b)
+        workflow.step(agent_c, depends_on=["agent_a", "agent_b"])
+        """)
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"name": "first_agent"}')
+        assert 'depends_on=["first_agent", "agent_b"]' in output
+
+    def test_rename_step_with_other_config(self, wf_workspace):
+        """Renaming via set-config together with other config changes."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        workflow.step(agent_b, depends_on=["agent_a"])
+        """)
+        config = json.dumps({"name": "first_agent", "model": "openai/gpt-4o"})
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", config)
+        assert 'name="first_agent"' in output
+        assert 'model="openai/gpt-4o"' in output
+        assert 'depends_on=["first_agent"]' in output
+
+    def test_no_name_change_leaves_references_alone(self, wf_workspace):
+        """When name is not in config, depends_on and step_span are untouched."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        workflow.step(agent_b, depends_on=["agent_a"])
+        """)
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"model": "openai/gpt-4o"}')
+        assert 'depends_on=["agent_a"]' in output

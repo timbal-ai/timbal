@@ -1,13 +1,13 @@
 """End-to-end tests that chain every codegen operation and validate each intermediate state.
 
 TestFullLifecycle:
-    Basic lifecycle: agent → add/remove tools → convert to workflow → add/remove steps → rename.
+    Basic lifecycle: agent → add/remove tools → convert to workflow → add/remove steps → set-config rename.
 
 TestComplexWorkflow:
     Multi-step workflow with custom function steps, framework tool steps, chained params
     with key indexing via set-param, ordering edges, tool management on individual steps,
-    renames that propagate across step_span and depends_on references, and sequential
-    removal that validates cleanup.
+    set-config renames that propagate across step_span and depends_on references, and
+    sequential removal that validates cleanup.
 """
 
 import json
@@ -262,17 +262,17 @@ class TestFullLifecycle:
         assert ".step(" in source
 
         # ---------------------------------------------------------------
-        # Step 15: Rename the original agent step
+        # Step 15: Rename the original agent step via set-config
         # ---------------------------------------------------------------
         assert 'name="agent"' in source
 
-        _run(ws, "rename", "--old-name", "agent", "--to", "primary_agent")
+        rename_config = json.dumps({"name": "primary_agent"})
+        _run(ws, "set-config", "--name", "agent", "--config", rename_config)
         source = _read_source(ws)
 
-        assert "agent_step" not in source
-        assert "primary_agent" in source
         assert 'name="primary_agent"' in source
-        assert _has_step_call(source, "primary_agent")
+        # Variable stays "agent_step", only runtime name changes.
+        assert _has_step_call(source, "agent_step")
 
         # ---------------------------------------------------------------
         # Final validation
@@ -549,9 +549,9 @@ class TestComplexWorkflow:
         # Phase 7: Dry-run verification
         # ===============================================================
 
-        # -- 7a. Dry-run a rename and verify it doesn't write to disk --
+        # -- 7a. Dry-run a set-config rename and verify it doesn't write to disk --
         source_before = _read_source(ws)
-        dry_output = _dry_run(ws, "rename", "--old-name", "reviewer", "--to", "validator")
+        dry_output = _dry_run(ws, "set-config", "--name", "reviewer", "--config", '{"name": "validator"}')
         source_after = _read_source(ws)
 
         assert source_before == source_after, "dry-run should not modify files"
@@ -559,65 +559,62 @@ class TestComplexWorkflow:
         assert "validator" in dry_output
 
         # ===============================================================
-        # Phase 8: Rename a step and verify reference propagation
+        # Phase 8: Rename a step via set-config and verify reference propagation
         # ===============================================================
 
-        # Rename reviewer → validator. This should update:
-        # - Variable name
+        # Rename reviewer → validator via set-config. This should update:
         # - name= kwarg
         # - step_span("reviewer") references in summarizer_agent's params
-        # - depends_on=["reviewer"] references in summarizer_agent
-        _run(ws, "rename", "--old-name", "reviewer", "--to", "validator")
+        # Variable name stays "reviewer".
+        rename_config = json.dumps({"name": "validator"})
+        _run(ws, "set-config", "--name", "reviewer", "--config", rename_config)
         source = _read_source(ws)
         ns = _exec_code(source)
 
-        # Old name completely gone.
-        assert "reviewer" not in source
-        # New name present.
-        assert "validator = Agent(" in source
+        # Runtime name updated.
         assert 'name="validator"' in source
-        assert _has_step_call(source, "validator")
-        assert ns["validator"].model == "openai/gpt-4o"
-        assert ns["validator"].max_iter == 5
-        assert ns["validator"].system_prompt == "You review and validate outputs."
-        assert len(ns["validator"].tools) == 2
+        # Variable name stays "reviewer".
+        assert "reviewer = Agent(" in source
+        assert _has_step_call(source, "reviewer")
+        assert ns["reviewer"].model == "openai/gpt-4o"
+        assert ns["reviewer"].max_iter == 5
+        assert ns["reviewer"].system_prompt == "You review and validate outputs."
+        assert len(ns["reviewer"].tools) == 2
 
-        # step_span and depends_on references updated.
+        # step_span references updated to new runtime name.
         assert 'step_span("validator")' in source
-        assert '"reviewer"' not in source
-        normalized = " ".join(source.split())
-        assert '"validator"' in normalized
+        assert 'step_span("reviewer")' not in source
 
         # ===============================================================
         # Phase 9: Remove tools from a step selectively
         # ===============================================================
 
-        # -- 9a. Remove WebSearch from validator, keep Read --
-        _run(ws, "remove-tool", "--name", "web_search", "--step", "validator")
+        # -- 9a. Remove WebSearch from reviewer (variable name; runtime name is "validator") --
+        _run(ws, "remove-tool", "--name", "web_search", "--step", "reviewer")
         source = _read_source(ws)
         ns = _exec_code(source)
 
-        assert "web_search" not in [t.name for t in ns["validator"].tools]
-        assert "read" in [t.name for t in ns["validator"].tools]
-        assert len(ns["validator"].tools) == 1
-        # validator config preserved.
-        assert ns["validator"].model == "openai/gpt-4o"
+        assert "web_search" not in [t.name for t in ns["reviewer"].tools]
+        assert "read" in [t.name for t in ns["reviewer"].tools]
+        assert len(ns["reviewer"].tools) == 1
+        # config preserved.
+        assert ns["reviewer"].model == "openai/gpt-4o"
 
-        # -- 9b. Remove Read from validator --
-        _run(ws, "remove-tool", "--name", "read", "--step", "validator")
+        # -- 9b. Remove Read from reviewer --
+        _run(ws, "remove-tool", "--name", "read", "--step", "reviewer")
         source = _read_source(ws)
         ns = _exec_code(source)
 
-        assert len(ns["validator"].tools) == 0
-        assert ns["validator"].model == "openai/gpt-4o"
+        assert len(ns["reviewer"].tools) == 0
+        assert ns["reviewer"].model == "openai/gpt-4o"
 
-        # -- 9c. Add a tool back to validator --
-        _run(ws, "add-tool", "--type", "Write", "--step", "validator")
+        # -- 9c. Add a tool back to reviewer --
+        _run(ws, "add-tool", "--type", "Write", "--step", "reviewer")
         source = _read_source(ws)
         ns = _exec_code(source)
 
-        assert "write" in [t.name for t in ns["validator"].tools]
-        assert len(ns["validator"].tools) == 1
+        assert "write" in [t.name for t in ns["reviewer"].tools]
+        assert len(ns["reviewer"].tools) == 1
 
         # ===============================================================
         # Phase 10: Remove steps and verify cleanup
@@ -635,7 +632,7 @@ class TestComplexWorkflow:
 
         # All other steps still intact.
         assert "preprocessor" in source
-        assert "validator" in source
+        assert "reviewer" in source  # variable name unchanged
         assert "summarizer_agent" in source
         assert "agent_step" in source
 
@@ -650,8 +647,8 @@ class TestComplexWorkflow:
 
         # Remaining steps still intact.
         ns = _exec_code(source)
-        assert ns["validator"].model == "openai/gpt-4o"
-        assert "write" in [t.name for t in ns["validator"].tools]
+        assert ns["reviewer"].model == "openai/gpt-4o"
+        assert "write" in [t.name for t in ns["reviewer"].tools]
 
         # -- 10c. Remove preprocessor --
         _run(ws, "remove-step", "--name", "preprocessor")
@@ -661,11 +658,11 @@ class TestComplexWorkflow:
         assert "preprocessor" not in source
         assert _count_step_calls(source) == 2
 
-        # -- 10d. Remove validator --
+        # -- 10d. Remove validator (runtime name for reviewer variable) --
         _run(ws, "remove-step", "--name", "validator")
         source = _read_source(ws)
 
-        assert "validator" not in source
+        assert "reviewer" not in source
         assert _count_step_calls(source) == 1
         # Only the original agent_step should remain.
         assert _has_step_call(source, "agent_step")
@@ -721,20 +718,21 @@ class TestComplexWorkflow:
         assert _count_step_calls(source) == 3
 
         # ===============================================================
-        # Phase 13: Rename the original agent step
+        # Phase 13: Rename the original agent step via set-config
         # ===============================================================
 
-        _run(ws, "rename", "--old-name", "agent", "--to", "intake_agent")
+        rename_config = json.dumps({"name": "intake_agent"})
+        _run(ws, "set-config", "--name", "agent", "--config", rename_config)
         source = _read_source(ws)
         ns = _exec_code(source)
 
-        assert "agent_step" not in source
-        assert "intake_agent = Agent(" in source
+        # Variable stays "agent_step", runtime name changes.
+        assert "agent_step = Agent(" in source
         assert 'name="intake_agent"' in source
-        assert _has_step_call(source, "intake_agent")
-        assert ns["intake_agent"].model == "openai/gpt-4o"
-        assert ns["intake_agent"].system_prompt == "You are a data processing pipeline."
-        assert len(ns["intake_agent"].tools) == 3
+        assert _has_step_call(source, "agent_step")
+        assert ns["agent_step"].model == "openai/gpt-4o"
+        assert ns["agent_step"].system_prompt == "You are a data processing pipeline."
+        assert len(ns["agent_step"].tools) == 3
 
         # References in depends_on should be updated too.
         # (The depends_on had "agent" which is now "intake_agent".)
@@ -745,11 +743,7 @@ class TestComplexWorkflow:
         # Phase 14: Error cases — operations that should fail
         # ===============================================================
 
-        # -- 14a. Cannot rename the entry point --
-        err = _run_err(ws, "rename", "--old-name", "pipeline", "--to", "new_pipeline")
-        assert "entry point" in err.lower() or "not found" in err.lower()
-
-        # -- 14b. Cannot add-step on non-existent type --
+        # -- 14a. Cannot add-step on non-existent type --
         err = _run_err(ws, "add-step", "--type", "NonExistentType")
         assert "must be one of" in err.lower() or "nonexistenttype" in err.lower()
 
