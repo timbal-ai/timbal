@@ -1663,6 +1663,19 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "description": "Response detail level: \"list\" (default) returns a lightweight preview, \"full\" returns all project details",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "list",
+                "full"
+              ]
+            }
           }
         ],
         "responses": {
@@ -4229,6 +4242,35 @@
           }
         ]
       },
+      "EnvPreview": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "color"
+        ],
+        "properties": {
+          "color": {
+            "type": "string",
+            "description": "Environment color"
+          },
+          "id": {
+            "type": "string",
+            "description": "Environment identifier"
+          },
+          "last_deployment_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Status of the latest deployment in this environment"
+          },
+          "name": {
+            "type": "string",
+            "description": "Environment name"
+          }
+        }
+      },
       "File": {
         "type": "object",
         "required": [
@@ -4360,6 +4402,35 @@
           "brin",
           "hnsw"
         ]
+      },
+      "IntegrationPreview": {
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Integration identifier"
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Integration logo URL"
+          },
+          "name": {
+            "type": "string",
+            "description": "Integration display name"
+          },
+          "provider": {
+            "type": "string",
+            "description": "Integration provider key"
+          }
+        }
       },
       "InviteOrgUserReqBody": {
         "type": "object",
@@ -4875,6 +4946,35 @@
           "vectors"
         ]
       },
+      "KbPreview": {
+        "type": "object",
+        "required": [
+          "id",
+          "uid",
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Knowledge base description"
+          },
+          "id": {
+            "type": "string",
+            "description": "Knowledge base identifier"
+          },
+          "name": {
+            "type": "string",
+            "description": "Knowledge base name"
+          },
+          "uid": {
+            "type": "string",
+            "description": "Knowledge base unique identifier"
+          }
+        }
+      },
       "ListConnectionsResBody": {
         "type": "object",
         "required": [
@@ -5072,18 +5172,36 @@
         }
       },
       "ListProjectsResBody": {
-        "type": "object",
-        "required": [
-          "projects"
-        ],
-        "properties": {
-          "projects": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ProjectPreview"
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "projects"
+            ],
+            "properties": {
+              "projects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ProjectPreview"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "projects"
+            ],
+            "properties": {
+              "projects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ProjectDetail"
+                }
+              }
             }
           }
-        }
+        ]
       },
       "ListRunsResBody": {
         "type": "object",
@@ -5366,25 +5484,19 @@
           "id",
           "name",
           "has_ui",
-          "apps",
           "workforce",
           "role",
           "use_platform_iam",
           "is_public_template",
           "template_uses",
           "publishable_api_key",
+          "environments",
+          "knowledge_bases",
+          "integrations",
           "created_at",
           "updated_at"
         ],
         "properties": {
-          "apps": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/WorkforcePreview"
-            },
-            "description": "List of workforce items in this project.\n\n**Deprecated:** Use `workforce` instead. This field will be removed in a future version.",
-            "deprecated": true
-          },
           "created_at": {
             "type": "integer",
             "format": "int64",
@@ -5404,6 +5516,13 @@
             ],
             "description": "Project description"
           },
+          "environments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnvPreview"
+            },
+            "description": "Project environments with their latest deployment status"
+          },
           "has_ui": {
             "type": "boolean",
             "description": "Whether the project has a UI interface"
@@ -5412,9 +5531,23 @@
             "type": "string",
             "description": "Unique project identifier"
           },
+          "integrations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IntegrationPreview"
+            },
+            "description": "Integrations active in this project"
+          },
           "is_public_template": {
             "type": "boolean",
             "description": "Whether the project is a public template"
+          },
+          "knowledge_bases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KbPreview"
+            },
+            "description": "Knowledge bases connected to this project (new KB system only)"
           },
           "name": {
             "type": "string",
