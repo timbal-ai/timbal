@@ -388,7 +388,7 @@ async def _llm_router(
         if not api_key:
             if run_context.platform_config is not None and run_context.platform_config.subject is not None:
                 api_key = run_context.platform_config.auth.header_value
-                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-responses/v1"
         if not api_key:
             raise APIKeyNotFoundError("XAI_API_KEY not found.")
         if base_url is not None:
@@ -481,7 +481,7 @@ async def _llm_router(
         async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, "Anthropic"):
             yield res_chunk  # type: ignore[return-type]
 
-    elif provider == "openai" and TIMBAL_OPENAI_API == "responses":
+    elif provider in ("openai", "xai") and TIMBAL_OPENAI_API == "responses":
         responses_kwargs = {
             "model": model_name,
             "stream": True,

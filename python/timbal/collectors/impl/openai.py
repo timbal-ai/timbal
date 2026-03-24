@@ -14,10 +14,14 @@ from openai.types.responses import (
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
     ResponseCreatedEvent,
+    ResponseCustomToolCall,
+    ResponseCustomToolCallInputDeltaEvent,
+    ResponseCustomToolCallInputDoneEvent,
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
+    ResponseIncompleteEvent,
     ResponseInProgressEvent,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
@@ -29,6 +33,8 @@ from openai.types.responses import (
     ResponseReasoningSummaryPartDoneEvent,
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseReasoningSummaryTextDoneEvent,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     ResponseWebSearchCallCompletedEvent,
@@ -82,6 +88,11 @@ ResponseEvent = (
     | ResponseTextDoneEvent
     | ResponseContentPartDoneEvent
     | ResponseCompletedEvent
+    | ResponseReasoningTextDeltaEvent
+    | ResponseReasoningTextDoneEvent
+    | ResponseIncompleteEvent
+    | ResponseCustomToolCallInputDeltaEvent
+    | ResponseCustomToolCallInputDoneEvent
 )
 
 logger = structlog.get_logger("timbal.collectors.impl.openai")
@@ -290,7 +301,7 @@ class ResponseCollector(BaseCollector):
             return None
         elif isinstance(event, ResponseOutputItemDoneEvent):
             return self._handle_output_item_done(event)
-        elif isinstance(event, ResponseCompletedEvent):
+        elif isinstance(event, ResponseCompletedEvent | ResponseIncompleteEvent):
             return self._handle_completed(event)
         elif isinstance(event, ResponseOutputTextAnnotationAddedEvent):
             return self._handle_output_text_annotation_added(event)
@@ -301,6 +312,12 @@ class ResponseCollector(BaseCollector):
         elif isinstance(event, ResponseReasoningSummaryTextDoneEvent):
             return None
         elif isinstance(event, ResponseReasoningSummaryPartDoneEvent):
+            return None
+        elif isinstance(event, ResponseReasoningTextDeltaEvent):
+            return self._handle_reasoning_text_delta(event)
+        elif isinstance(event, ResponseReasoningTextDoneEvent):
+            return None
+        elif isinstance(event, ResponseCustomToolCallInputDeltaEvent | ResponseCustomToolCallInputDoneEvent):
             return None
         else:
             logger.warning("Unhandled response event", response_event=event)
@@ -344,6 +361,17 @@ class ResponseCollector(BaseCollector):
             return TimbalThinking(
                 id=content_block_id,
                 thinking="",  # TODO Review this
+            )
+        elif isinstance(event.item, ResponseCustomToolCall):
+            # Server-side custom tools (e.g. xAI's x_keyword_search, web_fetch).
+            # Track as server tool use but don't emit to the stream.
+            content_block_id = event.item.id
+            self.content_blocks.add(content_block_id)
+            return TimbalToolUse(
+                id=content_block_id,
+                name=event.item.name,
+                input=event.item.input,
+                is_server_tool_use=True,
             )
         else:
             logger.warning("Unhandled output item added event", response_output_item_added_event=event)
@@ -416,6 +444,26 @@ class ResponseCollector(BaseCollector):
             thinking_delta=event.delta,
         )
 
+    def _handle_reasoning_text_delta(self, event: ResponseReasoningTextDeltaEvent) -> None:
+        """Handle raw reasoning text delta events (e.g. from xAI)."""
+        if event.item_id not in self.content:
+            self.content[event.item_id] = {
+                "type": "thinking",
+                "thinking": "",
+            }
+        self.content[event.item_id]["thinking"] += event.delta
+        content_block_id = event.item_id
+        if content_block_id not in self.content_blocks:
+            self.content_blocks.add(content_block_id)
+            return TimbalThinking(
+                id=content_block_id,
+                thinking=event.delta,
+            )
+        return TimbalThinkingDelta(
+            id=content_block_id,
+            thinking_delta=event.delta,
+        )
+
     def _handle_output_item_done(self, event: ResponseOutputItemDoneEvent) -> None:
         """Handle output item done events from OpenAI."""
         if isinstance(event.item, ResponseFunctionWebSearch):
@@ -434,10 +482,19 @@ class ResponseCollector(BaseCollector):
                 return TimbalContentBlockStop(id=content_block_id)
             else:
                 return None
+        elif isinstance(event.item, ResponseCustomToolCall):
+            # Track server-side custom tool requests for cost tracking.
+            tool_name = event.item.name
+            get_run_context().update_usage(f"{self.model}:{tool_name}_requests", 1)
+            content_block_id = event.item.id
+            if content_block_id in self.content_blocks:
+                return TimbalContentBlockStop(id=content_block_id)
+            else:
+                return None
         else:
             logger.warning("Unhandled output item done event", response_output_item_done_event=event)
 
-    def _handle_completed(self, event: ResponseCompletedEvent) -> None:
+    def _handle_completed(self, event: ResponseCompletedEvent | ResponseIncompleteEvent) -> None:
         """Handle completed events from OpenAI."""
         # Capture stop reason from the response
         # status can be: 'completed', 'failed', 'in_progress', 'cancelled', 'queued', 'incomplete'

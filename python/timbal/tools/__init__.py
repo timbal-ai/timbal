@@ -373,6 +373,7 @@ if TYPE_CHECKING:
     from .tavily import TavilyCrawl, TavilyExtract, TavilyMap, TavilySearch
     from .web_search import WebSearch
     from .write import Write
+    from .xai import XSearch
 
     from .zendesk import (
         ZendeskCreateTicket,
@@ -890,6 +891,7 @@ __all__ = [
     "TavilySearch",
     "WebSearch",
     "Write",
+    "XSearch",
     "ListCharges",
     "CreateCustomer",
     "SearchCustomer",
@@ -1665,6 +1667,7 @@ _LAZY_IMPORTS = {
     "TavilySearch": ".tavily",
     "WebSearch": ".web_search",
     "Write": ".write",
+    "XSearch": ".xai",
     "ListCharges": ".stripe",
     "CreateCustomer": ".stripe",
     "SearchCustomer": ".stripe",

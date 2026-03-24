@@ -74,10 +74,13 @@ class WebSearch(Tool):
             "type": "web_search",
         }
 
+        filters: dict[str, Any] = {}
         if self.allowed_domains:
-            schema["filters"] = {"allowed_domains": self.allowed_domains}
+            filters["allowed_domains"] = self.allowed_domains
         if self.blocked_domains:
-            _get_logger().warning("Blocked domains are not supported by OpenAI.")
+            filters["excluded_domains"] = self.blocked_domains
+        if filters:
+            schema["filters"] = filters
         if self.user_location:
             schema["user_location"] = self.user_location
 
