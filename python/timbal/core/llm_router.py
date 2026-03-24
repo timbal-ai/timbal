@@ -152,6 +152,14 @@ Model = Literal[
     "fireworks/accounts/fireworks/models/glm-5",
     "fireworks/accounts/fireworks/models/glm-4p5",
     "fireworks/accounts/fireworks/models/qwq-32b",
+    "xiaomi/mimo-v2-pro",
+    "xiaomi/mimo-v2-omni",
+    "xiaomi/mimo-v2-flash",
+    "byteplus/seed-2-0-pro-260215",
+    "byteplus/seed-2-0-lite-260228",
+    "byteplus/seed-2-0-mini-260215",
+    "byteplus/seed-1-8-251228",
+    "byteplus/seed-1-6-250915",
 ]
 
 
@@ -430,6 +438,42 @@ async def _llm_router(
                 api_key=api_key, base_url="https://api.fireworks.ai/inference/v1", default_headers=default_headers
             )
 
+    elif provider == "byteplus":
+        default_headers["x-provider"] = "byteplus"
+        if not api_key:
+            api_key = os.getenv("BYTEPLUS_API_KEY")
+        if not api_key:
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
+        if not api_key:
+            raise APIKeyNotFoundError("BYTEPLUS_API_KEY not found.")
+        if base_url is not None:
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
+        else:
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url="https://ark.ap-southeast.bytepluses.com/api/v3",
+                default_headers=default_headers,
+            )
+
+    elif provider == "xiaomi":
+        default_headers["x-provider"] = "xiaomi"
+        if not api_key:
+            api_key = os.getenv("XIAOMI_API_KEY")
+        if not api_key:
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
+        if not api_key:
+            raise APIKeyNotFoundError("XIAOMI_API_KEY not found.")
+        if base_url is not None:
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
+        else:
+            client = AsyncOpenAI(
+                api_key=api_key, base_url="https://api.xiaomimimo.com/v1", default_headers=default_headers
+            )
+
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
@@ -536,12 +580,25 @@ async def _llm_router(
             chat_completions_message = message.to_openai_chat_completions_input()
             chat_completions_messages.append(chat_completions_message)
 
-        chat_completions_kwargs = {
+        # Some providers have incomplete OpenAI chat completions support.
+        # Flatten text-only content arrays to plain strings for compatibility.
+        if provider == "xiaomi":
+            for msg in chat_completions_messages:
+                content = msg.get("content")
+                if isinstance(content, list) and all(
+                    isinstance(item, dict) and item.get("type") == "text" for item in content
+                ):
+                    msg["content"] = "\n".join(item["text"] for item in content)
+
+        chat_completions_kwargs: dict[str, Any] = {
             "model": model_name,
             "messages": chat_completions_messages,
             "stream": True,
-            "stream_options": {"include_usage": True},
         }
+
+        # stream_options is not supported by all OpenAI-compatible providers
+        if provider != "xiaomi":
+            chat_completions_kwargs["stream_options"] = {"include_usage": True}
 
         if tools:
             chat_completions_tools = []

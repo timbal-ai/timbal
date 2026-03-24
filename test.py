@@ -1,5 +1,9 @@
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 os.environ["TIMBAL_DELTA_EVENTS"] = "true"
 os.environ["TIMBAL_LOG_EVENTS"] = "START,DELTA,OUTPUT"
 
@@ -18,9 +22,9 @@ client = AsyncOpenAI(base_url="https://api.dev.timbal.ai/ace/v1")
 
 agent = Agent(
     name="agent",
-    model="openai/gpt-4.1-mini",
-    base_url="https://api.dev.timbal.ai/ace/v1",
-    tools=[get_datetime, WebSearch()],
+    model="byteplus/seed-2-0-lite-260228",
+    # base_url="https://api.dev.timbal.ai/ace/v1",
+    tools=[get_datetime],
 )
 
 

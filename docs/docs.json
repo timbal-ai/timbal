@@ -354,7 +354,9 @@
               "models/xai",
               "models/togetherai",
               "models/groq",
-              "models/fireworks"
+              "models/fireworks",
+              "models/xiaomi",
+              "models/byteplus"
             ]
           }
         ]
