@@ -72,15 +72,6 @@
             ]
           },
           {
-            "group": "Knowledge Bases",
-            "pages": [
-              "knowledge-bases/index",
-              "knowledge-bases/tables",
-              "knowledge-bases/embeddings",
-              "knowledge-bases/indexes"
-            ]
-          },
-          {
             "group": "Deployment",
             "pages": [
               "deployment/index",
@@ -281,53 +272,23 @@
             ]
           },
           {
-            "group": "K2",
+            "group": "Knowledge Bases",
             "tag": "Beta",
             "pages": [
-              "api-reference/k2/list",
-              "api-reference/k2/create",
-              "api-reference/k2/get",
-              "api-reference/k2/delete",
-              "api-reference/k2/query",
-              "api-reference/k2/schema",
-              "api-reference/k2/upload",
+              "api-reference/knowledge-bases/list",
+              "api-reference/knowledge-bases/create",
+              "api-reference/knowledge-bases/get",
+              "api-reference/knowledge-bases/delete",
+              "api-reference/knowledge-bases/query",
+              "api-reference/knowledge-bases/schema",
+              "api-reference/knowledge-bases/upload",
               {
                 "group": "Files",
                 "pages": [
-                  "api-reference/k2/files/list",
-                  "api-reference/k2/files/add",
-                  "api-reference/k2/files/get",
-                  "api-reference/k2/files/delete"
-                ]
-              }
-            ]
-          },
-          {
-            "group": "Knowledge Bases",
-            "pages": [
-              {
-                "group": "Tables",
-                "pages": [
-                  "api-reference/knowledge-bases/tables/upsert-records",
-                  "api-reference/knowledge-bases/tables/upsert-csv",
-                  "api-reference/knowledge-bases/tables/search"
-                ]
-              },
-              {
-                "group": "Embeddings",
-                "pages": [
-                  "api-reference/knowledge-bases/embeddings/list-models",
-                  "api-reference/knowledge-bases/embeddings/list",
-                  "api-reference/knowledge-bases/embeddings/create",
-                  "api-reference/knowledge-bases/embeddings/delete"
-                ]
-              },
-              {
-                "group": "Indexes",
-                "pages": [
-                  "api-reference/knowledge-bases/indexes/list",
-                  "api-reference/knowledge-bases/indexes/create",
-                  "api-reference/knowledge-bases/indexes/delete"
+                  "api-reference/knowledge-bases/files/list",
+                  "api-reference/knowledge-bases/files/add",
+                  "api-reference/knowledge-bases/files/get",
+                  "api-reference/knowledge-bases/files/delete"
                 ]
               }
             ]

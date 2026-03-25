@@ -3,3 +3,5 @@ title: "Prompt"
 description: "Send a prompt to the Timbal Composer agent"
 openapi: "POST /orgs/{org_id}/projects/{project_id}/compose"
 ---
+
+The `prompt` field accepts a plain string, an array of content blocks, or a full Message object. Content blocks can be text or files (base64, URL, or server-side path). Supported file types: images (png/jpg/gif/webp/svg), PDFs, and text-readable formats (json, csv, md, yaml, py, rs, etc.).

@@ -1870,7 +1870,7 @@
         "tags": [
           "compose"
         ],
-        "description": "Send a prompt and stream the response as Server-Sent Events",
+        "description": "Send a prompt to the Timbal Composer agent. The `prompt` field accepts a plain string, an array of content blocks, or a full Message object. Content blocks can be text or files (base64, URL, or server-side path). Supported file types: images (png/jpg/gif/webp/svg), PDFs, and text-readable formats (json, csv, md, yaml, py, rs, etc.).",
         "operationId": "handler",
         "parameters": [
           {
@@ -1895,6 +1895,100 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ComposeRequest"
+              },
+              "examples": {
+                "File from URL": {
+                  "value": {
+                    "rev": "main",
+                    "prompt": [
+                      "Review this config file",
+                      {
+                        "type": "file",
+                        "file": {
+                          "name": "config.json",
+                          "source": {
+                            "type": "url",
+                            "url": "https://example.com/config.json"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "File from server path": {
+                  "value": {
+                    "rev": "main",
+                    "prompt": [
+                      "Analyze this log file",
+                      {
+                        "type": "file",
+                        "file": {
+                          "name": "app.log",
+                          "source": {
+                            "type": "path",
+                            "path": "/mnt/efs/uploads/app.log"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "File without name (media_type required)": {
+                  "value": {
+                    "rev": "main",
+                    "prompt": [
+                      "What is in this image?",
+                      {
+                        "type": "file",
+                        "file": {
+                          "media_type": "image/png",
+                          "source": {
+                            "type": "base64",
+                            "data": "iVBORw0KGgo..."
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "Full Message object": {
+                  "value": {
+                    "rev": "main",
+                    "prompt": {
+                      "role": "user",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Refactor this to use async/await"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "Plain string": {
+                  "value": {
+                    "rev": "main",
+                    "prompt": "Add error handling to the upload endpoint"
+                  }
+                },
+                "Text with inline image (base64)": {
+                  "value": {
+                    "rev": "main",
+                    "prompt": [
+                      "Describe what you see in this screenshot and fix the layout",
+                      {
+                        "type": "file",
+                        "file": {
+                          "name": "screenshot.png",
+                          "source": {
+                            "type": "base64",
+                            "data": "iVBORw0KGgo..."
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
               }
             }
           },
@@ -3543,9 +3637,8 @@
             "example": "sonnet"
           },
           "prompt": {
-            "type": "string",
-            "description": "The prompt to send to Claude",
-            "example": "Add error handling to the upload endpoint"
+            "$ref": "#/components/schemas/Message",
+            "description": "The prompt: a plain string, an array of content blocks, or a full Message object."
           },
           "rev": {
             "type": "string",
@@ -3597,6 +3690,46 @@
                 "type": "string",
                 "enum": [
                   "integration"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "Content": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "type"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "file",
+              "type"
+            ],
+            "properties": {
+              "file": {
+                "$ref": "#/components/schemas/FileRef"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "file"
                 ]
               }
             }
@@ -4318,6 +4451,93 @@
             "description": "The URL where the file can be accessed"
           }
         }
+      },
+      "FileRef": {
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "media_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "MIME type. Inferred from `name` extension when omitted."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Filename (e.g. \"screenshot.png\"). Used for display and media-type inference.\nOptional — when omitted, `media_type` must be provided explicitly."
+          },
+          "source": {
+            "$ref": "#/components/schemas/FileSource",
+            "description": "How to obtain the file bytes."
+          }
+        }
+      },
+      "FileSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Inline base64-encoded content.",
+            "required": [
+              "data",
+              "type"
+            ],
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "base64"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Local filesystem path (server-side).",
+            "required": [
+              "path",
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "path"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Remote URL to fetch.",
+            "required": [
+              "url",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "url"
+                ]
+              },
+              "url": {
+                "type": "string"
+              }
+            }
+          }
+        ]
       },
       "GetK2FileResponse": {
         "allOf": [
@@ -5256,6 +5476,23 @@
           }
         }
       },
+      "Message": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Content"
+            }
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
       "Org": {
         "type": "object",
         "required": [
@@ -5912,6 +6149,14 @@
             "description": "Email address of the user to remove from the organization"
           }
         }
+      },
+      "Role": {
+        "type": "string",
+        "enum": [
+          "system",
+          "user",
+          "assistant"
+        ]
       },
       "RunPreview": {
         "type": "object",
