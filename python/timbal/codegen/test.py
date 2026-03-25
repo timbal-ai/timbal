@@ -1,3 +1,5 @@
+import json
+
 from ..state import RunContext, set_run_context
 from ..utils import ImportSpec
 
@@ -22,11 +24,10 @@ async def run_test(
     output_event = None
     runnable = import_spec.load()
     async for event in runnable(**params):
-        event_dict = event.model_dump()
-        if event.type == "OUTPUT":
-            output_event = event_dict
         if stream:
-            print(event_dict, flush=True)
+            print(event.model_dump(), flush=True)
+        elif event.type == "OUTPUT":
+            output_event = event
 
-    if not stream:
-        print(output_event)
+    if not stream and output_event is not None:
+        print(json.dumps(output_event.model_dump()))
