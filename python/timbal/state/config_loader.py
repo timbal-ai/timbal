@@ -12,6 +12,13 @@ logger = structlog.get_logger("timbal.state.config_loader")
 
 TIMBAL_CONFIG_DIR = Path.home() / ".timbal"
 
+# Shared with TIMBAL_SYNC_TRACES and ~/.timbal/config sync_traces option.
+_TRUTHY_STRINGS = frozenset({"true", "1", "t", "yes", "y", "enabled", "on"})
+
+
+def _is_truthy_string(value: str) -> bool:
+    return value.lower() in _TRUTHY_STRINGS
+
 
 class FileConfig(NamedTuple):
     """Raw values extracted from ~/.timbal/ config and credentials files."""
@@ -19,6 +26,7 @@ class FileConfig(NamedTuple):
     base_url: str | None
     api_key: SecretStr | None
     org: str | None
+    sync_traces_enabled: bool | None
 
 
 def _resolve_section_name(profile: str) -> str:
@@ -55,7 +63,8 @@ def load_file_config(
 
     base_url: str | None = None
     org: str | None = None
-    api_key: str | None = None
+    api_key: SecretStr | None = None
+    sync_traces_enabled: bool | None = None
 
     if config_path.is_file():
         config = configparser.ConfigParser()
@@ -64,6 +73,10 @@ def load_file_config(
             if config.has_section(section):
                 base_url = config.get(section, "base_url", fallback=None)
                 org = config.get(section, "org", fallback=None)
+                if config.has_option(section, "sync_traces"):
+                    sync_traces_enabled = _is_truthy_string(config.get(section, "sync_traces"))
+                else:
+                    sync_traces_enabled = None
             else:
                 logger.debug(
                     f"Profile section '{section}' not found in config file.",
@@ -98,7 +111,36 @@ def load_file_config(
                 error=str(e),
             )
 
-    return FileConfig(base_url=base_url, api_key=api_key, org=org)
+    return FileConfig(
+        base_url=base_url,
+        api_key=api_key,
+        org=org,
+        sync_traces_enabled=sync_traces_enabled,
+    )
+
+
+def _merge_sync_traces_enabled(platform_config: PlatformConfig, file_config: FileConfig) -> None:
+    """Fill sync_traces_enabled from env then file then default (True) when not set on platform_config."""
+    if platform_config.sync_traces_enabled is not None:
+        return
+    if "TIMBAL_SYNC_TRACES" in os.environ:
+        platform_config.sync_traces_enabled = _is_truthy_string(
+            os.getenv("TIMBAL_SYNC_TRACES", "true"),
+        )
+        logger.debug(
+            "Resolved sync_traces_enabled from TIMBAL_SYNC_TRACES.",
+            value=platform_config.sync_traces_enabled,
+        )
+        return
+    if file_config.sync_traces_enabled is not None:
+        platform_config.sync_traces_enabled = file_config.sync_traces_enabled
+        logger.debug(
+            "Resolved sync_traces_enabled from config file.",
+            value=file_config.sync_traces_enabled,
+        )
+        return
+    platform_config.sync_traces_enabled = True
+    logger.debug("Defaulted sync_traces_enabled to True.")
 
 
 def _strip_scheme(url: str) -> str:
@@ -122,6 +164,10 @@ def resolve_platform_config(
     2. Environment variables
     3. ~/.timbal/ config and credentials files
 
+    Sync trace persistence uses ``sync_traces_enabled`` on ``PlatformConfig``.
+    When that field is unset, ``TIMBAL_SYNC_TRACES`` is checked first, then the ``sync_traces``
+    option in ~/.timbal/config, then defaults to True.
+
     Args:
         platform_config: Existing config to fill in missing fields for.
         profile: Profile name for file config. Defaults to TIMBAL_PROFILE env var or "default".
@@ -138,9 +184,6 @@ def resolve_platform_config(
         elif file_config.base_url:
             host = _strip_scheme(file_config.base_url)
             logger.debug("Resolved host from config file.", host=host)
-        else:
-            host = "api.timbal.ai"
-            logger.debug("Defaulted host to 'api.timbal.ai'.")
 
         api_key = os.getenv("TIMBAL_API_KEY") or os.getenv("TIMBAL_API_TOKEN")
         if api_key:
@@ -181,6 +224,7 @@ def resolve_platform_config(
 
     if not org_id:
         logger.debug("No org_id found, skipping subject resolution.")
+        _merge_sync_traces_enabled(platform_config, file_config)
         return platform_config
 
     app_id = None
@@ -202,4 +246,5 @@ def resolve_platform_config(
     )
     logger.debug("Resolved platform subject.", org_id=org_id, app_id=app_id, version_id=version_id)
 
+    _merge_sync_traces_enabled(platform_config, file_config)
     return platform_config

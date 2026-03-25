@@ -90,7 +90,12 @@ class RunContext(BaseModel):
 
         self._trace = Trace()
         if self.platform_config:
-            if self.platform_config.subject and self.platform_config.subject.app_id:
+            use_platform_traces = self.platform_config.sync_traces_enabled is not False
+            if (
+                use_platform_traces
+                and self.platform_config.subject
+                and self.platform_config.subject.app_id
+            ):
                 _get_logger().info(
                     f"Platform configuration found (subject: {self.platform_config.subject}). "
                     "Using platform tracing provider.",
@@ -99,12 +104,19 @@ class RunContext(BaseModel):
                 )
                 self._tracing_provider = PlatformTracingProvider
                 return
-            _get_logger().warning(
-                "Platform configuration found but no valid subject. "
-                "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID environment variables to enable platform tracing.",
-                event_name="tracing_setup",
-                run_id=self.id,
-            )
+            if self.platform_config.sync_traces_enabled is False:
+                _get_logger().info(
+                    "Sync traces disabled (sync_traces_enabled=False). Using in-memory tracing provider.",
+                    event_name="tracing_setup",
+                    run_id=self.id,
+                )
+            else:
+                _get_logger().warning(
+                    "Platform configuration found but no valid subject. "
+                    "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID environment variables to enable platform tracing.",
+                    event_name="tracing_setup",
+                    run_id=self.id,
+                )
         _get_logger().info(
             "Using in-memory tracing provider.",
             event_name="tracing_setup",

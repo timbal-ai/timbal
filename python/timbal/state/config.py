@@ -71,6 +71,13 @@ class PlatformConfig(BaseModel):
     """Platform authentication configuration."""
     subject: PlatformSubject | None = None
     """Platform subject configuration. i.e. this is the agent/workflow platform identifiers context."""
+    sync_traces_enabled: bool | None = None
+    """When True, persist run traces to the platform (requires org + app subject).
+
+    When False, use in-memory tracing even if subject is set. Resolved from
+    ``TIMBAL_SYNC_TRACES`` / ``sync_traces`` in ~/.timbal/config when unset here.
+    Defaults to True when not explicitly configured.
+    """
 
     @model_validator(mode="before")
     @classmethod
