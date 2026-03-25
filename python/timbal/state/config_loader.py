@@ -12,7 +12,7 @@ logger = structlog.get_logger("timbal.state.config_loader")
 
 TIMBAL_CONFIG_DIR = Path.home() / ".timbal"
 
-# Shared with TIMBAL_PLATFORM_TRACES and ~/.timbal/config platform_traces option.
+# Shared with TIMBAL_SYNC_TRACES and ~/.timbal/config sync_traces option.
 _TRUTHY_STRINGS = frozenset({"true", "1", "t", "yes", "y", "enabled", "on"})
 
 
@@ -26,7 +26,7 @@ class FileConfig(NamedTuple):
     base_url: str | None
     api_key: SecretStr | None
     org: str | None
-    platform_traces_enabled: bool | None
+    sync_traces_enabled: bool | None
 
 
 def _resolve_section_name(profile: str) -> str:
@@ -64,7 +64,7 @@ def load_file_config(
     base_url: str | None = None
     org: str | None = None
     api_key: SecretStr | None = None
-    platform_traces_enabled: bool | None = None
+    sync_traces_enabled: bool | None = None
 
     if config_path.is_file():
         config = configparser.ConfigParser()
@@ -73,10 +73,10 @@ def load_file_config(
             if config.has_section(section):
                 base_url = config.get(section, "base_url", fallback=None)
                 org = config.get(section, "org", fallback=None)
-                if config.has_option(section, "platform_traces"):
-                    platform_traces_enabled = _is_truthy_string(config.get(section, "platform_traces"))
+                if config.has_option(section, "sync_traces"):
+                    sync_traces_enabled = _is_truthy_string(config.get(section, "sync_traces"))
                 else:
-                    platform_traces_enabled = None
+                    sync_traces_enabled = None
             else:
                 logger.debug(
                     f"Profile section '{section}' not found in config file.",
@@ -115,29 +115,32 @@ def load_file_config(
         base_url=base_url,
         api_key=api_key,
         org=org,
-        platform_traces_enabled=platform_traces_enabled,
+        sync_traces_enabled=sync_traces_enabled,
     )
 
 
-def _merge_platform_traces_enabled(platform_config: PlatformConfig, file_config: FileConfig) -> None:
-    """Fill platform_traces_enabled from env then file when not set on platform_config."""
-    if platform_config.platform_traces_enabled is not None:
+def _merge_sync_traces_enabled(platform_config: PlatformConfig, file_config: FileConfig) -> None:
+    """Fill sync_traces_enabled from env then file then default (True) when not set on platform_config."""
+    if platform_config.sync_traces_enabled is not None:
         return
-    if "TIMBAL_PLATFORM_TRACES" in os.environ:
-        platform_config.platform_traces_enabled = _is_truthy_string(
-            os.getenv("TIMBAL_PLATFORM_TRACES", "false"),
+    if "TIMBAL_SYNC_TRACES" in os.environ:
+        platform_config.sync_traces_enabled = _is_truthy_string(
+            os.getenv("TIMBAL_SYNC_TRACES", "true"),
         )
         logger.debug(
-            "Resolved platform_traces_enabled from TIMBAL_PLATFORM_TRACES.",
-            value=platform_config.platform_traces_enabled,
+            "Resolved sync_traces_enabled from TIMBAL_SYNC_TRACES.",
+            value=platform_config.sync_traces_enabled,
         )
         return
-    if file_config.platform_traces_enabled is not None:
-        platform_config.platform_traces_enabled = file_config.platform_traces_enabled
+    if file_config.sync_traces_enabled is not None:
+        platform_config.sync_traces_enabled = file_config.sync_traces_enabled
         logger.debug(
-            "Resolved platform_traces_enabled from config file.",
-            value=file_config.platform_traces_enabled,
+            "Resolved sync_traces_enabled from config file.",
+            value=file_config.sync_traces_enabled,
         )
+        return
+    platform_config.sync_traces_enabled = True
+    logger.debug("Defaulted sync_traces_enabled to True.")
 
 
 def _strip_scheme(url: str) -> str:
@@ -161,12 +164,9 @@ def resolve_platform_config(
     2. Environment variables
     3. ~/.timbal/ config and credentials files
 
-    Platform trace persistence uses ``platform_traces_enabled`` on ``PlatformConfig``.
-    When that field is unset, ``TIMBAL_PLATFORM_TRACES`` is parsed with the same truthy rules as
-    ``platform_traces`` in the config file, but only if ``TIMBAL_PLATFORM_TRACES`` is set in the
-    environment; otherwise the ``platform_traces`` option in ~/.timbal/config is used.
-    ``None`` on the model keeps legacy behavior: use the platform tracing provider when
-    org and app subject are present.
+    Sync trace persistence uses ``sync_traces_enabled`` on ``PlatformConfig``.
+    When that field is unset, ``TIMBAL_SYNC_TRACES`` is checked first, then the ``sync_traces``
+    option in ~/.timbal/config, then defaults to True.
 
     Args:
         platform_config: Existing config to fill in missing fields for.
@@ -224,7 +224,7 @@ def resolve_platform_config(
 
     if not org_id:
         logger.debug("No org_id found, skipping subject resolution.")
-        _merge_platform_traces_enabled(platform_config, file_config)
+        _merge_sync_traces_enabled(platform_config, file_config)
         return platform_config
 
     app_id = None
@@ -246,5 +246,5 @@ def resolve_platform_config(
     )
     logger.debug("Resolved platform subject.", org_id=org_id, app_id=app_id, version_id=version_id)
 
-    _merge_platform_traces_enabled(platform_config, file_config)
+    _merge_sync_traces_enabled(platform_config, file_config)
     return platform_config

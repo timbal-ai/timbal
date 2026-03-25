@@ -90,7 +90,7 @@ class RunContext(BaseModel):
 
         self._trace = Trace()
         if self.platform_config:
-            use_platform_traces = self.platform_config.platform_traces_enabled is not False
+            use_platform_traces = self.platform_config.sync_traces_enabled is not False
             if (
                 use_platform_traces
                 and self.platform_config.subject
@@ -104,9 +104,9 @@ class RunContext(BaseModel):
                 )
                 self._tracing_provider = PlatformTracingProvider
                 return
-            if self.platform_config.platform_traces_enabled is False:
+            if self.platform_config.sync_traces_enabled is False:
                 _get_logger().info(
-                    "Platform traces disabled (platform_traces_enabled=False). Using in-memory tracing provider.",
+                    "Sync traces disabled (sync_traces_enabled=False). Using in-memory tracing provider.",
                     event_name="tracing_setup",
                     run_id=self.id,
                 )
