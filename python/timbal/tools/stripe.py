@@ -1449,6 +1449,155 @@ class CancelSubscription(Tool):
         super().__init__(handler=_cancel_subscription, **kwargs)
 
 
+class ListSubscriptions(Tool):
+    name: str = "stripe_list_subscriptions"
+    description: str | None = "List Stripe subscriptions with optional filters (customer, status, etc.)."
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_subscriptions(
+            limit: int = Field(10, description="Maximum number of subscriptions to return."),
+            customer: str | None = Field(None, description="Filter by Stripe customer ID (e.g. 'cus_xxx')."),
+            status: str | None = Field(
+                None,
+                description="Filter by status: 'active', 'past_due', 'unpaid', 'canceled', 'incomplete', 'incomplete_expired', 'trialing', 'paused', or 'all'.",
+            ),
+            starting_after: str | None = Field(None, description="Subscription ID cursor for pagination."),
+            ending_before: str | None = Field(None, description="Subscription ID cursor for pagination."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            params: dict[str, Any] = {"limit": limit}
+            if customer:
+                params["customer"] = customer
+            if status:
+                params["status"] = status
+            if starting_after:
+                params["starting_after"] = starting_after
+            if ending_before:
+                params["ending_before"] = ending_before
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_BASE_URL}/subscriptions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    params=params,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_subscriptions, **kwargs)
+
+
+class RetrieveSubscription(Tool):
+    name: str = "stripe_retrieve_subscription"
+    description: str | None = "Retrieve a single Stripe subscription by ID."
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _retrieve_subscription(
+            subscription_id: str = Field(..., description="Stripe subscription ID (e.g. 'sub_xxx')."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_BASE_URL}/subscriptions/{subscription_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_retrieve_subscription, **kwargs)
+
+
+class UpdateSubscription(Tool):
+    name: str = "stripe_update_subscription"
+    description: str | None = (
+        "Update a Stripe subscription: metadata, cancel at period end, or change one subscription line item's price."
+    )
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _update_subscription(
+            subscription_id: str = Field(..., description="Stripe subscription ID (e.g. 'sub_xxx')."),
+            cancel_at_period_end: bool | None = Field(
+                None,
+                description="If True, subscription cancels at end of current period; False resumes if was set to cancel.",
+            ),
+            metadata: dict[str, str] | None = Field(None, description="Key-value pairs to set on the subscription."),
+            subscription_item_id: str | None = Field(
+                None,
+                description="ID of an existing subscription item (si_xxx) to update when changing price.",
+            ),
+            new_price_id: str | None = Field(
+                None,
+                description="New Stripe price ID (price_xxx) for the subscription_item_id line.",
+            ),
+            quantity: int | None = Field(
+                None,
+                description="Quantity for the updated line item (default 1 if changing price).",
+            ),
+            proration_behavior: str | None = Field(
+                None,
+                description="Stripe proration behavior: e.g. 'create_prorations', 'none', 'always_invoice'.",
+            ),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            data: dict[str, Any] = {}
+            if cancel_at_period_end is not None:
+                data["cancel_at_period_end"] = str(cancel_at_period_end).lower()
+            if metadata:
+                for k, v in metadata.items():
+                    data[f"metadata[{k}]"] = v
+            if subscription_item_id and new_price_id:
+                data["items[0][id]"] = subscription_item_id
+                data["items[0][price]"] = new_price_id
+                if quantity is not None:
+                    data["items[0][quantity]"] = quantity
+            if proration_behavior:
+                data["proration_behavior"] = proration_behavior
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{_BASE_URL}/subscriptions/{subscription_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data=data,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_update_subscription, **kwargs)
+
+
 class CreateProduct(Tool):
     name: str = "stripe_create_product"
     description: str | None = "Create a new Stripe product."
@@ -1583,11 +1732,33 @@ class CreatePrice(Tool):
 
     def __init__(self, **kwargs: Any) -> None:
         async def _create_price(
-            unit_amount: int = Field(..., description="Price in the smallest currency unit (e.g. cents). 1099 = $10.99."),
-            currency: str = Field(..., description="Three-letter ISO currency code, lowercase (e.g. 'usd')."),
+            unit_amount: int = Field(
+                ...,
+                description=(
+                    "Amount in the smallest currency unit (integer). "
+                    "Examples: 5900 = 59.00 EUR/USD; 1099 = 10.99. Not a float."
+                ),
+            ),
+            currency: str = Field(
+                ...,
+                description="Three-letter ISO currency code, lowercase (e.g. 'eur', 'usd').",
+            ),
             product: str = Field(..., description="Stripe product ID this price belongs to (e.g. 'prod_xxx')."),
-            recurring_interval: str | None = Field(None, description="Billing interval for recurring: 'day', 'week', 'month', or 'year'. Omit for one-time."),
-            recurring_interval_count: int | None = Field(None, description="Number of intervals between each billing cycle (default 1)."),
+            recurring_interval: str | None = Field(
+                None,
+                description=(
+                    "For subscriptions: 'month' or 'year' (also 'day', 'week'). "
+                    "Omit for a one-time price."
+                ),
+            ),
+            recurring_interval_count: int | None = Field(
+                None,
+                description="Number of intervals between charges (default 1). e.g. interval=month, interval_count=3 = quarterly.",
+            ),
+            nickname: str | None = Field(
+                None,
+                description="Short label shown in Dashboard (e.g. 'Monthly', 'Annual').",
+            ),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the price."),
         ) -> Any:
             api_key = await _resolve_api_key(self)
@@ -1598,6 +1769,8 @@ class CreatePrice(Tool):
                 "currency": currency,
                 "product": product,
             }
+            if nickname:
+                data["nickname"] = nickname
             if recurring_interval:
                 data["recurring[interval]"] = recurring_interval
                 if recurring_interval_count is not None:
@@ -1647,6 +1820,110 @@ class RetrievePrice(Tool):
                 return response.json()
 
         super().__init__(handler=_retrieve_price, **kwargs)
+
+
+class ListPrices(Tool):
+    name: str = "stripe_list_prices"
+    description: str | None = (
+        "List Stripe prices. Filter by product to see all prices (monthly, yearly, etc.) attached to a product."
+    )
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_prices(
+            limit: int = Field(10, description="Maximum number of prices to return (max 100)."),
+            product: str | None = Field(None, description="Only return prices for this product ID (e.g. 'prod_xxx')."),
+            active: bool | None = Field(None, description="True = active prices only, False = inactive."),
+            currency: str | None = Field(None, description="Filter by currency code (e.g. 'eur')."),
+            type_filter: str | None = Field(
+                None,
+                description="Filter by price type: 'one_time' or 'recurring'.",
+            ),
+            starting_after: str | None = Field(None, description="Price ID cursor for pagination."),
+            ending_before: str | None = Field(None, description="Price ID cursor for pagination."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            params: dict[str, Any] = {"limit": limit}
+            if product:
+                params["product"] = product
+            if active is not None:
+                params["active"] = str(active).lower()
+            if currency:
+                params["currency"] = currency
+            if type_filter:
+                params["type"] = type_filter
+            if starting_after:
+                params["starting_after"] = starting_after
+            if ending_before:
+                params["ending_before"] = ending_before
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_BASE_URL}/prices",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    params=params,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_prices, **kwargs)
+
+
+class UpdatePrice(Tool):
+    name: str = "stripe_update_price"
+    description: str | None = (
+        "Update a Stripe price (active flag, nickname, metadata). "
+        "Amount and billing interval cannot be changed; create a new price instead."
+    )
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _update_price(
+            price_id: str = Field(..., description="Stripe price ID (e.g. 'price_xxx')."),
+            active: bool | None = Field(None, description="Whether the price can be used for new purchases."),
+            nickname: str | None = Field(None, description="Dashboard label for this price."),
+            metadata: dict[str, str] | None = Field(None, description="Metadata key-value pairs (replaces keys sent)."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            data: dict[str, Any] = {}
+            if active is not None:
+                data["active"] = str(active).lower()
+            if nickname is not None:
+                data["nickname"] = nickname
+            if metadata:
+                for k, v in metadata.items():
+                    data[f"metadata[{k}]"] = v
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{_BASE_URL}/prices/{price_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data=data,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_update_price, **kwargs)
 
 
 class CreatePayout(Tool):
