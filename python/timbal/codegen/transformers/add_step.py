@@ -44,7 +44,12 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     valid_types = [*get_framework_tools().keys(), "Agent", "Custom"]
 
     if step_type not in valid_types:
-        raise ValueError(f"--type must be one of {valid_types}, got '{step_type}'.")
+        raise ValueError(
+            f"--type '{step_type}' is not valid. "
+            f"Use 'Agent' for agent steps, 'Custom' for custom function steps, "
+            f"or a framework tool class name. "
+            f"Run `timbal-codegen get-tools` to browse available tool types."
+        )
 
     if step_type == "Custom":
         if not args.definition:
