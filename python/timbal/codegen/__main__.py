@@ -24,11 +24,6 @@ def main() -> None:
 
     # Read-only operations (not CST transformers)
     subparsers.add_parser("get-flow", help="Print the graph for the workspace entry point.")
-    list_tools_parser = subparsers.add_parser("list-tools", help="List available framework tool types.")
-    list_tools_parser.add_argument(
-        "--no-cache", action="store_true", help="Skip the disk cache and force a full rediscovery."
-    )
-
     get_tools_parser = subparsers.add_parser(
         "get-tools",
         help="Browse tools by provider, or search/filter with pagination.",
@@ -70,7 +65,7 @@ def main() -> None:
     # Defer transformer module loading (pulls in libcst + timbal.codegen which
     # are expensive) — only needed for transformer operations, not for
     # list-tools, get-flow, or test.
-    _lightweight_ops = {"list-tools", "get-models", "get-tools", "get-flow", "test"}
+    _lightweight_ops = {"get-models", "get-tools", "get-flow", "test"}
     if not (_lightweight_ops & set(sys.argv[1:])):
         from timbal.codegen.transformers import load_modules
 
@@ -114,24 +109,6 @@ def main() -> None:
         models = models[args.offset : args.offset + args.limit]
 
         print(json.dumps({"models": models, "total": total, "limit": args.limit, "offset": args.offset}, indent=2))
-        return
-
-    if operation == "list-tools":
-        from timbal.codegen.tool_discovery import get_framework_tools
-
-        tools = [
-            {
-                "type": cls,
-                "module": ft.module,
-                "name": ft.name,
-                "description": ft.description,
-                "provider": ft.provider,
-                "provider_logo": ft.provider_logo,
-            }
-            for cls, ft in sorted(get_framework_tools(no_cache=args.no_cache).items())
-        ]
-        tools = {"tools": tools}
-        print(json.dumps(tools, indent=2))
         return
 
     if operation == "get-tools":

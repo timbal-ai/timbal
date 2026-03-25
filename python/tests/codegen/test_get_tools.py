@@ -397,17 +397,6 @@ class TestGetToolsNoCache:
         assert "providers" in data
         assert len(data["providers"]) > 0
 
-    def test_list_tools_no_cache_flag(self):
-        result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "list-tools", "--no-cache"],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0
-        data = json.loads(result.stdout)
-        assert "tools" in data
-        assert len(data["tools"]) > 100
-
 
 # ---------------------------------------------------------------------------
 # CLI: tool data shape
@@ -433,32 +422,3 @@ class TestToolDataShape:
         assert tool["provider_logo"] is None
         assert tool["module"] == "timbal.tools"
 
-
-# ---------------------------------------------------------------------------
-# Backwards compat: list-tools unchanged
-# ---------------------------------------------------------------------------
-
-
-class TestListToolsUnchanged:
-    def test_list_tools_still_works(self):
-        result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "list-tools"],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0
-        data = json.loads(result.stdout)
-        assert "tools" in data
-        assert len(data["tools"]) > 100  # all tools, no pagination
-
-    def test_list_tools_no_pagination_metadata(self):
-        """list-tools does not return total/limit/offset."""
-        result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "list-tools"],
-            capture_output=True,
-            text=True,
-        )
-        data = json.loads(result.stdout)
-        assert "total" not in data
-        assert "limit" not in data
-        assert "offset" not in data
