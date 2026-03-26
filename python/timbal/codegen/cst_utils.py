@@ -153,6 +153,43 @@ def collect_assignments(tree: cst.Module) -> dict[str, cst.Call]:
     return result
 
 
+def collect_step_names(
+    tree: cst.Module,
+    entry_point: str,
+    assignments: dict[str, cst.Call],
+) -> dict[str, str]:
+    """Build a mapping of step variable name → runtime name.
+
+    Scans the tree for ``<entry_point>.step(<var>, ...)`` calls and resolves
+    each step's runtime name from its assignment.  Returns a dict like
+    ``{"agent_b": "Agent 2", "translator": "translator"}``.
+    """
+    var_to_name: dict[str, str] = {}
+    for stmt in tree.body:
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for item in stmt.body:
+            if not isinstance(item, cst.Expr) or not isinstance(item.value, cst.Call):
+                continue
+            call = item.value
+            if not (
+                isinstance(call.func, cst.Attribute)
+                and isinstance(call.func.value, cst.Name)
+                and call.func.value.value == entry_point
+                and call.func.attr.value == "step"
+                and call.args
+            ):
+                continue
+            first_arg = call.args[0].value
+            if isinstance(first_arg, cst.Name):
+                var_name = first_arg.value
+                resolved = resolve_runnable_name(
+                    assignments[var_name],
+                ) if var_name in assignments else None
+                var_to_name[var_name] = resolved if resolved is not None else var_name
+    return var_to_name
+
+
 def has_import(tree: cst.Module, module: str, name: str) -> bool:
     """Check if `from <module> import <name>` already exists."""
     for stmt in tree.body:

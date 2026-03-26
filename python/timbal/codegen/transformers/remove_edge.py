@@ -4,8 +4,8 @@ import libcst as cst
 
 from ..cst_utils import (
     collect_assignments,
+    collect_step_names,
     resolve_entry_point_type,
-    resolve_runnable_name,
 )
 
 
@@ -33,7 +33,8 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         raise ValueError("remove-edge requires a Workflow entry point.")
 
     assignments = collect_assignments(tree) if tree else {}
-    return EdgeRemover(entry_point, args.source, args.target, assignments)
+    step_names = collect_step_names(tree, entry_point, assignments) if tree else {}
+    return EdgeRemover(entry_point, args.source, args.target, assignments, step_names)
 
 
 class EdgeRemover(cst.CSTTransformer):
@@ -45,11 +46,15 @@ class EdgeRemover(cst.CSTTransformer):
         source: str,
         target: str,
         assignments: dict[str, cst.Call],
+        step_names: dict[str, str] | None = None,
     ):
         self.entry_point = entry_point
         self.source = source
         self.target = target
         self.assignments = assignments
+        self.step_names = step_names or {}
+        # Resolve source to runtime name for matching against depends_on and step_span.
+        self._resolved_source = self.step_names.get(source, source)
 
     def _is_step_call(self, call: cst.Call) -> bool:
         return (
@@ -60,22 +65,23 @@ class EdgeRemover(cst.CSTTransformer):
         )
 
     def _matches_target(self, call: cst.Call) -> bool:
+        """Match by variable name or runtime name."""
         if not call.args:
             return False
         first_arg = call.args[0].value
         if isinstance(first_arg, cst.Name):
             var_name = first_arg.value
-            if var_name in self.assignments:
-                resolved = resolve_runnable_name(self.assignments[var_name])
-                if resolved is not None:
-                    return resolved == self.target
-            return var_name == self.target
+            if var_name == self.target:
+                return True
+            runtime_name = self.step_names.get(var_name)
+            if runtime_name is not None and runtime_name == self.target:
+                return True
         return False
 
     def _references_source(self, arg: cst.Arg) -> bool:
         """Check if an argument's value references the source step via step_span."""
         code = cst.parse_module("").code_for_node(arg.value)
-        return f'step_span("{self.source}")' in code
+        return f'step_span("{self._resolved_source}")' in code
 
     def leave_Expr(self, original_node: cst.Expr, updated_node: cst.Expr) -> cst.Expr:
         """Remove edge references from the target's .step() call."""
@@ -114,7 +120,7 @@ class EdgeRemover(cst.CSTTransformer):
                 remaining = []
                 for el in arg.value.elements:
                     if isinstance(el.value, (cst.SimpleString, cst.ConcatenatedString)):
-                        if el.value.evaluated_value != self.source:
+                        if el.value.evaluated_value != self._resolved_source:
                             remaining.append(f'"{el.value.evaluated_value}"')
                     else:
                         remaining.append(cst.parse_module("").code_for_node(el.value).strip())

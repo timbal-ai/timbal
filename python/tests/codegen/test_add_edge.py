@@ -74,6 +74,43 @@ class TestOrderingEdge:
         assert match.group(1).count('"agent_a"') == 1
 
 
+    def test_source_variable_name_resolved_to_runtime_name(self, wf_workspace):
+        """When source is a variable name that differs from the step's runtime name,
+        depends_on should use the runtime name (the name= kwarg)."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="Agent 1", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="Agent 2", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_a)
+        workflow.step(agent_b)
+        """)
+        # Pass the variable name as source — codegen should resolve it to "Agent 1"
+        output = _run(ws, source="agent_a", target="agent_b", when=None)
+        normalized = " ".join(output.split())
+        assert 'depends_on=["Agent 1"]' in normalized
+
+    def test_target_variable_name_resolved_to_runtime_name(self, wf_workspace):
+        """When target is a variable name that differs from the step's runtime name,
+        the target step should still be found and updated."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="Agent 1", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="Agent 2", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_a)
+        workflow.step(agent_b)
+        """)
+        # Pass the runtime name as source, variable name as target
+        output = _run(ws, source="Agent 1", target="agent_b", when=None)
+        normalized = " ".join(output.split())
+        assert 'depends_on=["Agent 1"]' in normalized
+
+
 class TestConditionalEdge:
     def test_when_condition(self, wf_workspace):
         ws = wf_workspace("""\

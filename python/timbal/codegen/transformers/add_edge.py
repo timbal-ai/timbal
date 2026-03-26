@@ -4,9 +4,9 @@ import libcst as cst
 
 from ..cst_utils import (
     collect_assignments,
+    collect_step_names,
     has_import,
     resolve_entry_point_type,
-    resolve_runnable_name,
 )
 
 
@@ -43,8 +43,9 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
     when_expr = args.when if args.when else None
     assignments = collect_assignments(tree) if tree else {}
+    step_names = collect_step_names(tree, entry_point, assignments) if tree else {}
 
-    return EdgeAdder(entry_point, args.source, args.target, when_expr, assignments)
+    return EdgeAdder(entry_point, args.source, args.target, when_expr, assignments, step_names)
 
 
 class EdgeAdder(cst.CSTTransformer):
@@ -59,12 +60,14 @@ class EdgeAdder(cst.CSTTransformer):
         target: str,
         when_expr: str | None,
         assignments: dict[str, cst.Call],
+        step_names: dict[str, str] | None = None,
     ):
         self.entry_point = entry_point
         self.source = source
         self.target = target
         self.when_expr = when_expr
         self.assignments = assignments
+        self.step_names = step_names or {}
 
     def _is_step_call(self, call: cst.Call) -> bool:
         return (
@@ -75,16 +78,23 @@ class EdgeAdder(cst.CSTTransformer):
         )
 
     def _matches_target(self, call: cst.Call) -> bool:
+        """Check if a .step() call is the target step.
+
+        Matches when self.target equals either the variable name or the
+        runtime name (the ``name=`` kwarg) of the step.
+        """
         if not call.args:
             return False
         first_arg = call.args[0].value
         if isinstance(first_arg, cst.Name):
             var_name = first_arg.value
-            if var_name in self.assignments:
-                resolved = resolve_runnable_name(self.assignments[var_name])
-                if resolved is not None:
-                    return resolved == self.target
-            return var_name == self.target
+            # Match by variable name.
+            if var_name == self.target:
+                return True
+            # Match by runtime name (name= kwarg).
+            runtime_name = self.step_names.get(var_name)
+            if runtime_name is not None and runtime_name == self.target:
+                return True
         return False
 
     def _get_existing_depends_on(self, call: cst.Call) -> list[str]:
@@ -130,6 +140,17 @@ class EdgeAdder(cst.CSTTransformer):
             return updated_node.with_changes(body=body)
         return updated_node
 
+    def _resolve_source_name(self) -> str:
+        """Resolve self.source to the runtime step name.
+
+        If self.source is a step variable name whose runtime ``name=`` kwarg
+        differs, return that runtime name. Only considers variables that are
+        actually used as workflow steps (not the workflow itself).
+        """
+        if self.source in self.step_names:
+            return self.step_names[self.source]
+        return self.source
+
     def _build_step_call_code(self, existing_call: cst.Call) -> str:
         """Build the updated .step() call source code."""
         first_arg = existing_call.args[0]
@@ -148,9 +169,10 @@ class EdgeAdder(cst.CSTTransformer):
                 value_code = cst.parse_module("").code_for_node(arg.value).strip()
                 parts.append(f"{arg.keyword.value}={value_code}")
 
-        # Merge source into depends_on.
+        # Merge source into depends_on, resolving variable name to runtime name.
+        resolved_source = self._resolve_source_name()
         existing_deps = self._get_existing_depends_on(existing_call)
-        all_deps = list(dict.fromkeys(existing_deps + [self.source]))  # dedupe, preserve order
+        all_deps = list(dict.fromkeys(existing_deps + [resolved_source]))  # dedupe, preserve order
         deps = ", ".join(f'"{d}"' for d in all_deps)
         parts.append(f"depends_on=[{deps}]")
 
