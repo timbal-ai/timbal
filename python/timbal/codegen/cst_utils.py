@@ -190,6 +190,115 @@ def collect_step_names(
     return var_to_name
 
 
+def is_bare_function_step(
+    tree: cst.Module,
+    entry_point: str,
+    step_name: str,
+    assignments: dict[str, cst.Call],
+) -> bool:
+    """Check if *step_name* is a bare ``def`` used directly in a ``.step()`` call.
+
+    Returns ``True`` when:
+    1. No top-level assignment resolves to *step_name* (i.e. it's not already
+       wrapped in ``Tool`` / ``Agent`` / etc.).
+    2. A ``FunctionDef`` with that name exists at the module level.
+    3. That name appears as the first positional arg in an
+       ``<entry_point>.step(step_name, ...)`` call.
+    """
+    # Already wrapped?
+    for _var, call in assignments.items():
+        if resolve_runnable_name(call) == step_name:
+            return False
+
+    # Has a matching FunctionDef?
+    has_func_def = any(
+        isinstance(stmt, cst.FunctionDef) and stmt.name.value == step_name
+        for stmt in tree.body
+    )
+    if not has_func_def:
+        return False
+
+    # Used as a workflow step?
+    for stmt in tree.body:
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for item in stmt.body:
+            if not (isinstance(item, cst.Expr) and isinstance(item.value, cst.Call)):
+                continue
+            call = item.value
+            if (
+                isinstance(call.func, cst.Attribute)
+                and isinstance(call.func.value, cst.Name)
+                and call.func.value.value == entry_point
+                and call.func.attr.value == "step"
+                and call.args
+                and isinstance(call.args[0].value, cst.Name)
+                and call.args[0].value.value == step_name
+            ):
+                return True
+
+    return False
+
+
+class _BareFunctionWrapper(cst.CSTTransformer):
+    """Rename ``def step_name(...)`` → ``def step_name_fn(...)`` and insert a
+    ``Tool(name="step_name", handler=step_name_fn)`` assignment."""
+
+    def __init__(self, entry_point: str, step_name: str) -> None:
+        self.entry_point = entry_point
+        self.step_name = step_name
+        self._func_renamed = False
+
+    def leave_FunctionDef(
+        self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef  # noqa: ARG002
+    ) -> cst.FunctionDef:
+        if updated_node.name.value == self.step_name:
+            self._func_renamed = True
+            return updated_node.with_changes(name=cst.Name(f"{self.step_name}_fn"))
+        return updated_node
+
+    def leave_Module(
+        self, original_node: cst.Module, updated_node: cst.Module
+    ) -> cst.Module:
+        if not self._func_renamed:
+            return updated_node
+
+        body = list(updated_node.body)
+
+        # Add ``from timbal.core import Tool`` if missing.
+        if not has_import(original_node, "timbal.core", "Tool"):
+            import_insert_idx = 0
+            for i, stmt in enumerate(body):
+                if isinstance(stmt, cst.SimpleStatementLine):
+                    for item_node in stmt.body:
+                        if isinstance(item_node, (cst.Import, cst.ImportFrom)):
+                            import_insert_idx = i + 1
+            body.insert(import_insert_idx, cst.parse_statement("from timbal.core import Tool\n"))
+
+        # Build ``step_name = Tool(name="step_name", handler=step_name_fn)``
+        assignment_code = (
+            f'{self.step_name} = Tool(name="{self.step_name}", handler={self.step_name}_fn)\n'
+        )
+
+        # Insert before the entry-point assignment.
+        insert_idx = len(body)
+        for i, stmt in enumerate(body):
+            if isinstance(stmt, cst.SimpleStatementLine):
+                for item_node in stmt.body:
+                    if isinstance(item_node, cst.Assign):
+                        for t in item_node.targets:
+                            if isinstance(t.target, cst.Name) and t.target.value == self.entry_point:
+                                insert_idx = min(insert_idx, i)
+        body.insert(insert_idx, cst.parse_statement(assignment_code))
+
+        return updated_node.with_changes(body=body)
+
+
+def wrap_bare_function_step(tree: cst.Module, entry_point: str, step_name: str) -> cst.Module:
+    """Wrap a bare function step in a ``Tool`` and return the modified tree."""
+    return tree.visit(_BareFunctionWrapper(entry_point, step_name))
+
+
 def has_import(tree: cst.Module, module: str, name: str) -> bool:
     """Check if `from <module> import <name>` already exists."""
     for stmt in tree.body:

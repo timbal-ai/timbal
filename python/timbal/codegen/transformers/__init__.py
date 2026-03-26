@@ -285,7 +285,12 @@ def apply_operation(workspace_path: str | Path, operation: str, **kwargs) -> str
         raise ValueError(f"unknown operation: {operation}")
 
     args = SimpleNamespace(**kwargs)
-    transformer = mod.run(spec.target, args, tree=tree)
+    result = mod.run(spec.target, args, tree=tree)
+    # run() may return (transformer, modified_tree) when pre-processing was needed.
+    if isinstance(result, tuple):
+        transformer, tree = result
+    else:
+        transformer = result
     new_tree = tree.visit(transformer)
 
     code = remove_unused_code(new_tree.code, protected={spec.target})

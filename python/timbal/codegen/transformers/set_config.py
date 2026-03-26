@@ -6,8 +6,10 @@ import libcst as cst
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
+    is_bare_function_step,
     resolve_entry_point_type,
     resolve_runnable_name,
+    wrap_bare_function_step,
 )
 from ..tool_discovery import get_framework_tool_names, validate_tool_config
 
@@ -56,6 +58,14 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             raise ValueError("--config is required for set-config.")
 
         assignments = collect_assignments(tree) if tree else {}
+
+        # Bare function used directly as a step → wrap in Tool first.
+        wrapped_tree = None
+        if tree and is_bare_function_step(tree, entry_point, args.name, assignments):
+            tree = wrap_bare_function_step(tree, entry_point, args.name)
+            wrapped_tree = tree
+            assignments = collect_assignments(tree)
+
         step_class = _resolve_step_class(args.name, assignments)
         if step_class == "Agent":
             unknown = set(config.keys()) - AGENT_FIELDS
@@ -64,7 +74,10 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
                     f"Unknown agent config field(s): {', '.join(sorted(unknown))}. "
                     f"Valid fields: {', '.join(sorted(AGENT_FIELDS))}."
                 )
-        return StepConstructorConfigSetter(entry_point, args.name, config, assignments)
+        transformer = StepConstructorConfigSetter(entry_point, args.name, config, assignments)
+        if wrapped_tree is not None:
+            return transformer, wrapped_tree
+        return transformer
 
     # --- Agent entry point ---
     if ep_type is not None and ep_type != "Agent":

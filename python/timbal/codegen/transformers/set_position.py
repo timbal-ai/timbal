@@ -5,8 +5,10 @@ import libcst as cst
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
+    is_bare_function_step,
     resolve_entry_point_type,
     resolve_runnable_name,
+    wrap_bare_function_step,
 )
 
 
@@ -33,6 +35,13 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         if not args.name:
             raise ValueError("set-position on a Workflow entry point requires a step --name.")
         assignments = collect_assignments(tree) if tree else {}
+
+        # Bare function used directly as a step → wrap in Tool first.
+        if tree and is_bare_function_step(tree, entry_point, args.name, assignments):
+            tree = wrap_bare_function_step(tree, entry_point, args.name)
+            assignments = collect_assignments(tree)
+            return StepPositionSetter(entry_point, args.name, position, assignments), tree
+
         return StepPositionSetter(entry_point, args.name, position, assignments)
 
     # Agent (or unknown) entry point — set on the constructor directly.
