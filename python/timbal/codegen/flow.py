@@ -3,6 +3,7 @@ import inspect
 import io
 import re
 import textwrap
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -230,3 +231,185 @@ def get_flow(workspace_path: str | Path) -> dict[str, Any]:
         "nodes": nodes,
         "edges": edges,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Compact formatter — token-efficient, LLM-readable summary
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _short(node_id: str) -> str:
+    """'workflow.step_name' → 'step_name'."""
+    return node_id.split(".")[-1]
+
+
+def _fmt_type(prop: dict) -> str:
+    if prop.get("x-timbal-ref") == "models":
+        return "model"
+    t = prop.get("type", "")
+    if t == "object":
+        return "dict"
+    if t == "array":
+        item_type = _fmt_type(prop.get("items", {})) if prop.get("items") else "any"
+        return f"list[{item_type}]"
+    if "anyOf" in prop:
+        types = [_fmt_type(x) for x in prop["anyOf"] if x.get("type") != "null"]
+        return "|".join(types) if types else "any"
+    return t or "any"
+
+
+def _config_val(field: dict) -> Any:
+    """Extract plain value from a config field dict produced by _compact_config."""
+    v = field.get("value")
+    if isinstance(v, dict) and v.get("type") == "value":
+        return v["value"]
+    return v
+
+
+def _fmt_node_lines(node: dict, indent: str) -> list[str]:
+    lines: list[str] = []
+    ntype = node["type"]
+    name = _short(node["id"])
+    config = node["data"].get("config", {})
+    params = node["data"].get("params", {})
+    props = params.get("properties", {})
+    required = set(params.get("required", []))
+
+    if ntype == "agent":
+        model = _config_val(config.get("model", {})) or "?"
+        extras: list[str] = [model]
+        for key in ("max_iter", "max_tokens", "temperature"):
+            val = _config_val(config.get(key, {}))
+            if val is not None:
+                extras.append(f"{key}={val}")
+        lines.append(f"{indent}agent  {name}  [{', '.join(extras)}]")
+
+        sp = _config_val(config.get("system_prompt", {}))
+        if sp:
+            sp_short = sp[:120].replace("\n", " ")
+            if len(sp) > 120:
+                sp_short += "…"
+            lines.append(f'{indent}  system_prompt: "{sp_short}"')
+
+        tools: list[dict] = config.get("tools", [])
+        tool_names = [_short(t["id"]) for t in tools] if tools else []
+        lines.append(f"{indent}  tools: {', '.join(tool_names) if tool_names else 'none'}")
+
+        for pname, prop in props.items():
+            val = prop.get("value", {})
+            if isinstance(val, dict) and val.get("type") == "map":
+                source = _short(val.get("source", "?"))
+                key = val.get("key")
+                src = f"{source}.{key}" if key else source
+                lines.append(f"{indent}  {pname} ← {src}")
+
+    elif ntype == "tool":
+        sig_parts: list[str] = []
+        for pname, prop in props.items():
+            val = prop.get("value", {})
+            if isinstance(val, dict) and val.get("type") == "map":
+                source = _short(val.get("source", "?"))
+                key = val.get("key")
+                src = f"{source}.{key}" if key else source
+                sig_parts.append(f"{pname}:←{src}")
+            elif isinstance(val, dict) and val.get("type") == "value":
+                sig_parts.append(f"{pname}={repr(val['value'])[:30]}")
+            else:
+                opt = "" if pname in required else "?"
+                sig_parts.append(f"{pname}{opt}:{_fmt_type(prop)}")
+
+        ret = node["data"].get("return", {})
+        ret_t = _fmt_type(ret) if ret else ""
+        ret_str = f" → {ret_t}" if ret_t and ret_t not in ("any", "") else ""
+        lines.append(f"{indent}tool   {name}({', '.join(sig_parts)}){ret_str}")
+
+    elif ntype == "workflow":
+        lines.append(f"{indent}workflow  {name}")
+
+    return lines
+
+
+def _build_edge_lines(edges: list[dict]) -> list[str]:
+    """Render edges grouped by source, one line per source node."""
+    targets_of: dict[str, list[tuple[str, str | None]]] = defaultdict(list)
+    all_sources: list[str] = []
+    seen_sources: set[str] = set()
+    for e in edges:
+        src, tgt = _short(e["source"]), _short(e["target"])
+        targets_of[src].append((tgt, e.get("when")))
+        if src not in seen_sources:
+            all_sources.append(src)
+            seen_sources.add(src)
+
+    lines: list[str] = []
+    for src in all_sources:
+        nexts = targets_of[src]
+        if len(nexts) == 1:
+            tgt, when = nexts[0]
+            arrow = f"→[{when}] " if when else "→ "
+            lines.append(f"{src} {arrow}{tgt}")
+        else:
+            parts = []
+            for tgt, when in nexts:
+                parts.append(f"[{when}] {tgt}" if when else tgt)
+            lines.append(f"{src} → {', '.join(parts)}")
+    return lines
+
+
+def format_compact(flow: dict) -> str:
+    """Render a get-flow result as a compact, token-efficient text summary."""
+    nodes = flow.get("nodes", [])
+    edges = flow.get("edges", [])
+
+    if not nodes:
+        return "(empty flow)"
+
+    lines: list[str] = []
+
+    # A standalone runnable (Agent/Tool as entry point) has no workflow prefix
+    # in its ID (e.g. "my_agent"). Workflow step nodes always have "wf.step" form.
+    is_standalone = len(nodes) == 1 and "." not in nodes[0]["id"]
+
+    if is_standalone:
+        node = nodes[0]
+        ntype = node["type"].upper()
+        name = _short(node["id"])
+        config = node["data"].get("config", {})
+
+        extras: list[str] = []
+        if ntype == "AGENT":
+            model = _config_val(config.get("model", {})) or "?"
+            extras.append(model)
+            for key in ("max_iter", "max_tokens", "temperature"):
+                val = _config_val(config.get(key, {}))
+                if val is not None:
+                    extras.append(f"{key}={val}")
+        header = f"{ntype} {name}"
+        if extras:
+            header += f"  [{', '.join(extras)}]"
+        lines.append(header)
+
+        if ntype == "AGENT":
+            sp = _config_val(config.get("system_prompt", {}))
+            if sp:
+                sp_short = sp[:120].replace("\n", " ") + ("…" if len(sp) > 120 else "")
+                lines.append(f'system_prompt: "{sp_short}"')
+            tools: list[dict] = config.get("tools", [])
+            tool_names = [_short(t["id"]) for t in tools]
+            lines.append(f"tools: {', '.join(tool_names) if tool_names else 'none'}")
+    else:
+        # Workflow entry point — steps have IDs like "wf_name.step_name"
+        workflow_name = nodes[0]["id"].split(".")[0]
+        lines.append(f"WORKFLOW {workflow_name}")
+        lines.append("")
+        lines.append("STEPS")
+        for node in nodes:
+            for line in _fmt_node_lines(node, indent="  "):
+                lines.append(line)
+
+    if edges:
+        lines.append("")
+        lines.append("EDGES")
+        for line in _build_edge_lines(edges):
+            lines.append(f"  {line}")
+
+    return "\n".join(lines)

@@ -23,7 +23,13 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="operation", required=True)
 
     # Read-only operations (not CST transformers)
-    subparsers.add_parser("get-flow", help="Print the graph for the workspace entry point.")
+    get_flow_parser = subparsers.add_parser("get-flow", help="Print the graph for the workspace entry point.")
+    get_flow_parser.add_argument(
+        "--format",
+        choices=["compact", "json"],
+        default="json",
+        help="Output format: 'json' (default) is the full ReactFlow-compatible JSON; 'compact' is token-efficient and LLM-readable.",
+    )
     get_tools_parser = subparsers.add_parser(
         "get-tools",
         help="Browse tools by provider, or search/filter with pagination.",
@@ -159,14 +165,17 @@ def main() -> None:
         return
 
     if operation == "get-flow":
-        from timbal.codegen.flow import get_flow
+        from timbal.codegen.flow import format_compact, get_flow
 
         try:
             flow = get_flow(workspace_path)
         except (FileNotFoundError, ValueError) as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(1)
-        print(json.dumps(flow, indent=2))
+        if args.format == "json":
+            print(json.dumps(flow, indent=2))
+        else:
+            print(format_compact(flow))
         return
 
     if operation == "test":
