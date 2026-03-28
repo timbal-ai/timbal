@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .agent import Agent
     from .mcp import MCPServer
+    from .memory_compaction import MemoryCompactor  # noqa: F401 - type alias
     from .skill import Skill
     from .tool import Tool
     from .tool_set import ToolSet

@@ -35,6 +35,7 @@
             "pages": [
               "agents/index",
               "agents/memory",
+              "agents/memory-compaction",
               "agents/tools",
               "agents/thinking",
               "agents/background-tasks",

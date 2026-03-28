@@ -31,17 +31,35 @@ from uuid_extensions import uuid7
 
 from ..errors import InterruptError, bail
 from ..state import get_run_context
-from ..types.content import CustomContent, FileContent, TextContent, ToolUseContent
+from ..types.content import CustomContent, FileContent, TextContent, ToolResultContent, ToolUseContent
 from ..types.events import BaseEvent, OutputEvent
 from ..types.message import Message
 from ..utils import coerce_to_dict, dump
 from .llm_router import Model, _llm_router
+from .memory_compaction import MemoryCompactor
+from .models import get_context_window
 from .runnable import Runnable, RunnableLike
 from .skill import ReadSkill, Skill
 from .tool import Tool
 from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.agent")
+
+
+def _estimate_tokens_from_memory(memory: list[Message]) -> int:
+    """Rough token estimate from message content. 1 token ≈ 4 chars (standard approximation)."""
+    total_chars = 0
+    for msg in memory:
+        for content in msg.content:
+            if isinstance(content, TextContent):
+                total_chars += len(content.text)
+            elif isinstance(content, ToolUseContent):
+                total_chars += len(content.name) + len(str(content.input))
+            elif isinstance(content, ToolResultContent):
+                for item in content.content:
+                    if isinstance(item, TextContent):
+                        total_chars += len(item.text)
+    return max(1, total_chars // 4)
 
 
 SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)*\}")
@@ -110,6 +128,18 @@ class Agent(Runnable):
     """Maximum number of LLM->tool call iterations before stopping."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
+    memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
+    """Memory compaction strategies applied after resolve_memory. Reduces context window usage.
+    Can be a single compactor or list (applied in order). Built-in strategies:
+    compact_tool_results(keep_last_n=None, threshold=0, replacement=None),
+    keep_last_n_messages(n), keep_last_n_turns(n),
+    summarize(threshold, model=None, keep_last_n=4, max_summary_tokens=500).
+    summarize uses the agent's model by default; override with a cheaper model if needed.
+    Compaction is triggered automatically when context window utilization exceeds memory_compaction_ratio."""
+    memory_compaction_ratio: float = 0.75
+    """Context window utilization ratio that triggers compaction. Uses previous run's token
+    usage from span data and the model's context window from models.yaml. Set to 0.0 to
+    always compact, or 1.0 to effectively disable auto-triggering. Default: 0.75 (75%)."""
     temperature: float | None = None
     """Sampling temperature for the LLM response."""
     output_model: type[BaseModel] | None = None
@@ -478,6 +508,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             raise NotImplementedError("Multiple spans for the same agent are not supported yet.")
 
         previous_span = self_spans[0]
+
         # >= 1.1.0: memory stored in agent span
         if isinstance(previous_span.memory, list):
             memory = [Message.validate(m) for m in previous_span.memory]
@@ -539,6 +570,71 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     )
                 )
         current_span.memory = memory + current_span.memory
+
+        # Apply memory compaction if configured and context window utilization warrants it
+        if self.memory_compaction is not None:
+            should_compact = self.memory_compaction_ratio <= 0.0
+            utilization = None
+            if not should_compact:
+                context_window = get_context_window(str(self.model))
+                if context_window is None:
+                    # Unknown model — context window not in models.yaml.
+                    # Estimate token count from message content as a best effort.
+                    estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
+                    logger.warning(
+                        "Context window unknown for model; token usage estimated from message content (1 token ≈ 4 chars). Compacting as safe fallback.",
+                        model=str(self.model),
+                        estimated_tokens=estimated_tokens,
+                    )
+                    should_compact = True
+                elif previous_span.usage:
+                    prev_input_tokens = sum(
+                        v for k, v in previous_span.usage.items() if ":input" in k and "token" in k
+                    )
+                    prev_output_tokens = sum(
+                        v for k, v in previous_span.usage.items() if ":output" in k and "token" in k
+                    )
+                    utilization = (prev_input_tokens + prev_output_tokens) / context_window
+                    should_compact = utilization >= self.memory_compaction_ratio
+                else:
+                    # Known model but no usage data from previous run.
+                    # Estimate utilization from message content.
+                    estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
+                    utilization = estimated_tokens / context_window
+                    logger.warning(
+                        "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
+                        model=str(self.model),
+                        estimated_tokens=estimated_tokens,
+                        estimated_utilization=round(utilization, 4),
+                    )
+                    should_compact = utilization >= self.memory_compaction_ratio
+
+            if should_compact:
+                compactors = (
+                    [self.memory_compaction]
+                    if not isinstance(self.memory_compaction, list)
+                    else self.memory_compaction
+                )
+                compaction_steps = []
+                for compactor in compactors:
+                    # Set the agent's model on compactors that support it (e.g. summarize)
+                    if hasattr(compactor, "_state"):
+                        compactor._state["agent_model"] = str(self.model)
+                    before = len(current_span.memory)
+                    if asyncio.iscoroutinefunction(compactor):
+                        current_span.memory = await compactor(current_span.memory)
+                    else:
+                        current_span.memory = compactor(current_span.memory)
+                    compaction_steps.append({
+                        "compactor": getattr(compactor, "__name__", repr(compactor)),
+                        "before": before,
+                        "after": len(current_span.memory),
+                    })
+                current_span.metadata["compaction"] = {
+                    "triggered": True,
+                    "utilization": round(utilization, 4) if utilization is not None else None,
+                    "steps": compaction_steps,
+                }
 
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
@@ -637,6 +733,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = await self._resolve_system_prompt()
 
         await self.resolve_memory()
+
+
         # Span memory will also be modified with messages array modification (it's the same object)
         # current_span.memory = messages
         current_span._memory_dump = await dump(

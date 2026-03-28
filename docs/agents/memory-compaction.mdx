@@ -1,0 +1,160 @@
+---
+title: "Memory Compaction"
+description: "Keep agent memory within context window limits using built-in compaction strategies"
+---
+
+<Warning>
+Memory compaction is in **beta**. The API may change in future releases.
+</Warning>
+
+As conversations grow longer, the accumulated message history can exceed a model's context window. Memory compaction lets you define strategies that automatically trim or condense that history before each agent call, keeping token usage under control without changing how you call the agent.
+
+## How It Works
+
+Compaction is triggered automatically based on the **previous run's token utilization**. Before each call, the agent checks how much of the context window was used in the prior run. If utilization exceeds `memory_compaction_ratio` (default `0.75`, i.e. 75%), the configured compactors are applied to the resolved memory before it reaches the LLM.
+
+```python
+from timbal import Agent
+from timbal.core.memory_compaction import keep_last_n_turns
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    memory_compaction=keep_last_n_turns(10),
+    memory_compaction_ratio=0.75,  # trigger when previous run used >75% of context
+)
+```
+
+Set `memory_compaction_ratio=0.0` to always compact, or `1.0` to effectively disable auto-triggering.
+
+## Built-in Strategies
+
+Import strategies from `timbal.core.memory_compaction`.
+
+### `keep_last_n_turns(n)`
+
+Keeps only the last `n` user/assistant turn pairs. Structure-aware: never leaves orphaned tool calls or results.
+
+```python
+from timbal.core.memory_compaction import keep_last_n_turns
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    memory_compaction=keep_last_n_turns(5),
+)
+```
+
+### `keep_last_n_messages(n)`
+
+Keeps only the last `n` messages regardless of role. Also structure-aware.
+
+```python
+from timbal.core.memory_compaction import keep_last_n_messages
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    memory_compaction=keep_last_n_messages(20),
+)
+```
+
+### `compact_tool_results(...)`
+
+Reduces the size of tool call history. Useful when tools return large payloads that are no longer needed verbatim.
+
+```python
+from timbal.core.memory_compaction import compact_tool_results
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    memory_compaction=compact_tool_results(
+        keep_last_n=2,       # keep last 2 tool call pairs intact
+        threshold=10,        # only apply when memory exceeds 10 messages
+        replacement="[Tool '{tool_name}' result truncated ({result_length} chars)]",
+    ),
+)
+```
+
+**`replacement` controls what happens to compacted tool results:**
+
+- `None` (default) — drop tool results and their corresponding `tool_use` entries entirely. Assistant messages that become empty are also dropped.
+- `str` — replace each result with a template string. Supported placeholders: `{tool_name}`, `{call_id}`, `{result_length}`.
+- `callable(tool_name, call_id, result_text) -> str` — call a function per result and use the return value as the replacement.
+
+```python
+# Drop all tool results
+compact_tool_results()
+
+# Replace with a short summary string
+compact_tool_results(replacement="[{tool_name}: {result_length} chars]")
+
+# Custom replacement logic
+def shorten(tool_name, call_id, result_text):
+    return f"[{tool_name}]: {result_text[:100]}..."
+
+compact_tool_results(replacement=shorten)
+```
+
+### `summarize(...)`
+
+Summarizes old messages into a single context message using an LLM call. Uses **incremental summarization**: on subsequent runs, only the new overflow messages are sent to the summarizer, which updates the existing summary rather than regenerating it from scratch.
+
+System messages are always preserved and never included in summarization.
+
+```python
+from timbal.core.memory_compaction import summarize
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    memory_compaction=summarize(
+        threshold=20,                     # summarize when non-system messages exceed 20
+        model="openai/gpt-4o-mini",       # model used for summarization (defaults to agent's model)
+        keep_last_n=4,                    # keep last 4 messages unsummarized
+        max_summary_tokens=500,
+    ),
+)
+```
+
+<Tip>
+Use a smaller, cheaper model for summarization to reduce cost. For example, `model="openai/gpt-4.1-nano"` works well for summarization tasks.
+</Tip>
+
+## Composing Strategies
+
+Pass a list of compactors to apply them in order. Each compactor receives the output of the previous one.
+
+```python
+from timbal.core.memory_compaction import compact_tool_results, keep_last_n_turns
+
+agent = Agent(
+    name="my_agent",
+    model="openai/gpt-4o-mini",
+    memory_compaction=[
+        compact_tool_results(keep_last_n=2),  # first: shrink tool results
+        keep_last_n_turns(10),                # then: trim to last 10 turns
+    ],
+)
+```
+
+## Observability
+
+When compaction fires, the agent span records a `compaction` key in its metadata:
+
+```json
+{
+  "triggered": true,
+  "utilization": 0.91,
+  "steps": [
+    { "compactor": "compact_tool_results", "before": 42, "after": 28 },
+    { "compactor": "keep_last_n_turns",    "before": 28, "after": 12 }
+  ]
+}
+```
+
+- `utilization` — the context window fraction from the previous run (`null` when `memory_compaction_ratio=0.0`).
+- `steps` — one entry per compactor with message counts before and after.
+
+This data is visible in the Timbal platform trace viewer alongside the other span metadata.
