@@ -827,6 +827,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "description": "Filter files by directory path (e.g. \"docs/reports\")",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -2913,6 +2925,104 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/k2": {
+      "put": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Link a K2 knowledge base to a project. Replaces any previously linked KB.",
+        "operationId": "put",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkKbRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Knowledge base linked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbPreview"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Knowledge base not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Unlink the K2 knowledge base from a project.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Knowledge base unlinked"
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects/{project_id}/users": {
       "get": {
         "tags": [
@@ -3586,7 +3696,8 @@
         "type": "string",
         "enum": [
           "agent",
-          "workflow"
+          "workflow",
+          "unknown"
         ]
       },
       "BatchCreateVarsReqBody": {
@@ -4816,6 +4927,12 @@
             "type": "string",
             "format": "date-time"
           },
+          "directory": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "integer",
             "format": "int64"
@@ -5192,6 +5309,18 @@
           "uid": {
             "type": "string",
             "description": "Knowledge base unique identifier"
+          }
+        }
+      },
+      "LinkKbRequest": {
+        "type": "object",
+        "required": [
+          "kb_id"
+        ],
+        "properties": {
+          "kb_id": {
+            "type": "string",
+            "description": "ID of the K2 knowledge base to link to this project"
           }
         }
       },

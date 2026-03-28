@@ -259,6 +259,13 @@
                 ]
               },
               {
+                "group": "Knowledge Base",
+                "pages": [
+                  "api-reference/projects/k2/link",
+                  "api-reference/projects/k2/unlink"
+                ]
+              },
+              {
                 "group": "Variables",
                 "pages": [
                   "api-reference/projects/vars/list",
