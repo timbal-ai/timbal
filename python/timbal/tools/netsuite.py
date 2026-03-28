@@ -1121,3 +1121,1716 @@ class NetSuiteSuiteQL(Tool):
                 return response.json()
 
         super().__init__(handler=_suiteql, **kwargs)
+
+
+# ===========================================================================
+# BILLING ACCOUNT
+# ===========================================================================
+
+class NetSuiteCreateBillingAccount(Tool):
+    """Create a new billing account in NetSuite."""
+
+    name: str = "netsuite_create_billing_account"
+    description: str | None = "Create a new billing account in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_billing_account(
+            customer: str = Field(..., description="Internal ID of the customer this billing account belongs to."),
+            name: str | None = Field(None, description="Name of the billing account."),
+            currency: str | None = Field(None, description="Currency internal ID (e.g. '1' for USD)."),
+            billing_schedule: str | None = Field(None, description="Internal ID of the billing schedule to associate."),
+            memo: str | None = Field(None, description="Memo or notes for the billing account."),
+            return_record: bool = Field(False, description="If true, returns the created record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingaccount"
+
+            import httpx
+
+            data: dict[str, Any] = {"customer": {"id": customer}}
+            if name:
+                data["name"] = name
+            if currency:
+                data["currency"] = {"id": currency}
+            if billing_schedule:
+                data["billingSchedule"] = {"id": billing_schedule}
+            if memo:
+                data["memo"] = memo
+
+            auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    json=data,
+                )
+                response.raise_for_status()
+                location = response.headers.get("Location", "")
+                created_id = location.rstrip("/").split("/")[-1] if location else None
+                if return_record and created_id:
+                    auth2 = _netsuite_auth_header("GET", f"{base}/billingaccount/{created_id}", account_id, consumer_key, consumer_secret, token_id, token_secret)
+                    r2 = await client.get(f"{base}/billingaccount/{created_id}", headers={"Authorization": auth2, "Content-Type": "application/json"})
+                    r2.raise_for_status()
+                    return r2.json()
+                return {"created": True, "record_type": "billingaccount", "record_id": created_id, "location": location}
+
+        super().__init__(handler=_create_billing_account, **kwargs)
+
+
+class NetSuiteDeleteBillingAccount(Tool):
+    """Delete a billing account from NetSuite by internal ID."""
+
+    name: str = "netsuite_delete_billing_account"
+    description: str | None = "Delete a billing account from NetSuite by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _delete_billing_account(
+            record_id: str = Field(..., description="Internal ID of the billing account to delete."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingaccount/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
+                response.raise_for_status()
+                return {"deleted": True, "record_type": "billingaccount", "record_id": record_id}
+
+        super().__init__(handler=_delete_billing_account, **kwargs)
+
+
+class NetSuiteGetBillingAccount(Tool):
+    """Retrieve a NetSuite billing account by internal ID."""
+
+    name: str = "netsuite_get_billing_account"
+    description: str | None = "Retrieve a NetSuite billing account by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _get_billing_account(
+            record_id: str = Field(..., description="Internal ID of the billing account to retrieve."),
+            fields: str | None = Field(None, description="Comma-separated list of fields to return. Returns all fields if omitted."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingaccount/{record_id}"
+
+            import httpx
+
+            params: dict[str, str] = {}
+            if fields:
+                params["fields"] = fields
+
+            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    params=params if params else None,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_get_billing_account, **kwargs)
+
+
+class NetSuiteListBillingAccounts(Tool):
+    """List billing accounts in NetSuite with optional filtering."""
+
+    name: str = "netsuite_list_billing_accounts"
+    description: str | None = "List billing accounts in NetSuite with optional filtering."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_billing_accounts(
+            query: str | None = Field(None, description="Search query to filter billing accounts."),
+            limit: int = Field(100, description="Maximum number of billing accounts to return (default 100)."),
+            offset: int = Field(0, description="Number of records to skip for pagination."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingaccount"
+
+            import httpx
+
+            params: dict[str, Any] = {"limit": limit, "offset": offset}
+            if query:
+                params["q"] = query
+
+            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_billing_accounts, **kwargs)
+
+
+class NetSuiteUpdateBillingAccount(Tool):
+    """Update an existing billing account in NetSuite."""
+
+    name: str = "netsuite_update_billing_account"
+    description: str | None = "Update an existing billing account in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _update_billing_account(
+            record_id: str = Field(..., description="Internal ID of the billing account to update."),
+            data: dict[str, Any] = Field(..., description="Fields to update on the billing account record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingaccount/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
+                response.raise_for_status()
+                return {"updated": True, "record_type": "billingaccount", "record_id": record_id}
+
+        super().__init__(handler=_update_billing_account, **kwargs)
+
+
+# ===========================================================================
+# BILLING SCHEDULE
+# ===========================================================================
+
+class NetSuiteCreateBillingSchedule(Tool):
+    """Create a new billing schedule in NetSuite."""
+
+    name: str = "netsuite_create_billing_schedule"
+    description: str | None = "Create a new billing schedule in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_billing_schedule(
+            name: str = Field(..., description="Name of the billing schedule."),
+            frequency: str | None = Field(None, description="Billing frequency (e.g. 'MONTHLY', 'QUARTERLY', 'ANNUALLY')."),
+            recurrence_count: int | None = Field(None, description="Number of billing recurrences."),
+            memo: str | None = Field(None, description="Memo or notes for the billing schedule."),
+            return_record: bool = Field(False, description="If true, returns the created record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingschedule"
+
+            import httpx
+
+            data: dict[str, Any] = {"name": name}
+            if frequency:
+                data["frequency"] = {"id": frequency}
+            if recurrence_count is not None:
+                data["recurrenceCount"] = recurrence_count
+            if memo:
+                data["memo"] = memo
+
+            auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    json=data,
+                )
+                response.raise_for_status()
+                location = response.headers.get("Location", "")
+                created_id = location.rstrip("/").split("/")[-1] if location else None
+                if return_record and created_id:
+                    auth2 = _netsuite_auth_header("GET", f"{base}/billingschedule/{created_id}", account_id, consumer_key, consumer_secret, token_id, token_secret)
+                    r2 = await client.get(f"{base}/billingschedule/{created_id}", headers={"Authorization": auth2, "Content-Type": "application/json"})
+                    r2.raise_for_status()
+                    return r2.json()
+                return {"created": True, "record_type": "billingschedule", "record_id": created_id, "location": location}
+
+        super().__init__(handler=_create_billing_schedule, **kwargs)
+
+
+class NetSuiteDeleteBillingSchedule(Tool):
+    """Delete a billing schedule from NetSuite by internal ID."""
+
+    name: str = "netsuite_delete_billing_schedule"
+    description: str | None = "Delete a billing schedule from NetSuite by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _delete_billing_schedule(
+            record_id: str = Field(..., description="Internal ID of the billing schedule to delete."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingschedule/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
+                response.raise_for_status()
+                return {"deleted": True, "record_type": "billingschedule", "record_id": record_id}
+
+        super().__init__(handler=_delete_billing_schedule, **kwargs)
+
+
+class NetSuiteGetBillingSchedule(Tool):
+    """Retrieve a NetSuite billing schedule by internal ID."""
+
+    name: str = "netsuite_get_billing_schedule"
+    description: str | None = "Retrieve a NetSuite billing schedule by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _get_billing_schedule(
+            record_id: str = Field(..., description="Internal ID of the billing schedule to retrieve."),
+            fields: str | None = Field(None, description="Comma-separated list of fields to return. Returns all fields if omitted."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingschedule/{record_id}"
+
+            import httpx
+
+            params: dict[str, str] = {}
+            if fields:
+                params["fields"] = fields
+
+            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    params=params if params else None,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_get_billing_schedule, **kwargs)
+
+
+class NetSuiteListBillingSchedules(Tool):
+    """List billing schedules in NetSuite with optional filtering."""
+
+    name: str = "netsuite_list_billing_schedules"
+    description: str | None = "List billing schedules in NetSuite with optional filtering."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_billing_schedules(
+            query: str | None = Field(None, description="Search query to filter billing schedules."),
+            limit: int = Field(100, description="Maximum number of billing schedules to return (default 100)."),
+            offset: int = Field(0, description="Number of records to skip for pagination."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingschedule"
+
+            import httpx
+
+            params: dict[str, Any] = {"limit": limit, "offset": offset}
+            if query:
+                params["q"] = query
+
+            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_billing_schedules, **kwargs)
+
+
+class NetSuiteUpdateBillingSchedule(Tool):
+    """Update an existing billing schedule in NetSuite."""
+
+    name: str = "netsuite_update_billing_schedule"
+    description: str | None = "Update an existing billing schedule in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _update_billing_schedule(
+            record_id: str = Field(..., description="Internal ID of the billing schedule to update."),
+            data: dict[str, Any] = Field(..., description="Fields to update on the billing schedule record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingschedule/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
+                response.raise_for_status()
+                return {"updated": True, "record_type": "billingschedule", "record_id": record_id}
+
+        super().__init__(handler=_update_billing_schedule, **kwargs)
+
+
+class NetSuiteUpsertBillingAccount(Tool):
+    """Upsert (create or update) a billing account in NetSuite using an external ID."""
+
+    name: str = "netsuite_upsert_billing_account"
+    description: str | None = "Upsert (create or update) a billing account in NetSuite using an external ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _upsert_billing_account(
+            external_id: str = Field(..., description="External ID used to identify and upsert the billing account."),
+            data: dict[str, Any] = Field(..., description="Fields to set on the billing account record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingaccount/eid:{external_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("PUT", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.put(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
+                response.raise_for_status()
+                return {"upserted": True, "record_type": "billingaccount", "external_id": external_id}
+
+        super().__init__(handler=_upsert_billing_account, **kwargs)
+
+
+class NetSuiteUpsertBillingSchedule(Tool):
+    """Upsert (create or update) a billing schedule in NetSuite using an external ID."""
+
+    name: str = "netsuite_upsert_billing_schedule"
+    description: str | None = "Upsert (create or update) a billing schedule in NetSuite using an external ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _upsert_billing_schedule(
+            external_id: str = Field(..., description="External ID used to identify and upsert the billing schedule."),
+            data: dict[str, Any] = Field(..., description="Fields to set on the billing schedule record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/billingschedule/eid:{external_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("PUT", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.put(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
+                response.raise_for_status()
+                return {"upserted": True, "record_type": "billingschedule", "external_id": external_id}
+
+        super().__init__(handler=_upsert_billing_schedule, **kwargs)
+
+
+# ===========================================================================
+# CALENDAR EVENT
+# ===========================================================================
+
+class NetSuiteCreateCalendarEvent(Tool):
+    """Create a new calendar event in NetSuite."""
+
+    name: str = "netsuite_create_calendar_event"
+    description: str | None = "Create a new calendar event in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_calendar_event(
+            title: str = Field(..., description="Title of the calendar event."),
+            start_date: str = Field(..., description="Start date/time of the event (ISO 8601 format, e.g. '2024-01-15T10:00:00')."),
+            end_date: str | None = Field(None, description="End date/time of the event (ISO 8601 format)."),
+            location: str | None = Field(None, description="Location of the event."),
+            message: str | None = Field(None, description="Description or message body of the event."),
+            all_day_event: bool = Field(False, description="If true, marks the event as an all-day event."),
+            return_record: bool = Field(False, description="If true, returns the created record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/calendarevent"
+
+            import httpx
+
+            data: dict[str, Any] = {"title": title, "startDate": start_date}
+            if end_date:
+                data["endDate"] = end_date
+            if location:
+                data["location"] = location
+            if message:
+                data["message"] = message
+            if all_day_event:
+                data["allDayEvent"] = all_day_event
+
+            auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    json=data,
+                )
+                response.raise_for_status()
+                location_hdr = response.headers.get("Location", "")
+                created_id = location_hdr.rstrip("/").split("/")[-1] if location_hdr else None
+                if return_record and created_id:
+                    auth2 = _netsuite_auth_header("GET", f"{base}/calendarevent/{created_id}", account_id, consumer_key, consumer_secret, token_id, token_secret)
+                    r2 = await client.get(f"{base}/calendarevent/{created_id}", headers={"Authorization": auth2, "Content-Type": "application/json"})
+                    r2.raise_for_status()
+                    return r2.json()
+                return {"created": True, "record_type": "calendarevent", "record_id": created_id, "location": location_hdr}
+
+        super().__init__(handler=_create_calendar_event, **kwargs)
+
+
+class NetSuiteDeleteCalendarEvent(Tool):
+    """Delete a calendar event from NetSuite by internal ID."""
+
+    name: str = "netsuite_delete_calendar_event"
+    description: str | None = "Delete a calendar event from NetSuite by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _delete_calendar_event(
+            record_id: str = Field(..., description="Internal ID of the calendar event to delete."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/calendarevent/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
+                response.raise_for_status()
+                return {"deleted": True, "record_type": "calendarevent", "record_id": record_id}
+
+        super().__init__(handler=_delete_calendar_event, **kwargs)
+
+
+class NetSuiteGetCalendarEvent(Tool):
+    """Retrieve a NetSuite calendar event by internal ID."""
+
+    name: str = "netsuite_get_calendar_event"
+    description: str | None = "Retrieve a NetSuite calendar event by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _get_calendar_event(
+            record_id: str = Field(..., description="Internal ID of the calendar event to retrieve."),
+            fields: str | None = Field(None, description="Comma-separated list of fields to return. Returns all fields if omitted."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/calendarevent/{record_id}"
+
+            import httpx
+
+            params: dict[str, str] = {}
+            if fields:
+                params["fields"] = fields
+
+            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    params=params if params else None,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_get_calendar_event, **kwargs)
+
+
+class NetSuiteListCalendarEvents(Tool):
+    """List calendar events in NetSuite with optional filtering."""
+
+    name: str = "netsuite_list_calendar_events"
+    description: str | None = "List calendar events in NetSuite with optional filtering."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_calendar_events(
+            query: str | None = Field(None, description="Search query to filter calendar events."),
+            limit: int = Field(100, description="Maximum number of calendar events to return (default 100)."),
+            offset: int = Field(0, description="Number of records to skip for pagination."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/calendarevent"
+
+            import httpx
+
+            params: dict[str, Any] = {"limit": limit, "offset": offset}
+            if query:
+                params["q"] = query
+
+            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_calendar_events, **kwargs)
+
+
+class NetSuiteUpdateCalendarEvent(Tool):
+    """Update an existing calendar event in NetSuite."""
+
+    name: str = "netsuite_update_calendar_event"
+    description: str | None = "Update an existing calendar event in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _update_calendar_event(
+            record_id: str = Field(..., description="Internal ID of the calendar event to update."),
+            data: dict[str, Any] = Field(..., description="Fields to update on the calendar event record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/calendarevent/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
+                response.raise_for_status()
+                return {"updated": True, "record_type": "calendarevent", "record_id": record_id}
+
+        super().__init__(handler=_update_calendar_event, **kwargs)
+
+
+class NetSuiteUpsertCalendarEvent(Tool):
+    """Upsert (create or update) a calendar event in NetSuite using an external ID."""
+
+    name: str = "netsuite_upsert_calendar_event"
+    description: str | None = "Upsert (create or update) a calendar event in NetSuite using an external ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _upsert_calendar_event(
+            external_id: str = Field(..., description="External ID used to identify and upsert the calendar event."),
+            data: dict[str, Any] = Field(..., description="Fields to set on the calendar event record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/calendarevent/eid:{external_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("PUT", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.put(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
+                response.raise_for_status()
+                return {"upserted": True, "record_type": "calendarevent", "external_id": external_id}
+
+        super().__init__(handler=_upsert_calendar_event, **kwargs)
+
+
+# ===========================================================================
+# FINANCE — INTERCOMPANY JOURNAL ENTRY
+# ===========================================================================
+
+class NetSuiteCustomSuiteQL(Tool):
+    """Run a custom SuiteQL query against NetSuite with full control over the query string."""
+
+    name: str = "netsuite_custom_suiteql"
+    description: str | None = "Run a custom SuiteQL query against NetSuite with full control over the query string."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _custom_suiteql(
+            query: str = Field(
+                ...,
+                description="Full SuiteQL query string (SQL-like). E.g. \"SELECT id, tranId FROM transaction WHERE type = 'Journal' ORDER BY id DESC\".",
+            ),
+            limit: int = Field(100, description="Maximum number of rows to return (default 100, max 1000)."),
+            offset: int = Field(0, description="Number of rows to skip for pagination."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            url = _build_suiteql_url(account_id)
+
+            import httpx
+
+            payload = {"q": query}
+            params = {"limit": min(limit, 1000), "offset": offset}
+            auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json", "Prefer": "transient"},
+                    json=payload,
+                    params=params,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_custom_suiteql, **kwargs)
+
+
+class NetSuiteCreateIntercompanyJournalEntry(Tool):
+    """Create a new intercompany journal entry in NetSuite."""
+
+    name: str = "netsuite_create_intercompany_journal_entry"
+    description: str | None = "Create a new intercompany journal entry in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_intercompany_journal_entry(
+            subsidiary: str = Field(..., description="Internal ID of the subsidiary for the journal entry."),
+            tran_date: str | None = Field(None, description="Transaction date (ISO 8601 format, e.g. '2024-01-15')."),
+            memo: str | None = Field(None, description="Memo or description for the journal entry."),
+            lines: list[dict[str, Any]] | None = Field(None, description="List of line items. Each line should include 'account' (id), 'debit' or 'credit' amount, and optional 'memo'."),
+            return_record: bool = Field(False, description="If true, returns the created record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/intercompanyjournalentry"
+
+            import httpx
+
+            data: dict[str, Any] = {"subsidiary": {"id": subsidiary}}
+            if tran_date:
+                data["tranDate"] = tran_date
+            if memo:
+                data["memo"] = memo
+            if lines:
+                data["line"] = {"items": lines}
+
+            auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    json=data,
+                )
+                response.raise_for_status()
+                location = response.headers.get("Location", "")
+                created_id = location.rstrip("/").split("/")[-1] if location else None
+                if return_record and created_id:
+                    auth2 = _netsuite_auth_header("GET", f"{base}/intercompanyjournalentry/{created_id}", account_id, consumer_key, consumer_secret, token_id, token_secret)
+                    r2 = await client.get(f"{base}/intercompanyjournalentry/{created_id}", headers={"Authorization": auth2, "Content-Type": "application/json"})
+                    r2.raise_for_status()
+                    return r2.json()
+                return {"created": True, "record_type": "intercompanyjournalentry", "record_id": created_id, "location": location}
+
+        super().__init__(handler=_create_intercompany_journal_entry, **kwargs)
+
+
+class NetSuiteDeleteIntercompanyJournalEntry(Tool):
+    """Delete an intercompany journal entry from NetSuite by internal ID."""
+
+    name: str = "netsuite_delete_intercompany_journal_entry"
+    description: str | None = "Delete an intercompany journal entry from NetSuite by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _delete_intercompany_journal_entry(
+            record_id: str = Field(..., description="Internal ID of the intercompany journal entry to delete."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/intercompanyjournalentry/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
+                response.raise_for_status()
+                return {"deleted": True, "record_type": "intercompanyjournalentry", "record_id": record_id}
+
+        super().__init__(handler=_delete_intercompany_journal_entry, **kwargs)
+
+
+class NetSuiteGetIntercompanyJournalEntry(Tool):
+    """Retrieve a NetSuite intercompany journal entry by internal ID."""
+
+    name: str = "netsuite_get_intercompany_journal_entry"
+    description: str | None = "Retrieve a NetSuite intercompany journal entry by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _get_intercompany_journal_entry(
+            record_id: str = Field(..., description="Internal ID of the intercompany journal entry to retrieve."),
+            fields: str | None = Field(None, description="Comma-separated list of fields to return. Returns all fields if omitted."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/intercompanyjournalentry/{record_id}"
+
+            import httpx
+
+            params: dict[str, str] = {}
+            if fields:
+                params["fields"] = fields
+
+            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    params=params if params else None,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_get_intercompany_journal_entry, **kwargs)
+
+
+class NetSuiteListIntercompanyJournalEntries(Tool):
+    """List intercompany journal entries in NetSuite with optional filtering."""
+
+    name: str = "netsuite_list_intercompany_journal_entries"
+    description: str | None = "List intercompany journal entries in NetSuite with optional filtering."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_intercompany_journal_entries(
+            query: str | None = Field(None, description="Search query to filter intercompany journal entries."),
+            limit: int = Field(100, description="Maximum number of entries to return (default 100)."),
+            offset: int = Field(0, description="Number of records to skip for pagination."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/intercompanyjournalentry"
+
+            import httpx
+
+            params: dict[str, Any] = {"limit": limit, "offset": offset}
+            if query:
+                params["q"] = query
+
+            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_intercompany_journal_entries, **kwargs)
+
+
+class NetSuiteUpdateIntercompanyJournalEntry(Tool):
+    """Update an existing intercompany journal entry in NetSuite."""
+
+    name: str = "netsuite_update_intercompany_journal_entry"
+    description: str | None = "Update an existing intercompany journal entry in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _update_intercompany_journal_entry(
+            record_id: str = Field(..., description="Internal ID of the intercompany journal entry to update."),
+            data: dict[str, Any] = Field(..., description="Fields to update on the intercompany journal entry record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/intercompanyjournalentry/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
+                response.raise_for_status()
+                return {"updated": True, "record_type": "intercompanyjournalentry", "record_id": record_id}
+
+        super().__init__(handler=_update_intercompany_journal_entry, **kwargs)
+
+
+# ===========================================================================
+# INVENTORY — BIN TRANSFER
+# ===========================================================================
+
+class NetSuiteCreateBinTransfer(Tool):
+    """Create a new bin transfer record in NetSuite."""
+
+    name: str = "netsuite_create_bin_transfer"
+    description: str | None = "Create a new bin transfer record in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_bin_transfer(
+            subsidiary: str | None = Field(None, description="Internal ID of the subsidiary."),
+            tran_date: str | None = Field(None, description="Transaction date (ISO 8601, e.g. '2024-01-15')."),
+            memo: str | None = Field(None, description="Memo or notes for the bin transfer."),
+            inventory: list[dict[str, Any]] | None = Field(None, description="List of inventory lines. Each line should include 'item' (id), 'quantity', 'fromBin' (id), and 'toBin' (id)."),
+            return_record: bool = Field(False, description="If true, returns the created record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/bintransfer"
+
+            import httpx
+
+            data: dict[str, Any] = {}
+            if subsidiary:
+                data["subsidiary"] = {"id": subsidiary}
+            if tran_date:
+                data["tranDate"] = tran_date
+            if memo:
+                data["memo"] = memo
+            if inventory:
+                data["inventory"] = {"items": inventory}
+
+            auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    json=data,
+                )
+                response.raise_for_status()
+                location = response.headers.get("Location", "")
+                created_id = location.rstrip("/").split("/")[-1] if location else None
+                if return_record and created_id:
+                    auth2 = _netsuite_auth_header("GET", f"{base}/bintransfer/{created_id}", account_id, consumer_key, consumer_secret, token_id, token_secret)
+                    r2 = await client.get(f"{base}/bintransfer/{created_id}", headers={"Authorization": auth2, "Content-Type": "application/json"})
+                    r2.raise_for_status()
+                    return r2.json()
+                return {"created": True, "record_type": "bintransfer", "record_id": created_id, "location": location}
+
+        super().__init__(handler=_create_bin_transfer, **kwargs)
+
+
+class NetSuiteDeleteBinTransfer(Tool):
+    """Delete a bin transfer from NetSuite by internal ID."""
+
+    name: str = "netsuite_delete_bin_transfer"
+    description: str | None = "Delete a bin transfer from NetSuite by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _delete_bin_transfer(
+            record_id: str = Field(..., description="Internal ID of the bin transfer to delete."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/bintransfer/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
+                response.raise_for_status()
+                return {"deleted": True, "record_type": "bintransfer", "record_id": record_id}
+
+        super().__init__(handler=_delete_bin_transfer, **kwargs)
+
+
+class NetSuiteGetBinTransfer(Tool):
+    """Retrieve a NetSuite bin transfer by internal ID."""
+
+    name: str = "netsuite_get_bin_transfer"
+    description: str | None = "Retrieve a NetSuite bin transfer by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _get_bin_transfer(
+            record_id: str = Field(..., description="Internal ID of the bin transfer to retrieve."),
+            fields: str | None = Field(None, description="Comma-separated list of fields to return. Returns all fields if omitted."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/bintransfer/{record_id}"
+
+            import httpx
+
+            params: dict[str, str] = {}
+            if fields:
+                params["fields"] = fields
+
+            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    params=params if params else None,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_get_bin_transfer, **kwargs)
+
+
+class NetSuiteListBinTransfers(Tool):
+    """List bin transfers in NetSuite with optional filtering."""
+
+    name: str = "netsuite_list_bin_transfers"
+    description: str | None = "List bin transfers in NetSuite with optional filtering."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_bin_transfers(
+            query: str | None = Field(None, description="Search query to filter bin transfers."),
+            limit: int = Field(100, description="Maximum number of bin transfers to return (default 100)."),
+            offset: int = Field(0, description="Number of records to skip for pagination."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/bintransfer"
+
+            import httpx
+
+            params: dict[str, Any] = {"limit": limit, "offset": offset}
+            if query:
+                params["q"] = query
+
+            auth = _netsuite_auth_header("GET", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, headers={"Authorization": auth, "Content-Type": "application/json"}, params=params)
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_bin_transfers, **kwargs)
+
+
+class NetSuiteUpdateBinTransfer(Tool):
+    """Update an existing bin transfer in NetSuite."""
+
+    name: str = "netsuite_update_bin_transfer"
+    description: str | None = "Update an existing bin transfer in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _update_bin_transfer(
+            record_id: str = Field(..., description="Internal ID of the bin transfer to update."),
+            data: dict[str, Any] = Field(..., description="Fields to update on the bin transfer record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/bintransfer/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("PATCH", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
+                response.raise_for_status()
+                return {"updated": True, "record_type": "bintransfer", "record_id": record_id}
+
+        super().__init__(handler=_update_bin_transfer, **kwargs)
+
+
+class NetSuiteUpsertBinTransfer(Tool):
+    """Upsert (create or update) a bin transfer in NetSuite using an external ID."""
+
+    name: str = "netsuite_upsert_bin_transfer"
+    description: str | None = "Upsert (create or update) a bin transfer in NetSuite using an external ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _upsert_bin_transfer(
+            external_id: str = Field(..., description="External ID used to identify and upsert the bin transfer."),
+            data: dict[str, Any] = Field(..., description="Fields to set on the bin transfer record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/bintransfer/eid:{external_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("PUT", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.put(url, headers={"Authorization": auth, "Content-Type": "application/json"}, json=data)
+                response.raise_for_status()
+                return {"upserted": True, "record_type": "bintransfer", "external_id": external_id}
+
+        super().__init__(handler=_upsert_bin_transfer, **kwargs)
+
+
+# ===========================================================================
+# PERIOD — ACCOUNTING PERIOD
+# ===========================================================================
+
+class NetSuiteCreateAccountingPeriod(Tool):
+    """Create a new accounting period in NetSuite."""
+
+    name: str = "netsuite_create_accounting_period"
+    description: str | None = "Create a new accounting period in NetSuite."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_accounting_period(
+            period_name: str = Field(..., description="Name of the accounting period (e.g. 'Jan 2024')."),
+            start_date: str = Field(..., description="Start date of the period (ISO 8601, e.g. '2024-01-01')."),
+            end_date: str = Field(..., description="End date of the period (ISO 8601, e.g. '2024-01-31')."),
+            fiscal_calendar: str | None = Field(None, description="Internal ID of the fiscal calendar."),
+            is_quarter: bool = Field(False, description="If true, marks this period as a quarter."),
+            is_year: bool = Field(False, description="If true, marks this period as a year."),
+            return_record: bool = Field(False, description="If true, returns the created record."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/accountingperiod"
+
+            import httpx
+
+            data: dict[str, Any] = {
+                "periodName": period_name,
+                "startDate": start_date,
+                "endDate": end_date,
+            }
+            if fiscal_calendar:
+                data["fiscalCalendar"] = {"id": fiscal_calendar}
+            if is_quarter:
+                data["isQuarter"] = is_quarter
+            if is_year:
+                data["isYear"] = is_year
+
+            auth = _netsuite_auth_header("POST", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    json=data,
+                )
+                response.raise_for_status()
+                location = response.headers.get("Location", "")
+                created_id = location.rstrip("/").split("/")[-1] if location else None
+                if return_record and created_id:
+                    auth2 = _netsuite_auth_header("GET", f"{base}/accountingperiod/{created_id}", account_id, consumer_key, consumer_secret, token_id, token_secret)
+                    r2 = await client.get(f"{base}/accountingperiod/{created_id}", headers={"Authorization": auth2, "Content-Type": "application/json"})
+                    r2.raise_for_status()
+                    return r2.json()
+                return {"created": True, "record_type": "accountingperiod", "record_id": created_id, "location": location}
+
+        super().__init__(handler=_create_accounting_period, **kwargs)
+
+
+class NetSuiteDeleteAccountingPeriod(Tool):
+    """Delete an accounting period from NetSuite by internal ID."""
+
+    name: str = "netsuite_delete_accounting_period"
+    description: str | None = "Delete an accounting period from NetSuite by internal ID."
+    integration: Annotated[str, Integration("netsuite")] | None = None
+    account_id: str | None = None
+    consumer_key: str | None = None
+    consumer_secret: SecretStr | None = None
+    token_id: str | None = None
+    token_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "account_id": self.account_id,
+                "consumer_key": self.consumer_key,
+                "consumer_secret": self.consumer_secret,
+                "token_id": self.token_id,
+                "token_secret": self.token_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _delete_accounting_period(
+            record_id: str = Field(..., description="Internal ID of the accounting period to delete."),
+        ) -> Any:
+            account_id, consumer_key, consumer_secret, token_id, token_secret = await _resolve_credentials(self)
+            base = _build_base_url(account_id)
+            url = f"{base}/accountingperiod/{record_id}"
+
+            import httpx
+
+            auth = _netsuite_auth_header("DELETE", url, account_id, consumer_key, consumer_secret, token_id, token_secret)
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(url, headers={"Authorization": auth, "Content-Type": "application/json"})
+                response.raise_for_status()
+                return {"deleted": True, "record_type": "accountingperiod", "record_id": record_id}
+
+        super().__init__(handler=_delete_accounting_period, **kwargs)
