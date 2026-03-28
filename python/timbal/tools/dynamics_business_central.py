@@ -296,3 +296,93 @@ class DynamicsBCGetSalesOrder(Tool):
                 return response.json()
 
         super().__init__(handler=_get_sales_order, **kwargs)
+
+
+class DynamicsBCGetItemPrices(Tool):
+    """Query item prices from Business Central for budget estimations.
+    Supports filtering by item number, name, or a custom OData filter."""
+
+    name: str = "dynamics_bc_get_item_prices"
+    description: str | None = (
+        "Query item prices from Business Central for budget estimations. "
+        "Supports filtering by item number, name, or a custom OData filter."
+    )
+    integration: Annotated[str, Integration("dynamics_business_central")] | None = None
+    tenant_id: str | None = None
+    environment_name: str | None = None
+    company_id: str | None = None
+    client_id: str | None = None
+    client_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "tenant_id": self.tenant_id,
+                "environment_name": self.environment_name,
+                "company_id": self.company_id,
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _get_item_prices(
+            item_number: str | None = Field(
+                None,
+                description="Filter by exact item number (e.g. 'ITEM-001'). Takes priority over name and filter_query.",
+            ),
+            name: str | None = Field(
+                None,
+                description="Partial match on item display name. Ignored if item_number is provided.",
+            ),
+            filter_query: str | None = Field(
+                None,
+                description=(
+                    "Custom OData $filter expression, e.g. \"unitPrice gt 100\" or "
+                    "\"type eq 'Inventory'\". Ignored if item_number or name is provided."
+                ),
+            ),
+            top: int = Field(50, description="Maximum number of items to return (default 50, max 1000)."),
+            select: str | None = Field(
+                None,
+                description=(
+                    "Comma-separated fields to return. Defaults to the most useful pricing fields: "
+                    "number, displayName, type, unitPrice, unitCost, baseUnitOfMeasureCode, inventory."
+                ),
+            ),
+        ) -> Any:
+            token, tenant_id, environment_name, company_id = await _resolve_credentials(self)
+            url = _bc_url(tenant_id, environment_name, company_id, "items")
+
+            default_select = "number,displayName,type,unitPrice,unitCost,baseUnitOfMeasureCode,inventory"
+            params: dict[str, Any] = {
+                "$top": min(top, 1000),
+                "$select": select or default_select,
+            }
+
+            if item_number:
+                escaped = item_number.replace("'", "''")
+                params["$filter"] = f"number eq '{escaped}'"
+            elif name:
+                escaped = name.replace("'", "''")
+                params["$filter"] = f"contains(displayName,'{escaped}')"
+            elif filter_query:
+                params["$filter"] = filter_query
+
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    },
+                    params=params,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_get_item_prices, **kwargs)

@@ -231,3 +231,103 @@ class DynamicsSalesCreateCustomEntity(Tool):
                 return {"created": True, "entity_id": entity_id, "entity_set_name": entity_set_name}
 
         super().__init__(handler=_create_custom_entity, **kwargs)
+
+
+class DynamicsSalesCreateOpportunity(Tool):
+    """Create an opportunity (oportunitat) in Microsoft Dynamics 365 Sales CRM."""
+
+    name: str = "dynamics_sales_create_opportunity"
+    description: str | None = "Create an opportunity (oportunitat) in Microsoft Dynamics 365 Sales CRM."
+    integration: Annotated[str, Integration("dynamics_sales")] | None = None
+    tenant_id: str | None = None
+    environment_name: str | None = None
+    client_id: str | None = None
+    client_secret: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({
+                "integration": self.integration,
+                "tenant_id": self.tenant_id,
+                "environment_name": self.environment_name,
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+            }),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_opportunity(
+            name: str = Field(
+                ...,
+                description="Name of the opportunity / project (Nombre del Proyecto).",
+            ),
+            account_id: str | None = Field(
+                None,
+                description="GUID of the account (Cuenta) to associate with the opportunity.",
+            ),
+            contact_id: str | None = Field(
+                None,
+                description="GUID of the primary contact to associate with the opportunity.",
+            ),
+            budget_amount: float | None = Field(
+                None,
+                description="Estimated budget / revenue amount (Presupuesto) in the org's base currency.",
+            ),
+            description: str | None = Field(
+                None,
+                description="Additional notes or description for the opportunity.",
+            ),
+            estimated_close_date: str | None = Field(
+                None,
+                description="Estimated close date in ISO 8601 format (YYYY-MM-DD), e.g. '2026-06-30'.",
+            ),
+            owner_id: str | None = Field(
+                None,
+                description="GUID of the system user who owns this opportunity (Propietario). Defaults to the integration user if omitted.",
+            ),
+            return_representation: bool = Field(
+                False,
+                description="If true, returns the created opportunity record in the response.",
+            ),
+        ) -> Any:
+            token, environment_url = await _resolve_credentials(self)
+            base = _dataverse_base(environment_url)
+            url = f"{base}/opportunities"
+
+            import httpx
+
+            data: dict[str, Any] = {"name": name}
+            if budget_amount is not None:
+                data["budgetamount"] = budget_amount
+            if description is not None:
+                data["description"] = description
+            if estimated_close_date is not None:
+                data["estimatedclosedate"] = estimated_close_date
+            if account_id is not None:
+                data["customerid_account@odata.bind"] = f"/accounts({account_id})"
+            if contact_id is not None:
+                data["customerid_contact@odata.bind"] = f"/contacts({contact_id})"
+            if owner_id is not None:
+                data["ownerid@odata.bind"] = f"/systemusers({owner_id})"
+
+            headers: dict[str, str] = {
+                "Authorization": f"Bearer {token}",
+                "OData-MaxVersion": "4.0",
+                "OData-Version": "4.0",
+                "Accept": "application/json",
+                "Content-Type": "application/json; charset=utf-8",
+            }
+            if return_representation:
+                headers["Prefer"] = "return=representation"
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=headers, json=data)
+                response.raise_for_status()
+                if return_representation and response.content:
+                    return response.json()
+                entity_id = response.headers.get("OData-EntityId")
+                return {"created": True, "opportunity_id": entity_id}
+
+        super().__init__(handler=_create_opportunity, **kwargs)
