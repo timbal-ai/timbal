@@ -1323,7 +1323,9 @@ class DeleteInvoiceLineItem(Tool):
 
 class CreateSubscription(Tool):
     name: str = "stripe_create_subscription"
-    description: str | None = "Create a Stripe subscription for a customer."
+    description: str | None = (
+        "Create a Stripe subscription for a customer. Optionally apply a coupon_id or promotion_code_id (promo_xxx) discount."
+    )
     integration: Annotated[str, Integration("stripe")] | None = None
     api_key: SecretStr | None = None
 
@@ -1340,10 +1342,21 @@ class CreateSubscription(Tool):
             price_ids: list[str] = Field(..., description="List of Stripe price IDs to subscribe the customer to."),
             trial_period_days: int | None = Field(None, description="Number of trial days before charging begins."),
             cancel_at_period_end: bool = Field(False, description="If True, cancels the subscription at the end of the current period."),
+            coupon_id: str | None = Field(
+                None,
+                description="Stripe Coupon ID (e.g. 'Z4OV52SU') to apply as a discount. Mutually exclusive with promotion_code_id.",
+            ),
+            promotion_code_id: str | None = Field(
+                None,
+                description="Stripe Promotion Code object ID (promo_xxx), not the customer-facing string. Mutually exclusive with coupon_id.",
+            ),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to attach to the subscription."),
         ) -> Any:
             api_key = await _resolve_api_key(self)
             import httpx
+
+            if coupon_id and promotion_code_id:
+                raise ValueError("Pass only one of coupon_id or promotion_code_id.")
 
             data: dict[str, Any] = {
                 "customer": customer,
@@ -1353,6 +1366,10 @@ class CreateSubscription(Tool):
                 data[f"items[{i}][price]"] = price_id
             if trial_period_days is not None:
                 data["trial_period_days"] = trial_period_days
+            if coupon_id:
+                data["coupon"] = coupon_id
+            if promotion_code_id:
+                data["promotion_code"] = promotion_code_id
             if metadata:
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
@@ -1532,7 +1549,7 @@ class RetrieveSubscription(Tool):
 class UpdateSubscription(Tool):
     name: str = "stripe_update_subscription"
     description: str | None = (
-        "Update a Stripe subscription: metadata, cancel at period end, or change one subscription line item's price."
+        "Update a Stripe subscription: metadata, cancel at period end, line item price, or apply coupon_id / promotion_code_id."
     )
     integration: Annotated[str, Integration("stripe")] | None = None
     api_key: SecretStr | None = None
@@ -1552,6 +1569,14 @@ class UpdateSubscription(Tool):
                 description="If True, subscription cancels at end of current period; False resumes if was set to cancel.",
             ),
             metadata: dict[str, str] | None = Field(None, description="Key-value pairs to set on the subscription."),
+            coupon_id: str | None = Field(
+                None,
+                description="Apply this Coupon ID as a discount (mutually exclusive with promotion_code_id on this call).",
+            ),
+            promotion_code_id: str | None = Field(
+                None,
+                description="Apply this Promotion Code object ID (promo_xxx). Mutually exclusive with coupon_id.",
+            ),
             subscription_item_id: str | None = Field(
                 None,
                 description="ID of an existing subscription item (si_xxx) to update when changing price.",
@@ -1572,12 +1597,19 @@ class UpdateSubscription(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
+            if coupon_id and promotion_code_id:
+                raise ValueError("Pass only one of coupon_id or promotion_code_id.")
+
             data: dict[str, Any] = {}
             if cancel_at_period_end is not None:
                 data["cancel_at_period_end"] = str(cancel_at_period_end).lower()
             if metadata:
                 for k, v in metadata.items():
                     data[f"metadata[{k}]"] = v
+            if coupon_id:
+                data["coupon"] = coupon_id
+            if promotion_code_id:
+                data["promotion_code"] = promotion_code_id
             if subscription_item_id and new_price_id:
                 data["items[0][id]"] = subscription_item_id
                 data["items[0][price]"] = new_price_id
@@ -1596,6 +1628,487 @@ class UpdateSubscription(Tool):
                 return response.json()
 
         super().__init__(handler=_update_subscription, **kwargs)
+
+
+class RemoveSubscriptionDiscount(Tool):
+    name: str = "stripe_remove_subscription_discount"
+    description: str | None = (
+        "Remove the discount from an active subscription (deletes the subscription discount object)."
+    )
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _remove_discount(
+            subscription_id: str = Field(..., description="Stripe subscription ID (e.g. 'sub_xxx')."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(
+                    f"{_BASE_URL}/subscriptions/{subscription_id}/discount",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                response.raise_for_status()
+                return response.json() if response.content else {"deleted": True}
+
+        super().__init__(handler=_remove_discount, **kwargs)
+
+
+class CreateCoupon(Tool):
+    name: str = "stripe_create_coupon"
+    description: str | None = (
+        "Create a Stripe coupon: percent or fixed amount off, duration, and optional restriction to specific products "
+        "(applies_to_product_ids). Apply to subscriptions via stripe_create_subscription / stripe_update_subscription, "
+        "or expose to customers with stripe_create_promotion_code."
+    )
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_coupon(
+            duration: str = Field(
+                ...,
+                description="How long the discount lasts: 'once', 'repeating', or 'forever'.",
+            ),
+            percent_off: float | None = Field(
+                None,
+                description="Percent off (0-100). Use this OR amount_off+currency, not both.",
+            ),
+            amount_off: int | None = Field(
+                None,
+                description="Fixed discount in smallest currency unit. Requires currency.",
+            ),
+            currency: str | None = Field(
+                None,
+                description="Required if amount_off is set. Lowercase ISO code (e.g. 'eur').",
+            ),
+            duration_in_months: int | None = Field(
+                None,
+                description="Required when duration is 'repeating': number of months the coupon applies.",
+            ),
+            name: str | None = Field(None, description="Display name in the Dashboard."),
+            coupon_id: str | None = Field(
+                None,
+                description="Optional unique id for the coupon (e.g. 'LAUNCH25'). Max 500 chars.",
+            ),
+            max_redemptions: int | None = Field(None, description="Max times this coupon can be redeemed across customers."),
+            redeem_by: int | None = Field(
+                None,
+                description="Unix timestamp after which the coupon can no longer be redeemed.",
+            ),
+            applies_to_product_ids: list[str] | None = Field(
+                None,
+                description="If set, discount only applies when checkout/subscription includes these product IDs (prod_xxx).",
+            ),
+            metadata: dict[str, str] | None = Field(None, description="Metadata key-value pairs."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            if percent_off is not None and amount_off is not None:
+                raise ValueError("Set only one of percent_off or amount_off.")
+            if percent_off is None and amount_off is None:
+                raise ValueError("Set percent_off or amount_off (with currency).")
+            if amount_off is not None and not currency:
+                raise ValueError("currency is required when amount_off is set.")
+
+            data: dict[str, Any] = {"duration": duration}
+            if name:
+                data["name"] = name
+            if coupon_id:
+                data["id"] = coupon_id
+            if percent_off is not None:
+                data["percent_off"] = percent_off
+            if amount_off is not None:
+                data["amount_off"] = amount_off
+                data["currency"] = currency
+            if duration_in_months is not None:
+                data["duration_in_months"] = duration_in_months
+            if max_redemptions is not None:
+                data["max_redemptions"] = max_redemptions
+            if redeem_by is not None:
+                data["redeem_by"] = redeem_by
+            if applies_to_product_ids:
+                for i, pid in enumerate(applies_to_product_ids):
+                    data[f"applies_to[products][{i}]"] = pid
+            if metadata:
+                for k, v in metadata.items():
+                    data[f"metadata[{k}]"] = v
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{_BASE_URL}/coupons",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data=data,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_create_coupon, **kwargs)
+
+
+class RetrieveCoupon(Tool):
+    name: str = "stripe_retrieve_coupon"
+    description: str | None = "Retrieve a Stripe coupon by id (includes applies_to products if configured)."
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _retrieve_coupon(
+            coupon_id: str = Field(..., description="Coupon ID (e.g. 'Z4OV52SU' or custom id)."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_BASE_URL}/coupons/{coupon_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_retrieve_coupon, **kwargs)
+
+
+class ListCoupons(Tool):
+    name: str = "stripe_list_coupons"
+    description: str | None = "List Stripe coupons (paginated)."
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_coupons(
+            limit: int = Field(10, description="Maximum number of coupons to return."),
+            starting_after: str | None = Field(None, description="Coupon id cursor for pagination."),
+            ending_before: str | None = Field(None, description="Coupon id cursor for pagination."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            params: dict[str, Any] = {"limit": limit}
+            if starting_after:
+                params["starting_after"] = starting_after
+            if ending_before:
+                params["ending_before"] = ending_before
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_BASE_URL}/coupons",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    params=params,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_coupons, **kwargs)
+
+
+class UpdateCoupon(Tool):
+    name: str = "stripe_update_coupon"
+    description: str | None = "Update coupon name or metadata. Amount and percent cannot be changed; create a new coupon instead."
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _update_coupon(
+            coupon_id: str = Field(..., description="Coupon ID to update."),
+            name: str | None = Field(None, description="New display name."),
+            metadata: dict[str, str] | None = Field(None, description="Metadata keys to set."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            data: dict[str, Any] = {}
+            if name is not None:
+                data["name"] = name
+            if metadata:
+                for k, v in metadata.items():
+                    data[f"metadata[{k}]"] = v
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{_BASE_URL}/coupons/{coupon_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data=data,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_update_coupon, **kwargs)
+
+
+class DeleteCoupon(Tool):
+    name: str = "stripe_delete_coupon"
+    description: str | None = "Delete a coupon. Existing subscriptions keep their discount; new redemptions are blocked."
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _delete_coupon(
+            coupon_id: str = Field(..., description="Coupon ID to delete."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.delete(
+                    f"{_BASE_URL}/coupons/{coupon_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_delete_coupon, **kwargs)
+
+
+class CreatePromotionCode(Tool):
+    name: str = "stripe_create_promotion_code"
+    description: str | None = (
+        "Create a customer-redeemable promotion code tied to a coupon. Customers use the code string at checkout; "
+        "for subscriptions pass promotion_code_id (promo_xxx) to stripe_create_subscription."
+    )
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_promotion_code(
+            coupon: str = Field(..., description="Coupon ID this code unlocks (e.g. same as stripe_create_coupon id)."),
+            code: str | None = Field(
+                None,
+                description="The code customers type (e.g. SAVE20). Omit for Stripe to generate.",
+            ),
+            active: bool = Field(True, description="Whether the code can be redeemed."),
+            customer: str | None = Field(None, description="Restrict redemption to a single customer (cus_xxx)."),
+            max_redemptions: int | None = Field(None, description="Max redemptions for this code."),
+            first_time_transaction: bool | None = Field(
+                None,
+                description="If true, only customers who never paid can redeem.",
+            ),
+            expires_at: int | None = Field(None, description="Unix timestamp when the code expires."),
+            minimum_amount: int | None = Field(
+                None,
+                description="Minimum order subtotal (smallest currency unit) for redemption.",
+            ),
+            minimum_amount_currency: str | None = Field(
+                None,
+                description="Currency for minimum_amount (e.g. 'eur').",
+            ),
+            metadata: dict[str, str] | None = Field(None, description="Metadata for the promotion code object."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            data: dict[str, Any] = {
+                "coupon": coupon,
+                "active": str(active).lower(),
+            }
+            if code:
+                data["code"] = code
+            if customer:
+                data["customer"] = customer
+            if max_redemptions is not None:
+                data["max_redemptions"] = max_redemptions
+            if first_time_transaction is not None:
+                data["restrictions[first_time_transaction]"] = str(first_time_transaction).lower()
+            if expires_at is not None:
+                data["expires_at"] = expires_at
+            if minimum_amount is not None:
+                data["restrictions[minimum_amount]"] = minimum_amount
+            if minimum_amount_currency:
+                data["restrictions[minimum_amount_currency]"] = minimum_amount_currency
+            if metadata:
+                for k, v in metadata.items():
+                    data[f"metadata[{k}]"] = v
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{_BASE_URL}/promotion_codes",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data=data,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_create_promotion_code, **kwargs)
+
+
+class ListPromotionCodes(Tool):
+    name: str = "stripe_list_promotion_codes"
+    description: str | None = "List promotion codes; filter by coupon, active, or exact code string."
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _list_promotion_codes(
+            limit: int = Field(10, description="Maximum number of codes to return."),
+            code: str | None = Field(None, description="Case-sensitive filter for the customer-facing code."),
+            coupon: str | None = Field(None, description="Only codes for this coupon id."),
+            active: bool | None = Field(None, description="Filter by active status."),
+            created_gte: int | None = Field(None, description="Created on or after this Unix timestamp."),
+            created_lte: int | None = Field(None, description="Created on or before this Unix timestamp."),
+            starting_after: str | None = Field(None, description="Pagination cursor."),
+            ending_before: str | None = Field(None, description="Pagination cursor."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            params: dict[str, Any] = {"limit": limit}
+            if code:
+                params["code"] = code
+            if coupon:
+                params["coupon"] = coupon
+            if active is not None:
+                params["active"] = str(active).lower()
+            if created_gte is not None:
+                params["created[gte]"] = created_gte
+            if created_lte is not None:
+                params["created[lte]"] = created_lte
+            if starting_after:
+                params["starting_after"] = starting_after
+            if ending_before:
+                params["ending_before"] = ending_before
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_BASE_URL}/promotion_codes",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    params=params,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_list_promotion_codes, **kwargs)
+
+
+class RetrievePromotionCode(Tool):
+    name: str = "stripe_retrieve_promotion_code"
+    description: str | None = "Retrieve a promotion code by id (promo_xxx). Use stripe_list_promotion_codes to find ids from the code string."
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _retrieve_promotion_code(
+            promotion_code_id: str = Field(..., description="Promotion code object id (promo_xxx)."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{_BASE_URL}/promotion_codes/{promotion_code_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_retrieve_promotion_code, **kwargs)
+
+
+class UpdatePromotionCode(Tool):
+    name: str = "stripe_update_promotion_code"
+    description: str | None = "Update a promotion code (e.g. set active=false to disable redemptions)."
+    integration: Annotated[str, Integration("stripe")] | None = None
+    api_key: SecretStr | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        return {
+            **super().get_config(),
+            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+        }
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _update_promotion_code(
+            promotion_code_id: str = Field(..., description="Promotion code id (promo_xxx)."),
+            active: bool | None = Field(None, description="Whether new redemptions are allowed."),
+            metadata: dict[str, str] | None = Field(None, description="Metadata to set."),
+        ) -> Any:
+            api_key = await _resolve_api_key(self)
+            import httpx
+
+            data: dict[str, Any] = {}
+            if active is not None:
+                data["active"] = str(active).lower()
+            if metadata:
+                for k, v in metadata.items():
+                    data[f"metadata[{k}]"] = v
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{_BASE_URL}/promotion_codes/{promotion_code_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data=data,
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_update_promotion_code, **kwargs)
 
 
 class CreateProduct(Tool):
