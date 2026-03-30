@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Generator
+from unittest.mock import patch
 
 import pytest
 from timbal import Agent, Tool, Workflow
@@ -942,3 +943,188 @@ class TestComprehensiveInterruptionVerification:
 
         assert result.t0 > 0, "Start time should be recorded"
         assert result.t1 > result.t0, "End time should be after start time"
+
+
+# ==============================================================================
+# Regression tests: second CancelledError inside the interruption except block
+#
+# Bug: in the except (CancelledError, InterruptError) handler, span.status was
+# set AFTER awaiting dump(output).  If a NEW external CancelledError arrives
+# while that await is suspended (e.g. another task.cancel() call, or a timeout
+# firing during heavy load), the handler exits before span.status is assigned,
+# leaving it as None.  The finally block then calls OutputEvent(status=None),
+# which raises a Pydantic ValidationError because status: RunStatus is required.
+#
+# Mechanism reproduced by these tests:
+#   1. A dict-yielding generator accumulates items so the collector result is
+#      a non-empty list (DefaultCollector).
+#   2. dump() is patched: call #1 (input at line 849) completes normally;
+#      call #2 (output dump in the except block) suspends long enough for an
+#      external task.cancel() to fire.
+#   3. First cancel fires during the generator → except block runs.
+#   4. Second cancel (external) fires at asyncio.sleep() inside the patched
+#      dump → CancelledError raised inside the except block's await.
+#   5. Without fix: span.status is None → OutputEvent(status=None) →
+#      Pydantic ValidationError.
+#   6. With fix: span.status set first → no ValidationError; task ends with
+#      CancelledError (acceptable).
+#
+# Fix: move span.status assignment to the top of the except block.
+# ==============================================================================
+
+
+async def _dict_generator(count: int = 100) -> AsyncGenerator[dict, None]:
+    """Yields dicts so DefaultCollector accumulates a list.
+    dump(list_of_dicts) → asyncio.gather → a real, suspending await."""
+    for i in range(count):
+        await asyncio.sleep(0.05)
+        yield {"index": i}
+
+
+class TestDoubleCancellationStatusSet:
+    """Regression tests for the span.status=None / Pydantic ValidationError bug."""
+
+    @pytest.mark.asyncio
+    async def test_second_cancel_at_output_dump_raises_validation_error_without_fix(self):
+        """Core regression: external cancel fires while the except block awaits dump(output).
+
+        Setup
+        -----
+        * dump() is patched: call #1 (input dump) completes instantly; call #2
+          (output dump inside the except block) suspends for 3 s.
+        * A dict-yielding generator is used so the collector result is a list
+          (DefaultCollector) and call #2 is indeed triggered.
+
+        Without the fix the second cancel leaves span.status=None and
+        OutputEvent() raises ValidationError → pytest.fail().
+        With the fix span.status is set first → CancelledError (acceptable).
+        """
+        from timbal.utils.serialization import dump as real_dump
+
+        input_done = asyncio.Event()
+        in_except_dump = asyncio.Event()
+        call_count = [0]
+
+        async def tracked_dump(value):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Input dump (line 849 of runnable.py): complete normally.
+                result = await real_dump(value)
+                input_done.set()
+                return result
+            # Output dump inside except block: suspend so the external cancel fires.
+            in_except_dump.set()
+            await asyncio.sleep(3.0)
+            return await real_dump(value)
+
+        tool = Tool(handler=_dict_generator)
+
+        with patch("timbal.core.runnable.dump", tracked_dump):
+            task = asyncio.create_task(tool(count=100).collect())
+
+            # Wait for the input dump to finish (handler has started running).
+            try:
+                await asyncio.wait_for(input_done.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                pytest.skip("Input dump did not complete in time")
+
+            # Let some items accumulate so the collector result is non-empty.
+            await asyncio.sleep(0.4)
+
+            # First cancel — fires during the generator's asyncio.sleep(0.05).
+            task.cancel()
+
+            # Wait until the except block starts its dump (call #2).
+            try:
+                await asyncio.wait_for(in_except_dump.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                pytest.skip("Output dump in except block was never reached")
+
+            # Second (external) cancel — fires at asyncio.sleep(3.0) inside tracked_dump.
+            # This is the scenario that triggers the bug without the fix.
+            task.cancel()
+
+            try:
+                result = await task
+                # Best case: generator fully suppressed both exceptions.
+                assert isinstance(result, OutputEvent)
+                assert result.status is not None, (
+                    "status must not be None — without the fix OutputEvent() would "
+                    "raise a Pydantic ValidationError here"
+                )
+                assert result.status.code == "cancelled"
+            except asyncio.CancelledError:
+                pass  # acceptable: task was cancelled by the second cancel
+            except Exception as exc:
+                pytest.fail(
+                    f"Unexpected exception — without the fix this would be a "
+                    f"Pydantic ValidationError: {type(exc).__name__}: {exc}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_many_concurrent_external_cancels_during_output_dump(self):
+        """Heavy-load regression: 10 concurrent tasks, each hit with a second external
+        cancel while the except block is suspended inside dump(output).
+        No task may raise ValidationError."""
+        from timbal.utils.serialization import dump as real_dump
+
+        async def run_one():
+            input_done = asyncio.Event()
+            in_except_dump = asyncio.Event()
+            call_count = [0]
+
+            async def tracked_dump(value):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    result = await real_dump(value)
+                    input_done.set()
+                    return result
+                in_except_dump.set()
+                await asyncio.sleep(3.0)
+                return await real_dump(value)
+
+            tool = Tool(handler=_dict_generator)
+
+            with patch("timbal.core.runnable.dump", tracked_dump):
+                t = asyncio.create_task(tool(count=100).collect())
+
+                try:
+                    await asyncio.wait_for(input_done.wait(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    t.cancel()
+                    return None
+
+                await asyncio.sleep(0.4)
+                t.cancel()
+
+                try:
+                    await asyncio.wait_for(in_except_dump.wait(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    t.cancel()
+                    try:
+                        return await t
+                    except Exception:
+                        return None
+
+                t.cancel()  # external second cancel
+
+                try:
+                    return await t
+                except asyncio.CancelledError:
+                    return None  # acceptable
+                except Exception as exc:
+                    return exc   # reported below
+
+        results = await asyncio.gather(*[run_one() for _ in range(10)])
+
+        for i, r in enumerate(results):
+            if r is None:
+                continue
+            if isinstance(r, Exception):
+                pytest.fail(
+                    f"Task {i} raised unexpected exception "
+                    f"(ValidationError = regression): {type(r).__name__}: {r}"
+                )
+            assert isinstance(r, OutputEvent), f"Task {i}: unexpected type {type(r)}"
+            assert r.status is not None, f"Task {i}: status must not be None"
+            assert r.status.code == "cancelled"

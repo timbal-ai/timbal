@@ -943,6 +943,11 @@ class Runnable(ABC, BaseModel):
             span._output_dump = None
 
         except (asyncio.CancelledError, InterruptError) as e:
+            # Set status FIRST before any awaits. A second CancelledError can arrive
+            # at any subsequent await (e.g. dump() below) and exit this handler before
+            # the original assignment, leaving span.status=None and causing a Pydantic
+            # ValidationError in the finally block (OutputEvent.status is required).
+            span.status = RunStatus(code="cancelled", reason="interrupted", message=str(e))
             if isinstance(e, InterruptError):
                 _get_logger().warning(
                     "Interrupted",
@@ -967,7 +972,6 @@ class Runnable(ABC, BaseModel):
                         output = output.output
                     span.output = output
                     span._output_dump = await dump(output)
-            span.status = RunStatus(code="cancelled", reason="interrupted", message=str(e))
 
         except Exception as err:
             error = {

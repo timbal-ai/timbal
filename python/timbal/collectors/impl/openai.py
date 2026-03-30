@@ -116,6 +116,7 @@ class ChatCompletionCollector(BaseCollector):
         self._text_block_started: bool = False
         self._content_blocks: set[str] = set()
         self._stop_reason: str | None = None
+        self._pending_usage: Any | None = None  # Last usage event, written once in result()
 
     @classmethod
     @override
@@ -125,9 +126,12 @@ class ChatCompletionCollector(BaseCollector):
     @override
     def process(self, event: ChatCompletionEvent) -> Any:
         """Processes OpenAI streaming events."""
-        # Handle usage statistics
+        # Stash usage for deferred processing in result().
+        # Some providers (e.g. Gemini) send cumulative usage on every chunk,
+        # not just the final one. By always overwriting _pending_usage and
+        # writing once in result(), we avoid double-counting.
         if event.usage:
-            self._handle_usage(event)
+            self._pending_usage = event
         if not len(event.choices):
             return None
         # Capture finish_reason from the choice
@@ -232,6 +236,10 @@ class ChatCompletionCollector(BaseCollector):
     @override
     def result(self) -> Message:
         """Returns structured OpenAI response."""
+        # Write usage once from the last chunk that carried it.
+        if self._pending_usage is not None:
+            self._handle_usage(self._pending_usage)
+
         span = get_run_context().current_span()
         ttft = self._first_token - self._start
         span.metadata["ttft"] = ttft
