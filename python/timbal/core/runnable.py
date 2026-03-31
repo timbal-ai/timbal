@@ -974,21 +974,29 @@ class Runnable(ABC, BaseModel):
                     span._output_dump = await dump(output)
 
         except Exception as err:
+            # Set status FIRST before any operations that could raise (str(err),
+            # traceback.format_exc()).  If those fail, span.status is already valid.
+            span.status = RunStatus(
+                code="error",
+                reason=None,  # TODO
+                message=None,  # TODO
+            )
             error = {
                 "type": type(err).__name__,
                 "message": str(err),
                 "traceback": traceback.format_exc(),
             }
             span.error = error  # No need to model dump the error. It's already a json compatible dict
-            span.status = RunStatus(
-                code="error",
-                reason=None,  # TODO
-                message=None,  # TODO
-            )
 
         finally:
             t1 = int(time.time() * 1000)
             span.t1 = t1
+            # Defensive fallback: GeneratorExit and other BaseException subclasses bypass
+            # all except clauses above. If span.status is still None at this point, set a
+            # safe default so OutputEvent() (which requires status: RunStatus) doesn't raise
+            # a Pydantic ValidationError on top of the already-propagating exception.
+            if span.status is None:
+                span.status = RunStatus(code="cancelled", reason="interrupted", message="")
             output_event = OutputEvent(
                 run_id=run_context.id,
                 parent_run_id=run_context.parent_id,

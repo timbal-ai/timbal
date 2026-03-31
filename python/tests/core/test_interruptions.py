@@ -1128,3 +1128,473 @@ class TestDoubleCancellationStatusSet:
             assert isinstance(r, OutputEvent), f"Task {i}: unexpected type {type(r)}"
             assert r.status is not None, f"Task {i}: status must not be None"
             assert r.status.code == "cancelled"
+
+
+# ==============================================================================
+# Regression tests: span.status=None from paths OTHER than the double-cancel
+#
+# Two additional scenarios where span.status can still be None in the finally
+# block, each with a different root cause:
+#
+# 1. except Exception — span.status was set AFTER str(err) and
+#    traceback.format_exc().  If the exception's __str__ itself raises (e.g. a
+#    buggy or hostile custom exception class), the assignment is never reached.
+#    Fix: move span.status assignment to be the first statement in that block.
+#
+# 2. GeneratorExit — a BaseException subclass that bypasses all three except
+#    clauses (EarlyExit, CancelledError/InterruptError, Exception).  Thrown
+#    when the generator is closed early: streaming HTTP consumer breaks on
+#    client disconnect, explicit aclose() call, etc.
+#    Fix: defensive `if span.status is None:` guard at the TOP of the finally
+#    block, before OutputEvent() is called.
+# ==============================================================================
+
+
+class _StrRaisesException(Exception):
+    """Custom exception whose __str__ always raises RuntimeError.
+
+    Used to simulate the case where processing an exception inside
+    `except Exception` (specifically str(err)) itself raises, leaving
+    span.status unset if the status assignment came after that call.
+    """
+
+    def __str__(self):
+        raise RuntimeError("__str__ deliberately raised")
+
+
+class _NotAnException(BaseException):
+    """BaseException subclass that is NOT a subclass of Exception.
+
+    Bypasses `except Exception`, `except EarlyExit`, and
+    `except (CancelledError, InterruptError)` — goes straight to finally.
+    Used to test the defensive `if span.status is None` fallback.
+    """
+
+
+async def _slow_generator_for_close(count: int = 100) -> AsyncGenerator[str, None]:
+    """Slow generator used to test early aclose(); must be at module level."""
+    for i in range(count):
+        await asyncio.sleep(0.1)
+        yield f"item_{i}"
+
+
+async def _raises_not_an_exception() -> str:
+    """Handler that raises a BaseException (not Exception) subclass."""
+    raise _NotAnException("bypasses except Exception")
+
+
+async def _raises_str_raises() -> str:
+    """Handler that raises _StrRaisesException (module-level for nested tests)."""
+    raise _StrRaisesException()
+
+
+class TestExceptExceptionStatusSet:
+    """Regression: span.status set before str(err)/traceback in except Exception."""
+
+    @pytest.mark.asyncio
+    async def test_bad_str_exception_does_not_produce_validation_error(self):
+        """If the caught exception's __str__ raises, span.status must already be
+        set so the finally block can construct OutputEvent without ValidationError.
+
+        Without the fix: str(err) raises → span.status still None → finally
+        calls OutputEvent(status=None) → Pydantic ValidationError.
+        With the fix:    span.status set first → str(err) raises → finally
+        calls OutputEvent(status=span.status) → succeeds; RuntimeError
+        from str(err) propagates instead of ValidationError.
+        """
+
+        async def raising_handler():
+            raise _StrRaisesException("will never be stringified")
+
+        tool = Tool(handler=raising_handler)
+
+        try:
+            await tool().collect()
+        except Exception as exc:
+            from pydantic import ValidationError
+            if isinstance(exc, ValidationError) and "status" in str(exc):
+                pytest.fail(
+                    f"Got Pydantic ValidationError for 'status' — span.status was "
+                    f"not set before str(err) raised: {exc}"
+                )
+            # Any other exception (RuntimeError from __str__) is acceptable.
+
+    @pytest.mark.asyncio
+    async def test_many_bad_str_exceptions(self):
+        """10 concurrent tasks, each raising _StrRaisesException. None may
+        produce a ValidationError for status."""
+
+        async def raising_handler():
+            raise _StrRaisesException()
+
+        from pydantic import ValidationError
+
+        async def run_one():
+            tool = Tool(handler=raising_handler)
+            try:
+                await tool().collect()
+                return None
+            except ValidationError as e:
+                if "status" in str(e):
+                    return e
+                return None
+            except Exception:
+                return None
+
+        results = await asyncio.gather(*[run_one() for _ in range(10)])
+        for i, r in enumerate(results):
+            if r is not None:
+                pytest.fail(
+                    f"Task {i} got ValidationError for status — regression: {r}"
+                )
+
+
+class TestGeneratorExitStatusSet:
+    """Regression: span.status=None when GeneratorExit bypasses all except clauses."""
+
+    @pytest.mark.asyncio
+    async def test_aclose_does_not_produce_validation_error(self):
+        """Calling aclose() mid-stream throws GeneratorExit into the generator.
+        GeneratorExit bypasses all except clauses, so without the defensive
+        `if span.status is None` guard in finally, OutputEvent(status=None)
+        raises a Pydantic ValidationError.
+
+        Without the fix: ValidationError propagates from aclose().
+        With the fix:    span.status is set defensively; ValidationError is
+                         avoided (aclose may raise RuntimeError from yield-in-
+                         finally-during-GeneratorExit, which is acceptable).
+        """
+        from pydantic import ValidationError
+
+        tool = Tool(handler=_slow_generator_for_close)
+        collector = tool(count=50)
+
+        # Consume the StartEvent so the generator is running inside the try block.
+        first = await collector.__anext__()
+        assert first is not None
+
+        try:
+            await collector.aclose()
+        except ValidationError as exc:
+            if "status" in str(exc):
+                pytest.fail(
+                    f"aclose() raised ValidationError for 'status' — defensive "
+                    f"fallback in finally is missing: {exc}"
+                )
+            raise
+        except Exception:
+            pass  # RuntimeError("async generator ignored GeneratorExit") is acceptable
+
+    @pytest.mark.asyncio
+    async def test_many_concurrent_aclose_calls(self):
+        """10 concurrent generators each closed early via aclose().
+        None may produce a ValidationError for status."""
+        from pydantic import ValidationError
+
+        async def run_one():
+            tool = Tool(handler=_slow_generator_for_close)
+            collector = tool(count=50)
+            await collector.__anext__()  # let it enter the try block
+            try:
+                await collector.aclose()
+                return None
+            except ValidationError as e:
+                if "status" in str(e):
+                    return e
+                return None
+            except Exception:
+                return None
+
+        results = await asyncio.gather(*[run_one() for _ in range(10)])
+        for i, r in enumerate(results):
+            if r is not None:
+                pytest.fail(
+                    f"Task {i}: aclose() raised ValidationError for status — "
+                    f"regression: {r}"
+                )
+
+
+# ==============================================================================
+# Deeper regression tests
+#
+# Extends coverage beyond the basic scenarios with:
+#
+# 1. except Exception — additional routes where pre-status code can raise:
+#    - traceback.format_exc() patched to raise (instead of str(err))
+#    - BaseException subclass (not Exception) bypasses the block entirely
+#
+# 2. GeneratorExit — real GC-finalizer path (the streaming disconnect scenario):
+#    - consumer breaks from async for, reference dropped, GC triggers aclose()
+#    - asyncio exception handler is monitored so errors in the finalizer are
+#      visible to the test
+#
+# 3. Nested runnables — tool inside a Workflow:
+#    - verifies the fix holds end-to-end, not just in unit isolation
+#    - the ValidationError must not surface in the outer workflow result
+# ==============================================================================
+
+
+def _no_validation_error_for_status(exc: BaseException) -> bool:
+    """Return True if exc is a Pydantic ValidationError complaining about status."""
+    from pydantic import ValidationError
+    return isinstance(exc, ValidationError) and "status" in str(exc)
+
+
+class TestExceptExceptionDeeper:
+    """Deeper coverage for the except Exception span.status ordering fix."""
+
+    @pytest.mark.asyncio
+    async def test_format_exc_raises_does_not_produce_validation_error(self):
+        """traceback.format_exc() is called AFTER str(err) in the except Exception
+        block.  If it raises, span.status must already be set.
+
+        Patching traceback.format_exc via the runnable module's reference so
+        that any exception class can trigger it, not just one with bad __str__.
+        """
+        from pydantic import ValidationError
+
+        async def normal_error_handler():
+            raise ValueError("ordinary error")
+
+        tool = Tool(handler=normal_error_handler)
+
+        with patch("timbal.core.runnable.traceback.format_exc", side_effect=RuntimeError("format_exc deliberately raised")):
+            try:
+                await tool().collect()
+            except ValidationError as exc:
+                if "status" in str(exc):
+                    pytest.fail(
+                        f"ValidationError for 'status' — span.status was not set "
+                        f"before traceback.format_exc raised: {exc}"
+                    )
+            except Exception:
+                pass  # RuntimeError from format_exc is acceptable
+
+    @pytest.mark.asyncio
+    async def test_base_exception_subclass_uses_defensive_fallback(self):
+        """A BaseException subclass that is not an Exception subclass bypasses
+        all three except clauses (EarlyExit, CancelledError/InterruptError,
+        Exception) and hits the finally block directly.
+
+        Without the `if span.status is None` guard in finally, the handler
+        raises _NotAnException, span.status stays None, and
+        OutputEvent(status=None) raises ValidationError.
+        With the guard, span.status is set defensively and the original
+        _NotAnException propagates cleanly.
+        """
+        from pydantic import ValidationError
+
+        tool = Tool(handler=_raises_not_an_exception)
+
+        try:
+            await tool().collect()
+        except _NotAnException:
+            pass  # original exception propagated cleanly — fix is working
+        except ValidationError as exc:
+            if "status" in str(exc):
+                pytest.fail(
+                    f"ValidationError for 'status' — defensive fallback in finally "
+                    f"is missing for BaseException subclasses: {exc}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_many_concurrent_base_exception_in_handler(self):
+        """10 concurrent tasks raising _NotAnException. None may produce a
+        ValidationError for status."""
+        from pydantic import ValidationError
+
+        async def run_one():
+            tool = Tool(handler=_raises_not_an_exception)
+            try:
+                await tool().collect()
+                return None
+            except _NotAnException:
+                return None  # correct outcome
+            except ValidationError as e:
+                if "status" in str(e):
+                    return e
+                return None
+            except Exception:
+                return None
+
+        results = await asyncio.gather(*[run_one() for _ in range(10)])
+        for i, r in enumerate(results):
+            if r is not None:
+                pytest.fail(f"Task {i}: got ValidationError for status — regression: {r}")
+
+
+class TestGeneratorExitDeeper:
+    """Deeper coverage for the GeneratorExit / consumer-disconnect scenario."""
+
+    @pytest.mark.asyncio
+    async def test_consumer_break_gc_finalizer_no_validation_error(self):
+        """Real streaming-disconnect simulation: consumer breaks from async for,
+        the collector reference is dropped, CPython immediately decrements the
+        inner async generator's refcount to zero, and asyncio's async-gen
+        finalizer schedules aclose().  The finalizer runs on the next event-loop
+        turn and throws GeneratorExit into the generator's finally block.
+
+        Without the defensive fallback the finalizer raises ValidationError,
+        which asyncio routes to the exception handler.
+        With the fix, the exception handler sees at most RuntimeError
+        ('async generator ignored GeneratorExit') but never ValidationError.
+        """
+        from pydantic import ValidationError
+
+        loop = asyncio.get_event_loop()
+        captured: list[BaseException] = []
+        original_handler = loop.get_exception_handler()
+
+        def capture_handler(loop, context):
+            exc = context.get("exception")
+            if exc is not None:
+                captured.append(exc)
+
+        loop.set_exception_handler(capture_handler)
+        try:
+            tool = Tool(handler=_slow_generator_for_close)
+            collector = tool(count=100)
+
+            # Consume one event then exit — simulates client disconnect
+            async for _ in collector:
+                break
+
+            # Drop our reference; CPython immediately GC's the async gen
+            del collector
+            import gc
+            gc.collect()
+            await asyncio.sleep(0.1)  # Let the event loop run the finalizer
+
+            for exc in captured:
+                if _no_validation_error_for_status(exc):
+                    pytest.fail(
+                        f"ValidationError for 'status' surfaced in async-gen GC "
+                        f"finalizer — defensive fallback in finally is missing: {exc}"
+                    )
+        finally:
+            loop.set_exception_handler(original_handler)
+
+    @pytest.mark.asyncio
+    async def test_many_consumer_breaks_no_validation_error(self):
+        """10 concurrent streaming consumers that each disconnect after one event.
+        No ValidationError for status should appear in the asyncio exception handler."""
+        from pydantic import ValidationError
+
+        loop = asyncio.get_event_loop()
+        captured: list[BaseException] = []
+        original_handler = loop.get_exception_handler()
+
+        def capture_handler(loop, context):
+            exc = context.get("exception")
+            if exc is not None:
+                captured.append(exc)
+
+        loop.set_exception_handler(capture_handler)
+        try:
+            import gc
+
+            async def one_consumer():
+                tool = Tool(handler=_slow_generator_for_close)
+                collector = tool(count=100)
+                async for _ in collector:
+                    break
+                del collector
+
+            await asyncio.gather(*[one_consumer() for _ in range(10)])
+            gc.collect()
+            await asyncio.sleep(0.2)
+
+            for exc in captured:
+                if _no_validation_error_for_status(exc):
+                    pytest.fail(
+                        f"ValidationError for 'status' in GC finalizer — regression: {exc}"
+                    )
+        finally:
+            loop.set_exception_handler(original_handler)
+
+
+class TestNestedRunnableStatusIntegrity:
+    """Verify the fixes hold end-to-end when runnables are nested inside a Workflow."""
+
+    @pytest.mark.asyncio
+    async def test_tool_with_bad_str_exception_inside_workflow(self):
+        """Tool raises _StrRaisesException (str(err) raises).  Without the fix,
+        the tool's except Exception block fails before setting span.status, the
+        tool's finally raises ValidationError, that exception propagates into the
+        workflow as a step failure, and the workflow result's error field contains
+        the ValidationError text about 'status'.
+
+        With the fix, the tool handles the exception cleanly (status set first),
+        and the workflow result's error — if any — must NOT reference a
+        ValidationError for status.
+        """
+        from pydantic import ValidationError
+
+        tool = Tool(name="bad_str_tool", handler=_raises_str_raises)
+        workflow = Workflow(name="nested_bad_str_wf").step(tool)
+
+        try:
+            result = await workflow().collect()
+        except ValidationError as exc:
+            if "status" in str(exc):
+                pytest.fail(
+                    f"ValidationError for 'status' propagated out of workflow — "
+                    f"fix not effective in nested context: {exc}"
+                )
+            raise
+
+        assert result is not None, "workflow collect() should return an OutputEvent"
+        assert result.status is not None, "workflow OutputEvent.status must not be None"
+
+        # If the workflow captured an error, it must not be the status=None ValidationError
+        if result.error:
+            error_text = str(result.error)
+            if "ValidationError" in error_text and "status" in error_text:
+                pytest.fail(
+                    f"ValidationError for 'status' surfaced inside workflow error — "
+                    f"fix not effective in nested context: {result.error}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_tool_with_base_exception_inside_workflow(self):
+        """Tool raises _NotAnException (BaseException, not Exception) inside a Workflow.
+
+        The tool's defensive fallback in finally fires correctly (no ValidationError for
+        status from the tool span), but because _NotAnException is a BaseException (not
+        Exception), the workflow's _enqueue_step_events catches it only via its `finally`
+        block — the task exits with an unhandled BaseException stored on the asyncio.Task.
+
+        The important invariant: no ValidationError for 'status' leaks out of the
+        tool-level span.  The workflow-level behaviour for bare BaseException subclasses is
+        a pre-existing limitation (the tool-level fix is already verified independently in
+        TestExceptExceptionDeeper.test_base_exception_in_handler).
+
+        We wrap collect() in asyncio.wait_for so the test cannot hang.
+        """
+        import asyncio
+
+        from pydantic import ValidationError
+
+        tool = Tool(name="base_exc_tool2", handler=_raises_not_an_exception)
+        workflow = Workflow(name="nested_base_exc_wf2").step(tool)
+
+        try:
+            result = await asyncio.wait_for(workflow().collect(), timeout=10.0)
+        except _NotAnException:
+            pass  # tool BaseException propagated cleanly — no ValidationError
+        except asyncio.TimeoutError:
+            # Pre-existing workflow limitation: bare BaseException in a step task
+            # leaves the queue without a completion sentinel, causing the consumer
+            # loop to wait until the timeout.  The important thing is that this path
+            # does NOT indicate a ValidationError for status (the tool span is fine).
+            pass
+        except ValidationError as exc:
+            if "status" in str(exc):
+                pytest.fail(
+                    f"ValidationError for 'status' propagated out of workflow "
+                    f"with BaseException in tool: {exc}"
+                )
+            raise
+        else:
+            assert result is not None
+            assert result.status is not None, "workflow OutputEvent.status must not be None"
