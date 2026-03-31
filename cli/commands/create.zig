@@ -521,7 +521,7 @@ fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config:
     try utils.fetchBlueprint(allocator, config.path, "api", utils.blueprint_api_url);
 
     // Create workforce member
-    const funny_name = try utils.addWorkforceMember(allocator, app_dir, project_name, config.project_type);
+    const funny_name = try utils.addWorkforceMember(allocator, app_dir, project_name, config.project_type, null);
     defer allocator.free(funny_name);
 
     // Create .gitignore in the project root

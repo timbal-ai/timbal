@@ -15,13 +15,16 @@ fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.writeAll("Add a component to an existing timbal project.\n" ++
         "\n" ++
-        "\x1b[1;32mUsage: \x1b[1;36mtimbal add \x1b[0;36m<COMPONENT>\n" ++
+        "\x1b[1;32mUsage: \x1b[1;36mtimbal add \x1b[0;36m<COMPONENT> \x1b[0;33m[name]\n" ++
         "\n" ++
         "\x1b[1;32mComponents:\n" ++
         "    \x1b[1;36magent    \x1b[0mAdd a new agent to the workforce\n" ++
         "    \x1b[1;36mworkflow \x1b[0mAdd a new workflow to the workforce\n" ++
         "    \x1b[1;36mui       \x1b[0mAdd a UI blueprint (Chat or Blank)\n" ++
         "    \x1b[1;36mapi      \x1b[0mAdd the API blueprint (Elysia + Bun)\n" ++
+        "\n" ++
+        "\x1b[1;32mArguments:\n" ++
+        "    \x1b[1;33mname     \x1b[0mOptional name for the workforce member (agent/workflow only)\n" ++
         "\n" ++
         utils.global_options_help ++
         "\n");
@@ -321,17 +324,21 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const stdout = std.io.getStdOut().writer();
     var component: ?[]const u8 = null;
+    var name: ?[]const u8 = null;
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage();
             return;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
-            if (component != null) {
-                try printUsageWithError("Error: multiple components provided");
+            if (component == null) {
+                component = arg;
+            } else if (name == null) {
+                name = arg;
+            } else {
+                try printUsageWithError("Error: too many arguments provided");
                 return;
             }
-            component = arg;
         } else {
             try printUsageWithError("Error: unknown option");
             return;
@@ -357,7 +364,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             return;
         };
 
-        const funny_name = try utils.addWorkforceMember(allocator, cwd, project_name, project_type);
+        const funny_name = try utils.addWorkforceMember(allocator, cwd, project_name, project_type, name);
         defer allocator.free(funny_name);
 
         try stdout.print("\n{s}✓{s} {s}Added {s} '{s}' to workforce{s}\n\n", .{
