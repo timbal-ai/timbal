@@ -34,6 +34,35 @@ from .runnable import Runnable
 
 logger = structlog.get_logger("timbal.core.llm_router")
 
+# Module-level client caches keyed by (api_key, base_url).
+# Reusing clients preserves the underlying httpx connection pool, avoiding a
+# fresh TCP+TLS handshake on every LLM call (~200-300ms saved per request).
+# Per-request tracing headers (run_id, call_id) are passed via extra_headers
+# on each individual .create() call instead.
+_OPENAI_CLIENT_CACHE: dict[tuple, AsyncOpenAI] = {}
+_ANTHROPIC_CLIENT_CACHE: dict[tuple, AsyncAnthropic] = {}
+
+
+def _get_openai_client(api_key: str, base_url: str | None, provider: str) -> AsyncOpenAI:
+    cache_key = (api_key, base_url, provider)
+    if cache_key not in _OPENAI_CLIENT_CACHE:
+        kwargs: dict[str, Any] = {"api_key": api_key, "default_headers": {"x-provider": provider}}
+        if base_url:
+            kwargs["base_url"] = base_url
+        _OPENAI_CLIENT_CACHE[cache_key] = AsyncOpenAI(**kwargs)
+    return _OPENAI_CLIENT_CACHE[cache_key]
+
+
+def _get_anthropic_client(api_key: str, base_url: str | None) -> AsyncAnthropic:
+    cache_key = (api_key, base_url)
+    if cache_key not in _ANTHROPIC_CLIENT_CACHE:
+        kwargs: dict[str, Any] = {"api_key": api_key, "default_headers": {"x-provider": "anthropic"}}
+        if base_url:
+            kwargs["base_url"] = base_url
+        _ANTHROPIC_CLIENT_CACHE[cache_key] = AsyncAnthropic(**kwargs)
+    return _ANTHROPIC_CLIENT_CACHE[cache_key]
+
+
 TIMBAL_OPENAI_API = os.getenv("TIMBAL_OPENAI_API", "responses")
 if TIMBAL_OPENAI_API != "responses":
     logger.warning(
@@ -160,6 +189,24 @@ Model = Literal[
     "byteplus/seed-2-0-mini-260215",
     "byteplus/seed-1-8-251228",
     "byteplus/seed-1-6-250915",
+    "cerebras/llama3.1-8b",
+    "cerebras/gpt-oss-120b",
+    "cerebras/qwen-3-235b-a22b-instruct-2507",
+    "cerebras/zai-glm-4.7",
+    "sambanova/DeepSeek-R1-0528",
+    "sambanova/DeepSeek-V3-0324",
+    "sambanova/DeepSeek-V3.1",
+    "sambanova/DeepSeek-V3.1-cb",
+    "sambanova/DeepSeek-V3.1-Terminus",
+    "sambanova/DeepSeek-V3.2",
+    "sambanova/Llama-3.3-Swallow-70B-Instruct-v0.4",
+    "sambanova/Llama-4-Maverick-17B-128E-Instruct",
+    "sambanova/Meta-Llama-3.1-8B-Instruct",
+    "sambanova/Meta-Llama-3.3-70B-Instruct",
+    "sambanova/MiniMax-M2.5",
+    "sambanova/Qwen3-32B",
+    "sambanova/Qwen3-235B-A22B-Instruct-2507",
+    "sambanova/gpt-oss-120b",
 ]
 
 
@@ -308,18 +355,18 @@ async def _llm_router(
 
     run_context = get_or_create_run_context()
     call_id = get_call_id()
-    default_headers = {
+    # Per-request headers: change every call, so passed via extra_headers on each .create().
+    request_headers: dict[str, str] = {
         "x-timbal-run-id": run_context.id,
         "x-timbal-call-id": call_id,
     }
     if run_context.platform_config and run_context.platform_config.subject:
         if run_context.platform_config.subject.app_id:
-            default_headers["x-timbal-app-id"] = run_context.platform_config.subject.app_id
+            request_headers["x-timbal-app-id"] = run_context.platform_config.subject.app_id
         if run_context.platform_config.subject.version_id:
-            default_headers["x-timbal-version-id"] = run_context.platform_config.subject.version_id
+            request_headers["x-timbal-version-id"] = run_context.platform_config.subject.version_id
 
     if provider == "openai":
-        default_headers["x-provider"] = "openai"
         if not api_key:
             api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -331,13 +378,9 @@ async def _llm_router(
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/{proxy_api}/v1"
         if not api_key:
             raise APIKeyNotFoundError("OPENAI_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(api_key=api_key, default_headers=default_headers)
+        client = _get_openai_client(api_key, base_url, "openai")
 
     elif provider == "anthropic":
-        default_headers["x-provider"] = "anthropic"
         if not max_tokens:
             raise ValueError("'max_tokens' is required for claude models.")
         if not api_key:
@@ -348,13 +391,9 @@ async def _llm_router(
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/anthropic"
         if not api_key:
             raise APIKeyNotFoundError("ANTHROPIC_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncAnthropic(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncAnthropic(api_key=api_key, default_headers=default_headers)
+        client = _get_anthropic_client(api_key, base_url)
 
     elif provider == "google":
-        default_headers["x-provider"] = "google"
         if not api_key:
             api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
@@ -363,17 +402,13 @@ async def _llm_router(
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
         if not api_key:
             raise APIKeyNotFoundError("GEMINI_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(
-                api_key=api_key,
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                default_headers=default_headers,
-            )
+        client = _get_openai_client(
+            api_key,
+            base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "google",
+        )
 
     elif provider == "togetherai":
-        default_headers["x-provider"] = "togetherai"
         if not api_key:
             api_key = os.getenv("TOGETHER_API_KEY")
         if not api_key:
@@ -382,15 +417,9 @@ async def _llm_router(
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
         if not api_key:
             raise APIKeyNotFoundError("TOGETHER_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(
-                api_key=api_key, base_url="https://api.together.xyz/v1/", default_headers=default_headers
-            )
+        client = _get_openai_client(api_key, base_url or "https://api.together.xyz/v1/", "togetherai")
 
     elif provider == "xai":
-        default_headers["x-provider"] = "xai"
         if not api_key:
             api_key = os.getenv("XAI_API_KEY")
         if not api_key:
@@ -399,13 +428,9 @@ async def _llm_router(
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-responses/v1"
         if not api_key:
             raise APIKeyNotFoundError("XAI_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1", default_headers=default_headers)
+        client = _get_openai_client(api_key, base_url or "https://api.x.ai/v1", "xai")
 
     elif provider == "groq":
-        default_headers["x-provider"] = "groq"
         if not api_key:
             api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
@@ -414,15 +439,9 @@ async def _llm_router(
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
         if not api_key:
             raise APIKeyNotFoundError("GROQ_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(
-                api_key=api_key, base_url="https://api.groq.com/openai/v1", default_headers=default_headers
-            )
+        client = _get_openai_client(api_key, base_url or "https://api.groq.com/openai/v1", "groq")
 
     elif provider == "fireworks":
-        default_headers["x-provider"] = "fireworks"
         if not api_key:
             api_key = os.getenv("FIREWORKS_API_KEY")
         if not api_key:
@@ -431,15 +450,11 @@ async def _llm_router(
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
         if not api_key:
             raise APIKeyNotFoundError("FIREWORKS_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(
-                api_key=api_key, base_url="https://api.fireworks.ai/inference/v1", default_headers=default_headers
-            )
+        client = _get_openai_client(
+            api_key, base_url or "https://api.fireworks.ai/inference/v1", "fireworks"
+        )
 
     elif provider == "byteplus":
-        default_headers["x-provider"] = "byteplus"
         if not api_key:
             api_key = os.getenv("BYTEPLUS_API_KEY")
         if not api_key:
@@ -448,17 +463,13 @@ async def _llm_router(
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
         if not api_key:
             raise APIKeyNotFoundError("BYTEPLUS_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(
-                api_key=api_key,
-                base_url="https://ark.ap-southeast.bytepluses.com/api/v3",
-                default_headers=default_headers,
-            )
+        client = _get_openai_client(
+            api_key,
+            base_url or "https://ark.ap-southeast.bytepluses.com/api/v3",
+            "byteplus",
+        )
 
     elif provider == "xiaomi":
-        default_headers["x-provider"] = "xiaomi"
         if not api_key:
             api_key = os.getenv("XIAOMI_API_KEY")
         if not api_key:
@@ -467,12 +478,29 @@ async def _llm_router(
                 base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
         if not api_key:
             raise APIKeyNotFoundError("XIAOMI_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(
-                api_key=api_key, base_url="https://api.xiaomimimo.com/v1", default_headers=default_headers
-            )
+        client = _get_openai_client(api_key, base_url or "https://api.xiaomimimo.com/v1", "xiaomi")
+
+    elif provider == "cerebras":
+        if not api_key:
+            api_key = os.getenv("CEREBRAS_API_KEY")
+        if not api_key:
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
+        if not api_key:
+            raise APIKeyNotFoundError("CEREBRAS_API_KEY not found.")
+        client = _get_openai_client(api_key, base_url or "https://api.cerebras.ai/v1", "cerebras")
+
+    elif provider == "sambanova":
+        if not api_key:
+            api_key = os.getenv("SAMBANOVA_API_KEY")
+        if not api_key:
+            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+                api_key = run_context.platform_config.auth.header_value
+                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
+        if not api_key:
+            raise APIKeyNotFoundError("SAMBANOVA_API_KEY not found.")
+        client = _get_openai_client(api_key, base_url or "https://api.sambanova.ai/v1", "sambanova")
 
     else:
         raise ValueError(f"Unsupported provider: {provider}")
@@ -516,9 +544,9 @@ async def _llm_router(
                     "type": "json_schema",
                     "schema": transform_schema(output_model),
                 }
-                res = await client.beta.messages.create(betas=["structured-outputs-2025-11-13"], **anthropic_kwargs)  # type: ignore[attr-defined]
+                res = await client.beta.messages.create(betas=["structured-outputs-2025-11-13"], extra_headers=request_headers, **anthropic_kwargs)  # type: ignore[attr-defined]
             else:
-                res = await client.messages.create(**anthropic_kwargs)  # type: ignore[attr-defined]
+                res = await client.messages.create(extra_headers=request_headers, **anthropic_kwargs)  # type: ignore[attr-defined]
             async for chunk in res:
                 yield chunk
 
@@ -564,7 +592,7 @@ async def _llm_router(
         responses_kwargs.update(provider_params)
 
         async def _create_stream():
-            res = await client.responses.create(**responses_kwargs)  # type: ignore[attr-defined]
+            res = await client.responses.create(extra_headers=request_headers, **responses_kwargs)  # type: ignore[attr-defined]
             async for chunk in res:
                 yield chunk
 
@@ -582,7 +610,7 @@ async def _llm_router(
 
         # Some providers have incomplete OpenAI chat completions support.
         # Flatten text-only content arrays to plain strings for compatibility.
-        if provider == "xiaomi":
+        if provider in ("xiaomi", "sambanova"):
             for msg in chat_completions_messages:
                 content = msg.get("content")
                 if isinstance(content, list) and all(
@@ -627,7 +655,7 @@ async def _llm_router(
         chat_completions_kwargs.update(provider_params)
 
         async def _create_stream():
-            res = await client.chat.completions.create(**chat_completions_kwargs)  # type: ignore[attr-defined]
+            res = await client.chat.completions.create(extra_headers=request_headers, **chat_completions_kwargs)  # type: ignore[attr-defined]
             async for chunk in res:
                 yield chunk
 

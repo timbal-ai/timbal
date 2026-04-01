@@ -1598,3 +1598,218 @@ class TestNestedRunnableStatusIntegrity:
         else:
             assert result is not None
             assert result.status is not None, "workflow OutputEvent.status must not be None"
+
+
+# ==============================================================================
+# GeneratorExit — consumer early-exit scenarios
+# ==============================================================================
+
+
+def _identity(x: str) -> str:
+    return x
+
+
+class TestGeneratorExit:
+    """Test that breaking out of a Runnable async generator is clean (no RuntimeError)."""
+
+    @pytest.mark.asyncio
+    async def test_break_after_start_event_no_runtime_error(self):
+        """Breaking after the StartEvent must not raise RuntimeError."""
+        from timbal.types.events.start import StartEvent
+
+        errors = []
+
+        def exc_handler(loop, context):
+            errors.append(context.get("exception", context.get("message")))
+
+        loop = asyncio.get_event_loop()
+        loop.set_exception_handler(exc_handler)
+
+        tool = Tool(handler=_identity)
+        async for _event in tool(x="test"):
+            break
+
+        await asyncio.sleep(0)
+
+        runtime_errors = [e for e in errors if isinstance(e, RuntimeError)]
+        assert not runtime_errors, f"Got RuntimeError from GeneratorExit: {runtime_errors}"
+
+    @pytest.mark.asyncio
+    async def test_break_early_span_is_saved(self):
+        """Even when a consumer breaks early, the span must be saved with a valid status."""
+        from timbal.state import RunContext, set_run_context
+
+        run_context = RunContext()
+        set_run_context(run_context)
+
+        tool = Tool(handler=_identity)
+        gen = tool(x="test").__aiter__()
+        await gen.__anext__()  # get the StartEvent
+        await gen.aclose()     # explicitly close — runs finally block synchronously
+
+        assert len(run_context._trace) == 1
+        span = next(iter(run_context._trace.values()))
+        assert span.status is not None
+        assert span.status.code == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_break_early_output_event_not_yielded(self):
+        """The OutputEvent must NOT be yielded after GeneratorExit — that would RuntimeError."""
+        from timbal.types.events.start import StartEvent
+
+        tool = Tool(handler=_identity)
+        collected = []
+        async for event in tool(x="test"):
+            collected.append(event)
+            if isinstance(event, StartEvent):
+                break
+
+        await asyncio.sleep(0)
+
+        assert any(isinstance(e, StartEvent) for e in collected)
+        assert not any(isinstance(e, OutputEvent) for e in collected)
+
+    @pytest.mark.asyncio
+    async def test_full_iteration_still_yields_output_event(self):
+        """Normal full iteration must still receive the OutputEvent."""
+        tool = Tool(handler=_identity)
+        collected = []
+        async for event in tool(x="test"):
+            collected.append(event)
+
+        assert any(isinstance(e, OutputEvent) for e in collected)
+        output = next(e for e in collected if isinstance(e, OutputEvent))
+        assert output.status.code == "success"
+
+
+# ==============================================================================
+# BaseException subclasses — KeyboardInterrupt, SystemExit, custom
+# ==============================================================================
+
+
+class _KiSeCustomBase(BaseException):
+    """BaseException subclass that is not an Exception — bypasses except Exception."""
+
+
+class TestBaseExceptionHandling:
+    """Test that BaseException subclasses are handled correctly in Runnable.__call__."""
+
+    @pytest.mark.asyncio
+    async def test_keyboard_interrupt_status_cancelled(self):
+        """KeyboardInterrupt → status=cancelled/interrupted, OutputEvent IS yielded."""
+        async def raises_ki():
+            raise KeyboardInterrupt()
+
+        tool = Tool(handler=raises_ki)
+        collected = []
+        try:
+            async for event in tool():
+                collected.append(event)
+        except KeyboardInterrupt:
+            pass
+
+        output_events = [e for e in collected if isinstance(e, OutputEvent)]
+        assert len(output_events) == 1
+        assert output_events[0].status.code == "cancelled"
+        assert output_events[0].status.reason == "interrupted"
+
+    @pytest.mark.asyncio
+    async def test_keyboard_interrupt_reraises(self):
+        """KeyboardInterrupt must propagate to the caller."""
+        async def raises_ki():
+            raise KeyboardInterrupt()
+
+        tool = Tool(handler=raises_ki)
+        raised = False
+        try:
+            async for _ in tool():
+                pass
+        except KeyboardInterrupt:
+            raised = True
+        assert raised, "KeyboardInterrupt did not propagate"
+
+    @pytest.mark.asyncio
+    async def test_system_exit_status_cancelled(self):
+        """SystemExit → status=cancelled/interrupted, OutputEvent IS yielded."""
+        async def raises_se():
+            raise SystemExit(1)
+
+        tool = Tool(handler=raises_se)
+        collected = []
+        try:
+            async for event in tool():
+                collected.append(event)
+        except SystemExit:
+            pass
+
+        output_events = [e for e in collected if isinstance(e, OutputEvent)]
+        assert len(output_events) == 1
+        assert output_events[0].status.code == "cancelled"
+        assert output_events[0].status.reason == "interrupted"
+
+    @pytest.mark.asyncio
+    async def test_system_exit_reraises(self):
+        """SystemExit must propagate to the caller."""
+        async def raises_se():
+            raise SystemExit(1)
+
+        tool = Tool(handler=raises_se)
+        raised = False
+        try:
+            async for _ in tool():
+                pass
+        except SystemExit:
+            raised = True
+        assert raised, "SystemExit did not propagate"
+
+    @pytest.mark.asyncio
+    async def test_custom_base_exception_status_error(self):
+        """Custom BaseException subclass → status=error, error dict populated, OutputEvent IS yielded."""
+        async def raises_custom():
+            raise _KiSeCustomBase("something went wrong")
+
+        tool = Tool(handler=raises_custom)
+        collected = []
+        try:
+            async for event in tool():
+                collected.append(event)
+        except _KiSeCustomBase:
+            pass
+
+        output_events = [e for e in collected if isinstance(e, OutputEvent)]
+        assert len(output_events) == 1
+        out = output_events[0]
+        assert out.status.code == "error"
+        assert out.error is not None
+        assert out.error["type"] == "_KiSeCustomBase"
+        assert "something went wrong" in out.error["message"]
+
+    @pytest.mark.asyncio
+    async def test_custom_base_exception_reraises(self):
+        """Custom BaseException subclasses must propagate to the caller."""
+        async def raises_custom():
+            raise _KiSeCustomBase("propagate me")
+
+        tool = Tool(handler=raises_custom)
+        raised = False
+        try:
+            async for _ in tool():
+                pass
+        except _KiSeCustomBase:
+            raised = True
+        assert raised, "_KiSeCustomBase did not propagate"
+
+    @pytest.mark.asyncio
+    async def test_generator_exit_does_not_yield_output_event(self):
+        """Contrast: GeneratorExit must NOT yield the OutputEvent (unlike the others)."""
+        from timbal.types.events.start import StartEvent
+
+        tool = Tool(handler=_identity)
+        collected = []
+        async for event in tool(x="test"):
+            collected.append(event)
+            if isinstance(event, StartEvent):
+                break
+
+        await asyncio.sleep(0)
+        assert not any(isinstance(e, OutputEvent) for e in collected)

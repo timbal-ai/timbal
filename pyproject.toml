@@ -60,6 +60,7 @@ dev = [
     "pyngrok>=7.2.3",
     "pytest>=8.3.4",
     "pytest-asyncio>=0.25.2",
+    "yappi>=1.7.6",
 ]
 
 [project.scripts]

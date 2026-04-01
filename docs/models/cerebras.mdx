@@ -1,0 +1,66 @@
+---
+title: "Cerebras"
+description: "Wafer-scale inference at world-record token speeds with specs, pricing, and capabilities"
+---
+
+<Note>Source: [Cerebras model docs](https://inference-docs.cerebras.ai/introduction). All model IDs use the prefix `cerebras/`. Powered by Cerebras wafer-scale chips — the world's largest AI accelerator — delivering up to 3000+ tokens/second.</Note>
+
+<Warning>Cerebras models are not yet available through the Timbal platform proxy. A `CEREBRAS_API_KEY` is required to use these models. If you'd like to access Cerebras models via your Timbal API key, please [contact sales](https://timbal.ai).</Warning>
+
+## All Models
+
+<CardGroup cols={2}>
+  <Card title="gpt-oss-120b">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `cerebras/gpt-oss-120b`
+
+  OpenAI's open-weight MoE model with 120B total parameters (5.1B active per token), running at up to 3000 tokens/s on Cerebras wafer-scale hardware. Near-parity with o4-mini on reasoning benchmarks. Supports extended thinking. Apache 2.0.
+
+  - &#36;0.35 / &#36;0.75
+  - <Icon icon="window-maximize" size={14} /> 128K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Thinking
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  </Card>
+
+  <Card title="qwen-3-235b-a22b-instruct-2507">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `cerebras/qwen-3-235b-a22b-instruct-2507`
+
+  Qwen 3 235B MoE model with 22B active parameters, running at ~1400 tokens/s on Cerebras wafer-scale hardware. Hybrid thinking mode with strong multilingual and agentic capabilities.
+
+  - &#36;0.60 / &#36;1.20
+  - <Icon icon="window-maximize" size={14} /> 128K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Hybrid thinking
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~early 2025
+  </Card>
+
+  <Card title="zai-glm-4.7">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `cerebras/zai-glm-4.7`
+
+  ZAI GLM 4.7 with 355B parameters, running at ~1000 tokens/s on Cerebras hardware. Strong multilingual reasoning and instruction-following capabilities.
+
+  - &#36;2.25 / &#36;2.75
+  - <Icon icon="window-maximize" size={14} /> 128K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~early 2025
+  </Card>
+
+  <Card title="llama3.1-8b">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `cerebras/llama3.1-8b`
+
+  Meta's Llama 3.1 8B running at up to 2200 tokens/s on Cerebras wafer-scale hardware. The fastest and most affordable entry point for real-time applications.
+
+  - &#36;0.10 / &#36;0.10
+  - <Icon icon="window-maximize" size={14} /> 128K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jul 2024
+  </Card>
+</CardGroup>

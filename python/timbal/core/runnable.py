@@ -830,6 +830,7 @@ class Runnable(ABC, BaseModel):
         span._input_dump = None  # ? await dump(input)
         span._output_dump = None
         collector = None
+        _generator_closed = False
         try:
             start_event = StartEvent(
                 run_id=run_context.id,
@@ -936,6 +937,11 @@ class Runnable(ABC, BaseModel):
             # Post hook might modify the output, so we dump afterwards
             span._output_dump = await dump(span.output)
 
+        except GeneratorExit:
+            _generator_closed = True
+            span.status = RunStatus(code="cancelled", reason="interrupted", message="")
+            raise
+
         except EarlyExit as early_exit:
             reason = "early_exit" if early_exit.propagate else "early_exit_local"
             span.status = RunStatus(code="cancelled", reason=reason, message=early_exit.message)
@@ -988,15 +994,24 @@ class Runnable(ABC, BaseModel):
             }
             span.error = error  # No need to model dump the error. It's already a json compatible dict
 
+        except (KeyboardInterrupt, SystemExit):
+            span.status = RunStatus(code="cancelled", reason="interrupted", message="")
+            raise
+
+        except BaseException as err:
+            # Any remaining BaseException subclass that is not an Exception —
+            # e.g. custom BaseException subclasses from user code.
+            span.status = RunStatus(code="error", reason=None, message=None)
+            span.error = {
+                "type": type(err).__name__,
+                "message": str(err),
+                "traceback": traceback.format_exc(),
+            }
+            raise
+
         finally:
             t1 = int(time.time() * 1000)
             span.t1 = t1
-            # Defensive fallback: GeneratorExit and other BaseException subclasses bypass
-            # all except clauses above. If span.status is still None at this point, set a
-            # safe default so OutputEvent() (which requires status: RunStatus) doesn't raise
-            # a Pydantic ValidationError on top of the already-propagating exception.
-            if span.status is None:
-                span.status = RunStatus(code="cancelled", reason="interrupted", message="")
             output_event = OutputEvent(
                 run_id=run_context.id,
                 parent_run_id=run_context.parent_id,
@@ -1019,7 +1034,8 @@ class Runnable(ABC, BaseModel):
             set_call_id(_call_id)
             if output_event.type in self._log_events:
                 _get_logger().info(output_event.type, **output_event.model_dump())
-            yield output_event
+            if not _generator_closed:
+                yield output_event
 
 
 RunnableLike = Runnable | dict[str, Any] | Callable[..., Any]

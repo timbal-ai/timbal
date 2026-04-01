@@ -1075,3 +1075,168 @@ models:
     output_price: 2.00
     context_window: 262144
     capabilities: [tools]
+
+  # --- Cerebras ---
+  - id: "cerebras/llama3.1-8b"
+    provider: cerebras
+    display_name: "Llama 3.1 8B"
+    description: "Meta Llama 3.1 8B running on Cerebras wafer-scale inference at ~2200 tokens/s."
+    input_price: 0.10
+    output_price: 0.10
+    context_window: 131072
+    capabilities: [tools]
+
+  - id: "cerebras/gpt-oss-120b"
+    provider: cerebras
+    display_name: "GPT OSS 120B"
+    description: "OpenAI GPT OSS 120B running on Cerebras wafer-scale inference at ~3000 tokens/s."
+    input_price: 0.35
+    output_price: 0.75
+    context_window: 131072
+    capabilities: [tools]
+
+  - id: "cerebras/qwen-3-235b-a22b-instruct-2507"
+    provider: cerebras
+    display_name: "Qwen 3 235B Instruct"
+    description: "Qwen 3 235B (22B active MoE) running on Cerebras wafer-scale inference at ~1400 tokens/s."
+    input_price: 0.60
+    output_price: 1.20
+    context_window: 131072
+    capabilities: [tools]
+
+  - id: "cerebras/zai-glm-4.7"
+    provider: cerebras
+    display_name: "ZAI GLM 4.7"
+    description: "ZAI GLM 4.7 355B running on Cerebras wafer-scale inference at ~1000 tokens/s."
+    input_price: 2.25
+    output_price: 2.75
+    context_window: 131072
+    capabilities: [tools]
+
+  # --- SambaNova ---
+  - id: "sambanova/DeepSeek-R1-0528"
+    provider: sambanova
+    display_name: "DeepSeek R1 0528"
+    description: "DeepSeek's latest R1 reasoning model running on SambaNova RDU hardware."
+    input_price: 5.00
+    output_price: 7.00
+    context_window: 131072
+    capabilities: [tools, thinking]
+
+  - id: "sambanova/DeepSeek-V3-0324"
+    provider: sambanova
+    display_name: "DeepSeek V3 0324"
+    description: "DeepSeek V3 March 2024 release running on SambaNova RDU hardware."
+    input_price: 3.00
+    output_price: 4.50
+    context_window: 131072
+    capabilities: [tools]
+
+  - id: "sambanova/DeepSeek-V3.1"
+    provider: sambanova
+    display_name: "DeepSeek V3.1"
+    description: "DeepSeek V3.1 running on SambaNova RDU hardware."
+    input_price: 3.00
+    output_price: 4.50
+    context_window: 131072
+    capabilities: [tools]
+
+  - id: "sambanova/DeepSeek-V3.1-cb"
+    provider: sambanova
+    display_name: "DeepSeek V3.1 (Community)"
+    description: "DeepSeek V3.1 community tier running on SambaNova RDU hardware at reduced pricing."
+    input_price: 0.15
+    output_price: 0.75
+    context_window: 131072
+    capabilities: [tools]
+
+  - id: "sambanova/DeepSeek-V3.1-Terminus"
+    provider: sambanova
+    display_name: "DeepSeek V3.1 Terminus"
+    description: "DeepSeek V3.1 Terminus preview running on SambaNova RDU hardware."
+    input_price: 3.00
+    output_price: 4.50
+    context_window: 131072
+    capabilities: [tools]
+
+  - id: "sambanova/DeepSeek-V3.2"
+    provider: sambanova
+    display_name: "DeepSeek V3.2"
+    description: "DeepSeek V3.2 preview running on SambaNova RDU hardware."
+    input_price: 3.00
+    output_price: 4.50
+    context_window: 8192
+    capabilities: [tools]
+
+  - id: "sambanova/Meta-Llama-3.3-70B-Instruct"
+    provider: sambanova
+    display_name: "Llama 3.3 70B Instruct"
+    description: "Meta Llama 3.3 70B instruction-tuned model running on SambaNova RDU hardware."
+    input_price: 0.60
+    output_price: 1.20
+    context_window: 131072
+    capabilities: [tools]
+
+  - id: "sambanova/Llama-3.3-Swallow-70B-Instruct-v0.4"
+    provider: sambanova
+    display_name: "Llama 3.3 Swallow 70B Instruct"
+    description: "Japanese-tuned Llama 3.3 70B by TokyoTech-LLM running on SambaNova RDU hardware."
+    input_price: 0.60
+    output_price: 1.20
+    context_window: 16384
+    capabilities: [tools]
+
+  - id: "sambanova/Llama-4-Maverick-17B-128E-Instruct"
+    provider: sambanova
+    display_name: "Llama 4 Maverick 17B 128E Instruct"
+    description: "Meta Llama 4 Maverick preview with 17B active parameters across 128 experts running on SambaNova RDU hardware. Supports image input."
+    input_price: 0.63
+    output_price: 1.80
+    context_window: 131072
+    capabilities: [tools, images]
+
+  - id: "sambanova/Meta-Llama-3.1-8B-Instruct"
+    provider: sambanova
+    display_name: "Llama 3.1 8B Instruct"
+    description: "Meta Llama 3.1 8B instruction-tuned model running on SambaNova RDU hardware."
+    input_price: 0.10
+    output_price: 0.20
+    context_window: 16384
+    capabilities: [tools]
+
+  - id: "sambanova/Qwen3-235B-A22B-Instruct-2507"
+    provider: sambanova
+    display_name: "Qwen3 235B A22B Instruct"
+    description: "Qwen3 235B MoE model with 22B active parameters running on SambaNova RDU hardware. Supports hybrid thinking mode."
+    input_price: 0.40
+    output_price: 0.80
+    context_window: 65536
+    capabilities: [tools, thinking]
+
+  - id: "sambanova/Qwen3-32B"
+    provider: sambanova
+    display_name: "Qwen3 32B"
+    description: "Qwen3 32B dense model running on SambaNova RDU hardware. Supports hybrid thinking mode with strong multilingual capabilities."
+    input_price: 0.40
+    output_price: 0.80
+    context_window: 32768
+    capabilities: [tools, thinking]
+
+  - id: "sambanova/MiniMax-M2.5"
+    provider: sambanova
+    display_name: "MiniMax M2.5"
+    description: "MiniMax M2.5 large-scale model running on SambaNova RDU hardware with a very long 160K context window."
+    input_price: 0.30
+    output_price: 1.20
+    context_window: 163840
+    capabilities: [tools]
+
+  - id: "sambanova/gpt-oss-120b"
+    provider: sambanova
+    display_name: "GPT OSS 120B"
+    description: "OpenAI's open-weight MoE model with 120B total parameters running on SambaNova RDU hardware. Near-parity with o4-mini on reasoning benchmarks."
+    input_price: 0.22
+    output_price: 0.59
+    context_window: 131072
+    capabilities: [tools, thinking]
+

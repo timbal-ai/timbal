@@ -325,7 +325,9 @@
               "models/groq",
               "models/fireworks",
               "models/xiaomi",
-              "models/byteplus"
+              "models/byteplus",
+              "models/cerebras",
+              "models/sambanova"
             ]
           }
         ]
