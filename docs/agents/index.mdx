@@ -28,15 +28,13 @@ You can specify any model using the "provider/model" format. See all supported m
 
 Some models support advanced capabilities like [thinking/reasoning](/agents/thinking), which enables extended reasoning processes for complex problem-solving.
 
-Some models require specific parameters (like `max_tokens` for Claude). Use `model_params` to pass any additional model configuration: 
+Some models require specific parameters (like `max_tokens` for Claude). Pass it as a top-level field:
 
 ```python highlight={4}
 agent = Agent(
     name="claude_agent",
     model="anthropic/claude-sonnet-4-latest",
-    model_params={
-        "max_tokens": 1024
-    }
+    max_tokens=1024
 )
 ```
 
@@ -135,14 +133,14 @@ For more information about accessing input parameters and using the run context,
 
 ### Overriding Model Configuration
 
-What if you want to change the model, `max_tokens`, or `thinking` for each run? Instead of creating multiple agents, you can pass these as input parameters. This is useful for A/B testing different models, adjusting token limits per request, or dynamically selecting models based on task complexity.
+What if you want to change the model, `max_tokens`, or thinking config for each run? Instead of creating multiple agents, you can pass these as input parameters. This is useful for A/B testing different models, adjusting token limits per request, or dynamically selecting models based on task complexity.
 
 ```python
 # Agent with default values
 agent = Agent(
     name="my_agent",
     model="openai/gpt-4o-mini",  # Default model
-    model_params={"max_tokens": 1024}  # Default max_tokens
+    max_tokens=1024  # Default max_tokens
 )
 
 # Override model: was "openai/gpt-4o-mini", now "anthropic/claude-sonnet-4-latest"
@@ -158,26 +156,24 @@ async for event in agent(
 ):
     print(event)
 
-# Override thinking (provider-specific format)
-# For OpenAI: {"effort": "high", "summary": true}
+# Override thinking via provider_params (provider-specific format)
+# For OpenAI: pass "reasoning" key
 response = await agent(
     prompt="Solve this complex problem",
-    model="openai/gpt-4o",
-    thinking={"effort": "high", "summary": True}
+    model="openai/gpt-5.4",
+    provider_params={"reasoning": {"effort": "high", "summary": "auto"}}
 ).collect()
 
-# For Anthropic: {"budget_tokens": 10000}
+# For Anthropic: pass "thinking" key
 response = await agent(
     prompt="Solve this complex problem",
     model="anthropic/claude-sonnet-4-latest",
-    thinking={
-        "type": "enabled",
-        "budget_tokens": 10000}
+    provider_params={"thinking": {"type": "enabled", "budget_tokens": 10000}}
 ).collect()
 ```
 
 <Warning>
-The parameter names `model`, `max_tokens`, and `thinking` are reserved and will affect model configuration when passed as input. These parameters will not be available as regular input to your agent. If you need to pass custom data without changing the actual model configuration, use different parameter names (e.g., `data_model` instead of `model` if you want to pass a data model name).
+The parameter names `model`, `max_tokens`, and `provider_params` are reserved and will affect model configuration when passed as input. These parameters will not be available as regular input to your agent. If you need to pass custom data without changing the actual model configuration, use different parameter names (e.g., `data_model` instead of `model` if you want to pass a data model name).
 </Warning>
 
 ## Output

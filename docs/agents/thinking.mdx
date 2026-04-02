@@ -13,18 +13,18 @@ Not all models support thinking capabilities. See the [Model Capabilities](/mode
 
 ## Using Thinking
 
-Thinking is configured differently depending on the model provider. Pass the `thinking` parameter when creating an agent or override it per request.
+Thinking is configured via `model_params` when creating an agent. The parameter key differs by provider.
 
 ### Anthropic Models
 
-For Anthropic models, thinking is configured with a dictionary containing `type` and `budget_tokens`:
+For Anthropic models, pass a `thinking` dict with `type` and `budget_tokens` inside `model_params`. `max_tokens` is a required top-level field:
 
 ```python
 agent = Agent(
     name="reasoning_agent",
     model="anthropic/claude-sonnet-4-5",
+    max_tokens=20000,
     model_params={
-        "max_tokens": 20000,
         "thinking": {
             "type": "enabled",
             "budget_tokens": 10000  # Must be >= 1024 and < max_tokens
@@ -43,16 +43,16 @@ agent = Agent(
 
 ### OpenAI Models
 
-For OpenAI models, thinking is configured with a dictionary containing `effort` and `summary`:
+For OpenAI models (both o-series reasoning models and GPT models that support thinking), pass a `reasoning` dict inside `model_params`:
 
 ```python
 agent = Agent(
     name="reasoning_agent",
     model="openai/gpt-5",
     model_params={
-        "thinking": {
-            "effort": "high",  # Options: "minimal", "low", "medium", "high"
-            "summary": "auto"     # Options: "auto", "concise", "detailed"
+        "reasoning": {
+            "effort": "high",   # Options: "none", "low", "medium", "high", "xhigh"
+            "summary": "auto"   # Options: "auto", "concise", "detailed"
         }
     }
 )
@@ -60,38 +60,62 @@ agent = Agent(
 
 **Parameters:**
 - `effort`: Controls how much computational effort the model puts into reasoning
-  - `"minimal"` - Light reasoning
-  - `"low"` - Moderate reasoning
+  - `"none"` - No reasoning (default for non-reasoning-focused calls)
+  - `"low"` - Light reasoning
   - `"medium"` - Substantial reasoning
-  - `"high"` - Maximum reasoning effort
-- `summary`: Controls how the reasoning is summarized
+  - `"high"` - Deep reasoning
+  - `"xhigh"` - Maximum reasoning effort
+- `summary`: Controls whether a reasoning summary is streamed alongside the response
   - `"auto"` - Automatic summary
   - `"concise"` - Brief summary
   - `"detailed"` - Comprehensive summary
 
 ### Overriding Thinking Per Request
 
-You can override thinking configuration for individual requests:
+You can override the thinking configuration for individual requests by passing `provider_params` at call time. This takes priority over the agent's default `model_params`.
 
 ```python
-# Default agent without thinking
+# Agent with no thinking by default
 agent = Agent(
     name="my_agent",
     model="anthropic/claude-sonnet-4-5",
-    model_params={
-        "max_tokens"=2400
-    }
+    max_tokens=20000,
 )
 
-# Enable thinking for this specific request
+# Enable thinking for this specific request (Anthropic)
 result = await agent(
     prompt="Solve this complex problem",
-    thinking={
-        "type": "enabled",
-        "budget_tokens": 1500
+    provider_params={
+        "thinking": {
+            "type": "enabled",
+            "budget_tokens": 5000
+        }
     }
 ).collect()
 ```
+
+```python
+# Agent with no thinking by default
+agent = Agent(
+    name="my_agent",
+    model="openai/o3-mini",
+)
+
+# Enable thinking for this specific request (OpenAI)
+result = await agent(
+    prompt="Solve this complex problem",
+    provider_params={
+        "reasoning": {
+            "effort": "high",
+            "summary": "auto"
+        }
+    }
+).collect()
+```
+
+<Note>
+`provider_params` passed at call time completely replaces the agent's default `model_params` for that request. If your agent has other provider-specific params set via `model_params`, make sure to include them in the per-call `provider_params` as well if you still need them.
+</Note>
 
 ## When to Use Thinking
 
