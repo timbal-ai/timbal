@@ -15,11 +15,7 @@
         "groups": [
           {
             "group": "Getting started",
-            "pages": [
-              "index",
-              "installation",
-              "quickstart"
-            ]
+            "pages": ["index", "installation", "quickstart"]
           },
           {
             "group": "Core Concepts",
@@ -87,9 +83,7 @@
         "pages": [
           {
             "group": "Examples",
-            "pages": [
-              "examples/index"
-            ]
+            "pages": ["examples/index"]
           },
           {
             "group": "Guides",
@@ -188,9 +182,7 @@
               },
               {
                 "group": "Files",
-                "pages": [
-                  "api-reference/files/upload"
-                ]
+                "pages": ["api-reference/files/upload"]
               },
               {
                 "group": "Users",
@@ -211,6 +203,8 @@
               "api-reference/projects/get",
               "api-reference/projects/update",
               "api-reference/projects/delete",
+              "api-reference/projects/link-knowledge-base",
+              "api-reference/projects/unlink-knowledge-base",
               {
                 "group": "Compose",
                 "tag": "Beta",
@@ -251,19 +245,22 @@
                 ]
               },
               {
+                "group": "Workforce",
+                "pages": [
+                  "api-reference/projects/workforce/list",
+                  "api-reference/projects/workforce/create",
+                  "api-reference/projects/workforce/delete",
+                  "api-reference/projects/workforce/call",
+                  "api-reference/projects/workforce/codegen"
+                ]
+              },
+              {
                 "group": "Users",
                 "pages": [
                   "api-reference/projects/users/list",
                   "api-reference/projects/users/add",
                   "api-reference/projects/users/delete",
                   "api-reference/projects/users/update"
-                ]
-              },
-              {
-                "group": "Knowledge Base",
-                "pages": [
-                  "api-reference/projects/k2/link",
-                  "api-reference/projects/k2/unlink"
                 ]
               },
               {
@@ -303,10 +300,7 @@
           },
           {
             "group": "Runs",
-            "pages": [
-              "api-reference/runs/list",
-              "api-reference/runs/upsert"
-            ]
+            "pages": ["api-reference/runs/list", "api-reference/runs/upsert"]
           }
         ]
       },
@@ -337,9 +331,7 @@
         "pages": [
           {
             "group": "MCP Integration",
-            "pages": [
-              "mcp-integration/index"
-            ]
+            "pages": ["mcp-integration/index"]
           },
           {
             "group": "Connecting Timbal",

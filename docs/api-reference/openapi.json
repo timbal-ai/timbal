@@ -1107,476 +1107,6 @@
         ]
       }
     },
-    "/orgs/{org_id}/kbs/{kb_id}/embeddings": {
-      "get": {
-        "tags": ["embeddings"],
-        "description": "List embeddings",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "kb_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "table_name",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Embeddings listed successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListEmbeddingsResBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "post": {
-        "tags": ["embeddings"],
-        "description": "Create a new embedding",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "kb_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateEmbeddingReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "Embedding created successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/kbs/{kb_id}/embeddings/{embedding_name}": {
-      "delete": {
-        "tags": ["embeddings"],
-        "description": "Delete an embedding",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "kb_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "embedding_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Embedding deleted successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/kbs/{kb_id}/indexes": {
-      "get": {
-        "tags": ["indexes"],
-        "description": "List indexes for a KB",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "kb_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "table_name",
-            "in": "query",
-            "description": "Table name to filter indexes by",
-            "required": false,
-            "schema": {
-              "type": ["string", "null"]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Array of indexes",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListIndexesResBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "post": {
-        "tags": ["indexes"],
-        "description": "Create a new index on a table",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "kb_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateIndexReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "Index created successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/kbs/{kb_id}/indexes/{index_name}": {
-      "delete": {
-        "tags": ["indexes"],
-        "description": "Delete an index",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "kb_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "index_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Index deleted successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/csv": {
-      "post": {
-        "tags": ["tables"],
-        "description": "Insert or update rows into a table from a CSV file",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "kb_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "table_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/csv": {}
-          }
-        },
-        "responses": {
-          "204": {
-            "description": "Rows inserted successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/records": {
-      "post": {
-        "tags": ["tables"],
-        "description": "Insert or update records into a table",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "kb_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "table_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpsertRecordsReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "Records upserted successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/kbs/{kb_id}/tables/{table_name}/search": {
-      "post": {
-        "tags": ["tables"],
-        "description": "Search for records in a table",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "kb_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "table_name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SearchTableReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Array of records matching the search query. Structure depends on the table schema and selected columns.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {}
-                },
-                "example": [
-                  {
-                    "id": 1,
-                    "name": "Alice Johnson",
-                    "email": "alice@example.com"
-                  },
-                  {
-                    "id": 2,
-                    "name": null,
-                    "email": "bob@example.com"
-                  },
-                  {
-                    "id": 3,
-                    "name": "Carol",
-                    "email": "carol@example.com"
-                  }
-                ]
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
     "/orgs/{org_id}/projects": {
       "get": {
         "tags": ["projects"],
@@ -2775,6 +2305,306 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/workforce/{workforce}": {
+      "post": {
+        "tags": ["projects"],
+        "description": "Proxy a request to a running workforce deployment. Accepts any HTTP method and forwards to the deployment's internal URL. The `workforce` can be the numeric id, name, or uid of the workforce item.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "description": "Environment identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workforce",
+            "in": "path",
+            "description": "Workforce identifier (id, name, or uid)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Proxied response from workforce deployment"
+          },
+          "404": {
+            "description": "No running workforce deployment found"
+          },
+          "502": {
+            "description": "Workforce deployment not responding"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env}/workforce": {
+      "get": {
+        "tags": ["projects"],
+        "description": "List running workforce deployments in an environment",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env",
+            "in": "path",
+            "description": "Environment id or branch name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of running workforce items",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListWorkforceResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": ["projects"],
+        "description": "Create a new workforce component (agent or workflow)",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env",
+            "in": "path",
+            "description": "Environment id or branch name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkforceReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Workforce component created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateWorkforceResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": ["projects"],
+        "description": "Delete a workforce component (agent or workflow)",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env",
+            "in": "path",
+            "description": "Environment id or branch name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteWorkforceReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Workforce component deleted"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env}/workforce/{workforce}/codegen": {
+      "post": {
+        "tags": ["projects"],
+        "description": "Run a codegen command against a workforce component. Commands include: test, get-flow, get-tools, get-models, add-tool, remove-tool, etc. The `env` can be the numeric id or branch name. The `workforce` can be the numeric id, uid, or name.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env",
+            "in": "path",
+            "description": "Environment id or branch name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workforce",
+            "in": "path",
+            "description": "Workforce identifier (id, uid, or name)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Codegen command output"
+          },
+          "204": {
+            "description": "Command produced no output"
+          },
+          "400": {
+            "description": "Invalid request or missing files"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects/{project_id}/k2": {
       "put": {
         "tags": ["projects"],
@@ -3624,38 +3454,6 @@
           }
         }
       },
-      "CreateEmbeddingReqBody": {
-        "type": "object",
-        "required": [
-          "name",
-          "table_name",
-          "column_name",
-          "model",
-          "with_gin_index"
-        ],
-        "properties": {
-          "column_name": {
-            "type": "string",
-            "description": "Name of the source column"
-          },
-          "model": {
-            "$ref": "#/components/schemas/EmbeddingModel",
-            "description": "Embedding model to use. See the list embedding models endpoint for available options."
-          },
-          "name": {
-            "type": "string",
-            "description": "Name of the embedding"
-          },
-          "table_name": {
-            "type": "string",
-            "description": "Name of the source table"
-          },
-          "with_gin_index": {
-            "type": "boolean",
-            "description": "Whether to create a GIN index for the source column for faster hybrid search"
-          }
-        }
-      },
       "CreateEnvReqBody": {
         "type": "object",
         "required": ["name", "color"],
@@ -3668,35 +3466,6 @@
           },
           "name": {
             "type": "string"
-          }
-        }
-      },
-      "CreateIndexReqBody": {
-        "type": "object",
-        "required": ["table_name", "name", "column_names", "type", "is_unique"],
-        "properties": {
-          "column_names": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "List of column names to index. At least one column is required. Multiple columns will create a composite index"
-          },
-          "is_unique": {
-            "type": "boolean",
-            "description": "Whether the index should enforce uniqueness"
-          },
-          "name": {
-            "type": "string",
-            "description": "Index name. This must be unique in the entire Knowledge Base"
-          },
-          "table_name": {
-            "type": "string",
-            "description": "Table name"
-          },
-          "type": {
-            "$ref": "#/components/schemas/IndexType",
-            "description": "Index type"
           }
         }
       },
@@ -3774,6 +3543,52 @@
           },
           "value": {
             "type": "string"
+          }
+        }
+      },
+      "CreateWorkforceReqBody": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": ["string", "null"],
+            "description": "Display name (e.g. \"email-summary\"). If omitted, a random name is generated."
+          },
+          "type": {
+            "type": "string",
+            "description": "Component type: \"agent\" or \"workflow\". Defaults to \"agent\"."
+          }
+        }
+      },
+      "CreateWorkforceResponse": {
+        "type": "object",
+        "description": "Response returned when a new workforce component is created.",
+        "required": ["id", "uid", "type", "name", "path"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative path in the worktree, e.g. \"workforce/jolly-ferret\""
+          },
+          "type": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string"
+          }
+        }
+      },
+      "DeleteWorkforceReqBody": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Workforce name or uid to delete."
           }
         }
       },
@@ -3987,125 +3802,8 @@
           }
         }
       },
-      "Embedding": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/EmbeddingStatus"
-          },
-          {
-            "type": "object",
-            "required": [
-              "id",
-              "name",
-              "table_name",
-              "column_name",
-              "model",
-              "created_at",
-              "updated_at"
-            ],
-            "properties": {
-              "column_name": {
-                "type": "string"
-              },
-              "created_at": {
-                "type": "string",
-                "format": "date-time"
-              },
-              "id": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "model": {
-                "$ref": "#/components/schemas/EmbeddingModel"
-              },
-              "name": {
-                "type": "string"
-              },
-              "table_name": {
-                "type": "string"
-              },
-              "updated_at": {
-                "type": "string",
-                "format": "date-time"
-              }
-            }
-          }
-        ]
-      },
       "EmbeddingModel": {
         "type": "string"
-      },
-      "EmbeddingStatus": {
-        "oneOf": [
-          {
-            "type": "object",
-            "required": ["details", "status"],
-            "properties": {
-              "details": {
-                "type": "object"
-              },
-              "status": {
-                "type": "string",
-                "enum": ["pending"]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": ["details", "status"],
-            "properties": {
-              "details": {
-                "type": "object",
-                "properties": {
-                  "processed_rows": {
-                    "type": ["integer", "null"],
-                    "format": "int64"
-                  },
-                  "total_rows": {
-                    "type": ["integer", "null"],
-                    "format": "int64"
-                  }
-                }
-              },
-              "status": {
-                "type": "string",
-                "enum": ["processing"]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": ["details", "status"],
-            "properties": {
-              "details": {
-                "type": "object"
-              },
-              "status": {
-                "type": "string",
-                "enum": ["success"]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": ["details", "status"],
-            "properties": {
-              "details": {
-                "type": "object",
-                "required": ["error"],
-                "properties": {
-                  "error": {
-                    "type": "string"
-                  }
-                }
-              },
-              "status": {
-                "type": "string",
-                "enum": ["error"]
-              }
-            }
-          }
-        ]
       },
       "EnvPreview": {
         "type": "object",
@@ -4271,44 +3969,6 @@
             "$ref": "#/components/schemas/Org"
           }
         }
-      },
-      "Index": {
-        "type": "object",
-        "required": [
-          "table",
-          "name",
-          "columns",
-          "type",
-          "is_unique",
-          "definition"
-        ],
-        "properties": {
-          "columns": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "definition": {
-            "type": "string"
-          },
-          "is_unique": {
-            "type": "boolean"
-          },
-          "name": {
-            "type": "string"
-          },
-          "table": {
-            "type": "string"
-          },
-          "type": {
-            "$ref": "#/components/schemas/IndexType"
-          }
-        }
-      },
-      "IndexType": {
-        "type": "string",
-        "enum": ["btree", "hash", "gin", "gist", "brin", "hnsw"]
       },
       "IntegrationPreview": {
         "type": "object",
@@ -4842,18 +4502,6 @@
           }
         }
       },
-      "ListEmbeddingsResBody": {
-        "type": "object",
-        "required": ["embeddings"],
-        "properties": {
-          "embeddings": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Embedding"
-            }
-          }
-        }
-      },
       "ListEnvsResBody": {
         "type": "object",
         "required": ["envs"],
@@ -4862,18 +4510,6 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ProjectEnv"
-            }
-          }
-        }
-      },
-      "ListIndexesResBody": {
-        "type": "object",
-        "required": ["indexes"],
-        "properties": {
-          "indexes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Index"
             }
           }
         }
@@ -5018,6 +4654,18 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Var"
+            }
+          }
+        }
+      },
+      "ListWorkforceResBody": {
+        "type": "object",
+        "required": ["workforce"],
+        "properties": {
+          "workforce": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkforceItem"
             }
           }
         }
@@ -5582,6 +5230,22 @@
           }
         }
       },
+      "ReqBody": {
+        "type": "object",
+        "required": ["command"],
+        "properties": {
+          "args": {
+            "type": "object",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "command": {
+            "type": "string"
+          }
+        }
+      },
       "Role": {
         "type": "string",
         "enum": ["system", "user", "assistant"]
@@ -5646,53 +5310,6 @@
           }
         },
         "additionalProperties": {}
-      },
-      "SearchTableReqBody": {
-        "type": "object",
-        "required": ["query", "embedding_names"],
-        "properties": {
-          "embedding_names": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "List of embedding names to use for semantic search. Only a single column is supported at the moment."
-          },
-          "fts_columns": {
-            "type": ["array", "null"],
-            "items": {
-              "type": "string"
-            },
-            "description": "List of column names to use for full-text search. When specified together with embedding_names, search will be hybrid (both semantic and full-text)."
-          },
-          "limit": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Maximum number of results to return.",
-            "default": 10
-          },
-          "offset": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Number of results to skip before returning.",
-            "default": 0
-          },
-          "query": {
-            "type": "string",
-            "description": "Semantic search query."
-          },
-          "select_columns": {
-            "type": ["array", "null"],
-            "items": {
-              "type": "string"
-            },
-            "description": "List of column names to return in the search results. When not specified, all columns will be returned."
-          },
-          "where": {
-            "type": ["string", "null"],
-            "description": "SQL WHERE expression to apply to the search. This feature is _experimental_ and may be removed or changed in the future."
-          }
-        }
       },
       "SessionDetail": {
         "allOf": [
@@ -5806,23 +5423,6 @@
           },
           "value": {
             "type": ["string", "null"]
-          }
-        }
-      },
-      "UpsertRecordsReqBody": {
-        "type": "object",
-        "required": ["records"],
-        "properties": {
-          "records": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": {},
-              "propertyNames": {
-                "type": "string"
-              }
-            },
-            "description": "Array of records to insert or update (at least one record is required)"
           }
         }
       },
@@ -6020,6 +5620,30 @@
           }
         }
       },
+      "WorkforceItem": {
+        "type": "object",
+        "required": ["id", "type", "name", "url"],
+        "properties": {
+          "description": {
+            "type": ["string", "null"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "uid": {
+            "type": ["string", "null"]
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
       "WorkforcePreview": {
         "type": "object",
         "required": ["id", "type", "name"],
@@ -6057,6 +5681,14 @@
   },
   "tags": [
     {
+      "name": "compose",
+      "description": "Compose — AI coding agent sessions"
+    },
+    {
+      "name": "files",
+      "description": "File operations"
+    },
+    {
       "name": "k2",
       "description": "Knowledge Bases v2 operations"
     },
@@ -6065,32 +5697,12 @@
       "description": "Organization operations"
     },
     {
-      "name": "embeddings",
-      "description": "KB Embeddings operations"
-    },
-    {
-      "name": "files",
-      "description": "File operations"
-    },
-    {
-      "name": "indexes",
-      "description": "KB Indexes operations"
-    },
-    {
       "name": "projects",
       "description": "Project operations"
     },
     {
       "name": "runs",
       "description": "Execution operations"
-    },
-    {
-      "name": "compose",
-      "description": "Compose — AI coding agent sessions"
-    },
-    {
-      "name": "tables",
-      "description": "KB Tables operations"
     }
   ]
 }
