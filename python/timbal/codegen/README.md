@@ -146,16 +146,20 @@ python -m timbal.codegen add-step --type Custom \
 | `--config` | Agent only | JSON with Agent constructor params (must include `name`) |
 | `--definition` | Custom only | Full function definition |
 | `--name` | no | Override the step name |
+| `--x` | no | X canvas position (float). Auto-computed if omitted. |
+| `--y` | no | Y canvas position (float). Auto-computed if omitted. |
 
 **Requires**: Workflow entry point.
 
 **What it does**:
 - Adds necessary imports
-- Creates the variable assignment or function definition
+- Creates the variable assignment or function definition with `metadata={"position": {"x": ..., "y": ...}}`
 - Appends a `workflow.step(...)` call after the last existing step (or after the entry point)
 - Idempotent — re-running with the same name updates the existing step
 
 Agent config fields are validated against the same set as `set-config`.
+
+**Auto-positioning**: When `--x` and `--y` are omitted, the new step is placed automatically based on the existing nodes. The position is computed by finding the rightmost column of nodes and offsetting one column to the right (360px), vertically centered on that column. Bare function steps (not wrapped in `Tool`/`Agent`) are treated as nodes at the default column (`x=100`), stacked vertically with 140px spacing. If no existing steps have positions, the first step starts at `(100, 100)`.
 
 ---
 

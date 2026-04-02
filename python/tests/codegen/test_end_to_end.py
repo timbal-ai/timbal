@@ -403,7 +403,9 @@ class TestComplexWorkflow:
         source = _read_source(ws)
 
         assert "def preprocessor_fn(text: str) -> dict:" in source
-        assert 'preprocessor = Tool(name="preprocessor", handler=preprocessor_fn)' in source
+        norm = " ".join(source.split())
+        assert 'name="preprocessor"' in norm
+        assert "handler=preprocessor_fn" in norm
         assert _has_step_call(source, "preprocessor")
         assert _count_step_calls(source) == 2
 
