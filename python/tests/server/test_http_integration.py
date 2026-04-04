@@ -23,6 +23,38 @@ class TestHttpIntegration:
         return ImportSpec(path=slow_agent_fixture_file, target="slow_agent")
 
     @pytest.fixture
+    def tool_fixture_file(self):
+        return Path(__file__).parent / "fixtures" / "tool_fixture.py"
+
+    @pytest.fixture
+    def tool_import_spec(self, tool_fixture_file):
+        return ImportSpec(path=tool_fixture_file, target="tool_fixture")
+
+    @pytest.fixture
+    async def fast_server(self, tool_import_spec, monkeypatch):
+        """Start a real HTTP server backed by a simple Tool (no LLM calls)."""
+        monkeypatch.setenv("TIMBAL_RUNNABLE", f"{tool_import_spec.path}::{tool_import_spec.target}")
+        app = create_app()
+        app.state.runnable = tool_import_spec.load()
+        app.state.job_store = JobStore()
+
+        config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+        server = uvicorn.Server(config)
+
+        serve_task = asyncio.create_task(server.serve())
+
+        while not server.started:
+            await asyncio.sleep(0.01)
+
+        port = server.servers[0].sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+
+        yield base_url, app
+
+        server.should_exit = True
+        await serve_task
+
+    @pytest.fixture
     async def server(self, slow_agent_import_spec, monkeypatch):
         """Start a real HTTP server for testing."""
         monkeypatch.setenv("TIMBAL_RUNNABLE", f"{slow_agent_import_spec.path}::{slow_agent_import_spec.target}")
@@ -106,20 +138,20 @@ class TestHttpIntegration:
             assert response.json() == {"error": "Job not found or already completed"}
 
     @pytest.mark.asyncio
-    async def test_cancel_already_completed_job(self, server):
+    async def test_cancel_already_completed_job(self, fast_server):
         """Test that cancelling an already completed job returns 404."""
-        base_url, _ = server
+        base_url, _ = fast_server
         run_id = "testcompletedjob001"
 
         async with httpx.AsyncClient() as client:
-            # Run a quick job to completion
+            # Run a quick job to completion using the tool fixture (no LLM call)
             response = await client.post(
                 f"{base_url}/run",
                 json={
                     "context": {"id": run_id},
-                    "prompt": {"role": "user", "content": "Say hello"},
+                    "x": "hello",
                 },
-                timeout=30.0,
+                timeout=10.0,
             )
             assert response.status_code == 200
 

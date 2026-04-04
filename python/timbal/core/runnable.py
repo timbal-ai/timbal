@@ -94,6 +94,8 @@ class Runnable(ABC, BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
+    _is_timbal_runnable: bool = True  # Marker for fast isinstance check in dump() without circular imports
+
     name: str
     """The unique identifier for this runnable component."""
     description: str | None = None

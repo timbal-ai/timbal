@@ -23,56 +23,166 @@ def safe_is_nan(value: Any) -> bool:
         return False
 
 
-async def dump(value: Any) -> Any:
-    """Dumps all models that live within a nested structure of arbitrary depth."""
-    from ..types.file import File
-    from ..types.message import Message
+# ---------------------------------------------------------------------------
+# Cached type references (lazy-loaded once to avoid per-call import overhead)
+# ---------------------------------------------------------------------------
+_File = None
+_Message = None
 
-    # Handle float("nan"), np.nan, pd.NA, etc. (might need to handle more scenarios here)
-    if safe_is_nan(value):
-        return None
-    elif isinstance(value, float):
-        # Handle non-finite floats and limit precision to avoid JSON serialization issues
-        if not isinstance(value, float) or not value.is_integer():
-            return round(value, 10)  # 10 decimal places should be enough for most use cases
-    elif isinstance(value, Path):
-        return value.as_posix()
-    elif isinstance(value, Message):
+
+def _ensure_types():
+    global _File, _Message
+    if _File is None:
+        from ..types.file import File
+        from ..types.message import Message
+
+        _File = File
+        _Message = Message
+
+
+# Pre-allocated singleton to avoid creating exception objects on every File hit
+class _NeedsAsync(Exception):
+    """Sentinel: value tree contains a File that requires async I/O."""
+
+
+_NEEDS_ASYNC = _NeedsAsync()
+
+
+# ---------------------------------------------------------------------------
+# Sync fast path — zero asyncio overhead for the 99% case (no File objects)
+# ---------------------------------------------------------------------------
+
+# Primitive types that are always JSON-safe and need zero processing
+_PASSTHROUGH_TYPES = (int, str, bool, type(None))
+
+
+def _dump_sync(value: Any) -> Any:
+    # Fast exit for the most common types — no function call overhead
+    if isinstance(value, _PASSTHROUGH_TYPES):
+        return value
+
+    if isinstance(value, float):
+        # safe_is_nan inlined for hot path
+        if value != value:  # NaN check: NaN != NaN
+            return None
+        if not value.is_integer():
+            return round(value, 10)
+        return value
+
+    if isinstance(value, dict):
+        return {k: _dump_sync(v) for k, v in value.items()}
+
+    if isinstance(value, list):
+        return [_dump_sync(v) for v in value]
+
+    _ensure_types()
+
+    if isinstance(value, _File):
+        raise _NEEDS_ASYNC
+
+    if isinstance(value, _Message):
         result = {
             "role": value.role,
-            "content": await asyncio.gather(*[dump(c) for c in value.content]),
+            "content": [_dump_sync(c) for c in value.content],
         }
         if value.stop_reason is not None:
             result["stop_reason"] = value.stop_reason
         return result
-    # Perform the check via mro to avoid circular imports between Runnable and dump
-    elif any(cls.__name__ == "Runnable" for cls in value.__class__.__mro__):
+
+    # Marker attribute check — O(1) vs O(n) MRO scan
+    if getattr(value, "_is_timbal_runnable", False):
         return value.model_dump()
-    # Handle the rest of BaseModel instances as we handle dictionaries
-    elif isinstance(value, BaseModel):
-        items = await asyncio.gather(*[dump(v) for v in value.__dict__.values()])
-        return dict(zip(value.__dict__.keys(), items, strict=False))
-    elif isinstance(value, dict):
+
+    if isinstance(value, BaseModel):
+        return {k: _dump_sync(v) for k, v in value.__dict__.items()}
+
+    if isinstance(value, tuple):
+        return tuple(_dump_sync(v) for v in value)
+
+    if isinstance(value, Path):
+        return value.as_posix()
+
+    if isinstance(value, Exception):
+        return {"error_type": type(value).__name__, "message": str(value)}
+
+    # NaN/NA check for non-float types (pd.NA, np.nan boxed in object, etc.)
+    if safe_is_nan(value):
+        return None
+
+    return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Async path — only entered when a File object exists in the value tree
+# ---------------------------------------------------------------------------
+
+async def _dump_async(value: Any) -> Any:
+    _ensure_types()
+
+    if isinstance(value, _PASSTHROUGH_TYPES):
+        return value
+
+    if isinstance(value, float):
+        if value != value:
+            return None
+        if not value.is_integer():
+            return round(value, 10)
+        return value
+
+    if isinstance(value, dict):
         keys, values = zip(*value.items(), strict=False) if value else ([], [])
-        dumped_values = await asyncio.gather(*[dump(v) for v in values])
+        dumped_values = await asyncio.gather(*[_dump_async(v) for v in values])
         return dict(zip(keys, dumped_values, strict=False))
-    elif isinstance(value, (list, tuple)):  # noqa: UP038
-        dumped_items = await asyncio.gather(*[dump(v) for v in value])
+
+    if isinstance(value, (list, tuple)):  # noqa: UP038
+        dumped_items = await asyncio.gather(*[_dump_async(v) for v in value])
         return dumped_items if isinstance(value, list) else tuple(dumped_items)
-    elif isinstance(value, File):
+
+    if isinstance(value, _File):
         return await value.persist()
-    elif isinstance(value, Exception):
-        return {
-            "error_type": type(value).__name__,
-            "message": str(value),
-            # "traceback": traceback.format_exc()
+
+    if isinstance(value, _Message):
+        result = {
+            "role": value.role,
+            "content": await asyncio.gather(*[_dump_async(c) for c in value.content]),
         }
-    # Try to serialize the value as JSON, if it fails, convert it to a string
+        if value.stop_reason is not None:
+            result["stop_reason"] = value.stop_reason
+        return result
+
+    if getattr(value, "_is_timbal_runnable", False):
+        return value.model_dump()
+
+    if isinstance(value, BaseModel):
+        items = await asyncio.gather(*[_dump_async(v) for v in value.__dict__.values()])
+        return dict(zip(value.__dict__.keys(), items, strict=False))
+
+    if isinstance(value, Path):
+        return value.as_posix()
+
+    if isinstance(value, Exception):
+        return {"error_type": type(value).__name__, "message": str(value)}
+
+    if safe_is_nan(value):
+        return None
+
+    return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+async def dump(value: Any) -> Any:
+    """Dumps all models that live within a nested structure of arbitrary depth.
+
+    Uses a sync fast path for value trees without File objects (zero asyncio overhead).
+    Falls back to the async path only when a File requiring I/O is present.
+    """
     try:
-        json.dumps(value)
-    except:
-        value = str(value)
-    return value
+        return _dump_sync(value)
+    except _NeedsAsync:
+        return await _dump_async(value)
 
 
 async def sync_to_async_gen(
