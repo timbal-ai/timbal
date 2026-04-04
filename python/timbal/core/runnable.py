@@ -802,7 +802,16 @@ class Runnable(ABC, BaseModel):
             _parent_call_id = None
             _call_id = None
         elif "." not in self._path and run_context._trace:
-            run_context = RunContext(parent_id=run_context.id)
+            # Top-level runnable sees an existing context with traces.
+            # If the root span has completed (t1 is set), this is a finished
+            # previous run — chain session data via parent_id.
+            # If the root span is still running (t1 is None), this context
+            # belongs to a concurrent sibling — create a fresh context.
+            root = run_context.root_span()
+            if root is not None and root.t1 is not None:
+                run_context = RunContext(parent_id=run_context.id)
+            else:
+                run_context = RunContext()
             _parent_call_id = None
             _call_id = None
         await run_context.get_session()
@@ -824,6 +833,19 @@ class Runnable(ABC, BaseModel):
         )
         run_context._trace[_new_call_id] = span
 
+        def _restore_context():
+            """Restore this invocation's context vars.
+
+            Between yields, another coroutine sharing the same asyncio Task
+            may overwrite the context vars. Call this after every yield to
+            reclaim ownership. Skips the writes if context is already correct
+            (the common single-consumer case).
+            """
+            if get_call_id() != _new_call_id:
+                set_run_context(run_context)
+                set_parent_call_id(_new_parent_call_id)
+                set_call_id(_new_call_id)
+
         # We store a preliminary version of the input and output in the span, in case resolution fails
         input, output, error = kwargs, None, None
         span.input = input
@@ -842,6 +864,7 @@ class Runnable(ABC, BaseModel):
             if start_event.type in self._log_events:
                 _get_logger().info(start_event.type, **start_event.model_dump())
             yield start_event
+            _restore_context()
 
             # Resolve input params (merging fixed defaults, runtime defaults, and provided input)
             # We then store the unvalidated input, as sent by the user to ensure full replayability of the run.
@@ -890,7 +913,7 @@ class Runnable(ABC, BaseModel):
                         # Re-raise so asyncio marks the task as cancelled
                         raise
 
-                task = asyncio.create_task(_bg_handler_execution())
+                task = asyncio.create_task(_bg_handler_execution(), context=contextvars.copy_context())
 
                 # Store task with event queue in parent runnable if available
                 parent_span.runnable._bg_tasks[task_id] = {
@@ -910,6 +933,7 @@ class Runnable(ABC, BaseModel):
                         collector = handler_collector
                     if event is not None:
                         yield event
+                        _restore_context()
                     if final_output is not None:
                         output = final_output
 

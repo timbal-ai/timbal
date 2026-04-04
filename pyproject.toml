@@ -137,11 +137,16 @@ addopts = [
     "--tb=short",
     "--strict-markers",
     "--color=yes",
-    "-W ignore::DeprecationWarning"
+    "-W ignore::DeprecationWarning",
+    "--cov=timbal",
+    "--cov-report=term-missing",
 ]
 testpaths = [
     "python/tests"
 ]
+
+[tool.coverage.run]
+omit = ["*/timbal/tools/*"]
 
 [tool.uv.workspace]
 members = ["ace"]

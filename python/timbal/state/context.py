@@ -241,6 +241,10 @@ class RunContext(BaseModel):
         that parent components can track cumulative usage from their children.
         Commonly used for tracking token usage, API calls, or other metrics.
 
+        Note: This method is safe under asyncio concurrency because it contains
+        no await points — the entire read-modify-write is atomic with respect
+        to the event loop. Do not add await points inside this method.
+
         Args:
             key: The usage metric key (e.g., 'tokens', 'api_calls')
             value: The value to add to the current usage for this key
@@ -252,8 +256,7 @@ class RunContext(BaseModel):
         while call_id:
             assert call_id in self._trace, f"RunContext.update_usage: Call ID {call_id} not found in trace."
             span = self._trace[call_id]
-            current_value = span.usage.get(key, 0)
-            span.usage[key] = current_value + value
+            span.usage[key] = span.usage.get(key, 0) + value
             call_id = span.parent_call_id
 
     def resolve_cwd(self, path: str | None = None) -> Path:

@@ -152,6 +152,10 @@ def _strip_scheme(url: str) -> str:
     return url
 
 
+_cached_default_config: PlatformConfig | None = None
+_default_config_resolved: bool = False
+
+
 def resolve_platform_config(
     platform_config: PlatformConfig | None = None,
     profile: str | None = None,
@@ -168,11 +172,21 @@ def resolve_platform_config(
     When that field is unset, ``TIMBAL_SYNC_TRACES`` is checked first, then the ``sync_traces``
     option in ~/.timbal/config, then defaults to True.
 
+    When called with default arguments (no platform_config, profile, or config_dir),
+    the result is cached for subsequent calls. This avoids re-reading config files
+    and environment variables on every RunContext creation.
+
     Args:
         platform_config: Existing config to fill in missing fields for.
         profile: Profile name for file config. Defaults to TIMBAL_PROFILE env var or "default".
         config_dir: Override the config directory (for testing).
     """
+    global _cached_default_config, _default_config_resolved
+
+    is_default_call = platform_config is None and profile is None and config_dir is None
+    if is_default_call and _default_config_resolved:
+        return _cached_default_config.model_copy() if _cached_default_config else None
+
     file_config = load_file_config(profile=profile, config_dir=config_dir)
     logger.debug("Loaded file config.", file_config=file_config._asdict())
 
@@ -195,6 +209,8 @@ def resolve_platform_config(
 
         if not host or not api_key:
             logger.debug("Could not resolve platform config.", has_host=bool(host), has_api_key=bool(api_key))
+            if is_default_call:
+                _cached_default_config, _default_config_resolved = None, True
             return None
 
         platform_config = PlatformConfig(
@@ -225,6 +241,8 @@ def resolve_platform_config(
     if not org_id:
         logger.debug("No org_id found, skipping subject resolution.")
         _merge_sync_traces_enabled(platform_config, file_config)
+        if is_default_call:
+            _cached_default_config, _default_config_resolved = platform_config, True
         return platform_config
 
     app_id = None
@@ -247,4 +265,8 @@ def resolve_platform_config(
     logger.debug("Resolved platform subject.", org_id=org_id, app_id=app_id, version_id=version_id)
 
     _merge_sync_traces_enabled(platform_config, file_config)
+
+    if is_default_call:
+        _cached_default_config, _default_config_resolved = platform_config, True
+
     return platform_config

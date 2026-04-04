@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import importlib
 import inspect
 import json
@@ -700,7 +701,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         try:
             for tc in tool_calls:
-                task = asyncio.create_task(consume_tool(tc))
+                task = asyncio.create_task(consume_tool(tc), context=contextvars.copy_context())
                 tasks.append(task)
 
             remaining = len(tool_calls)

@@ -7,9 +7,28 @@ from timbal.state.context import RunContext
 
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch, tmp_path):
-    """Isolate from real ~/.timbal config so tests are deterministic."""
-    # Point config loader at an empty dir so it doesn't pick up real credentials.
+    """Isolate from real ~/.timbal config so tests are deterministic.
+
+    Three things must happen before each test:
+
+    1. Config dir — point the loader at an empty tmp dir so it never reads
+       the developer's real ~/.timbal/credentials.
+
+    2. Cache reset — resolve_platform_config() caches its result after the
+       first call (see config_loader.py). Without this reset, the real
+       credentials loaded earlier in the process would bleed into every
+       test regardless of what env vars the test sets.
+
+    3. Context var — clear the run-context var without creating a new
+       RunContext. Creating one here would immediately populate the cache
+       with None (no credentials in the just-cleared env), and any inner
+       fixture that later sets env vars and calls RunContext() would get a
+       stale cache hit. Instead, each test or class-level fixture creates
+       its own RunContext *after* its env vars are in place.
+    """
     monkeypatch.setattr("timbal.state.config_loader.TIMBAL_CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("timbal.state.config_loader._cached_default_config", None)
+    monkeypatch.setattr("timbal.state.config_loader._default_config_resolved", False)
     monkeypatch.delenv("TIMBAL_API_KEY", raising=False)
     monkeypatch.delenv("TIMBAL_API_TOKEN", raising=False)
     monkeypatch.delenv("TIMBAL_API_HOST", raising=False)
@@ -19,7 +38,7 @@ def _isolated_env(monkeypatch, tmp_path):
     monkeypatch.delenv("TIMBAL_START_UI_PORT", raising=False)
     monkeypatch.delenv("TIMBAL_START_WORKFORCE", raising=False)
     monkeypatch.delenv("TIMBAL_WORKFORCE", raising=False)
-    set_run_context(RunContext())
+    set_run_context(None)  # type: ignore[arg-type]
 
 
 class TestLocalDev:
@@ -97,6 +116,12 @@ class TestRemote:
         assert headers["Authorization"] == "Bearer sk-test"
 
     def test_raises_without_platform_config(self, monkeypatch):
+        # _setup_remote ran first and created a RunContext with TIMBAL_API_KEY=sk-test,
+        # which populated the resolve_platform_config cache. Deleting the env var alone
+        # is not enough — the cache would return the stale sk-test config. Reset it so
+        # RunContext() below is forced to re-resolve from the (now empty) environment.
+        monkeypatch.setattr("timbal.state.config_loader._cached_default_config", None)
+        monkeypatch.setattr("timbal.state.config_loader._default_config_resolved", False)
         monkeypatch.delenv("TIMBAL_API_KEY")
         set_run_context(RunContext())
         with pytest.raises(ValueError, match="No platform config"):

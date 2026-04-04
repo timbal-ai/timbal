@@ -6,6 +6,9 @@ dist/
 wheels/
 *.egg-info
 .pytest_cache
+.coverage
+.coverage.*
+htmlcov/
 .tool_cache/
 _version.py
 

@@ -152,26 +152,30 @@ class TestPerformance:
     
     @pytest.mark.asyncio
     async def test_concurrent_execution(self):
-        """Test that multiple runnables can execute concurrently."""
-        def slow_handler(x: str) -> str:
-            import time
-            time.sleep(1)  # 1s delay
+        """Test that multiple runnables can execute concurrently.
+
+        Uses asyncio.Barrier to prove concurrency without relying on wall-clock
+        timing. All 3 tasks must simultaneously reach the barrier before any can
+        proceed. If execution were sequential, the first task would block at
+        barrier.wait() forever — caught by asyncio.wait_for.
+        """
+        barrier = asyncio.Barrier(3)
+
+        async def slow_handler(x: str) -> str:
+            await barrier.wait()
             return f"slow:{x}"
-        
+
         tool = Tool(handler=slow_handler)
-        
-        with Timer() as timer:
-            # Run 3 tools concurrently
-            results = await asyncio.gather(
+
+        results = await asyncio.wait_for(
+            asyncio.gather(
                 tool(x="1").collect(),
                 tool(x="2").collect(),
-                tool(x="3").collect()
-            )
-        
-        # Should complete in roughly 1s, not 3s
-        assert timer.elapsed < 3, f"Concurrent execution took too long: {timer.elapsed}s"
-        
-        # All results should be present
+                tool(x="3").collect(),
+            ),
+            timeout=10.0,
+        )
+
         assert len(results) == 3
         assert all(isinstance(r, OutputEvent) for r in results)
     

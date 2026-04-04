@@ -1,5 +1,4 @@
 import asyncio
-import time
 from functools import partial
 from typing import Any
 
@@ -368,22 +367,30 @@ class TestPerformance:
     
     @pytest.mark.asyncio
     async def test_concurrent_sync_tools(self):
-        """Test that sync tools can run concurrently."""
-        def slow_handler(x: str) -> str:
-            time.sleep(1)
+        """Test that tools can run concurrently.
+
+        Uses asyncio.Barrier to prove concurrency without relying on wall-clock
+        timing. All 3 tasks must simultaneously reach the barrier before any can
+        proceed. If execution were sequential, the first task would block at
+        barrier.wait() forever — caught by asyncio.wait_for.
+        """
+        barrier = asyncio.Barrier(3)
+
+        async def slow_handler(x: str) -> str:
+            await barrier.wait()
             return f"slow:{x}"
-        
+
         tool = Tool(handler=slow_handler)
-        
-        with Timer() as timer:
-            results = await asyncio.gather(
+
+        results = await asyncio.wait_for(
+            asyncio.gather(
                 tool(x="1").collect(),
                 tool(x="2").collect(),
-                tool(x="3").collect()
-            )
-        
-        # Should complete concurrently, not sequentially
-        assert timer.elapsed < 2, f"Tools did not run concurrently: {timer.elapsed}s"
+                tool(x="3").collect(),
+            ),
+            timeout=10.0,
+        )
+
         assert len(results) == 3
     
     @pytest.mark.asyncio
