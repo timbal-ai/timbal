@@ -149,11 +149,6 @@ def print_eval_result(result: EvalResult) -> None:
     console.print()
 
 
-def print_eval_line(result: EvalResult) -> None:
-    """Print a single eval result line (pytest-style). Deprecated - use print_eval_result."""
-    print_eval_result(result)
-
-
 def print_failure_details(result: EvalResult) -> None:
     """Print detailed failure information."""
     path = result.eval.path

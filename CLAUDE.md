@@ -23,14 +23,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is an AI agent framework called Timbal that provides two main execution patterns:
 
 1. **Agent Pattern** (`python/timbal/core/agent.py`): LLMs autonomously decide execution paths and tool usage
-2. **Workflow Pattern** (`python/timbal/core/workflow.py`): Explicit step-by-step workflow definition with data mapping (early work)
+2. **Workflow Pattern** (`python/timbal/core/workflow.py`): Explicit DAG-based workflow definition with concurrent step execution, dependency resolution, and conditional skip/error propagation
 
 ### Key Components
 
 #### Core Engine (`python/timbal/core/`)
 - `runnable.py`: Base class for all executable components with event streaming, tracing, and async execution
 - `agent.py`: Agent execution engine with autonomous tool selection and LLM orchestration
-- `workflow.py`: Workflow execution engine with explicit step orchestration (early development stage)
+- `workflow.py`: Workflow execution engine — DAG cycle detection, concurrent step execution via asyncio, cascading skip/error propagation, conditional `when` logic, automatic dependency inference from span context
 - `tool.py`: Tool wrapper for function-based components
 - `llm_router.py`: Multi-provider LLM routing logic
 
@@ -56,7 +56,7 @@ This is an AI agent framework called Timbal that provides two main execution pat
 
 ### Data Flow Architecture
 - **Agents**: Messages → Tool Selection → LLM → Tool Execution → Response
-- **Workflows**: Input → Step Chain → Data Mapping → Output (early stage)
+- **Workflows**: Input → Concurrent Step Execution (DAG-ordered) → Parameter Resolution via Span Context → Output
 - Both patterns support streaming, state persistence, and event handling via the Runnable base class
 
 ### Testing Strategy

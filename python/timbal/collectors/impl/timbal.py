@@ -9,7 +9,6 @@ except ImportError:
 import structlog
 
 from ...types.events.base import BaseEvent as TimbalBaseEvent
-from ...types.events.chunk import ChunkEvent as TimbalChunkEvent
 from ...types.events.delta import DeltaEvent as TimbalDeltaEvent
 from ...types.events.output import OutputEvent as TimbalOutputEvent
 from ...types.events.start import StartEvent as TimbalStartEvent
@@ -36,8 +35,6 @@ class TimbalCollector(BaseCollector):
     def process(self, event: TimbalBaseEvent) -> TimbalBaseEvent | None:
         """Processes Timbal events."""
         if isinstance(event, TimbalStartEvent):
-            return event
-        elif isinstance(event, TimbalChunkEvent):
             return event
         elif isinstance(event, TimbalDeltaEvent):
             return event

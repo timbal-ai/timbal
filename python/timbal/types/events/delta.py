@@ -1,12 +1,9 @@
 """Delta event system for fine-grained streaming output.
 
 This module provides a structured event system for streaming LLM outputs with
-rich semantic information. Unlike the simple ChunkEvent which only carries raw
-data, DeltaEvents provide typed, structured information about different types
-of content being streamed (text, tool calls, thinking, etc.).
-
-The delta event system is enabled via the TIMBAL_DELTA_EVENTS environment variable
-and provides better observability and control over streaming LLM responses.
+rich semantic information. DeltaEvents carry typed, structured information about
+different types of content being streamed (text, tool calls, thinking, etc.),
+providing better observability and control over streaming LLM responses.
 """
 
 from typing import Annotated, Any, Literal

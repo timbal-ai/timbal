@@ -183,7 +183,6 @@ def main() -> None:
         import os
 
         os.environ["TIMBAL_LOG_LEVEL"] = "CRITICAL"
-        os.environ["TIMBAL_DELTA_EVENTS"] = "true"
 
         from ..logs import setup_logging
 

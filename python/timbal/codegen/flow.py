@@ -195,8 +195,7 @@ def get_flow(workspace_path: str | Path) -> dict[str, Any]:
         raise FileNotFoundError(f"source file not found: {spec.path}")
 
     # Suppress all stdout during import — structlog's default PrintLogger
-    # writes to stdout, and module-level warnings (e.g. ChunkEvents
-    # deprecation) would pollute the JSON output.
+    # writes to stdout and would pollute the JSON output.
     with contextlib.redirect_stdout(io.StringIO()):
         from timbal import __version__
         from timbal.core.agent import Agent

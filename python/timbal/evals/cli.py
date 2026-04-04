@@ -2,8 +2,6 @@ import argparse
 import os
 import sys
 
-# Set env vars before any timbal imports to silence deprecation warnings
-os.environ.setdefault("TIMBAL_DELTA_EVENTS", "true")
 os.environ.setdefault("TIMBAL_SUPPRESS_EVENTS", "tracing_setup")
 
 import asyncio

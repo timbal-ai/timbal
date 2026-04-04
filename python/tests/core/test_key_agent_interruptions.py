@@ -4,7 +4,7 @@ import pytest
 from timbal import Agent, Tool
 from timbal.tools import WebSearch
 from timbal.types.content.tool_use import ToolUseContent
-from timbal.types.events import ChunkEvent, OutputEvent
+from timbal.types.events import OutputEvent
 from timbal.types.events.delta import DeltaEvent
 from timbal.types.message import Message
 
@@ -119,7 +119,7 @@ class TestKeyAgentInterruptions:
         # Cancel after the first streaming chunk — proves LLM is mid-generation
         result1 = await _collect_and_cancel_on(
             agent,
-            event_filter=lambda e: isinstance(e, (DeltaEvent, ChunkEvent)),
+            event_filter=lambda e: isinstance(e, DeltaEvent),
             prompt=prompt1,
         )
 
@@ -170,7 +170,7 @@ class TestKeyAgentInterruptions:
         # Cancel after the first DeltaEvent — the LLM is streaming
         result1 = await _collect_and_cancel_on(
             agent,
-            event_filter=lambda e: isinstance(e, (DeltaEvent, ChunkEvent)),
+            event_filter=lambda e: isinstance(e, DeltaEvent),
             prompt=prompt1,
         )
 

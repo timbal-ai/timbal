@@ -38,7 +38,6 @@ from ..state.dependency_analyzer import RunContextDependencyAnalyzer
 from ..state.tracing.span import Span
 from ..types.events import (
     BaseEvent,
-    ChunkEvent,
     Event,
     OutputEvent,
     StartEvent,
@@ -67,17 +66,6 @@ def _timbal_collector_wrap(fn):
 
     return wrapper
 
-
-TIMBAL_DELTA_EVENTS = os.getenv("TIMBAL_DELTA_EVENTS", "false").lower() in [
-    "true",
-    "1",
-    "t",
-    "yes",
-    "y",
-    "enabled",
-    "on",
-]
-_DELTA_EVENTS_WARNING_SHOWN = False
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
@@ -704,39 +692,18 @@ class Runnable(ABC, BaseModel):
                     # If it's already a BaseEvent, it means we have already processed and logged it
                     if isinstance(event, BaseEvent):
                         return event
-                    if TIMBAL_DELTA_EVENTS:
-                        # Wrap non-delta events in a CustomItem
-                        if not isinstance(event, DeltaItem):
-                            # We use the runnable call id to aggregate events from the same call
-                            event = Custom(id=span.call_id, data=event)
-                        event = DeltaEvent(
-                            run_id=run_context.id,
-                            parent_run_id=run_context.parent_id,
-                            path=span.path,
-                            call_id=span.call_id,
-                            parent_call_id=span.parent_call_id,
-                            item=event,
-                        )
-                    else:
-                        global _DELTA_EVENTS_WARNING_SHOWN
-                        if not _DELTA_EVENTS_WARNING_SHOWN:
-                            _DELTA_EVENTS_WARNING_SHOWN = True
-                            _get_logger().warning(
-                                "ChunkEvents will be deprecated in a future release. Enable TIMBAL_DELTA_EVENTS=true to use the new structured DeltaEvents system."
-                            )
-                        if isinstance(event, TextDelta):
-                            event = event.text_delta
-                        elif isinstance(event, DeltaItem):
-                            # Filter out all LLM emitted delta events that are not text
-                            return None
-                        event = ChunkEvent(
-                            run_id=run_context.id,
-                            parent_run_id=run_context.parent_id,
-                            path=span.path,
-                            call_id=span.call_id,
-                            parent_call_id=span.parent_call_id,
-                            chunk=event,
-                        )
+                    # Wrap non-delta events in a CustomItem
+                    if not isinstance(event, DeltaItem):
+                        # We use the runnable call id to aggregate events from the same call
+                        event = Custom(id=span.call_id, data=event)
+                    event = DeltaEvent(
+                        run_id=run_context.id,
+                        parent_run_id=run_context.parent_id,
+                        path=span.path,
+                        call_id=span.call_id,
+                        parent_call_id=span.parent_call_id,
+                        item=event,
+                    )
                     if event.type in self._log_events:
                         _get_logger().info(event.type, **event.model_dump())
                     if event_queue:
@@ -767,7 +734,7 @@ class Runnable(ABC, BaseModel):
         This is the main entry point for executing a runnable. It handles:
         - Parameter validation and merging with default_params
         - Run context management and tracing setup
-        - Event streaming (StartEvent, ChunkEvents, OutputEvent)
+        - Event streaming (StartEvent, DeltaEvents, OutputEvent)
         - Error handling and cleanup
         - Integration with the collectors system
 

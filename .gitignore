@@ -19,6 +19,7 @@ version.zig
 .venv
 .env
 .env.test*
+*.log*
 .DS_Store
 
 # State savers artifacts
@@ -43,3 +44,6 @@ node_modules/
 **/target/
 
 **/*lancedb*/
+
+**/NOTES.md
+
