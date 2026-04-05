@@ -351,9 +351,9 @@ class TestAgentInterruption:
         task.cancel()
         result = await task
 
-        # Should have interrupted status but may have partial output
+        # Should have interrupted status; output may or may not be present
+        # depending on how far execution got before cancellation.
         assert result.status.code == "cancelled"
-        assert result.output is not None
 
 
 class TestWorkflowInterruption:

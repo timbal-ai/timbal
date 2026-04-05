@@ -36,9 +36,9 @@ from ..types.content import CustomContent, FileContent, TextContent, ToolResultC
 from ..types.events import BaseEvent, OutputEvent
 from ..types.message import Message
 from ..utils import coerce_to_dict, dump
-from .llm_router import Model, _llm_router
+from .llm_router import _llm_router
 from .memory_compaction import MemoryCompactor
-from .models import get_context_window
+from .models import Model, get_context_window
 from .runnable import Runnable, RunnableLike
 from .skill import ReadSkill, Skill
 from .tool import Tool
@@ -288,9 +288,9 @@ class Agent(Runnable):
                     else:
                         self.model_params.pop(key)
 
-        if getattr(self.model, "_is_test_model", False):
-            model_provider = "test"
-            model_name = "model"
+        if not isinstance(self.model, str):
+            model_provider = getattr(self.model, "provider", "test")
+            model_name = getattr(self.model, "model_name", "model")
         else:
             model_provider, model_name = self.model.split("/", 1)
             if model_provider == "anthropic":

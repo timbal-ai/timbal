@@ -151,7 +151,11 @@ testpaths = [
 ]
 
 [tool.coverage.run]
-omit = ["*/timbal/tools/*"]
+omit = [
+    "*/timbal/tools/*",
+    # TODO: add evals coverage once the evals test suite is built out
+    "*/timbal/evals/*",
+]
 
 [tool.uv.workspace]
 members = ["ace"]

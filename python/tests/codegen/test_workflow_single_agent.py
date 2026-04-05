@@ -74,8 +74,16 @@ class TestOutputEquivalence:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
-    async def test_tool_calling_works_in_both(self, agent, workflow_with_agent):
+    async def test_tool_calling_works_in_both(self):
         """Both should be able to call tools and use the results."""
+        agent = Agent(
+            name="test_agent",
+            model="openai/gpt-4o-mini",
+            tools=[add, multiply],
+            system_prompt="You are a helpful calculator. Use your tools for any math.",
+        )
+        wf = Workflow(name="test_workflow").step(agent)
+
         prompt = Message.validate({"role": "user", "content": "What is 6 multiplied by 7? Use the multiply tool."})
 
         agent_output = await agent(prompt=prompt).collect()
@@ -83,7 +91,7 @@ class TestOutputEquivalence:
         content = str(agent_output.output.content).lower()
         assert "42" in content
 
-        workflow_output = await workflow_with_agent(prompt=prompt).collect()
+        workflow_output = await wf(prompt=prompt).collect()
         skip_if_agent_error(workflow_output, "workflow_agent_tool")
         content = str(workflow_output.output.content).lower()
         assert "42" in content

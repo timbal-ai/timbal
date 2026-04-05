@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the Model Literal in llm_router.py from models.yaml.
+"""Regenerate the Model Literal in models.py from models.yaml.
 
 Usage (run from the repo root):
     python scripts/generate_models.py
@@ -13,9 +13,9 @@ import yaml
 
 ROOT = Path(__file__).parent.parent
 MODELS_YAML = ROOT / "python/timbal/models.yaml"
-LLM_ROUTER = ROOT / "python/timbal/core/llm_router.py"
+MODELS_PY = ROOT / "python/timbal/core/models.py"
 
-# Markers that delimit the auto-generated block inside llm_router.py.
+# Markers that delimit the auto-generated block inside models.py.
 _START = "# Model type with provider prefixes"
 _LITERAL_PATTERN = re.compile(
     r"(# Model type with provider prefixes\n)Model = Literal\[.*?\]",
@@ -45,19 +45,19 @@ def main() -> None:
     lines.append("]")
     new_block = "".join(lines)
 
-    source = LLM_ROUTER.read_text()
+    source = MODELS_PY.read_text()
 
     if not _LITERAL_PATTERN.search(source):
         print(
-            f"error: could not find 'Model = Literal[...]' block in {LLM_ROUTER}",
+            f"error: could not find 'Model = Literal[...]' block in {MODELS_PY}",
             file=sys.stderr,
         )
         sys.exit(1)
 
     new_source = _LITERAL_PATTERN.sub(r"\g<1>" + new_block, source)
 
-    LLM_ROUTER.write_text(new_source)
-    print(f"Updated {LLM_ROUTER} with {len(model_ids)} models.")
+    MODELS_PY.write_text(new_source)
+    print(f"Updated {MODELS_PY} with {len(model_ids)} models.")
 
 
 if __name__ == "__main__":

@@ -342,10 +342,11 @@ class TestAgentWithSkills:
 class TestReadSkillTool:
     """Test the ReadSkill tool functionality."""
 
-    @pytest.mark.integration
     @pytest.mark.asyncio
     async def test_read_skill_basic(self, skills_dir):
         """Test reading a skill's main documentation via agent execution."""
+        from timbal.types.content import ToolUseContent
+        from timbal.types.message import Message
 
         def check_skill_content() -> str:
             """Tool that reads a skill and returns content."""
@@ -358,8 +359,18 @@ class TestReadSkillTool:
             assert skill is not None
             return skill.content
 
+        # Configure TestModel to call the tool, then return a final answer.
+        model = TestModel(responses=[
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="c1", name="check_skill_content", input={})],
+                stop_reason="tool_use",
+            ),
+            "done",
+        ])
+
         agent = Agent(
-            name="agent", model=TestModel(), skills_path=skills_dir, tools=[Tool(handler=check_skill_content)]
+            name="agent", model=model, skills_path=skills_dir, tools=[Tool(handler=check_skill_content)]
         )
 
         # Execute through agent to have proper context
