@@ -158,6 +158,15 @@ omit = [
   "*/timbal/tools/*",
   # TODO: add evals coverage once the evals test suite is built out
   "*/timbal/evals/*",
+  # probe.py is a subprocess-based CLI script; pytest-cov can't instrument it
+  "*/timbal/server/probe.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  # __main__ blocks are CLI entry points, not unit-testable
+  "if __name__ == .__main__.:",
 ]
 
 [tool.uv.workspace]

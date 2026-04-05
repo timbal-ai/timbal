@@ -7,7 +7,7 @@ wheels/
 *.egg-info
 .pytest_cache
 .coverage
-.coverage.*
+coverage.json
 htmlcov/
 .tool_cache/
 _version.py

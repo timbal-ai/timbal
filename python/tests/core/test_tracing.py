@@ -1,5 +1,6 @@
 import asyncio
 import time
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from timbal import Agent, Tool
@@ -573,3 +574,153 @@ class TestEventSequenceValidation:
         # Should have start event for agent
         agent_start_events = [e for e in events if isinstance(e, StartEvent) and e.path == "sequence_agent"]
         assert len(agent_start_events) >= 1, "Should have agent start event"
+
+
+# ===========================================================================
+# TestPlatformTracingProvider
+# ===========================================================================
+
+
+class TestPlatformTracingProvider:
+    """Tests for PlatformTracingProvider.get() and ._store()."""
+
+    # ---------------------------------------------------------------------------
+    # Fixtures and helpers
+    # ---------------------------------------------------------------------------
+
+    @pytest.fixture(autouse=True)
+    def _reset_config_cache(self, monkeypatch):
+        """Isolate config-loader cache so no real credentials bleed in."""
+        monkeypatch.setattr("timbal.state.config_loader._cached_default_config", None)
+        monkeypatch.setattr("timbal.state.config_loader._default_config_resolved", True)
+
+    def _make_run_context(self, app_id: str | None = "app_456") -> "RunContext":
+        from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
+        from timbal.state.context import RunContext
+
+        cfg = PlatformConfig(
+            host="api.timbal.ai",
+            auth=PlatformAuth(type=PlatformAuthType.BEARER, token="tok"),
+            subject=PlatformSubject(org_id="org_123", app_id=app_id, version_id="v1"),
+        )
+        return RunContext(id="run_abc", parent_id="run_parent", platform_config=cfg, tracing_provider=None)
+
+    def _mock_response(self, json_data: dict) -> MagicMock:
+        res = MagicMock()
+        res.raise_for_status = MagicMock()
+        res.json = MagicMock(return_value=json_data)
+        return res
+
+    # ---------------------------------------------------------------------------
+    # get()
+    # ---------------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_get_returns_trace_when_found(self):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+        from timbal.state.tracing.trace import Trace
+
+        span_record = {
+            "call_id": "cid1",
+            "parent_call_id": None,
+            "path": "agent",
+            "t0": 0,
+            "t1": 1,
+            "input": {},
+            "output": None,
+            "status": {"code": "success"},
+            "error": None,
+            "usage": {},
+            "metadata": {},
+        }
+        mock_res = self._mock_response({"trace": [span_record]})
+        run_context = self._make_run_context()
+
+        with patch("timbal.platform.utils._request", new=AsyncMock(return_value=mock_res)):
+            trace = await PlatformTracingProvider.get(run_context)
+
+        assert isinstance(trace, Trace)
+        assert "cid1" in trace
+
+    @pytest.mark.asyncio
+    async def test_get_returns_none_when_trace_is_empty(self):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        mock_res = self._mock_response({"trace": None})
+        run_context = self._make_run_context()
+
+        with patch("timbal.platform.utils._request", new=AsyncMock(return_value=mock_res)):
+            trace = await PlatformTracingProvider.get(run_context)
+
+        assert trace is None
+
+    @pytest.mark.asyncio
+    async def test_get_returns_none_when_trace_key_missing(self):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        mock_res = self._mock_response({})
+        run_context = self._make_run_context()
+
+        with patch("timbal.platform.utils._request", new=AsyncMock(return_value=mock_res)):
+            trace = await PlatformTracingProvider.get(run_context)
+
+        assert trace is None
+
+    @pytest.mark.asyncio
+    async def test_get_raises_without_app_id(self):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        run_context = self._make_run_context(app_id=None)
+
+        with patch("timbal.platform.utils._request", new=AsyncMock()):
+            with pytest.raises((ValueError, AssertionError)):
+                await PlatformTracingProvider.get(run_context)
+
+    # ---------------------------------------------------------------------------
+    # _store()
+    # ---------------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_store_sends_patch_request(self):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        mock_res = self._mock_response({})
+        run_context = self._make_run_context()
+        mock_request = AsyncMock(return_value=mock_res)
+
+        with patch("timbal.platform.utils._request", new=mock_request):
+            await PlatformTracingProvider._store(run_context)
+
+        mock_request.assert_called_once()
+        call_kwargs = mock_request.call_args
+        # method is the first positional arg or keyword arg
+        assert call_kwargs.kwargs.get("method") == "PATCH" or call_kwargs.args[0] == "PATCH"
+        # path should reference org and app
+        path_arg = call_kwargs.kwargs.get("path") or call_kwargs.args[1]
+        assert "org_123" in path_arg
+        assert "app_456" in path_arg
+        assert "run_abc" in path_arg
+
+    @pytest.mark.asyncio
+    async def test_store_includes_version_id_in_payload(self):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        mock_res = self._mock_response({})
+        run_context = self._make_run_context()
+        mock_request = AsyncMock(return_value=mock_res)
+
+        with patch("timbal.platform.utils._request", new=mock_request):
+            await PlatformTracingProvider._store(run_context)
+
+        json_payload = mock_request.call_args.kwargs.get("json", {})
+        assert json_payload.get("version_id") == "v1"
+
+    @pytest.mark.asyncio
+    async def test_store_raises_without_app_id(self):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        run_context = self._make_run_context(app_id=None)
+
+        with patch("timbal.platform.utils._request", new=AsyncMock()):
+            with pytest.raises((ValueError, AssertionError)):
+                await PlatformTracingProvider._store(run_context)
