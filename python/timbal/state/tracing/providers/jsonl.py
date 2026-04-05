@@ -22,10 +22,15 @@ class JsonlTracingProvider(TracingProvider):
 
         {"run_id": "...", "parent_id": "...", "spans": [{...}, ...]}
 
-    Usage::
+    Configure via the base-class ``configured()`` method::
 
-        JsonlTracingProvider.configure("traces.jsonl")
-        agent = Agent(name="my_agent", model=..., tracing_provider=JsonlTracingProvider)
+        provider = JsonlTracingProvider.configured(_path=Path("traces.jsonl"))
+        agent = Agent(name="my_agent", model=..., tracing_provider=provider)
+
+    Class-level attributes:
+
+    - ``_path`` (Path | None): output file. Created on first write if absent.
+    - ``_lock`` (asyncio.Lock | None): write lock. Initialised lazily per subclass.
 
     The file is created automatically if it does not exist.
     Multiple concurrent runs append safely via an asyncio lock.
@@ -38,16 +43,6 @@ class JsonlTracingProvider(TracingProvider):
 
     _path: Path | None = None
     _lock: asyncio.Lock | None = None
-
-    @classmethod
-    def configure(cls, path: str | Path) -> None:
-        """Set the output file path. Must be called before first use.
-
-        Args:
-            path: Path to the JSONL file. Created on first write if absent.
-        """
-        cls._path = Path(path)
-        cls._lock = None  # Reset lock (may be called from a new event loop)
 
     @classmethod
     def _get_lock(cls) -> asyncio.Lock:
@@ -87,12 +82,12 @@ class JsonlTracingProvider(TracingProvider):
         """Append the current run's trace as a JSON line.
 
         Raises:
-            RuntimeError: If configure() has not been called.
+            RuntimeError: If ``_path`` has not been set via ``configured()``.
         """
         if cls._path is None:
             raise RuntimeError(
-                "JsonlTracingProvider is not configured. "
-                "Call JsonlTracingProvider.configure(path) before use."
+                "JsonlTracingProvider._path is not set. "
+                "Use JsonlTracingProvider.configured(_path=Path(...)) to create a configured provider."
             )
         record = {
             "run_id": str(run_context.id),
