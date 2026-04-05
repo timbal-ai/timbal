@@ -1,5 +1,5 @@
 # ruff: noqa: F401
-from .base import TracingProvider
+from .base import Exporter, TracingProvider
 from .in_memory import InMemoryTracingProvider
 from .jsonl import JsonlTracingProvider
 from .platform import PlatformTracingProvider

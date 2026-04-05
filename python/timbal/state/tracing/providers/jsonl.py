@@ -78,7 +78,7 @@ class JsonlTracingProvider(TracingProvider):
 
     @classmethod
     @override
-    async def put(cls, run_context: "RunContext") -> None:
+    async def _store(cls, run_context: "RunContext") -> None:
         """Append the current run's trace as a JSON line.
 
         Raises:

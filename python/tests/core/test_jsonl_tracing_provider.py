@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 from timbal.state.context import RunContext
-from timbal.state.tracing.providers.base import TracingProvider
+from timbal.state.tracing.providers.base import Exporter, TracingProvider
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
 from timbal.state.tracing.providers.jsonl import JsonlTracingProvider
 from timbal.state.tracing.span import Span
@@ -182,3 +182,99 @@ class TestJsonlTracingProviderGet:
         assert retrieved is not None
         assert retrieved["c1"].path == "test.step"
         assert retrieved["c1"].elapsed == 10
+
+
+class TestExporter:
+    """Tests for the Exporter attachment mechanism."""
+
+    @pytest.mark.asyncio
+    async def test_exporter_called_after_store(self, tmp_path):
+        calls = []
+
+        class RecordingExporter(Exporter):
+            async def export(self, run_context):
+                calls.append(run_context.id)
+
+        provider = JsonlTracingProvider.configured(
+            _path=tmp_path / "traces.jsonl",
+            _exporters=[RecordingExporter()],
+        )
+        await provider.put(_make_run_context(provider, "run-1"))
+
+        assert calls == ["run-1"]
+        assert (tmp_path / "traces.jsonl").exists()  # store also ran
+
+    @pytest.mark.asyncio
+    async def test_multiple_exporters_all_called(self, tmp_path):
+        calls = []
+
+        class RecordingExporter(Exporter):
+            def __init__(self, name):
+                self.name = name
+
+            async def export(self, run_context):
+                calls.append(self.name)
+
+        provider = JsonlTracingProvider.configured(
+            _path=tmp_path / "traces.jsonl",
+            _exporters=[RecordingExporter("a"), RecordingExporter("b")],
+        )
+        await provider.put(_make_run_context(provider, "run-1"))
+
+        assert calls == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_exporter_exception_does_not_break_run(self, tmp_path):
+        class BrokenExporter(Exporter):
+            async def export(self, run_context):
+                raise RuntimeError("exporter blew up")
+
+        provider = JsonlTracingProvider.configured(
+            _path=tmp_path / "traces.jsonl",
+            _exporters=[BrokenExporter()],
+        )
+        # Should not raise
+        await provider.put(_make_run_context(provider, "run-1"))
+        assert (tmp_path / "traces.jsonl").exists()
+
+    @pytest.mark.asyncio
+    async def test_exporter_receives_run_context(self, tmp_path):
+        received = []
+
+        class CapturingExporter(Exporter):
+            async def export(self, run_context):
+                received.append((run_context.id, list(run_context._trace.keys())))
+
+        provider = JsonlTracingProvider.configured(
+            _path=tmp_path / "traces.jsonl",
+            _exporters=[CapturingExporter()],
+        )
+        await provider.put(_make_run_context(provider, "run-42"))
+
+        assert received == [("run-42", ["c1"])]
+
+    @pytest.mark.asyncio
+    async def test_no_exporters_by_default(self, tmp_path):
+        provider = JsonlTracingProvider.configured(_path=tmp_path / "traces.jsonl")
+        # Just verify put() works fine with the default empty list
+        await provider.put(_make_run_context(provider, "run-1"))
+        assert (tmp_path / "traces.jsonl").exists()
+
+    @pytest.mark.asyncio
+    async def test_exporters_isolated_between_providers(self, tmp_path):
+        calls = []
+
+        class RecordingExporter(Exporter):
+            async def export(self, run_context):
+                calls.append(run_context.id)
+
+        provider_a = JsonlTracingProvider.configured(
+            _path=tmp_path / "a.jsonl",
+            _exporters=[RecordingExporter()],
+        )
+        provider_b = JsonlTracingProvider.configured(_path=tmp_path / "b.jsonl")
+
+        await provider_a.put(_make_run_context(provider_a, "run-a"))
+        await provider_b.put(_make_run_context(provider_b, "run-b"))
+
+        assert calls == ["run-a"]  # provider_b has no exporters

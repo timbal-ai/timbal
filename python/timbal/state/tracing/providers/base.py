@@ -7,6 +7,52 @@ if TYPE_CHECKING:
     from ...context import RunContext
 
 
+class Exporter(ABC):
+    """Abstract base class for trace exporters.
+
+    Exporters are write-only sinks attached to a ``TracingProvider``. After
+    every run, ``TracingProvider.put()`` calls each exporter in
+    ``cls._exporters`` once the primary storage has been written.
+
+    Exporters are attached via ``configured()``::
+
+        provider = JsonlTracingProvider.configured(
+            _path=Path("traces.jsonl"),
+            _exporters=[OTelExporter(endpoint="http://...")],
+        )
+
+    **Why not a full TracingProvider?**
+
+    Some backends (OpenTelemetry, Datadog, Langfuse) are write-only — they
+    have no retrieval API for session chaining. Forcing them into the
+    ``TracingProvider`` interface would require a fake ``get()`` that always
+    returns ``None``. Exporters are the right abstraction: they fire after
+    every run and never participate in session chaining.
+
+    **Implementing a custom exporter**
+
+    Subclass ``Exporter`` and implement ``export()``::
+
+        class MyExporter(Exporter):
+            async def export(self, run_context):
+                # Forward run_context._trace to your backend
+                ...
+    """
+
+    @abstractmethod
+    async def export(self, run_context: "RunContext") -> None:
+        """Forward the completed run's trace to an external backend.
+
+        Called after ``TracingProvider._store()`` completes. Exceptions are
+        silently caught by the framework to avoid breaking the run.
+
+        Args:
+            run_context: The current run context. Read ``run_context._trace``
+                         for spans and ``run_context.id`` for the run id.
+        """
+        pass
+
+
 class TracingProvider(ABC):
     """Abstract base class for tracing providers.
 
@@ -36,10 +82,23 @@ class TracingProvider(ABC):
 
     Each subclass returned by ``configured()`` has its own independent state.
 
+    **Attaching exporters**
+
+    Pass one or more ``Exporter`` instances via ``_exporters`` to forward
+    traces to write-only sinks (OTel, Langfuse, Datadog, etc.) after the
+    primary storage has been written::
+
+        provider = JsonlTracingProvider.configured(
+            _path=Path("traces.jsonl"),
+            _exporters=[OTelExporter(endpoint="http://...")],
+        )
+
+    Exporter exceptions are silenced so they never break a run.
+
     **Implementing a custom provider**
 
     Subclass ``TracingProvider``, declare any class-level attributes your
-    implementation needs, and implement ``get()`` and ``put()``::
+    implementation needs, and implement ``get()`` and ``_store()``::
 
         class MyProvider(TracingProvider):
             endpoint: str = ""
@@ -50,12 +109,14 @@ class TracingProvider(ABC):
                 ...
 
             @classmethod
-            async def put(cls, run_context):
+            async def _store(cls, run_context):
                 # Persist run_context._trace
                 ...
 
     See ``JsonlTracingProvider`` for a reference implementation.
     """
+
+    _exporters: list[Exporter] = []
 
     @classmethod
     def configured(cls, **kwargs) -> type["TracingProvider"]:
@@ -69,6 +130,7 @@ class TracingProvider(ABC):
             **kwargs: Class-level attributes to set on the new subclass.
                       What attributes are valid depends on the provider — see
                       the provider's class docstring for the full list.
+                      Pass ``_exporters=[...]`` to attach write-only sinks.
 
         Returns:
             A new subclass of this provider with the given attributes applied.
@@ -94,12 +156,31 @@ class TracingProvider(ABC):
         pass
 
     @classmethod
-    @abstractmethod
     async def put(cls, run_context: "RunContext") -> None:
-        """Persist the completed run's trace.
+        """Persist the completed run's trace and fire all attached exporters.
 
         Called at the end of every run (in a finally block — always executes).
-        The full trace is available as ``run_context._trace``.
+        Calls ``_store()`` first, then calls each exporter in ``_exporters``
+        in order. Exporter exceptions are silenced so they never break a run.
+
+        Args:
+            run_context: The current run context. Persist ``run_context._trace``
+                         keyed by ``run_context.id``.
+        """
+        await cls._store(run_context)
+        for exporter in cls._exporters:
+            try:
+                await exporter.export(run_context)
+            except Exception:
+                pass
+
+    @classmethod
+    @abstractmethod
+    async def _store(cls, run_context: "RunContext") -> None:
+        """Persist the completed run's trace (provider-specific storage).
+
+        Implement this in your provider subclass. Called by ``put()`` before
+        exporters are fired.
 
         Args:
             run_context: The current run context. Persist ``run_context._trace``

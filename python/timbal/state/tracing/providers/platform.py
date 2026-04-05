@@ -43,7 +43,7 @@ class PlatformTracingProvider(TracingProvider):
 
     @classmethod
     @override
-    async def put(cls, run_context: "RunContext") -> None:
+    async def _store(cls, run_context: "RunContext") -> None:
         """See base class."""
         from ....platform.utils import _request
 
