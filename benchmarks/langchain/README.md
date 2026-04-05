@@ -71,6 +71,17 @@ on what the LangGraph execution model can achieve with zero observability.
 ### 1. Agent loop (`bench_agent.py`)
 
 Full agent loop: prompt → LLM (faked) → tool(s) → LLM → answer.
+
+**Lines of code** (non-blank framework-specific lines: tool definitions + LLM adapter + agent/graph creation)
+
+| | Timbal | LangGraph |
+|--|--------|-----------|
+| Lines | 41 | 59 |
+
+Timbal: plain Python functions as tools, `TestModel(handler=fn)` accepts any callable — no
+wrapping needed. LangGraph: requires a `FakeMessagesListChatModel` subclass with 4 methods
+(`bind_tools`, `_step`, `_agenerate`, `_generate`) plus `StructuredTool.from_function()` for
+each tool instead of passing functions directly.
 LLM is faked by inspecting message history — no network calls, no API keys.
 One shared instance per framework, native async.
 
@@ -224,6 +235,19 @@ The fair runtime comparison is **Timbal vs LG+Smith** — both include tracing.
 Three fixed topologies with trivial synchronous handlers. Tests pure DAG scheduling
 overhead at small scale (4–5 steps each).
 
+**Lines of code** (non-blank framework-specific lines: handler fns + state schema + wiring)
+
+| Topology | Timbal | LangGraph |
+|----------|--------|-----------|
+| Sequential (A → B → C → D)   | 15 | 26 |
+| Fan-out/in (A → [B,C,D] → E) | 23 | 31 |
+| Diamond (A → [B,C] → D)      | 19 | 26 |
+
+Timbal: handlers defined inline, no state schema, no node/edge registration — one
+`.step()` call per step. LangGraph: requires a `TypedDict` state class upfront, all
+handler functions at module level, then explicit `add_node` + `add_edge` for every
+connection before `compile()`.
+
 **Scenario 1 — Sequential (A → B → C → D)**
 
 | | Timbal | LG bare | LG+Smith |
@@ -274,6 +298,16 @@ concurrency. With observability (LG+Smith), Timbal beats LG+Smith on every metri
 Topology: `root → [N async branches] → sink`
 
 Tests how scheduling overhead scales with N parallel branches. Two scenarios:
+
+**Lines of code** (non-blank framework-specific lines: state schema + branch factory + wiring)
+
+| | Timbal | LangGraph |
+|--|--------|-----------|
+| Lines | 25 | 29 |
+
+Timbal: one plain async getter for root output, one branch factory, one inline lambda
+to collect all branch outputs. LangGraph: TypedDict state schema with an `Annotated`
+list reducer, plus the graph factory.
 - **Scenario A:** trivial branches (no sleep) — measures pure overhead
 - **Scenario B:** 1 ms `asyncio.sleep` per branch — verifies true parallelism
 
@@ -338,6 +372,16 @@ concurrent overhead than LangGraph's Pregel superstep synchronisation under load
 Topology: `root → [N×p1] → aggregator → [N×p2] → sink`
 
 Two full fan-out/fan-in cycles per invocation. Total steps: 2N + 3.
+
+**Lines of code** (non-blank framework-specific lines: state schema + branch factories + wiring)
+
+| | Timbal | LangGraph |
+|--|--------|-----------|
+| Lines | 42 | 47 |
+
+Timbal: two plain async getters (root, aggregator), two branch factories, two inline
+lambdas to collect phase outputs. LangGraph: TypedDict state schema with two `Annotated`
+list reducers, plus the graph factory.
 Tests how framework overhead compounds across multiple parallel phases.
 
 #### Scenario A — Trivial branches (pure scheduling)

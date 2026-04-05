@@ -91,52 +91,28 @@ def _clear_timbal() -> None:
     InMemoryTracingProvider._storage.clear()
 
 
-def _make_root_getter():
-    async def get_root() -> Any:
-        return get_run_context().step_span("root").output
-    return get_root
+async def _get_root() -> Any:
+    return get_run_context().step_span("root").output
 
 
-def _make_phase1_getter(n: int):
-    async def get_phase1() -> list:
-        ctx = get_run_context()
-        return [ctx.step_span(f"p1_{i}").output for i in range(n)]
-    return get_phase1
-
-
-def _make_aggregator_getter():
-    async def get_agg() -> Any:
-        return get_run_context().step_span("aggregator").output
-    return get_agg
-
-
-def _make_phase2_getter(n: int):
-    async def get_phase2() -> list:
-        ctx = get_run_context()
-        return [ctx.step_span(f"p2_{i}").output for i in range(n)]
-    return get_phase2
+async def _get_aggregator() -> Any:
+    return get_run_context().step_span("aggregator").output
 
 
 def _make_p1_branch(i: int, async_work: bool):
-    if async_work:
-        async def branch(x: int) -> int:
+    async def branch(x: int) -> int:
+        if async_work:
             await asyncio.sleep(0.001)
-            return x * (i + 2)
-    else:
-        async def branch(x: int) -> int:
-            return x * (i + 2)
+        return x * (i + 2)
     branch.__name__ = f"p1_{i}"
     return branch
 
 
 def _make_p2_branch(i: int, async_work: bool):
-    if async_work:
-        async def branch(y: int) -> int:
+    async def branch(y: int) -> int:
+        if async_work:
             await asyncio.sleep(0.001)
-            return y * (i + 2)
-    else:
-        async def branch(y: int) -> int:
-            return y * (i + 2)
+        return y * (i + 2)
     branch.__name__ = f"p2_{i}"
     return branch
 
@@ -150,32 +126,28 @@ def _timbal_double(n: int, async_work: bool = False, tracing_provider=InMemoryTr
 
     wf.step(root)
 
-    # Phase 1 — fan out from root
     for i in range(n):
-        wf.step(_make_p1_branch(i, async_work), depends_on=["root"], x=_make_root_getter())
+        wf.step(_make_p1_branch(i, async_work), depends_on=["root"], x=_get_root)
 
-    # Aggregator — fan in, sum all phase-1 outputs
     async def aggregator(results: list) -> int:
         return sum(results)
 
     wf.step(
         aggregator,
         depends_on=[f"p1_{i}" for i in range(n)],
-        results=_make_phase1_getter(n),
+        results=lambda: [get_run_context().step_span(f"p1_{i}").output for i in range(n)],
     )
 
-    # Phase 2 — fan out from aggregator
     for i in range(n):
-        wf.step(_make_p2_branch(i, async_work), depends_on=["aggregator"], y=_make_aggregator_getter())
+        wf.step(_make_p2_branch(i, async_work), depends_on=["aggregator"], y=_get_aggregator)
 
-    # Sink — fan in, sum all phase-2 outputs
     async def sink(results: list) -> int:
         return sum(results)
 
     wf.step(
         sink,
         depends_on=[f"p2_{i}" for i in range(n)],
-        results=_make_phase2_getter(n),
+        results=lambda: [get_run_context().step_span(f"p2_{i}").output for i in range(n)],
     )
 
     return wf

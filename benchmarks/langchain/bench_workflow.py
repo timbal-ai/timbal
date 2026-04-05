@@ -178,11 +178,12 @@ def _timbal_diamond() -> Workflow:
 # LANGGRAPH — StateGraph factories
 # ═══════════════════════════════════════════════════════════════════════════════
 
-from langgraph.graph import StateGraph, START, END  # noqa: E402
+from langgraph.graph import END, START, StateGraph  # noqa: E402
 from typing_extensions import TypedDict  # noqa: E402
 
 try:
     from unittest.mock import MagicMock
+
     from langchain_core.tracers.langchain import LangChainTracer
 
     def _make_ls_tracer() -> LangChainTracer:
@@ -196,6 +197,7 @@ except (ImportError, Exception):
 
 
 # -- Sequential state --
+
 
 class SeqState(TypedDict):
     x: int
@@ -236,6 +238,7 @@ def _lg_sequential():
 
 
 # -- Fan-out state --
+
 
 class FanState(TypedDict):
     x: int
@@ -283,6 +286,7 @@ def _lg_fanout():
 
 
 # -- Diamond state --
+
 
 class DiamondState(TypedDict):
     x: int
@@ -441,13 +445,13 @@ async def bench_scenario(scenario: int) -> None:
     ls_run = (lambda: lg_wf.ainvoke({"x": input_val}, config={"callbacks": [ls_tracer]})) if HAS_LANGSMITH else None
 
     cols = ["Timbal", "LG (bare)"] + (["LG+Smith"] if HAS_LANGSMITH else [])
-    hdr  = f"  {'':>12}" + "".join(f"  {c:>12}" for c in cols)
-    sep  = f"  {'─' * 12}" + "  ────────────" * len(cols)
+    hdr = f"  {'':>12}" + "".join(f"  {c:>12}" for c in cols)
+    sep = f"  {'─' * 12}" + "  ────────────" * len(cols)
 
     # ── Latency ──────────────────────────────────────────────────────────────
     subsection(f"Latency  (×{N_ITERS})")
 
-    t_samples  = await _latency_async(lambda: t_wf(x=input_val).collect(), N_ITERS, N_WARMUP)
+    t_samples = await _latency_async(lambda: t_wf(x=input_val).collect(), N_ITERS, N_WARMUP)
     lg_samples = await _latency_async(lg_run, N_ITERS, N_WARMUP)
     ls_samples = await _latency_async(ls_run, N_ITERS, N_WARMUP) if HAS_LANGSMITH else None
 
@@ -461,7 +465,7 @@ async def bench_scenario(scenario: int) -> None:
     # ── Memory ───────────────────────────────────────────────────────────────
     subsection(f"Memory  (×{N_MEM} runs)")
 
-    t_peak,  t_per  = await _memory_async(lambda: t_wf(x=input_val).collect(), N_MEM, N_WARMUP)
+    t_peak, t_per = await _memory_async(lambda: t_wf(x=input_val).collect(), N_MEM, N_WARMUP)
     lg_peak, lg_per = await _memory_async(lg_run, N_MEM, N_WARMUP)
     ls_peak, ls_per = (await _memory_async(ls_run, N_MEM, N_WARMUP)) if HAS_LANGSMITH else (None, None)
 
@@ -476,7 +480,7 @@ async def bench_scenario(scenario: int) -> None:
     # ── Burst ────────────────────────────────────────────────────────────────
     subsection(f"Burst  ({N_BURST} concurrent)")
 
-    t_burst  = await _burst_async(lambda: t_wf(x=input_val).collect(), N_BURST)
+    t_burst = await _burst_async(lambda: t_wf(x=input_val).collect(), N_BURST)
     lg_burst = await _burst_async(lg_run, N_BURST)
     ls_burst = (await _burst_async(ls_run, N_BURST)) if HAS_LANGSMITH else None
 
@@ -486,9 +490,9 @@ async def bench_scenario(scenario: int) -> None:
         vals = [pct(t_burst, p), pct(lg_burst, p)] + ([pct(ls_burst, p)] if ls_burst else [])
         print(f"  {label:>12}" + "".join(f"  {fmt_us(v)}" for v in vals))
 
-    wall = f"\n  {DIM}wall: Timbal {max(t_burst)/1000:.1f} ms  |  LG bare {max(lg_burst)/1000:.1f} ms"
+    wall = f"\n  {DIM}wall: Timbal {max(t_burst) / 1000:.1f} ms  |  LG bare {max(lg_burst) / 1000:.1f} ms"
     if ls_burst:
-        wall += f"  |  LG+Smith {max(ls_burst)/1000:.1f} ms"
+        wall += f"  |  LG+Smith {max(ls_burst) / 1000:.1f} ms"
     print(wall + RESET)
 
     # ── Throughput ───────────────────────────────────────────────────────────
@@ -498,7 +502,7 @@ async def bench_scenario(scenario: int) -> None:
     print(sep)
 
     for conc in CONCURRENCY_LEVELS:
-        t_ops  = await _throughput_async(lambda: t_wf(x=input_val).collect(), THROUGHPUT_OPS, conc)
+        t_ops = await _throughput_async(lambda: t_wf(x=input_val).collect(), THROUGHPUT_OPS, conc)
         lg_ops = await _throughput_async(lg_run, THROUGHPUT_OPS, conc)
         line = f"  {conc:>12}  {t_ops:>10.0f}/s  {lg_ops:>10.0f}/s"
         if HAS_LANGSMITH:
