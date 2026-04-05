@@ -1,0 +1,301 @@
+
+[1m══════════════════════════════════════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal vs CrewAI — agent loop benchmark[0m
+  100 iters · burst {1: 30, 2: 20, 3: 25} · 100 mem · 100 throughput ops
+  Timbal: TestModel (offline) · CrewAI: patched OpenAI (offline)
+  CrewAI found — will measure + akickoff() async
+  [2mCA sync burst/throughput: capped at 5 threads (kickoff not async-safe; see #2632).[0m
+  [2mCA async burst/throughput: fully concurrent (akickoff is native async).[0m
+[1m══════════════════════════════════════════════════════════════════════════════════════════════════════════════[0m
+
+  [2mSpot-checking correctness (Scenario 1)...[0m
+  Timbal: ✓  |  CA sync: ✓  |  CA async: ✓
+
+  [2m[Phase 1 · Scenario 1][0m
+    Timbal latency... p50=978.2 µs
+    Timbal memory... 59 KB peak
+    Timbal burst (30 concurrent)... p50=9.51 ms
+    Timbal burst memory (30 concurrent)... 1121 KB peak
+    Timbal throughput conc=1... 1692/s
+    Timbal throughput conc=5... 1952/s
+    Timbal throughput conc=20... 1935/s
+    CA sync latency... p50=3.19 ms
+    CA sync memory... 986 KB peak
+    CA sync burst (30 bounded, conc≤5)... p50=869.97 ms
+    CA sync burst memory (30 bounded, conc≤5)... 812 KB peak
+    CA sync throughput conc=1... 31/s
+    CA sync throughput conc=5... 15/s
+    CA sync throughput conc=20... 17/s
+    CA async latency... p50=3.20 ms
+    CA async memory... 987 KB peak
+    CA async burst (30 concurrent)... p50=498.83 ms
+    CA async burst memory (30 concurrent)... 1724 KB peak
+    CA async throughput conc=1... 31/s
+    CA async throughput conc=5... 31/s
+    CA async throughput conc=20... 30/s
+
+  [2m[Phase 1 · Scenario 2][0m
+    Timbal latency... p50=1.04 ms
+    Timbal memory... 98 KB peak
+    Timbal burst (20 concurrent)... p50=19.44 ms
+    Timbal burst memory (20 concurrent)... 1385 KB peak
+    Timbal throughput conc=1... 383/s
+    Timbal throughput conc=5... 727/s
+    Timbal throughput conc=20... 788/s
+    CA sync latency... p50=4.19 ms
+    CA sync memory... 1340 KB peak
+    CA sync burst (20 bounded, conc≤5)... p50=761.79 ms
+    CA sync burst memory (20 bounded, conc≤5)... 930 KB peak
+    CA sync throughput conc=1... 31/s
+    CA sync throughput conc=5... 13/s
+    CA sync throughput conc=20... 16/s
+    CA async latency... p50=3.22 ms
+    CA async memory... 1285 KB peak
+    CA async burst (20 concurrent)... p50=347.46 ms
+    CA async burst memory (20 concurrent)... 1496 KB peak
+    CA async throughput conc=1... 30/s
+    CA async throughput conc=5... 32/s
+    CA async throughput conc=20... 26/s
+
+  [2m[Phase 1 · Scenario 3][0m
+    Timbal latency... p50=964.0 µs
+    Timbal memory... 89 KB peak
+    Timbal burst (25 concurrent)... p50=11.92 ms
+    Timbal burst memory (25 concurrent)... 1584 KB peak
+    Timbal throughput conc=1... 1151/s
+    Timbal throughput conc=5... 1206/s
+    Timbal throughput conc=20... 1290/s
+    CA sync latency... p50=3.70 ms
+    CA sync memory... 1303 KB peak
+    CA sync burst (25 bounded, conc≤5)... p50=694.84 ms
+    CA sync burst memory (25 bounded, conc≤5)... 844 KB peak
+    CA sync throughput conc=1... 30/s
+    CA sync throughput conc=5... 16/s
+    CA sync throughput conc=20... 19/s
+    CA async latency... p50=3.27 ms
+    CA async memory... 1251 KB peak
+    CA async burst (25 concurrent)... p50=445.03 ms
+    CA async burst memory (25 concurrent)... 1865 KB peak
+    CA async throughput conc=1... 28/s
+    CA async throughput conc=5... 30/s
+    CA async throughput conc=20... 31/s
+
+  [2mActivating AgentOps instrumentation...[0m
+  AgentOps instrumented.
+
+  [2m[Phase 2 · Scenario 1][0m
+    CA sync+AO latency... p50=4.40 ms
+    CA sync+AO memory... 20272 KB peak
+    CA sync+AO burst (30 bounded, conc≤5)... p50=880.31 ms
+    CA sync+AO burst memory (30 bounded, conc≤5)... 1169 KB peak
+    CA sync+AO throughput conc=1... 30/s
+    CA sync+AO throughput conc=5... 15/s
+    CA sync+AO throughput conc=20... 20/s
+    CA async+AO latency... p50=3.05 ms
+    CA async+AO memory... 988 KB peak
+    CA async+AO burst (30 concurrent)... p50=502.52 ms
+    CA async+AO burst memory (30 concurrent)... 1726 KB peak
+    CA async+AO throughput conc=1... 31/s
+    CA async+AO throughput conc=5... 31/s
+    CA async+AO throughput conc=20... 31/s
+
+  [2m[Phase 2 · Scenario 2][0m
+    CA sync+AO latency... p50=4.80 ms
+    CA sync+AO memory... 29998 KB peak
+    CA sync+AO burst (20 bounded, conc≤5)... p50=769.41 ms
+    CA sync+AO burst memory (20 bounded, conc≤5)... 1539 KB peak
+    CA sync+AO throughput conc=1... 27/s
+    CA sync+AO throughput conc=5... 16/s
+    CA sync+AO throughput conc=20... 18/s
+    CA async+AO latency... p50=3.44 ms
+    CA async+AO memory... 1283 KB peak
+    CA async+AO burst (20 concurrent)... p50=367.45 ms
+    CA async+AO burst memory (20 concurrent)... 1498 KB peak
+    CA async+AO throughput conc=1... 29/s
+    CA async+AO throughput conc=5... 30/s
+    CA async+AO throughput conc=20... 30/s
+
+  [2m[Phase 2 · Scenario 3][0m
+    CA sync+AO latency... p50=4.87 ms
+    CA sync+AO memory... 28966 KB peak
+    CA sync+AO burst (25 bounded, conc≤5)... p50=844.18 ms
+    CA sync+AO burst memory (25 bounded, conc≤5)... 1502 KB peak
+    CA sync+AO throughput conc=1... 29/s
+    CA sync+AO throughput conc=5... 17/s
+    CA sync+AO throughput conc=20... 21/s
+    CA async+AO latency... p50=3.36 ms
+    CA async+AO memory... 1250 KB peak
+    CA async+AO burst (25 concurrent)... p50=433.60 ms
+    CA async+AO burst memory (25 concurrent)... 1862 KB peak
+    CA async+AO throughput conc=1... 28/s
+    CA async+AO throughput conc=5... 30/s
+    CA async+AO throughput conc=20... 30/s
+
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 1: Single tool  (LLM → add → LLM → answer)[0m
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×100  Timbal async · CA sync: sequential · CA async: sequential)[0m
+                        Timbal       CA (sync)      CA (async)      CA sync+AO     CA async+AO
+  ────────────  ──────────────  ──────────────  ──────────────  ──────────────  ──────────────
+          mean        953.9 µs         3.32 ms         3.63 ms         4.74 ms         3.09 ms
+           p50        978.2 µs         3.19 ms         3.20 ms         4.40 ms         3.05 ms
+           p95         1.58 ms         4.58 ms         5.99 ms         6.50 ms         4.03 ms
+           p99         1.91 ms         5.53 ms        22.28 ms        12.70 ms         4.45 ms
+
+  [1mMemory  (×100 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          58.6 KB         600  B
+  CA (sync)                      986.4 KB       10101  B
+  CA (async)                     987.3 KB       10110  B
+  CA sync+AO                   20272.3 KB      207588  B
+  CA async+AO                    987.5 KB       10112  B
+
+  [1mBurst  (30 concurrent — Timbal/CA async: unbounded · CA sync: bounded conc≤5)[0m
+                        Timbal       CA (sync)      CA (async)      CA sync+AO     CA async+AO
+  ────────────  ──────────────  ──────────────  ──────────────  ──────────────  ──────────────
+           p50         9.51 ms       869.97 ms       498.83 ms       880.31 ms       502.52 ms
+           p75         9.64 ms      1046.63 ms       696.11 ms      1065.39 ms       697.84 ms
+           p95         9.67 ms      1181.97 ms       864.15 ms      1326.15 ms       870.23 ms
+           p99         9.88 ms      1441.93 ms       893.09 ms      1570.71 ms       899.45 ms
+           max         9.88 ms      1441.93 ms       893.09 ms      1570.71 ms       899.45 ms
+
+  [2mwall: Timbal: 9.9 ms | CA (sync): 1441.9 ms | CA (async): 893.1 ms | CA sync+AO: 1570.7 ms | CA async+AO: 899.4 ms[0m
+
+  [1mBurst memory  (30 concurrent — peak during full burst, no GC between)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                        1121.3 KB       38274  B
+  CA (sync)                      811.6 KB       27701  B
+  CA (async)                    1724.1 KB       58848  B
+  CA sync+AO                    1168.7 KB       39893  B
+  CA async+AO                   1726.1 KB       58919  B
+
+  [1mThroughput  (100 loops  ·  CA sync capped at conc≤5)[0m
+                        Timbal       CA (sync)      CA (async)      CA sync+AO     CA async+AO
+  ────────────  ──────────────  ──────────────  ──────────────  ──────────────  ──────────────
+             1          1692/s            31/s            31/s            30/s            31/s
+             5          1952/s            15/s            31/s            15/s            31/s
+            20          1935/s            17/s            30/s            20/s            31/s
+
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 2: Multi-step  (LLM → add → LLM → mul → LLM → sub → LLM → answer)[0m
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×100  Timbal async · CA sync: sequential · CA async: sequential)[0m
+                        Timbal       CA (sync)      CA (async)      CA sync+AO     CA async+AO
+  ────────────  ──────────────  ──────────────  ──────────────  ──────────────  ──────────────
+          mean         1.38 ms         4.49 ms         3.25 ms         4.94 ms         3.50 ms
+           p50         1.04 ms         4.19 ms         3.22 ms         4.80 ms         3.44 ms
+           p95         1.63 ms         7.14 ms         4.11 ms         6.57 ms         4.62 ms
+           p99        38.87 ms         8.87 ms         4.89 ms         7.82 ms         6.09 ms
+
+  [1mMemory  (×100 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          98.0 KB        1003  B
+  CA (sync)                     1339.6 KB       13717  B
+  CA (async)                    1285.0 KB       13158  B
+  CA sync+AO                   29997.6 KB      307176  B
+  CA async+AO                   1283.3 KB       13141  B
+
+  [1mBurst  (20 concurrent — Timbal/CA async: unbounded · CA sync: bounded conc≤5)[0m
+                        Timbal       CA (sync)      CA (async)      CA sync+AO     CA async+AO
+  ────────────  ──────────────  ──────────────  ──────────────  ──────────────  ──────────────
+           p50        19.44 ms       761.79 ms       347.46 ms       769.41 ms       367.45 ms
+           p75        19.50 ms       867.24 ms       491.28 ms       897.76 ms       511.82 ms
+           p95        19.55 ms      1222.68 ms       599.78 ms      1211.76 ms       627.04 ms
+           p99        19.55 ms      1222.68 ms       599.78 ms      1211.76 ms       627.04 ms
+           max        19.55 ms      1222.68 ms       599.78 ms      1211.76 ms       627.04 ms
+
+  [2mwall: Timbal: 19.6 ms | CA (sync): 1222.7 ms | CA (async): 599.8 ms | CA sync+AO: 1211.8 ms | CA async+AO: 627.0 ms[0m
+
+  [1mBurst memory  (20 concurrent — peak during full burst, no GC between)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                        1384.7 KB       70897  B
+  CA (sync)                      929.6 KB       47595  B
+  CA (async)                    1496.4 KB       76615  B
+  CA sync+AO                    1539.4 KB       78815  B
+  CA async+AO                   1498.0 KB       76697  B
+
+  [1mThroughput  (100 loops  ·  CA sync capped at conc≤5)[0m
+                        Timbal       CA (sync)      CA (async)      CA sync+AO     CA async+AO
+  ────────────  ──────────────  ──────────────  ──────────────  ──────────────  ──────────────
+             1           383/s            31/s            30/s            27/s            29/s
+             5           727/s            13/s            32/s            16/s            30/s
+            20           788/s            16/s            26/s            18/s            30/s
+
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 3: Parallel tools  (Timbal: concurrent | CrewAI: sequential ReAct)[0m
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [2mTimbal dispatches 3 tools concurrently; CrewAI does 3 sequential ReAct steps.[0m
+
+  [1mLatency  (×100  Timbal async · CA sync: sequential · CA async: sequential)[0m
+                        Timbal       CA (sync)      CA (async)      CA sync+AO     CA async+AO
+  ────────────  ──────────────  ──────────────  ──────────────  ──────────────  ──────────────
+          mean         1.45 ms         3.86 ms         3.36 ms         5.14 ms         3.41 ms
+           p50        964.0 µs         3.70 ms         3.27 ms         4.87 ms         3.36 ms
+           p95         1.91 ms         5.61 ms         4.67 ms         8.49 ms         4.56 ms
+           p99        43.90 ms         6.13 ms         5.35 ms        12.54 ms         5.34 ms
+
+  [1mMemory  (×100 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          89.1 KB         912  B
+  CA (sync)                     1303.2 KB       13345  B
+  CA (async)                    1250.8 KB       12808  B
+  CA sync+AO                   28966.3 KB      296615  B
+  CA async+AO                   1250.0 KB       12800  B
+
+  [1mBurst  (25 concurrent — Timbal/CA async: unbounded · CA sync: bounded conc≤5)[0m
+                        Timbal       CA (sync)      CA (async)      CA sync+AO     CA async+AO
+  ────────────  ──────────────  ──────────────  ──────────────  ──────────────  ──────────────
+           p50        11.92 ms       694.84 ms       445.03 ms       844.18 ms       433.60 ms
+           p75        12.88 ms      1056.93 ms       619.23 ms      1185.30 ms       607.15 ms
+           p95        12.98 ms      1634.61 ms       763.15 ms      1434.84 ms       751.30 ms
+           p99        12.99 ms      1891.11 ms       792.31 ms      1693.25 ms       780.73 ms
+           max        12.99 ms      1891.11 ms       792.31 ms      1693.25 ms       780.73 ms
+
+  [2mwall: Timbal: 13.0 ms | CA (sync): 1891.1 ms | CA (async): 792.3 ms | CA sync+AO: 1693.2 ms | CA async+AO: 780.7 ms[0m
+
+  [1mBurst memory  (25 concurrent — peak during full burst, no GC between)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                        1583.6 KB       64865  B
+  CA (sync)                      843.5 KB       34551  B
+  CA (async)                    1864.8 KB       76381  B
+  CA sync+AO                    1501.7 KB       61508  B
+  CA async+AO                   1862.3 KB       76279  B
+
+  [1mThroughput  (100 loops  ·  CA sync capped at conc≤5)[0m
+                        Timbal       CA (sync)      CA (async)      CA sync+AO     CA async+AO
+  ────────────  ──────────────  ──────────────  ──────────────  ──────────────  ──────────────
+             1          1151/s            30/s            28/s            29/s            28/s
+             5          1206/s            16/s            30/s            17/s            30/s
+            20          1290/s            19/s            31/s            21/s            30/s
+
+[2m──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Timbal: TestModel (sync handler, stateless). Built-in InMemory tracing always on.
+
+  CA sync:  Crew.kickoff() in run_in_executor — what most teams run in production.
+            kickoff_async() is NOT truly async: it is asyncio.to_thread(self.kickoff)
+            (crewAIInc/crewAI crew.py). Same GIL + thread-safety limits apply.
+            Burst capped at 5 threads: above that, instability from GIL contention
+            and internal asyncio calls made from threads (GitHub #2632, #1234).
+
+  CA async: Crew.akickoff() — native async path (added late 2024). Truly awaits
+            all the way to litellm.acompletion(). Still mutates self.usage_metrics
+            per run, so fresh Crew per concurrent call is required. Burst fully
+            concurrent (no semaphore cap). Global event bus singleton and shared
+            SQLite path remain potential bottlenecks at high concurrency (#2632).
+
+  AgentOps: CrewaiInstrumentor().instrument() patches CrewAI methods globally and
+            cannot be undone. Bare pass runs first, then AgentOps is activated.
+            HTTP export is mocked — only hot-path span overhead is measured.
+
+  Scenario 3: Timbal dispatches all 3 tools in one LLM call (parallel).
+  CrewAI uses ReAct (one tool per LLM call) — 3 sequential steps instead.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+
