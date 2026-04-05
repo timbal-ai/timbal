@@ -1,0 +1,157 @@
+
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal vs LangGraph — Wide Parallel Fan-out[0m
+  Topology: root → [N async branches] → sink
+  Widths: [4, 8, 16, 32, 64]  |  200 iters  |  200 burst
+  [2mLangSmith: mock tracer (no network)[0m
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+
+  [2mVerifying correctness (N=4, trivial)...[0m
+  N=4: Timbal=84  LangGraph=84  ✓ match
+
+  [2mVerifying async work (N=4, async_work=True)...[0m
+  N=4: Timbal=84  LangGraph=84  ✓ match
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario A — Trivial branches (async, no sleep)  ← pure scheduling overhead[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency p50  (×200 sequential runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4        894.2 µs         1.00 ms         2.04 ms
+       8         1.26 ms         1.32 ms         2.72 ms
+      16         2.06 ms         1.88 ms         4.15 ms
+      32         3.51 ms         2.95 ms         6.69 ms
+      64         6.84 ms         6.13 ms         12.6 ms
+
+  [1mLatency p95  (×200 sequential runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4         1.20 ms         1.31 ms         3.02 ms
+       8         1.72 ms         1.97 ms         4.27 ms
+      16         2.68 ms         2.47 ms         5.73 ms
+      32         4.39 ms         3.55 ms         8.54 ms
+      64         7.96 ms         6.90 ms         15.5 ms
+
+  [1mLatency p99  (×200 sequential runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4         1.53 ms         1.47 ms         3.94 ms
+       8         2.00 ms         22.1 ms         5.17 ms
+      16         3.68 ms         2.63 ms         7.37 ms
+      32         19.3 ms         3.89 ms         9.33 ms
+      64         32.2 ms        177.5 ms        243.7 ms
+
+  [1mOverhead per extra branch  (slope of p50 latency vs N)[0m
+  [2mEstimated by linear regression over the N values above[0m
+  Timbal          +98.9 µs / branch
+  LG (bare)       +84.9 µs / branch
+  LG+Smith        +175.7 µs / branch
+
+  [1mBurst p50  (200 concurrent runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4        122.8 ms        165.3 ms        297.7 ms
+       8        258.0 ms        330.5 ms        517.8 ms
+      16        546.3 ms        684.4 ms        911.5 ms
+      32       1157.4 ms       1374.4 ms       1974.6 ms
+      64       2223.6 ms       2457.7 ms       3643.5 ms
+
+  [1mBurst p95  (200 concurrent runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4        125.6 ms        182.0 ms        322.4 ms
+       8        262.4 ms        347.3 ms        543.7 ms
+      16        550.7 ms        700.8 ms        938.8 ms
+      32       1163.3 ms       1391.5 ms       2002.0 ms
+      64       2233.9 ms       2477.4 ms       3673.5 ms
+
+  [1mBurst p99  (200 concurrent runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4        126.1 ms        183.5 ms        324.7 ms
+       8        262.7 ms        348.8 ms        546.0 ms
+      16        551.2 ms        702.3 ms        941.1 ms
+      32       1164.5 ms       1393.3 ms       2004.7 ms
+      64       2234.5 ms       2479.1 ms       3676.2 ms
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario B — 1 ms async sleep per branch  ← parallelism verification[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency p50  (×200 sequential runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4         2.05 ms         2.36 ms         3.45 ms
+       8         2.23 ms         2.58 ms         3.94 ms
+      16         2.73 ms         3.07 ms         5.37 ms
+      32         3.98 ms         4.59 ms         8.22 ms
+      64         7.16 ms         6.93 ms         14.5 ms
+
+  [1mLatency p95  (×200 sequential runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4         3.01 ms         2.99 ms         5.11 ms
+       8         2.58 ms         2.95 ms         5.02 ms
+      16         3.21 ms         3.46 ms         8.51 ms
+      32         5.05 ms         5.27 ms         9.78 ms
+      64         8.51 ms         8.25 ms         17.4 ms
+
+  [1mLatency p99  (×200 sequential runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4         4.15 ms         3.86 ms         7.16 ms
+       8         2.82 ms         3.21 ms         5.59 ms
+      16         4.13 ms         3.67 ms         46.2 ms
+      32         5.51 ms         5.63 ms         38.0 ms
+      64         15.4 ms        191.9 ms        263.3 ms
+
+  [1mOverhead per extra branch  (slope of p50 latency vs N)[0m
+  [2mEstimated by linear regression over the N values above[0m
+  Timbal          +86.2 µs / branch
+  LG (bare)       +77.7 µs / branch
+  LG+Smith        +185.9 µs / branch
+
+  [1mBurst p50  (200 concurrent runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4        178.9 ms        187.1 ms        312.1 ms
+       8        347.3 ms        342.8 ms        550.5 ms
+      16        699.0 ms        638.2 ms        993.0 ms
+      32       1438.9 ms       1335.9 ms       1939.0 ms
+      64       2755.4 ms       2602.2 ms       4240.3 ms
+
+  [1mBurst p95  (200 concurrent runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4        182.1 ms        204.5 ms        332.6 ms
+       8        350.1 ms        359.6 ms        580.1 ms
+      16        702.8 ms        656.9 ms       1019.0 ms
+      32       1445.5 ms       1354.1 ms       1966.8 ms
+      64       2765.2 ms       2623.3 ms       4268.8 ms
+
+  [1mBurst p99  (200 concurrent runs)[0m
+       N          Timbal       LG (bare)        LG+Smith
+  ──────  ──────────────  ──────────────  ──────────────
+       4        182.3 ms        206.1 ms        334.8 ms
+       8        350.2 ms        361.0 ms        583.9 ms
+      16        703.1 ms        658.6 ms       1021.6 ms
+      32       1446.5 ms       1355.8 ms       1969.1 ms
+      64       2765.8 ms       2625.1 ms       4271.3 ms
+
+  [2mTheoretical serial: N × 1000 µs  |  Theoretical parallel: ~1000 µs flat[0m
+  [2mBoth frameworks use asyncio tasks — expect near-flat latency across widths[0m
+
+[2m────────────────────────────────────────────────────────────────────────────────────────
+  Scenario A: measures pure per-branch scheduling cost (task creation, span
+  lifecycle, param resolution). Both frameworks pay this on every parallel step.
+
+  Scenario B: verifies true concurrency. asyncio.sleep() yields to the event
+  loop so all N branches run concurrently. Latency should be ~1 ms flat.
+  If latency scales with N, the framework is serialising parallel branches.
+
+  Timbal uses one asyncio.Task per step. Overhead scales linearly with N.
+  LangGraph uses a Pregel superstep model. Different per-branch cost structure.
+────────────────────────────────────────────────────────────────────────────────────────[0m
+
