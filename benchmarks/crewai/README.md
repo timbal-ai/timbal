@@ -628,17 +628,18 @@ For small fixed DAGs, both work; the distinction compounds at scale.
 
 | | Timbal | CrewAI Flow |
 |--|--------|-------------|
-| Wide fan-out (N branches)    | 36 | 24 |
-| Double fan-out (2×N branches) | 63 | 41 |
+| Wide fan-out (N branches)    | 25 | 24 |
+| Double fan-out (2×N branches) | 42 | 41 |
 
-CrewAI is more compact per-file — `self.state.results.append(result)` inside each `@listen`
-method is concise. But the compact line count obscures what is required to make it work.
+Timbal: one async getter per fixed step output (`_get_root`, `_get_aggregator`), one branch
+factory per phase, one inline lambda to collect phase outputs. LOC is nearly identical to
+CrewAI Flow per-file — but how that LOC is expressed is completely different.
 The fundamental problem is how dynamic N is expressed:
 
 ```python
 # Timbal — a for loop
 for i in range(n):
-    wf.step(branch_fn_i, depends_on=["root"], x=root_getter())
+    wf.step(branch_fn_i, depends_on=["root"], x=_get_root)
 ```
 
 ```python

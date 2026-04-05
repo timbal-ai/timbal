@@ -99,27 +99,15 @@ def _clear_timbal() -> None:
     InMemoryTracingProvider._storage.clear()
 
 
-def _make_root_getter():
-    async def get_root() -> Any:
-        return get_run_context().step_span("root").output
-    return get_root
-
-
-def _make_all_branches_getter(n: int):
-    async def get_all_branches() -> list:
-        ctx = get_run_context()
-        return [ctx.step_span(f"branch_{i}").output for i in range(n)]
-    return get_all_branches
+async def _get_root() -> Any:
+    return get_run_context().step_span("root").output
 
 
 def _make_branch_fn(i: int, async_work: bool):
-    if async_work:
-        async def branch(x: int) -> int:
+    async def branch(x: int) -> int:
+        if async_work:
             await asyncio.sleep(0.001)
-            return x * (i + 2)
-    else:
-        async def branch(x: int) -> int:
-            return x * (i + 2)
+        return x * (i + 2)
     branch.__name__ = f"branch_{i}"
     return branch
 
@@ -135,7 +123,7 @@ def _timbal_wide(n: int, async_work: bool = False) -> Workflow:
 
     for i in range(n):
         branch = _make_branch_fn(i, async_work)
-        wf.step(branch, depends_on=["root"], x=_make_root_getter())
+        wf.step(branch, depends_on=["root"], x=_get_root)
 
     async def sink(results: list) -> int:
         return sum(results)
@@ -143,7 +131,7 @@ def _timbal_wide(n: int, async_work: bool = False) -> Workflow:
     wf.step(
         sink,
         depends_on=[f"branch_{i}" for i in range(n)],
-        results=_make_all_branches_getter(n),
+        results=lambda: [get_run_context().step_span(f"branch_{i}").output for i in range(n)],
     )
     return wf
 
