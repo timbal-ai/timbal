@@ -4,9 +4,10 @@ from datetime import datetime
 
 import pytest
 from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
 from timbal.types.message import Message
 
-from ..conftest import assert_has_output_event, assert_no_errors, skip_if_agent_error
+from ..conftest import assert_has_output_event, assert_no_errors
 
 # ==============================================================================
 # Test Utility Functions for Default Params
@@ -450,7 +451,7 @@ class TestDefaultParamsWithAgents:
     @pytest.mark.asyncio
     async def test_agent_with_static_default_params(self):
         """Test agent with static default params."""
-        agent = Agent(name="static_agent", model="openai/gpt-4o-mini", default_params={"context": "test_context"})
+        agent = Agent(name="static_agent", model=TestModel(), default_params={"context": "test_context"})
 
         assert agent._default_fixed_params == {"context": "test_context"}
         assert len(agent._default_runtime_params) == 0
@@ -461,14 +462,14 @@ class TestDefaultParamsWithAgents:
         output = await result.collect()
 
         assert_has_output_event(output)
-        skip_if_agent_error(output, "agent_with_static_default_params")
+        assert_no_errors(output)
 
     @pytest.mark.asyncio
     async def test_agent_with_callable_default_params(self):
         """Test agent with callable default params."""
         agent = Agent(
             name="callable_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             default_params={"current_time": get_current_time, "session_id": lambda: "session_123"},
         )
 
@@ -490,7 +491,7 @@ class TestDefaultParamsWithAgents:
         """Test agent with both static and callable default params."""
         agent = Agent(
             name="mixed_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             default_params={
                 "static_context": "production",  # Static
                 "timestamp": get_current_time,  # Callable
@@ -515,7 +516,7 @@ class TestDefaultParamsWithAgents:
         """Test that default params work alongside system prompt templating."""
         agent = Agent(
             name="template_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             system_prompt="Current directory: {os::getcwd}. Process ID: {os::getpid}",
             default_params={
                 "context": lambda: "AI_ASSISTANT_SESSION",
@@ -577,7 +578,7 @@ class TestDefaultParamsWithNestedTools:
         )
 
         # Create agent with these tools
-        agent = Agent(name="nested_tools_agent", model="openai/gpt-4o-mini", tools=[time_tool, counter_tool_instance])
+        agent = Agent(name="nested_tools_agent", model=TestModel(), tools=[time_tool, counter_tool_instance])
 
         # Verify tools maintain their default params after nesting
         assert len(time_tool._default_runtime_params) == 1
@@ -592,7 +593,7 @@ class TestDefaultParamsWithNestedTools:
         output = await result.collect()
 
         assert_has_output_event(output)
-        skip_if_agent_error(output, "nested_tools_with_default_params")
+        assert_no_errors(output)
 
     @pytest.mark.asyncio
     async def test_agent_and_nested_tools_both_have_default_params(self):
@@ -614,7 +615,7 @@ class TestDefaultParamsWithNestedTools:
         # Agent with default params
         agent = Agent(
             name="user_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[action_tool],
             default_params={
                 "session_id": lambda: f"session_{int(time.time())}",  # Callable
@@ -647,7 +648,7 @@ class TestDefaultParamsWithNestedTools:
 
         subagent = Agent(
             name="task_subagent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[simple_task],
             default_params={
                 "priority": "medium"  # Static default
@@ -657,7 +658,7 @@ class TestDefaultParamsWithNestedTools:
         # Create parent agent with the subagent as a tool
         parent_agent = Agent(
             name="parent_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[subagent],
             default_params={
                 "context": lambda: "parent_context",  # Callable
@@ -677,7 +678,7 @@ class TestDefaultParamsWithNestedTools:
         output = await result.collect()
 
         assert_has_output_event(output)
-        skip_if_agent_error(output, "nested_agent_default_params")
+        assert_no_errors(output)
 
 
 class TestDefaultParamsIntegration:
@@ -704,7 +705,7 @@ class TestDefaultParamsIntegration:
             )
             tools.append(tool)
 
-        agent = Agent(name="concurrent_agent", model="openai/gpt-4o-mini", tools=tools)
+        agent = Agent(name="concurrent_agent", model=TestModel(), tools=tools)
 
         # Test that each tool gets its own resolved default params
         resolved_params = []
@@ -734,7 +735,7 @@ class TestDefaultParamsIntegration:
             name="failing_tool", handler=simple_handler, default_params={"context": failing_default}
         )
 
-        agent = Agent(name="error_agent", model="openai/gpt-4o-mini", tools=[tool_with_failing_default])
+        agent = Agent(name="error_agent", model=TestModel(), tools=[tool_with_failing_default])
 
         # Test that the tool's default param resolution fails as expected
         with pytest.raises(RuntimeError, match="Default param failed"):

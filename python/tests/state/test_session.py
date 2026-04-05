@@ -4,10 +4,13 @@ import os
 
 import pytest
 from timbal import Agent
+from timbal.core.test_model import TestModel
 from timbal.state import get_run_context, set_run_context
 from timbal.state.config import PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
 from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
+from timbal.types.content import ToolUseContent
+from timbal.types.message import Message
 
 
 class TestSessionBasic:
@@ -71,11 +74,12 @@ class TestSessionPersistence:
 
         agent = Agent(
             name="session_setter",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="set_session_tool", input={})], stop_reason="tool_use"),
+                "Done.",
+            ]),
             tools=[set_session_tool],
         )
-
-        from timbal.types.message import Message
 
         prompt = Message.validate({"role": "user", "content": "Use set_session_tool"})
         result = agent(prompt=prompt)
@@ -119,11 +123,12 @@ class TestSessionPersistence:
         # First run: set session data
         agent1 = Agent(
             name="session_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="set_session_tool", input={})], stop_reason="tool_use"),
+                "Done.",
+            ]),
             tools=[set_session_tool],
         )
-
-        from timbal.types.message import Message
 
         prompt1 = Message.validate({"role": "user", "content": "Use set_session_tool"})
         result1 = agent1(prompt=prompt1)
@@ -134,12 +139,12 @@ class TestSessionPersistence:
         # Second run: get session data with parent_id pointing to first run
         agent2 = Agent(
             name="session_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="get_session_tool", input={})], stop_reason="tool_use"),
+                "counter=1, data=first_run",
+            ]),
             tools=[get_session_tool],
         )
-
-        # Create a run context with parent_id
-        from timbal.state import set_run_context
 
         parent_context = RunContext(parent_id=first_run_id)
         set_run_context(parent_context)
@@ -166,13 +171,12 @@ class TestSessionPersistence:
             session["counter"] = current + 1
             return f"Counter is now {session['counter']}"
 
-        from timbal.state import set_run_context
-        from timbal.types.message import Message
+        tool_call = Message(role="assistant", content=[ToolUseContent(id="c1", name="increment_counter", input={})], stop_reason="tool_use")
 
         # Run 1
         agent = Agent(
             name="counter_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[tool_call, "Done.", tool_call, "Done.", tool_call, "Done."]),
             tools=[increment_counter],
         )
 
@@ -234,13 +238,13 @@ class TestSessionPersistence:
             retrieved_session.update(session)
             return f"important_data={session.get('important_data')}, counter={session.get('counter')}"
 
-        from timbal.state import set_run_context
-        from timbal.types.message import Message
-
         # Run 1: Set session data
         agent1 = Agent(
             name="session_setter",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="set_session_data", input={})], stop_reason="tool_use"),
+                "Done.",
+            ]),
             tools=[set_session_data],
         )
         prompt1 = Message.validate({"role": "user", "content": "Use set_session_data"})
@@ -248,19 +252,29 @@ class TestSessionPersistence:
 
         # Run 2: Do NOT access session
         set_run_context(RunContext(parent_id=run_ids[0]))
+        no_session_tool_call = Message(
+            role="assistant",
+            content=[ToolUseContent(id="c1", name="no_session_tool", input={})],
+            stop_reason="tool_use",
+        )
         agent2 = Agent(
             name="no_session_agent",
-            model="openai/gpt-4o-mini",
+            # Provide 4 responses so agent3 (which inherits agent2's message history,
+            # yielding step=2) still calls the tool at responses[2] instead of cycling
+            # to the last entry prematurely.
+            model=TestModel(responses=[no_session_tool_call, "Done.", no_session_tool_call, "Done."]),
             tools=[no_session_tool],
         )
         prompt2 = Message.validate({"role": "user", "content": "Use no_session_tool"})
         await agent2(prompt=prompt2).collect()
 
         # Run 3: Do NOT access session again
+        # Note: agent3 shares the name "no_session_agent", so it loads agent2's message
+        # history (2 prior assistant turns → step=2 in TestModel index).
         set_run_context(RunContext(parent_id=run_ids[1]))
         agent3 = Agent(
             name="no_session_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[no_session_tool_call, "Done.", no_session_tool_call, "Done."]),
             tools=[no_session_tool],
         )
         await agent3(prompt=prompt2).collect()
@@ -269,7 +283,10 @@ class TestSessionPersistence:
         set_run_context(RunContext(parent_id=run_ids[2]))
         agent4 = Agent(
             name="session_verifier",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="verify_session_data", input={})], stop_reason="tool_use"),
+                "Done.",
+            ]),
             tools=[verify_session_data],
         )
         prompt4 = Message.validate({"role": "user", "content": "Use verify_session_data"})
@@ -360,12 +377,10 @@ class TestSessionInAgentExecution:
 
         agent = Agent(
             name="pre_hook_session_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             pre_hook=pre_hook,
             tools=[simple_tool],
         )
-
-        from timbal.types.message import Message
 
         prompt = Message.validate({"role": "user", "content": "Use simple_tool"})
         result = agent(prompt=prompt)
@@ -393,12 +408,13 @@ class TestSessionInAgentExecution:
 
         agent = Agent(
             name="post_hook_session_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="set_session", input={})], stop_reason="tool_use"),
+                "Done.",
+            ]),
             post_hook=post_hook,
             tools=[set_session],
         )
-
-        from timbal.types.message import Message
 
         prompt = Message.validate({"role": "user", "content": "Use set_session"})
         result = agent(prompt=prompt)
@@ -421,11 +437,12 @@ class TestSessionInAgentExecution:
 
         agent = Agent(
             name="tool_session_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="session_tool", input={})], stop_reason="tool_use"),
+                "Done.",
+            ]),
             tools=[session_tool],
         )
-
-        from timbal.types.message import Message
 
         prompt = Message.validate({"role": "user", "content": "Use session_tool"})
         result = agent(prompt=prompt)
@@ -434,6 +451,7 @@ class TestSessionInAgentExecution:
         assert tool_session_data.get("from_tool") == "tool_value"
 
 
+@pytest.mark.integration
 class TestSessionPlatformIntegration:
     """Integration tests for session with PlatformTracingProvider.
 

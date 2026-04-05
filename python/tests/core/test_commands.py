@@ -6,10 +6,11 @@ This bypasses the LLM and directly executes the tool with the provided arguments
 
 import pytest
 from timbal import Agent, Tool, Workflow
+from timbal.core.test_model import TestModel
 from timbal.types.events import OutputEvent, StartEvent
 from timbal.types.message import Message
 
-from ..conftest import assert_has_output_event, assert_no_errors, skip_if_agent_error
+from ..conftest import assert_has_output_event, assert_no_errors
 
 
 class TestCommandsWithTools:
@@ -25,7 +26,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=greet, command="greet")
         agent = Agent(
             name="command_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -51,7 +52,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=add, command="add")
         agent = Agent(
             name="math_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -76,7 +77,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=echo, command="echo")
         agent = Agent(
             name="echo_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -101,7 +102,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=multiply, command="mul")
         agent = Agent(
             name="math_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -129,7 +130,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=greet, command="greet")
         agent = Agent(
             name="greet_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -155,7 +156,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=get_time, command="time")
         agent = Agent(
             name="time_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -182,7 +183,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=async_greet, command="agreet")
         agent = Agent(
             name="async_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -206,7 +207,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=count, command="count")
         agent = Agent(
             name="gen_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -230,7 +231,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=divide, command="div")
         agent = Agent(
             name="div_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -257,7 +258,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=greet, command="greet")
         agent = Agent(
             name="fallthrough_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -267,8 +268,8 @@ class TestCommandsWithTools:
         
         output = await result.collect()
         assert_has_output_event(output)
-        skip_if_agent_error(output, "nonexistent_command")
-        
+        assert_no_errors(output)
+
         # Should get LLM response, not command execution
         assert isinstance(output.output, Message)
     
@@ -282,7 +283,7 @@ class TestCommandsWithTools:
         tool = Tool(handler=greet)
         agent = Agent(
             name="no_command_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -292,8 +293,8 @@ class TestCommandsWithTools:
         
         output = await result.collect()
         assert_has_output_event(output)
-        skip_if_agent_error(output, "tool_without_command")
-        
+        assert_no_errors(output)
+
         # Should fall through to LLM since no command is registered
         assert isinstance(output.output, Message)
 
@@ -315,7 +316,7 @@ class TestCommandsWithAgents:
         # Create a sub-agent
         sub_agent = Agent(
             name="helper_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[helper_tool],
             description="A helper agent",
             command="helper"
@@ -324,7 +325,7 @@ class TestCommandsWithAgents:
         # Create main agent with sub-agent as tool
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[sub_agent]
         )
         
@@ -345,7 +346,7 @@ class TestCommandsWithAgents:
         # Check for output events from the helper agent
         helper_outputs = [e for e in events if isinstance(e, OutputEvent) and "helper_agent" in e.path]
         if len(helper_outputs) > 0:
-            skip_if_agent_error(helper_outputs[0], "agent_as_command")
+            assert helper_outputs[0].error is None
     
     @pytest.mark.asyncio
     async def test_nested_agent_command_with_tools(self):
@@ -359,7 +360,7 @@ class TestCommandsWithAgents:
         # Create specialist agent with tools
         search_agent = Agent(
             name="search_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[search, summarize],
             description="Search and summarize",
             command="search"
@@ -367,7 +368,7 @@ class TestCommandsWithAgents:
         
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[search_agent]
         )
         
@@ -388,7 +389,7 @@ class TestCommandsWithAgents:
         # Check for output events from the search agent
         search_outputs = [e for e in events if isinstance(e, OutputEvent) and "search_agent" in e.path]
         if len(search_outputs) > 0:
-            skip_if_agent_error(search_outputs[0], "nested_agent_command")
+            assert search_outputs[0].error is None
 
 
 class TestCommandsWithMixedRunnables:
@@ -405,7 +406,7 @@ class TestCommandsWithMixedRunnables:
         
         sub_agent = Agent(
             name="sub_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[helper_func],
             description="Sub agent",
             command="sub"
@@ -415,7 +416,7 @@ class TestCommandsWithMixedRunnables:
         
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool, sub_agent]
         )
         
@@ -434,7 +435,7 @@ class TestCommandsWithMixedRunnables:
         output2 = await result2.collect()
         
         assert_has_output_event(output2)
-        skip_if_agent_error(output2, "agent_command")
+        assert_no_errors(output2)
     
     @pytest.mark.asyncio
     async def test_command_name_collision(self):
@@ -451,7 +452,7 @@ class TestCommandsWithMixedRunnables:
         
         agent = Agent(
             name="collision_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[t1, t2]
         )
         
@@ -479,7 +480,7 @@ class TestCommandsEventStreaming:
         tool = Tool(handler=process, command="process")
         agent = Agent(
             name="event_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -506,7 +507,7 @@ class TestCommandsEventStreaming:
         tool = Tool(handler=quick_tool, command="quick")
         agent = Agent(
             name="early_return_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -534,7 +535,7 @@ class TestCommandsMemory:
         tool = Tool(handler=remember, command="remember")
         agent = Agent(
             name="memory_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -562,7 +563,7 @@ class TestCommandsParameterOrdering:
         tool = Tool(handler=create_user, command="user")
         agent = Agent(
             name="order_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -595,7 +596,7 @@ class TestCommandsParameterOrdering:
         tool = Tool(handler=calculate, command="calc")
         agent = Agent(
             name="calc_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool]
         )
         
@@ -629,7 +630,7 @@ class TestCommandsWithWorkflows:
         
         agent = Agent(
             name="workflow_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[workflow]
         )
         
@@ -673,7 +674,7 @@ class TestCommandsWithWorkflows:
         
         agent = Agent(
             name="pipeline_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[workflow]
         )
         
@@ -716,7 +717,7 @@ class TestCommandsWithWorkflows:
         
         agent = Agent(
             name="parallel_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[workflow]
         )
         
@@ -754,7 +755,7 @@ class TestCommandsWithWorkflows:
         
         agent = Agent(
             name="error_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[workflow]
         )
         
@@ -792,7 +793,7 @@ class TestCommandsWithWorkflows:
         
         agent = Agent(
             name="mixed_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool, workflow]
         )
         

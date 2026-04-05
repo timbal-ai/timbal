@@ -90,6 +90,7 @@ async def _collect_and_cancel_on(agent, event_filter, timeout=30, **kwargs):
     return result
 
 
+@pytest.mark.integration
 class TestKeyAgentInterruptions:
     """Test interrupting agents at key points during LLM generation."""
 

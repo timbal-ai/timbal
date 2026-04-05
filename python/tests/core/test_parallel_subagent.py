@@ -7,10 +7,12 @@ management across concurrent executions.
 
 import pytest
 from timbal import Agent
+from timbal.core.test_model import TestModel
+from timbal.types.content import ToolUseContent
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
-from ..conftest import assert_has_output_event, skip_if_agent_error
+from ..conftest import assert_has_output_event, assert_no_errors
 
 
 class TestParallelSubagentExecution:
@@ -28,9 +30,16 @@ class TestParallelSubagentExecution:
 
         return Agent(
             name="counter_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="increment", input={})],
+                    stop_reason="tool_use",
+                ),
+                "The count is 1.",
+            ]),
             tools=[increment],
-            description="An agent that increments and returns a counter. Call the increment tool and return the result.",
+            description="An agent that increments and returns a counter.",
         )
 
     @pytest.fixture
@@ -43,9 +52,9 @@ class TestParallelSubagentExecution:
 
         return Agent(
             name="echo_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[echo],
-            description="An agent that echoes messages. Use the echo tool with the provided message.",
+            description="An agent that echoes messages.",
         )
 
     @pytest.fixture
@@ -53,12 +62,18 @@ class TestParallelSubagentExecution:
         """Create main agent with a subagent as a tool."""
         return Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[
+                        ToolUseContent(id="c1", name="echo_agent", input={"prompt": "hello"}),
+                        ToolUseContent(id="c2", name="echo_agent", input={"prompt": "world"}),
+                    ],
+                    stop_reason="tool_use",
+                ),
+                "Done.",
+            ]),
             tools=[echo_subagent],
-            system_prompt=(
-                "You have access to an echo_agent tool. When asked to echo multiple messages, "
-                "call the echo_agent tool for each message IN PARALLEL (all at once, not sequentially)."
-            ),
         )
 
     @pytest.mark.asyncio
@@ -72,7 +87,7 @@ class TestParallelSubagentExecution:
         output = await result.collect()
 
         assert_has_output_event(output)
-        skip_if_agent_error(output, "parallel_subagent_calls_basic")
+        assert_no_errors(output)
         assert isinstance(output.output, Message)
 
     @pytest.mark.asyncio
@@ -106,14 +121,14 @@ class TestParallelSubagentExecution:
 
         tracking_subagent = Agent(
             name="tracking_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[track_and_respond],
             description="An agent that tracks calls. Use track_and_respond with the given input_id.",
         )
 
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tracking_subagent],
             system_prompt=(
                 "You have a tracking_agent tool. When asked to process multiple IDs, "
@@ -127,14 +142,14 @@ class TestParallelSubagentExecution:
         output = await result.collect()
 
         assert_has_output_event(output)
-        skip_if_agent_error(output, "parallel_subagent_memory_isolation")
+        assert_no_errors(output)
 
     @pytest.mark.asyncio
     async def test_multiple_iterations_with_parallel_subagent(self, echo_subagent):
         """Test multiple iterations where each iteration has parallel subagent calls."""
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[echo_subagent],
             system_prompt=(
                 "You have an echo_agent tool. Call it for each message the user provides, "
@@ -150,7 +165,7 @@ class TestParallelSubagentExecution:
         output1 = await result1.collect()
 
         assert_has_output_event(output1)
-        skip_if_agent_error(output1, "multiple_iterations_1")
+        assert_no_errors(output1)
 
         # Second iteration - uses the RunContext from first to test memory handling
         prompt2 = Message.validate(
@@ -160,7 +175,7 @@ class TestParallelSubagentExecution:
         output2 = await result2.collect()
 
         assert_has_output_event(output2)
-        skip_if_agent_error(output2, "multiple_iterations_2")
+        assert_no_errors(output2)
 
         # Third iteration
         prompt3 = Message.validate(
@@ -170,7 +185,7 @@ class TestParallelSubagentExecution:
         output3 = await result3.collect()
 
         assert_has_output_event(output3)
-        skip_if_agent_error(output3, "multiple_iterations_3")
+        assert_no_errors(output3)
 
     @pytest.mark.asyncio
     async def test_nested_parallel_subagent_calls(self):
@@ -184,14 +199,14 @@ class TestParallelSubagentExecution:
 
         inner_agent = Agent(
             name="inner_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[tool_a, tool_b],
             description="An agent with tool_a and tool_b. When asked, call both tools in parallel.",
         )
 
         outer_agent = Agent(
             name="outer_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[inner_agent],
             system_prompt=(
                 "You have an inner_agent. When asked to process requests, call inner_agent multiple times IN PARALLEL."
@@ -209,7 +224,7 @@ class TestParallelSubagentExecution:
         output = await result.collect()
 
         assert_has_output_event(output)
-        skip_if_agent_error(output, "nested_parallel_subagent_calls")
+        assert_no_errors(output)
 
     @pytest.mark.asyncio
     async def test_parallel_subagent_with_errors(self):
@@ -225,14 +240,14 @@ class TestParallelSubagentExecution:
 
         error_subagent = Agent(
             name="error_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[sometimes_fail],
             description="An agent with a sometimes_fail tool. Call it with should_fail=true or false.",
         )
 
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[error_subagent],
             system_prompt=("You have an error_agent. When asked, call it multiple times in parallel."),
         )
@@ -268,14 +283,14 @@ class TestParallelSubagentExecution:
 
         slow_subagent = Agent(
             name="slow_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[slow_tool],
             description="An agent with a slow_tool. Call it with a task_id.",
         )
 
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[slow_subagent],
             system_prompt=(
                 "You have a slow_agent. When asked to run multiple tasks, "
@@ -291,7 +306,7 @@ class TestParallelSubagentExecution:
         total_time = time.time() - start_time
 
         assert_has_output_event(output)
-        skip_if_agent_error(output, "parallel_subagent_concurrent_execution_timing")
+        assert_no_errors(output)
 
         # If executed in parallel, total time should be less than 2x the individual tool time
         # (accounting for LLM latency, we just check it's not obviously sequential)
@@ -309,14 +324,14 @@ class TestParallelSubagentExecution:
 
         logging_subagent = Agent(
             name="logging_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[log_call],
             description="An agent that logs calls. Use log_call with a call_id.",
         )
 
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[logging_subagent],
             system_prompt=(
                 "You have a logging_agent. When asked to log multiple IDs, call logging_agent for each ID IN PARALLEL."
@@ -333,7 +348,7 @@ class TestParallelSubagentExecution:
             output = await result.collect()
 
             assert_has_output_event(output)
-            skip_if_agent_error(output, f"repeated_parallel_calls_iteration_{iteration}")
+            assert_no_errors(output)
 
     @pytest.mark.asyncio
     async def test_parallel_subagent_with_different_inputs(self):
@@ -349,14 +364,14 @@ class TestParallelSubagentExecution:
 
         multi_tool_subagent = Agent(
             name="processor_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[process_number, process_string],
             description="An agent that can process numbers or strings.",
         )
 
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[multi_tool_subagent],
             system_prompt=(
                 "You have a processor_agent. When asked to process multiple items, "
@@ -375,5 +390,5 @@ class TestParallelSubagentExecution:
         output = await result.collect()
 
         assert_has_output_event(output)
-        skip_if_agent_error(output, "parallel_subagent_with_different_inputs")
+        assert_no_errors(output)
         assert isinstance(output.output, Message)

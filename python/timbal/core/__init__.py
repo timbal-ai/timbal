@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from .mcp import MCPServer
     from .memory_compaction import MemoryCompactor  # noqa: F401 - type alias
     from .skill import Skill
+    from .test_model import TestModel
     from .tool import Tool
     from .tool_set import ToolSet
     from .workflow import Workflow
@@ -17,6 +18,7 @@ __all__ = [
     "Agent",
     "MCPServer",
     "Skill",
+    "TestModel",
     "Tool",
     "ToolSet",
     "Workflow",
@@ -26,6 +28,7 @@ _LAZY_IMPORTS = {
     "Agent": ".agent",
     "MCPServer": ".mcp",
     "Skill": ".skill",
+    "TestModel": ".test_model",
     "Tool": ".tool",
     "ToolSet": ".tool_set",
     "Workflow": ".workflow",

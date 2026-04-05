@@ -3,8 +3,6 @@
 from pathlib import Path
 
 import pytest
-from pydantic import SecretStr
-from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.config_loader import load_file_config, resolve_platform_config
 
 
@@ -45,51 +43,9 @@ def test_load_file_config_sync_traces_truthy_list(
     assert fc.sync_traces_enabled == expected
 
 
-def test_resolve_sync_traces_from_env(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.delenv("TIMBAL_SYNC_TRACES", raising=False)
-    creds = tmp_path / "credentials"
-    creds.write_text(
-        "[default]\napi_key = secret-key\n",
-        encoding="utf-8",
-    )
-    cfg = tmp_path / "config"
-    cfg.write_text(
-        "[default]\nbase_url = https://api.example.com\norg = o1\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("TIMBAL_APP_ID", "app1")
-    monkeypatch.setenv("TIMBAL_SYNC_TRACES", "0")
-
-    pc = resolve_platform_config(profile="default", config_dir=tmp_path)
-    assert pc is not None
-    assert pc.sync_traces_enabled is False
-    assert pc.subject is not None
-    assert pc.subject.app_id == "app1"
-
-
-def test_resolve_sync_traces_explicit_wins_over_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("TIMBAL_SYNC_TRACES", "0")
-    existing = PlatformConfig(
-        host="h",
-        auth=PlatformAuth(type=PlatformAuthType.BEARER, token=SecretStr("t")),
-        subject=PlatformSubject(org_id="o", app_id="a"),
-        sync_traces_enabled=True,
-    )
-    pc = resolve_platform_config(platform_config=existing)
-    assert pc is not None
-    assert pc.sync_traces_enabled is True
-
-
 def test_resolve_sync_traces_defaults_to_true(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.delenv("TIMBAL_SYNC_TRACES", raising=False)
     creds = tmp_path / "credentials"
     creds.write_text(
         "[default]\napi_key = secret-key\n",

@@ -15,6 +15,39 @@ def pytest_configure(config):
     load_dotenv()
 
 
+@pytest.fixture(autouse=True)
+def reset_platform_config_cache():
+    """Force platform config to resolve as None for every non-integration test.
+
+    Setting _default_config_resolved=True with _cached_default_config=None tells
+    resolve_platform_config() "already resolved — there is no platform config".
+    Any RunContext() without an explicit tracing_provider then falls back to
+    InMemoryTracingProvider instead of PlatformTracingProvider, preventing HTTP
+    calls on every _save_trace() / get_session() across the suite.
+    """
+    import timbal.state.config_loader as _cl
+
+    _cl._cached_default_config = None
+    _cl._default_config_resolved = True
+    yield
+    _cl._cached_default_config = None
+    _cl._default_config_resolved = True
+
+
+@pytest.fixture(autouse=True)
+def clear_in_memory_tracing_storage():
+    """Clear InMemoryTracingProvider storage between tests.
+
+    The storage is a class-level dict that otherwise grows unbounded across
+    the full test suite.
+    """
+    from timbal.state.tracing.providers.in_memory import InMemoryTracingProvider
+
+    InMemoryTracingProvider._storage.clear()
+    yield
+    InMemoryTracingProvider._storage.clear()
+
+
 def assert_has_output_event(output: OutputEvent):
     """Assert that we have a valid OutputEvent."""
     assert isinstance(output, OutputEvent), f"Expected OutputEvent, got {type(output)}"

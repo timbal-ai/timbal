@@ -9,6 +9,7 @@ import contextvars
 
 import pytest
 from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
 from timbal.state import (
     get_call_id,
     get_parent_call_id,
@@ -483,7 +484,7 @@ class TestHeavyParallelism:
         agents = [
             Agent(
                 name=f"agent_{i}",
-                model="openai/gpt-4o-mini",
+                model=TestModel(),
                 tools=[_make_tool(f"tool_{i}")],
             )
             for i in range(n)

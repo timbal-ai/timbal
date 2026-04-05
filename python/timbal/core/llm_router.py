@@ -11,6 +11,7 @@ Do not rely on this module's interface in external code.
 
 import asyncio
 import os
+from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
 import structlog
@@ -319,8 +320,61 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
             raise last_error
 
 
+_message_collector_registered = False
+
+
+async def _test_model_handler(model: Any, messages: list, **_kwargs: Any) -> AsyncGenerator:
+    """Yield a single Message from a TestModel — no network call, no streaming."""
+    global _message_collector_registered
+    from ..state import get_or_create_run_context
+    from ..types.content import TextContent
+    from ..types.message import Message
+
+    # Lazily register the MessageCollector so it's never loaded in production paths
+    if not _message_collector_registered:
+        from ..collectors import _collector_registry
+        from ..collectors.impl.message import MessageCollector
+
+        _collector_registry.register(MessageCollector)
+        _message_collector_registered = True
+
+    model.call_count += 1
+
+    if model.handler is not None:
+        raw = model.handler(messages)
+    else:
+        # Stateless step detection: count assistant messages already in the
+        # conversation. Each prior assistant reply = one prior LLM call within
+        # this run. Safe for concurrent asyncio.gather() on a shared instance
+        # because each run has its own message history.
+        step = sum(1 for m in messages if m.role == "assistant")
+        idx = min(step, len(model.responses) - 1)
+        raw = model.responses[idx]
+
+    if isinstance(raw, str):
+        response = Message(
+            role="assistant",
+            content=[TextContent(text=raw)],
+            stop_reason="end_turn",
+        )
+    else:
+        # Assume it's already a Message; default stop_reason so the agent loop terminates
+        if raw.stop_reason is None:
+            raw = Message(role=raw.role, content=raw.content, stop_reason="end_turn")
+        response = raw
+
+    # Approximate token counts (1 token ≈ 4 chars) for UsageLimits compatibility
+    run_context = get_or_create_run_context()
+    input_tokens = max(1, sum(len(str(c)) for m in messages for c in m.content) // 4)
+    output_tokens = max(1, sum(len(str(c)) for c in response.content) // 4)
+    run_context.update_usage("test/model:input_text_tokens", input_tokens)
+    run_context.update_usage("test/model:output_text_tokens", output_tokens)
+
+    yield response
+
+
 async def _llm_router(
-    model: Model | str,
+    model: Any,  # Model | str | TestModel — typed as Any so Pydantic doesn't reject TestModel instances
     system_prompt: str | None = None,
     messages: list[Message] | None = None,
     tools: list[Runnable] | None = None,
@@ -347,6 +401,12 @@ async def _llm_router(
         base_url = base_url.get_secret_value()
     if isinstance(api_key, SecretStr):
         api_key = api_key.get_secret_value()
+
+    # TestModel short-circuit — no network call, no import at module level
+    if getattr(model, "_is_test_model", False):
+        async for chunk in _test_model_handler(model, messages=messages):
+            yield chunk  # type: ignore[return-type]
+        return
 
     if "/" not in model:
         raise ValueError("Model must be in format 'provider/model_name'")

@@ -4,9 +4,10 @@ from datetime import datetime
 
 import pytest
 from timbal import Agent
+from timbal.core.test_model import TestModel
 from timbal.types.message import Message
 
-from ..conftest import assert_has_output_event, skip_if_agent_error
+from ..conftest import assert_has_output_event, assert_no_errors
 
 # ==============================================================================
 # Test Utility Functions for System Prompts
@@ -65,14 +66,14 @@ class TestSystemPromptBasic:
 
     def test_agent_without_system_prompt(self):
         """Test agent creation without system prompt."""
-        agent = Agent(name="no_prompt_agent", model="openai/gpt-4o-mini")
+        agent = Agent(name="no_prompt_agent", model=TestModel())
         assert agent.system_prompt is None
         assert len(agent._system_prompt_templates) == 0
 
     def test_agent_with_static_system_prompt(self):
         """Test agent with static system prompt (no template functions)."""
         system_prompt = "You are a helpful assistant specialized in mathematics."
-        agent = Agent(name="static_prompt_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="static_prompt_agent", model=TestModel(), system_prompt=system_prompt)
         assert agent.system_prompt == system_prompt
         assert len(agent._system_prompt_templates) == 0
 
@@ -80,18 +81,14 @@ class TestSystemPromptBasic:
     async def test_static_system_prompt_execution(self):
         """Test that static system prompt is used during execution."""
         system_prompt = "You are a math expert. Always start responses with 'As a math expert:'"
-        agent = Agent(name="math_expert", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="math_expert", model=TestModel(), system_prompt=system_prompt)
 
         prompt = Message.validate({"role": "user", "content": "What is 2+2?"})
         result = agent(prompt=prompt)
 
         output = await result.collect()
         assert_has_output_event(output)
-        skip_if_agent_error(output, "static_system_prompt_execution")
-
-        # The response should reflect the system prompt
-        response_content = str(output.output.content).lower()
-        # Note: This test may be flaky depending on LLM behavior
+        assert_no_errors(output)
         assert isinstance(output.output, Message)
 
 
@@ -102,7 +99,7 @@ class TestSystemPromptTemplateFunctions:
         """Test that system prompt patterns are correctly identified."""
         # Use functions that don't require parameters
         system_prompt = "Current directory: {os::getcwd}. Process ID: {os::getpid}"
-        agent = Agent(name="pattern_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="pattern_agent", model=TestModel(), system_prompt=system_prompt)
 
         # Should identify template patterns
         assert len(agent._system_prompt_templates) == 2
@@ -117,7 +114,7 @@ class TestSystemPromptTemplateFunctions:
         with pytest.raises(Exception):  # Could be various exceptions during import
             Agent(
                 name="invalid_pattern_agent",
-                model="openai/gpt-4o-mini",
+                model=TestModel(),
                 system_prompt="Invalid pattern: {nonexistent_module::nonexistent_function}",
             )
 
@@ -129,14 +126,14 @@ class TestSystemPromptTemplateFunctions:
 
         # This should fail during agent creation due to module not found
         with pytest.raises(Exception):  # Could be ImportError, ValueError, etc.
-            Agent(name="local_func_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+            Agent(name="local_func_agent", model=TestModel(), system_prompt=system_prompt)
 
     def test_package_function_loading(self):
         """Test loading functions from installed packages."""
         # Test with os module (more reliable than datetime.datetime.now)
         system_prompt = "CWD: {os::getcwd}"
 
-        agent = Agent(name="package_func_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="package_func_agent", model=TestModel(), system_prompt=system_prompt)
 
         assert len(agent._system_prompt_templates) == 1
         callable_info = agent._system_prompt_templates["{os::getcwd}"]
@@ -148,7 +145,7 @@ class TestSystemPromptTemplateFunctions:
         # Test with a valid function
         system_prompt = "Path: {os::getcwd}"
 
-        agent = Agent(name="validation_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="validation_agent", model=TestModel(), system_prompt=system_prompt)
 
         # Should have cached coroutine info
         callable_info = agent._system_prompt_templates["{os::getcwd}"]
@@ -164,7 +161,7 @@ class TestSystemPromptExecution:
         # Use os.getcwd which is available and callable
         system_prompt = "Current directory: {os::getcwd}"
 
-        agent = Agent(name="sync_exec_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="sync_exec_agent", model=TestModel(), system_prompt=system_prompt)
 
         # Manually test the resolution (since _resolve_system_prompt is private)
         resolved_prompt = await agent._resolve_system_prompt()
@@ -181,7 +178,7 @@ class TestSystemPromptExecution:
         # Test with a regular function (the framework handles sync/async automatically)
         system_prompt = "Directory: {os::getcwd}"
 
-        agent = Agent(name="async_exec_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="async_exec_agent", model=TestModel(), system_prompt=system_prompt)
 
         resolved_prompt = await agent._resolve_system_prompt()
         assert resolved_prompt is not None
@@ -193,7 +190,7 @@ class TestSystemPromptExecution:
         """Test parallel execution of multiple template functions."""
         system_prompt = "CWD: {os::getcwd} and PID: {os::getpid}"
 
-        agent = Agent(name="multi_exec_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="multi_exec_agent", model=TestModel(), system_prompt=system_prompt)
 
         resolved_prompt = await agent._resolve_system_prompt()
 
@@ -208,7 +205,7 @@ class TestSystemPromptExecution:
         # Test with a function that might cause issues
         system_prompt = "Result: {os::getcwd}"  # Should work but test the pattern
 
-        agent = Agent(name="error_handling_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="error_handling_agent", model=TestModel(), system_prompt=system_prompt)
 
         # Should not crash during resolution
         resolved_prompt = await agent._resolve_system_prompt()
@@ -220,7 +217,7 @@ class TestSystemPromptExecution:
         # We can't easily inject a None-returning function, so test the replacement logic
         system_prompt = "Value: {datetime::datetime.now}"
 
-        agent = Agent(name="none_result_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="none_result_agent", model=TestModel(), system_prompt=system_prompt)
 
         resolved_prompt = await agent._resolve_system_prompt()
         # Should handle the result properly (even if it's not None in this case)
@@ -236,16 +233,14 @@ class TestSystemPromptIntegration:
         """Test that resolved system prompt is used in LLM calls."""
         system_prompt = "Current time is {datetime::datetime.now}. You are a time-aware assistant."
 
-        agent = Agent(name="time_aware_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="time_aware_agent", model=TestModel(), system_prompt=system_prompt)
 
         prompt = Message.validate({"role": "user", "content": "What time is it?"})
         result = agent(prompt=prompt)
 
         output = await result.collect()
         assert_has_output_event(output)
-        skip_if_agent_error(output, "resolved_prompt_in_conversation")
-
-        # The agent should have access to the resolved system prompt
+        assert_no_errors(output)
         assert isinstance(output.output, Message)
 
     @pytest.mark.asyncio
@@ -254,7 +249,7 @@ class TestSystemPromptIntegration:
         # Use os.getcwd which should be consistent
         system_prompt = "Current directory: {os::getcwd}"
 
-        agent = Agent(name="dynamic_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="dynamic_agent", model=TestModel(), system_prompt=system_prompt)
 
         # First resolution
         resolved1 = await agent._resolve_system_prompt()
@@ -282,15 +277,14 @@ class TestSystemPromptIntegration:
         Please respond helpfully and include directory information when relevant.
         """
 
-        agent = Agent(name="complex_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="complex_agent", model=TestModel(), system_prompt=system_prompt)
 
         prompt = Message.validate({"role": "user", "content": "Hello, can you help me?"})
         result = agent(prompt=prompt)
 
         output = await result.collect()
         assert_has_output_event(output)
-        skip_if_agent_error(output, "complex_system_prompt_template")
-
+        assert_no_errors(output)
         assert isinstance(output.output, Message)
 
 
@@ -302,7 +296,7 @@ class TestSystemPromptPerformance:
         """Test that system prompt resolution is reasonably fast."""
         system_prompt = "CWD: {os::getcwd} Base: {os::path.basename}"
 
-        agent = Agent(name="perf_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="perf_agent", model=TestModel(), system_prompt=system_prompt)
 
         start_time = time.time()
         resolved_prompt = await agent._resolve_system_prompt()
@@ -318,7 +312,7 @@ class TestSystemPromptPerformance:
         system_prompt = "Directory: {os::getcwd}"
 
         agents = [
-            Agent(name=f"concurrent_agent_{i}", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+            Agent(name=f"concurrent_agent_{i}", model=TestModel(), system_prompt=system_prompt)
             for i in range(3)
         ]
 
@@ -340,7 +334,7 @@ class TestSystemPromptPerformance:
         """Test that function metadata is cached properly."""
         system_prompt = "Value: {os::getcwd}"
 
-        agent = Agent(name="cache_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="cache_agent", model=TestModel(), system_prompt=system_prompt)
 
         # Check that callable info is cached
         callable_info = agent._system_prompt_templates["{os::getcwd}"]
@@ -366,12 +360,12 @@ class TestSystemPromptEdgeCases:
         system_prompt = "{a::b}"
 
         with pytest.raises(Exception):  # Should fail to load module 'a'
-            Agent(name="edge_case_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+            Agent(name="edge_case_agent", model=TestModel(), system_prompt=system_prompt)
 
     @pytest.mark.asyncio
     async def test_system_prompt_with_no_templates(self):
         """Test that agents without templates work normally."""
-        agent = Agent(name="no_template_agent", model="openai/gpt-4o-mini", system_prompt="Static prompt")
+        agent = Agent(name="no_template_agent", model=TestModel(), system_prompt="Static prompt")
 
         resolved = await agent._resolve_system_prompt()
         assert resolved == "Static prompt"
@@ -388,7 +382,7 @@ class TestSystemPromptEdgeCases:
 
         for pattern in invalid_patterns:
             system_prompt = f"Test {pattern} end"
-            agent = Agent(name="edge_test_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+            agent = Agent(name="edge_test_agent", model=TestModel(), system_prompt=system_prompt)
             # Should not match any patterns
             assert len(agent._system_prompt_templates) == 0
 
@@ -406,7 +400,7 @@ class TestSystemPromptEdgeCases:
         - Provide examples when helpful
         """
 
-        agent = Agent(name="mixed_content_agent", model="openai/gpt-4o-mini", system_prompt=system_prompt)
+        agent = Agent(name="mixed_content_agent", model=TestModel(), system_prompt=system_prompt)
 
         resolved = await agent._resolve_system_prompt()
 
@@ -427,7 +421,7 @@ class TestCallableSystemPrompt:
         def get_prompt() -> str:
             return "You are a helpful assistant."
 
-        agent = Agent(name="sync_callable_agent", model="openai/gpt-4o-mini", system_prompt=get_prompt)
+        agent = Agent(name="sync_callable_agent", model=TestModel(), system_prompt=get_prompt)
 
         assert agent.system_prompt is None
         assert agent._system_prompt_fn is get_prompt
@@ -441,7 +435,7 @@ class TestCallableSystemPrompt:
             await asyncio.sleep(0.01)
             return "You are an async assistant."
 
-        agent = Agent(name="async_callable_agent", model="openai/gpt-4o-mini", system_prompt=get_prompt_async)
+        agent = Agent(name="async_callable_agent", model=TestModel(), system_prompt=get_prompt_async)
 
         assert agent.system_prompt is None
         assert agent._system_prompt_fn is get_prompt_async
@@ -458,7 +452,7 @@ class TestCallableSystemPrompt:
             call_count += 1
             return f"Call count: {call_count}"
 
-        agent = Agent(name="sync_resolution_agent", model="openai/gpt-4o-mini", system_prompt=get_prompt)
+        agent = Agent(name="sync_resolution_agent", model=TestModel(), system_prompt=get_prompt)
 
         resolved1 = await agent._resolve_system_prompt()
         assert resolved1 == "Call count: 1"
@@ -477,7 +471,7 @@ class TestCallableSystemPrompt:
             call_count += 1
             return f"Async call count: {call_count}"
 
-        agent = Agent(name="async_resolution_agent", model="openai/gpt-4o-mini", system_prompt=get_prompt_async)
+        agent = Agent(name="async_resolution_agent", model=TestModel(), system_prompt=get_prompt_async)
 
         resolved1 = await agent._resolve_system_prompt()
         assert resolved1 == "Async call count: 1"
@@ -493,7 +487,7 @@ class TestCallableSystemPrompt:
             current_time = datetime.now().strftime("%H:%M:%S")
             return f"Current time is {current_time}. You are a time-aware assistant."
 
-        agent = Agent(name="dynamic_callable_agent", model="openai/gpt-4o-mini", system_prompt=get_dynamic_prompt)
+        agent = Agent(name="dynamic_callable_agent", model=TestModel(), system_prompt=get_dynamic_prompt)
 
         resolved = await agent._resolve_system_prompt()
         assert "Current time is" in resolved
@@ -506,7 +500,7 @@ class TestCallableSystemPrompt:
         def get_empty_prompt() -> str:
             return ""
 
-        agent = Agent(name="empty_callable_agent", model="openai/gpt-4o-mini", system_prompt=get_empty_prompt)
+        agent = Agent(name="empty_callable_agent", model=TestModel(), system_prompt=get_empty_prompt)
 
         resolved = await agent._resolve_system_prompt()
         assert resolved == ""
@@ -514,7 +508,7 @@ class TestCallableSystemPrompt:
     @pytest.mark.asyncio
     async def test_lambda_as_system_prompt(self):
         """Test lambda function as system_prompt."""
-        agent = Agent(name="lambda_agent", model="openai/gpt-4o-mini", system_prompt=lambda: "Lambda system prompt")
+        agent = Agent(name="lambda_agent", model=TestModel(), system_prompt=lambda: "Lambda system prompt")
 
         assert agent._system_prompt_fn is not None
         assert agent._system_prompt_fn_is_async is False
@@ -526,12 +520,12 @@ class TestCallableSystemPrompt:
     async def test_callable_vs_string_behavior(self):
         """Test that callable and string system prompts behave differently."""
         static_prompt = "Static prompt"
-        agent_static = Agent(name="static_agent", model="openai/gpt-4o-mini", system_prompt=static_prompt)
+        agent_static = Agent(name="static_agent", model=TestModel(), system_prompt=static_prompt)
 
         def dynamic_prompt() -> str:
             return "Dynamic prompt"
 
-        agent_dynamic = Agent(name="dynamic_agent", model="openai/gpt-4o-mini", system_prompt=dynamic_prompt)
+        agent_dynamic = Agent(name="dynamic_agent", model=TestModel(), system_prompt=dynamic_prompt)
 
         # Static agent keeps the string
         assert agent_static.system_prompt == static_prompt

@@ -75,7 +75,7 @@ class PlatformConfig(BaseModel):
     """When True, persist run traces to the platform (requires org + app subject).
 
     When False, use in-memory tracing even if subject is set. Resolved from
-    ``TIMBAL_SYNC_TRACES`` / ``sync_traces`` in ~/.timbal/config when unset here.
+    ``sync_traces`` in ~/.timbal/config when unset here.
     Defaults to True when not explicitly configured.
     """
 

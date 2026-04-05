@@ -7,7 +7,7 @@ from uuid_extensions import uuid7
 
 from ..errors import SpanNotFound
 from .config import PlatformConfig
-from .tracing.providers import InMemoryTracingProvider, PlatformTracingProvider, TracingProvider
+from .tracing.providers import TRACING_UNSET, InMemoryTracingProvider, PlatformTracingProvider, TracingProvider, _TracingProviderUnset
 from .tracing.span import Span
 from .tracing.trace import Trace
 
@@ -58,6 +58,17 @@ class RunContext(BaseModel):
         description="Platform configuration for the run.",
     )
 
+    tracing_provider: Any = Field(
+        default=TRACING_UNSET,
+        description=(
+            "Tracing provider to use for this run. "
+            "TRACING_UNSET (default) → auto-detect from env/config. "
+            "None → disable tracing entirely. "
+            "A TracingProvider subclass → use that provider."
+        ),
+        exclude=True,
+    )
+
     @model_validator(mode="before")
     @classmethod
     def normalize_platform_config(cls, data: Any) -> Any:
@@ -86,9 +97,16 @@ class RunContext(BaseModel):
         """
         from .config_loader import resolve_platform_config
 
+        self._trace = Trace()
+
+        # Explicit provider set on the runnable — skip auto-detection entirely.
+        # None means tracing is disabled; a class means use that provider.
+        if not isinstance(self.tracing_provider, _TracingProviderUnset):
+            self._tracing_provider = self.tracing_provider
+            return
+
         self.platform_config = resolve_platform_config(self.platform_config)
 
-        self._trace = Trace()
         if self.platform_config:
             use_platform_traces = self.platform_config.sync_traces_enabled is not False
             if (
@@ -134,7 +152,7 @@ class RunContext(BaseModel):
         Returns:
             The parent run's tracing data, or None if this is a root run.
         """
-        if self.parent_id:
+        if self.parent_id and self._tracing_provider is not None:
             return await self._tracing_provider.get(self)
         return None
 
@@ -153,13 +171,14 @@ class RunContext(BaseModel):
 
             root.session = self._session_data
             root._session_dump = await dump(self._session_data)
-        await self._tracing_provider.put(self)
+        if self._tracing_provider is not None:
+            await self._tracing_provider.put(self)
 
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""
         if self._session_data is None:
             self._session_data = {}
-            if self.parent_id:
+            if self.parent_id and self._tracing_provider is not None:
                 trace = await self._tracing_provider.get(self)
                 if trace is None or trace._root_call_id is None:
                     _get_logger().error(

@@ -4,6 +4,8 @@ from collections.abc import AsyncGenerator, Generator
 
 import pytest
 from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
+from timbal.types.content import ToolUseContent
 from timbal.types.message import Message
 
 # ==============================================================================
@@ -88,11 +90,11 @@ def simple_agent():
     """Create a simple agent for testing."""
     def get_time() -> str:
         return time.strftime("%Y-%m-%d %H:%M:%S")
-    
+
     return Agent(
         name="simple_agent",
-        model="openai/gpt-4o-mini",
-        tools=[get_time]
+        model=TestModel(),
+        tools=[get_time],
     )
 
 
@@ -101,17 +103,29 @@ def multi_tool_agent():
     """Create an agent with multiple tools for testing."""
     def add(a: int, b: int) -> int:
         return a + b
-    
+
     def multiply(a: int, b: int) -> int:
         return a * b
-    
+
     def greet(name: str) -> str:
         return f"Hello, {name}!"
-    
+
     return Agent(
         name="multi_tool_agent",
-        model="openai/gpt-4o-mini",
-        tools=[add, multiply, greet]
+        model=TestModel(responses=[
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="c1", name="add", input={"a": 5, "b": 3})],
+                stop_reason="tool_use",
+            ),
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="c2", name="multiply", input={"a": 8, "b": 2})],
+                stop_reason="tool_use",
+            ),
+            "5 + 3 = 8, and 8 * 2 = 16.",
+        ]),
+        tools=[add, multiply, greet],
     )
 
 
@@ -121,7 +135,6 @@ def math_agent():
     def calculate(expression: str) -> str:
         """Safely evaluate simple math expressions."""
         try:
-            # Only allow basic math operations for safety
             allowed_chars = set('0123456789+-*/().= ')
             if all(c in allowed_chars for c in expression):
                 result = eval(expression)
@@ -130,12 +143,19 @@ def math_agent():
                 return "Invalid expression - only basic math allowed"
         except Exception as e:
             return f"Error: {str(e)}"
-    
+
     return Agent(
         name="math_agent",
-        model="openai/gpt-4o-mini",
+        model=TestModel(responses=[
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="c1", name="calculate", input={"expression": "15 + 27"})],
+                stop_reason="tool_use",
+            ),
+            "15 + 27 = 42.",
+        ]),
         tools=[calculate],
-        system_prompt="You are a helpful math assistant. Use the calculate tool for any math operations."
+        system_prompt="You are a helpful math assistant.",
     )
 
 

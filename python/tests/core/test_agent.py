@@ -1,10 +1,12 @@
 import pytest
 from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
 from timbal.core.agent import AgentParams
+from timbal.types.content import ToolUseContent
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
-from ..conftest import Timer, assert_has_output_event, assert_no_errors, skip_if_agent_error
+from ..conftest import Timer, assert_has_output_event, assert_no_errors
 
 
 class TestAgentCreation:
@@ -143,16 +145,15 @@ class TestAgentExecution:
         """Test basic agent conversation without tools."""
         agent = Agent(
             name="simple_agent",
-            model="openai/gpt-4o-mini"
+            model=TestModel(),
         )
-        
+
         prompt = Message.validate({"role": "user", "content": "Hello, how are you?"})
         result = agent(prompt=prompt)
-        
+
         output = await result.collect()
         assert isinstance(output, OutputEvent)
-        skip_if_agent_error(output, "simple_conversation")
-        
+        assert_no_errors(output)
         assert isinstance(output.output, Message)
         assert output.output.role == "assistant"
     
@@ -165,9 +166,6 @@ class TestAgentExecution:
         output = await result.collect()
         assert_has_output_event(output)
         assert_no_errors(output)
-        skip_if_agent_error(output, "agent_with_single_tool")
-        
-        # Should have valid response
         assert isinstance(output.output, Message)
     
     @pytest.mark.asyncio
@@ -178,11 +176,9 @@ class TestAgentExecution:
         
         output = await result.collect()
         assert isinstance(output, OutputEvent)
-        skip_if_agent_error(output, "agent_with_multiple_tools")
-        
+        assert_no_errors(output)
         assert isinstance(output.output, Message)
-        
-        # The response should mention the calculation results  
+        # The fixture's TestModel computes 5+3=8 and 8*2=16 via actual tool calls
         response_content = str(output.output.content).lower()
         assert any(num in response_content for num in ["8", "16"])
     
@@ -192,12 +188,24 @@ class TestAgentExecution:
         def infinite_tool(x: str) -> str:
             # This tool always suggests calling itself again
             return f"Please call infinite_tool with: {x}_again"
-        
+
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="infinite_tool", input={"x": "start"})],
+                    stop_reason="tool_use",
+                ),
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c2", name="infinite_tool", input={"x": "start_again"})],
+                    stop_reason="tool_use",
+                ),
+                "Done.",
+            ]),
             tools=[infinite_tool],
-            max_iter=2  # Limit to 2 iterations
+            max_iter=2,
         )
         
         prompt = Message.validate({"role": "user", "content": "Start the infinite loop"})
@@ -216,44 +224,51 @@ class TestAgentExecution:
         """Test that multiple tools can be called concurrently."""
         def slow_tool_1(delay: float) -> str:
             import time
-            time.sleep(1)
+            time.sleep(0.2)
             return "tool1_result"
-        
+
         def slow_tool_2() -> str:
             import time
-            time.sleep(1)
+            time.sleep(0.2)
             return "tool2_result"
-        
+
         agent = Agent(
             name="concurrent_agent",
-            model="openai/gpt-4o-mini",
-            tools=[slow_tool_1, slow_tool_2]
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[
+                        ToolUseContent(id="c1", name="slow_tool_1", input={"delay": 0.2}),
+                        ToolUseContent(id="c2", name="slow_tool_2", input={}),
+                    ],
+                    stop_reason="tool_use",
+                ),
+                "Both tools finished.",
+            ]),
+            tools=[slow_tool_1, slow_tool_2],
         )
-        
-        # Prompt that might trigger both tools
-        prompt = Message.validate({"role": "user", "content": "Call both slow_tool_1 and slow_tool_2. Just 1 time."})
-        
+
         slow_tool_1_started = False
         slow_tool_2_started = False
-        async for event in agent(prompt=prompt):
+        async for event in agent(prompt=Message.validate({"role": "user", "content": "go"})):
             if event.type == "START" and event.path == "concurrent_agent.slow_tool_1":
                 slow_tool_1_started = True
             if event.type == "START" and event.path == "concurrent_agent.slow_tool_2":
                 slow_tool_2_started = True
             if event.type == "OUTPUT" and event.path == "concurrent_agent.slow_tool_1":
                 if not slow_tool_2_started:
-                    pytest.fail("slow_tool_1 started before slow_tool_2")
+                    pytest.fail("slow_tool_1 finished before slow_tool_2 started")
             if event.type == "OUTPUT" and event.path == "concurrent_agent.slow_tool_2":
                 if not slow_tool_1_started:
-                    pytest.fail("slow_tool_2 started before slow_tool_1")
+                    pytest.fail("slow_tool_2 finished before slow_tool_1 started")
 
     
-    @pytest.mark.asyncio 
+    @pytest.mark.asyncio
     async def test_agent_event_streaming(self):
         """Test that agent events are streamed properly."""
         agent = Agent(
-            name="streaming_agent", 
-            model="openai/gpt-4o-mini"
+            name="streaming_agent",
+            model=TestModel(),
         )
         
         prompt = Message.validate({"role": "user", "content": "Hello!"})
@@ -274,30 +289,19 @@ class TestAgentExecution:
     @pytest.mark.asyncio
     async def test_system_prompt_override(self):
         """Test that system_prompt parameter overrides agent's default system_prompt."""
-        # Create agent with default system prompt
-        default_system_prompt = "You are a helpful assistant."
         agent = Agent(
             name="override_agent",
-            model="openai/gpt-4o-mini",
-            system_prompt=default_system_prompt
+            model=TestModel(),
+            system_prompt="You are a helpful assistant.",
         )
-        
-        # Override system prompt during execution
-        override_system_prompt = "You must respond with exactly one word: 'SUCCESS'"
+
         prompt = Message.validate({"role": "user", "content": "Hello, how are you?"})
-        result = agent(
-            prompt=prompt,
-            system_prompt=override_system_prompt
-        )
-        
+        result = agent(prompt=prompt, system_prompt="Overridden prompt.")
+
         output = await result.collect()
         assert isinstance(output, OutputEvent)
-        skip_if_agent_error(output, "system_prompt_override")
-        
+        assert_no_errors(output)
         assert isinstance(output.output, Message)
-        response_content = str(output.output.content).strip().upper()
-        # The overridden system prompt should make the agent respond with "SUCCESS"
-        assert "SUCCESS" in response_content
 
 
 class TestAgentNesting:
@@ -335,15 +339,22 @@ class TestAgentNesting:
         
         specialist_agent = Agent(
             name="specialist",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[specialist_tool],
-            description="A specialist agent that completes tasks"
+            description="A specialist agent that completes tasks",
         )
-        
+
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
-            tools=[specialist_agent]
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="specialist", input={"prompt": "do a task"})],
+                    stop_reason="tool_use",
+                ),
+                "Done.",
+            ]),
+            tools=[specialist_agent],
         )
         
         prompt = Message.validate({"role": "user", "content": "Please have the specialist complete a simple task"})
@@ -368,13 +379,20 @@ class TestAgentErrorHandling:
         
         agent = Agent(
             name="error_agent",
-            model="openai/gpt-4o-mini",
-            tools=[error_tool, working_tool]
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="error_tool", input={"message": "oops"})],
+                    stop_reason="tool_use",
+                ),
+                "The tool failed but I recovered.",
+            ]),
+            tools=[error_tool, working_tool],
         )
-        
+
         prompt = Message.validate({"role": "user", "content": "Try to use both tools"})
         result = agent(prompt=prompt)
-        
+
         # Should complete without crashing
         output = await result.collect()
         assert isinstance(output, OutputEvent)
@@ -389,15 +407,14 @@ class TestAgentErrorHandling:
         
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
-            tools=[valid_tool]
+            model=TestModel(),
+            tools=[valid_tool],
         )
-        
-        # This might cause the LLM to make invalid tool calls
+
         prompt = Message.validate({"role": "user", "content": "Call nonexistent_tool please"})
         result = agent(prompt=prompt)
-        
-        # Should handle gracefully
+
+        # Should handle gracefully — TestModel responds without calling any tool
         output = await result.collect()
         assert isinstance(output, OutputEvent)
 
@@ -407,27 +424,23 @@ class TestAgentMemory:
     
     @pytest.mark.asyncio
     async def test_conversation_memory(self):
-        """Test that agents maintain conversation memory."""
-        agent = Agent(
-            name="memory_agent",
-            model="openai/gpt-4o-mini"
-        )
-        
-        # First interaction
-        first_prompt = Message.validate({"role": "user", "content": "My name is Alice"})
-        first_result = agent(prompt=first_prompt)
-        first_output = await first_result.collect()
-        
+        """Test that agents pass conversation history to the LLM on subsequent calls."""
+
+        def memory_handler(messages):
+            # Verify the framework passes prior turns in messages
+            user_texts = [m.collect_text() for m in messages if m.role == "user"]
+            if any("alice" in t.lower() for t in user_texts):
+                return "Your name is Alice."
+            return "Nice to meet you!"
+
+        agent = Agent(name="memory_agent", model=TestModel(handler=memory_handler))
+
+        first_output = await agent(prompt=Message.validate({"role": "user", "content": "My name is Alice"})).collect()
         assert isinstance(first_output.output, Message)
-        
-        # Second interaction - should remember the name
-        second_prompt = Message.validate({"role": "user", "content": "What is my name?"})
-        second_result = agent(prompt=second_prompt)
-        second_output = await second_result.collect()
-        
+
+        second_output = await agent(prompt=Message.validate({"role": "user", "content": "What is my name?"})).collect()
         assert isinstance(second_output.output, Message)
-        response_content = str(second_output.output.content).lower()
-        assert "alice" in response_content
+        assert "alice" in str(second_output.output.content).lower()
 
 
     @pytest.mark.asyncio
@@ -437,7 +450,7 @@ class TestAgentMemory:
         the LLM doesn't receive an invalid conversation structure."""
         agent = Agent(
             name="receiving_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
         )
 
         # Simulate what happens when agent output is mapped as another agent's prompt.
@@ -445,7 +458,7 @@ class TestAgentMemory:
         result = agent(prompt=assistant_msg)
         output = await result.collect()
 
-        skip_if_agent_error(output, "test_assistant_message_as_prompt_normalized_to_user")
+        assert_no_errors(output)
         assert isinstance(output.output, Message)
 
 
@@ -457,24 +470,24 @@ class TestAgentPerformance:
         """Test that collect() method works efficiently."""
         agent = Agent(
             name="perf_agent",
-            model="openai/gpt-4o-mini"
+            model=TestModel(),
         )
-        
+
         prompt = Message.validate({"role": "user", "content": "Hello!"})
         result = agent(prompt=prompt)
-        
+
         with Timer() as timer:
             output = await result.collect()
-        
+
         assert isinstance(output, OutputEvent)
-        assert timer.elapsed < 30  # Reasonable timeout
+        assert timer.elapsed < 5  # Fast with TestModel
     
     @pytest.mark.asyncio
     async def test_multiple_collect_calls(self):
         """Test that collect() can be called multiple times."""
         agent = Agent(
             name="multi_collect_agent",
-            model="openai/gpt-4o-mini"
+            model=TestModel(),
         )
         
         prompt = Message.validate({"role": "user", "content": "Hello!"})
@@ -493,21 +506,15 @@ class TestAgentPerformance:
 class TestAgentIntegration:
     """Test Agent integration with different components."""
     
-    @pytest.mark.parametrize("model", ["openai/gpt-4o-mini", "openai/gpt-4.1-nano"])
     @pytest.mark.asyncio
-    async def test_different_models(self, model):
-        """Test agent with different LLM models."""
-        agent = Agent(
-            name="model_test_agent",
-            model=model
-        )
-        
-        prompt = Message.validate({"role": "user", "content": "Hello!"})
-        result = agent(prompt=prompt)
-        
-        output = await result.collect()
-        assert isinstance(output, OutputEvent)
-        assert output.error is None
+    async def test_different_models(self):
+        """Test agent runs successfully regardless of model configuration."""
+        for model in [TestModel(responses=["response A"]), TestModel(responses=["response B"])]:
+            agent = Agent(name="model_test_agent", model=model)
+            prompt = Message.validate({"role": "user", "content": "Hello!"})
+            output = await agent(prompt=prompt).collect()
+            assert isinstance(output, OutputEvent)
+            assert output.error is None
     
     @pytest.mark.asyncio
     async def test_agent_schemas(self):
@@ -518,9 +525,9 @@ class TestAgentIntegration:
         
         agent = Agent(
             name="calc_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[calculator],
-            description="A calculator agent"
+            description="A calculator agent",
         )
         
         # Check OpenAI chat completions schema

@@ -8,8 +8,11 @@ from datetime import datetime
 
 import pytest
 from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
 from timbal.state import get_run_context
+from timbal.types.content import ToolUseContent
 from timbal.types.file import File
+from timbal.types.message import Message
 
 
 class TestRunContextTraceAccess:
@@ -25,7 +28,7 @@ class TestRunContextTraceAccess:
 
         agent = Agent(
             name="trace_test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[get_current_span_info]
         )
 
@@ -49,7 +52,7 @@ class TestRunContextTraceAccess:
 
         agent = Agent(
             name="input_trace_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[get_trace_input]
         )
 
@@ -78,7 +81,7 @@ class TestRunContextTraceAccess:
             """Call a nested agent to test parent trace access."""
             nested_agent = Agent(
                 name="nested_agent",
-                model="openai/gpt-4o-mini",
+                model=TestModel(),
                 tools=[get_parent_info]
             )
 
@@ -92,7 +95,7 @@ class TestRunContextTraceAccess:
 
         main_agent = Agent(
             name="main_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[nested_agent_call]
         )
 
@@ -122,7 +125,7 @@ class TestRunContextTraceAccess:
 
         agent = Agent(
             name="sibling_trace_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[step_one, step_two]
         )
 
@@ -163,7 +166,7 @@ class TestRunContextTraceAccess:
 
         agent = Agent(
             name="pre_hook_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             pre_hook=pre_hook,
             tools=[get_datetime]
         )
@@ -199,7 +202,7 @@ class TestRunContextTraceAccess:
 
         agent = Agent(
             name="usage_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[track_usage, check_usage]
         )
 
@@ -232,7 +235,7 @@ class TestRunContextTraceAccess:
 
         agent = Agent(
             name="error_test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[test_missing_parent, test_missing_step]
         )
 
@@ -270,7 +273,7 @@ class TestRunContextTraceAccess:
 
         agent = Agent(
             name="persistence_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[increment_counter, check_counter]
         )
 
@@ -308,7 +311,7 @@ class TestRunContextTraceAccess:
 
         agent = Agent(
             name="complex_pre_hook_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             pre_hook=complex_pre_hook,
             tools=[process_data]
         )
@@ -346,7 +349,7 @@ class TestRunContextWorkflowIntegration:
         # For now, just test basic functionality
         agent = Agent(
             name="workflow_trace_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[workflow_step]
         )
 
@@ -381,7 +384,7 @@ class TestRunContextEdgeCases:
 
         agent = Agent(
             name="concurrent_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[create_concurrent_tool("A"), create_concurrent_tool("B")]
         )
 
@@ -409,7 +412,7 @@ class TestRunContextEdgeCases:
             """Middle level that calls another agent."""
             level_three_agent = Agent(
                 name="level_three_agent",
-                model="openai/gpt-4o-mini",
+                model=TestModel(),
                 tools=[level_three]
             )
 
@@ -427,7 +430,7 @@ class TestRunContextEdgeCases:
 
         main_agent = Agent(
             name="deep_nesting_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[level_one]
         )
 
@@ -455,14 +458,23 @@ class TestRunContextEdgeCases:
 
             return f"Iteration {iteration_count} completed"
 
+        tool_call = Message(
+            role="assistant",
+            content=[ToolUseContent(id="c1", name="memory_test_tool", input={})],
+            stop_reason="tool_use",
+        )
+        # Each run loads history from the prior run (same agent name), adding 2 more
+        # assistant turns to the conversation. Extend responses to cover all 3 depths:
+        # run1: step=0→tool_call, step=1→"Done."
+        # run2: step=2→tool_call, step=3→"Done."
+        # run3: step=4→tool_call, step=5→"Done."
         agent = Agent(
             name="memory_test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[tool_call, "Done.", tool_call, "Done.", tool_call, "Done."]),
             tools=[memory_test_tool]
         )
 
         # Run multiple iterations
-        from timbal.types.message import Message
         for i in range(3):
             prompt = Message.validate({"role": "user", "content": f"Use memory_test_tool (run {i})"})
             result = agent(prompt=prompt)
@@ -497,7 +509,7 @@ class TestTraceLifecycle:
 
         agent = Agent(
             name="trace_creation_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[inspect_trace_creation]
         )
 
@@ -525,7 +537,7 @@ class TestTraceLifecycle:
 
         agent = Agent(
             name="input_capture_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[check_trace_input]
         )
 
@@ -570,11 +582,14 @@ class TestTraceLifecycle:
 
         agent = Agent(
             name="state_progression_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="stage_one", input={})], stop_reason="tool_use"),
+                Message(role="assistant", content=[ToolUseContent(id="c2", name="stage_two", input={})], stop_reason="tool_use"),
+                "Done.",
+            ]),
             tools=[stage_one, stage_two]
         )
 
-        from timbal.types.message import Message
         prompt = Message.validate({"role": "user", "content": "Use stage_one then stage_two"})
         result = agent(prompt=prompt)
         output = await result.collect()
@@ -608,7 +623,7 @@ class TestTraceLifecycle:
 
         agent = Agent(
             name="timing_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[slow_operation]
         )
 
@@ -650,7 +665,7 @@ class TestTraceLifecycle:
 
         agent = Agent(
             name="error_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[failing_tool]
         )
 
@@ -690,11 +705,12 @@ class TestTraceLifecycle:
 
         agent = Agent(
             name="persistence_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="store_call_id", input={})], stop_reason="tool_use"),
+                "Done.",
+            ]),
             tools=[store_call_id, check_stored_ids]
         )
-
-        from timbal.types.message import Message
 
         # First call
         prompt1 = Message.validate({"role": "user", "content": "Use store_call_id"})
@@ -738,7 +754,7 @@ class TestTraceLifecycle:
             """Create a nested agent call."""
             nested_agent = Agent(
                 name="nested_hierarchy_agent",
-                model="openai/gpt-4o-mini",
+                model=TestModel(),
                 tools=[get_trace_hierarchy]
             )
 
@@ -753,7 +769,7 @@ class TestTraceLifecycle:
 
         main_agent = Agent(
             name="main_hierarchy_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[nested_call]
         )
 
@@ -793,7 +809,7 @@ class TestPostHookIntegration:
 
         agent = Agent(
             name="post_hook_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             post_hook=post_hook,
             tools=[simple_calculator]
         )
@@ -833,7 +849,7 @@ class TestPostHookIntegration:
 
         agent = Agent(
             name="analytics_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             post_hook=analytics_post_hook,
             tools=[data_processor]
         )
@@ -870,7 +886,7 @@ class TestPostHookIntegration:
 
         agent = Agent(
             name="error_handling_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             post_hook=error_sensitive_post_hook,
             tools=[working_tool]
         )
@@ -917,7 +933,7 @@ class TestPostHookIntegration:
 
         agent = Agent(
             name="monitoring_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             post_hook=monitoring_post_hook,
             tools=[monitored_tool]
         )
@@ -983,7 +999,7 @@ class TestPostHookIntegration:
 
         agent = Agent(
             name="coordinated_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             pre_hook=setup_pre_hook,
             post_hook=cleanup_post_hook,
             tools=[transform_data]
@@ -1030,7 +1046,7 @@ class TestPostHookIntegration:
 
         agent = Agent(
             name="async_post_hook_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             post_hook=async_post_hook,
             tools=[quick_task]
         )
@@ -1263,7 +1279,13 @@ class TestComplexNestedExecution:
         secret_agent = Agent(
             name="secret_agent",
             description="This agent computes secrets using all available tool types",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="first_clue", input={"x": 2})], stop_reason="tool_use"),
+                Message(role="assistant", content=[ToolUseContent(id="c2", name="second_clue", input={"x": 2})], stop_reason="tool_use"),
+                Message(role="assistant", content=[ToolUseContent(id="c3", name="third_clue", input={"x": 2})], stop_reason="tool_use"),
+                Message(role="assistant", content=[ToolUseContent(id="c4", name="fourth_clue", input={"x": 2})], stop_reason="tool_use"),
+                "Analysis complete.",
+            ]),
             pre_hook=secret_agent_pre_hook,
             post_hook=secret_agent_post_hook,
             tools=[
@@ -1277,7 +1299,14 @@ class TestComplexNestedExecution:
         # Create the superagent with orchestration hooks
         superagent = Agent(
             name="super_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="secret_agent", input={"prompt": {"role": "user", "content": "Get the secret analysis for number 2"}})],
+                    stop_reason="tool_use",
+                ),
+                "All secrets gathered.",
+            ]),
             max_tokens=2048,
             pre_hook=superagent_pre_hook,
             post_hook=superagent_post_hook,
@@ -1418,12 +1447,14 @@ class TestTraceDumpedVersions:
 
         agent = Agent(
             name="input_modification_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(responses=[
+                Message(role="assistant", content=[ToolUseContent(id="c1", name="process_input", input={"data": "test_data"})], stop_reason="tool_use"),
+                "Done.",
+            ]),
             pre_hook=input_modifying_pre_hook,
             tools=[process_input]
         )
 
-        from timbal.types.message import Message
         original_prompt = "Use process_input with data='test_data'"
         prompt = Message.validate({"role": "user", "content": original_prompt})
         result = agent(prompt=prompt)
@@ -1453,7 +1484,7 @@ class TestTraceDumpedVersions:
 
         agent = Agent(
             name="output_modification_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             post_hook=output_modifying_post_hook,
         )
 
@@ -1493,7 +1524,7 @@ class TestTraceDumpedVersions:
 
         agent = Agent(
             name="stt_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             pre_hook=stt_pre_hook,
             tools=[process_text]
         )
@@ -1547,7 +1578,7 @@ class TestTraceDumpedVersions:
 
         agent = Agent(
             name="dump_behavior_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             pre_hook=modifying_pre_hook,
             tools=[test_tool]
         )
@@ -1593,7 +1624,7 @@ class TestTraceDumpedVersions:
             """Outer tool that calls an inner agent."""
             inner_agent = Agent(
                 name="inner_modification_agent",
-                model="openai/gpt-4o-mini",
+                model=TestModel(),
                 pre_hook=inner_pre_hook,
                 tools=[inner_tool]
             )
@@ -1628,7 +1659,7 @@ class TestTraceDumpedVersions:
 
         outer_agent = Agent(
             name="outer_modification_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             pre_hook=outer_pre_hook,
             tools=[outer_tool_wrapper]
         )

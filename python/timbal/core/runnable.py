@@ -14,6 +14,7 @@ from nanoid import generate
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     PrivateAttr,
     TypeAdapter,
     ValidationInfo,
@@ -35,6 +36,7 @@ from ..state import (
 )
 from ..state.context import RunContext
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
+from ..state.tracing.providers import TRACING_UNSET
 from ..state.tracing.span import Span
 from ..types.events import (
     BaseEvent,
@@ -125,6 +127,21 @@ class Runnable(ABC, BaseModel):
 
     background_mode: Literal["auto", "always", "never"] = "never"
     """Background execution mode"""
+
+    tracing_provider: Any = Field(
+        default=TRACING_UNSET,
+        description=(
+            "Tracing provider for runs started by this runnable. "
+            "Unset (default) → auto-detect from env/config. "
+            "None → disable tracing. "
+            "A TracingProvider subclass → use that provider."
+        ),
+        exclude=True,
+    )
+    """Controls which tracing provider is used when this runnable creates a new RunContext.
+    Only applies to the outermost runnable in a call chain — nested runnables inherit
+    the RunContext (and provider) created by the outermost caller.
+    """
 
     command: str | None = None
     """Optional command string that triggers automatic invocation of this runnable.
@@ -767,7 +784,7 @@ class Runnable(ABC, BaseModel):
         _call_id = get_call_id()
         run_context = get_run_context()
         if run_context is None:
-            run_context = RunContext()
+            run_context = RunContext(tracing_provider=self.tracing_provider)
             _parent_call_id = None
             _call_id = None
         elif "." not in self._path and run_context._trace:
@@ -778,9 +795,9 @@ class Runnable(ABC, BaseModel):
             # belongs to a concurrent sibling — create a fresh context.
             root = run_context.root_span()
             if root is not None and root.t1 is not None:
-                run_context = RunContext(parent_id=run_context.id)
+                run_context = RunContext(parent_id=run_context.id, tracing_provider=self.tracing_provider)
             else:
-                run_context = RunContext()
+                run_context = RunContext(tracing_provider=self.tracing_provider)
             _parent_call_id = None
             _call_id = None
         await run_context.get_session()

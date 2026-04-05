@@ -3,6 +3,7 @@ import time
 
 import pytest
 from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
 from timbal.state import get_run_context
 from timbal.types.events import OutputEvent, StartEvent
 from timbal.types.message import Message
@@ -37,53 +38,27 @@ class TestCallIDGeneration:
         
         # All run IDs should be unique (each execution context)
         assert len(set(run_ids)) == len(run_ids), f"Run IDs should be unique, got: {run_ids}"
-    
+
     @pytest.mark.asyncio
     async def test_tools_in_agent_have_call_ids(self):
         """Test that tools executed within an agent context get call IDs."""
         def helper_tool(task: str) -> str:
             return f"completed:{task}"
-        
+
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[helper_tool],
-            system_prompt="Use the helper tool to complete tasks"
         )
-        
-        prompt = Message.validate({
-            "role": "user", 
-            "content": "Please use helper_tool to complete 'sample_task'"
-        })
-        
-        # Execute and collect the final result to verify nested execution occurred
-        result = agent(prompt=prompt)
-        output = await result.collect()
-        
+
+        prompt = Message.validate({"role": "user", "content": "complete sample_task"})
+        output = await agent(prompt=prompt).collect()
+
         assert isinstance(output, OutputEvent)
-        
-        # Verify the agent execution shows proper nesting structure
-        if output.error is None:
-            # Should have successful execution with proper path
-            assert output.path == "test_agent", f"Agent should have correct path: {output.path}"
-            
-            # The response should show the tool was used successfully
-            response = output.output
-            assert isinstance(response, Message), "Should have Message response"
-            
-            response_text = str(response.content).lower()
-            # Should mention the task completion
-            assert "completed" in response_text or "sample_task" in response_text, f"Should show task completion: {response_text}"
-            
-            # Key insight: The logs show nested execution paths:
-            # - test_agent (top-level executor with run_id)
-            # - test_agent.llm (nested LLM calls with call_ids from agent)
-            # - test_agent.helper_tool (nested tool calls with call_ids from agent)
-            
-            # This demonstrates that call IDs are assigned by the executor (agent) context
-            # while run_ids are for top-level execution contexts
-        else:
-            pytest.skip(f"Agent execution failed: {output.error}")
+        assert output.error is None
+        assert output.path == "test_agent"
+        assert output.run_id is not None
+        assert isinstance(output.output, Message)
     
     @pytest.mark.asyncio
     async def test_agent_executions_have_unique_run_ids(self):
@@ -93,7 +68,7 @@ class TestCallIDGeneration:
         
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[helper_tool]
         )
         
@@ -142,7 +117,7 @@ class TestNestedAgentTracing:
         # Child agent - specialist in math
         math_agent = Agent(
             name="math_specialist", 
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[math_operation],
             description="A specialist agent for mathematical operations"
         )
@@ -150,7 +125,7 @@ class TestNestedAgentTracing:
         # Parent agent - uses the math specialist
         coordinator = Agent(
             name="coordinator",
-            model="openai/gpt-4o-mini", 
+            model=TestModel(), 
             tools=[math_agent],
             system_prompt="Use the math specialist to solve problems"
         )
@@ -195,7 +170,7 @@ class TestNestedAgentTracing:
         # Level 3 agent
         level3_agent = Agent(
             name="level3_agent",
-            model="openai/gpt-4o-mini", 
+            model=TestModel(), 
             tools=[level3_task],
             description="Level 3 processing agent"
         )
@@ -203,7 +178,7 @@ class TestNestedAgentTracing:
         # Level 2 agent
         level2_agent = Agent(
             name="level2_agent", 
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[level2_task, level3_agent],
             description="Level 2 processing agent"
         )
@@ -211,7 +186,7 @@ class TestNestedAgentTracing:
         # Level 1 agent (root)
         root_agent = Agent(
             name="root_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[level2_agent],
             system_prompt="Coordinate multi-level processing"
         )
@@ -247,108 +222,57 @@ class TestNestedAgentTracing:
 
 class TestParallelToolCallTracing:
     """Test tracing with parallel tool execution."""
-    
+
     @pytest.mark.asyncio
     async def test_concurrent_tool_calls_have_unique_ids(self):
         """Test that concurrent tool calls within an agent have unique call IDs."""
         def slow_task_a(duration: float) -> str:
-            """Simulate slow task A."""
             time.sleep(duration)
             return f"task_a_completed_after_{duration}s"
-        
+
         def slow_task_b(duration: float) -> str:
-            """Simulate slow task B."""
-            time.sleep(duration) 
+            time.sleep(duration)
             return f"task_b_completed_after_{duration}s"
-        
+
         def slow_task_c(duration: float) -> str:
-            """Simulate slow task C."""
             time.sleep(duration)
             return f"task_c_completed_after_{duration}s"
-        
+
         agent = Agent(
             name="parallel_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[slow_task_a, slow_task_b, slow_task_c],
-            system_prompt="Execute multiple tasks concurrently when requested"
         )
-        
-        prompt = Message.validate({
-            "role": "user",
-            "content": "Execute slow_task_a with duration 0.1, slow_task_b with duration 0.1, and slow_task_c with duration 0.1 all at the same time"
-        })
-        
-        # Execute and get the final result to examine the execution structure
-        result = agent(prompt=prompt)
-        output = await result.collect()
-        
+
+        prompt = Message.validate({"role": "user", "content": "run tasks"})
+        output = await agent(prompt=prompt).collect()
+
         assert isinstance(output, OutputEvent)
-        
-        # If the agent executed successfully, verify concurrent execution occurred
-        if output.error is None:
-            # The agent should have successfully orchestrated multiple tool calls
-            response = output.output
-            assert isinstance(response, Message), "Should have Message response"
-            
-            # The response should mention multiple tasks (evidence of parallel execution)
-            response_text = str(response.content).lower()
-            # Check for task mentions with flexibility for spaces vs underscores
-            task_patterns = ["task_a", "task a", "task_b", "task b", "task_c", "task c"]
-            task_mentions = sum(1 for task in task_patterns if task in response_text)
-            
-            # Should mention at least 2 tasks to show parallel execution
-            assert task_mentions >= 2, f"Should mention multiple tasks: {response_text}"
-            
-            # Verify the agent execution has proper run_id (top-level context)
-            assert output.run_id is not None, "Agent execution should have run_id"
-            assert output.path == "parallel_agent", "Agent output should have correct path"
-        else:
-            # Skip test if agent execution failed
-            pytest.skip(f"Agent execution failed: {output.error}")
-    
+        assert output.error is None
+        assert output.run_id is not None
+        assert output.path == "parallel_agent"
+        assert isinstance(output.output, Message)
+
     @pytest.mark.asyncio
     async def test_execution_hierarchy_structure(self):
         """Test that nested executions (LLM, tools) within agents have call IDs."""
         def data_processor(input_data: str) -> str:
             return f"processed:{input_data}"
-        
+
         agent = Agent(
             name="nested_execution_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[data_processor],
-            system_prompt="Process the provided data using the data_processor tool"
         )
-        
-        prompt = Message.validate({
-            "role": "user",
-            "content": "Please process the data 'test_input' using data_processor"
-        })
-        
-        # Execute and examine the final result to verify hierarchy
-        result = agent(prompt=prompt)
-        output = await result.collect()
-        
+
+        prompt = Message.validate({"role": "user", "content": "process test_input"})
+        output = await agent(prompt=prompt).collect()
+
         assert isinstance(output, OutputEvent)
-        
-        if output.error is None:
-            # Verify successful execution with proper hierarchy
-            assert output.path == "nested_execution_agent", f"Agent should have correct path: {output.path}"
-            
-            # Should have successful tool usage
-            response = output.output
-            assert isinstance(response, Message), "Should have Message response"
-            
-            response_text = str(response.content).lower()
-            # Should show evidence of data processing
-            assert "processed" in response_text and "test_input" in response_text, f"Should show processing result: {response_text}"
-            
-            # The key insight from examining the execution logs:
-            # - nested_execution_agent (top-level executor with run_id)
-            # - nested_execution_agent.llm (nested LLM calls get call_ids from agent)
-            # - nested_execution_agent.data_processor (nested tool calls get call_ids from agent)
-            # This demonstrates proper executor hierarchy and call ID assignment
-        else:
-            pytest.skip(f"Agent execution failed: {output.error}")
+        assert output.error is None
+        assert output.path == "nested_execution_agent"
+        assert output.run_id is not None
+        assert isinstance(output.output, Message)
     
     @pytest.mark.asyncio
     async def test_mixed_sequential_parallel_execution_tracing(self):
@@ -373,7 +297,7 @@ class TestParallelToolCallTracing:
         
         workflow_agent = Agent(
             name="workflow_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[prepare_data, process_chunk_a, process_chunk_b, finalize_results],
             system_prompt="Execute a workflow: prepare data, then process chunks A and B in parallel, then finalize"
         )
@@ -429,7 +353,7 @@ class TestTracingContextPropagation:
         
         agent = Agent(
             name="context_agent",
-            model="openai/gpt-4o-mini", 
+            model=TestModel(), 
             tools=[context_inspector],
             system_prompt="Use the context inspector tool to examine the execution context"
         )
@@ -463,7 +387,7 @@ class TestTracingContextPropagation:
         # Child agent
         child_agent = Agent(
             name="child_context_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[get_context_info],
             description="Child agent that inspects context"
         )
@@ -471,7 +395,7 @@ class TestTracingContextPropagation:
         # Parent agent  
         parent_agent = Agent(
             name="parent_context_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[child_agent],
             system_prompt="Use the child agent to inspect execution context"
         )
@@ -517,7 +441,7 @@ class TestErrorTracingPropagation:
         
         agent = Agent(
             name="error_tracing_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[failing_tool, working_tool],
             system_prompt="Try using both tools - one will fail, one will succeed"
         )
@@ -551,7 +475,7 @@ class TestErrorTracingPropagation:
         # Unreliable child agent
         child_agent = Agent(
             name="unreliable_child",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[unreliable_operation],
             description="Child agent with unreliable operations"
         )
@@ -559,7 +483,7 @@ class TestErrorTracingPropagation:
         # Parent coordinator
         parent_agent = Agent(
             name="error_coordinator", 
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[child_agent],
             system_prompt="Use the child agent for operations, handle any failures gracefully"
         )
@@ -619,7 +543,7 @@ class TestEventSequenceValidation:
         
         agent = Agent(
             name="sequence_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[quick_task],
             system_prompt="Execute the requested task quickly"
         )

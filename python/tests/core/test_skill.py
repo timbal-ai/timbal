@@ -1,5 +1,6 @@
 import pytest
 from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
 from timbal.core.skill import ReadSkill, Skill
 from timbal.state import get_or_create_run_context
 
@@ -223,7 +224,7 @@ class TestAgentWithSkills:
     @pytest.mark.asyncio
     async def test_agent_with_skills_path(self, skills_dir):
         """Test creating agent with skills_path."""
-        agent = Agent(name="car_agent", model="openai/gpt-4o-mini", skills_path=skills_dir)
+        agent = Agent(name="car_agent", model=TestModel(), skills_path=skills_dir)
 
         # Should have loaded 2 skills (cars and bikes)
         skills = [t for t in agent.tools if isinstance(t, Skill)]
@@ -241,7 +242,7 @@ class TestAgentWithSkills:
 
     def test_agent_with_skills_path_string(self, skills_dir):
         """Test that skills_path accepts string."""
-        agent = Agent(name="car_agent", model="openai/gpt-4o-mini", skills_path=str(skills_dir))
+        agent = Agent(name="car_agent", model=TestModel(), skills_path=str(skills_dir))
 
         skills = [t for t in agent.tools if isinstance(t, Skill)]
         assert len(skills) == 2
@@ -249,21 +250,21 @@ class TestAgentWithSkills:
     def test_agent_with_invalid_skills_path(self, tmp_path):
         """Test that invalid skills_path raises error."""
         with pytest.raises(ValueError, match="Skills directory .* does not exist"):
-            Agent(name="agent", model="openai/gpt-4o-mini", skills_path=tmp_path / "nonexistent")
+            Agent(name="agent", model=TestModel(), skills_path=tmp_path / "nonexistent")
 
     def test_agent_with_duplicate_skill_names(self, skills_dir):
         """Test that duplicate skill names raise error."""
         skill = Skill(path=skills_dir / "cars")
 
         with pytest.raises(ValueError, match="Skill 'cars' already exists"):
-            Agent(name="agent", model="openai/gpt-4o-mini", skills_path=skills_dir, tools=[skill])
+            Agent(name="agent", model=TestModel(), skills_path=skills_dir, tools=[skill])
 
     @pytest.mark.asyncio
     async def test_agent_skills_in_system_prompt(self, skills_dir):
         """Test that skills are documented in system prompt."""
         agent = Agent(
             name="agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             skills_path=skills_dir,
             system_prompt="You are a helpful assistant.",
         )
@@ -287,7 +288,7 @@ class TestAgentWithSkills:
 
         agent = Agent(
             name="agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             skills_path=skills_dir,
             system_prompt=get_system_prompt,
         )
@@ -311,7 +312,7 @@ class TestAgentWithSkills:
 
         agent = Agent(
             name="agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             skills_path=skills_dir,
             system_prompt=get_system_prompt,
         )
@@ -327,7 +328,7 @@ class TestAgentWithSkills:
         """Test that skills modifier becomes the system prompt when none is provided."""
         agent = Agent(
             name="agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             skills_path=skills_dir,
         )
 
@@ -341,6 +342,7 @@ class TestAgentWithSkills:
 class TestReadSkillTool:
     """Test the ReadSkill tool functionality."""
 
+    @pytest.mark.integration
     @pytest.mark.asyncio
     async def test_read_skill_basic(self, skills_dir):
         """Test reading a skill's main documentation via agent execution."""
@@ -357,7 +359,7 @@ class TestReadSkillTool:
             return skill.content
 
         agent = Agent(
-            name="agent", model="openai/gpt-4o-mini", skills_path=skills_dir, tools=[Tool(handler=check_skill_content)]
+            name="agent", model=TestModel(), skills_path=skills_dir, tools=[Tool(handler=check_skill_content)]
         )
 
         # Execute through agent to have proper context
@@ -416,6 +418,7 @@ class TestSkillResolve:
         # which requires proper RunContext - tested in integration
 
 
+@pytest.mark.integration
 class TestSkillIntegration:
     """Integration tests for skill functionality with agents."""
 
@@ -436,7 +439,7 @@ class TestSkillIntegration:
 
         agent = Agent(
             name="car_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             skills_path=skills_dir,
             tools=[Tool(handler=list_tools)],
             max_iter=10,
@@ -495,7 +498,7 @@ class TestSkillIntegration:
 
         agent = Agent(
             name="agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             skills_path=skills_dir,
             tools=[Tool(handler=mark_skill_in_context), Tool(handler=check_resolved_tools)],
             max_iter=5,
@@ -512,7 +515,7 @@ class TestSkillIntegration:
     @pytest.mark.asyncio
     async def test_multiple_skills_tools_isolation(self, skills_dir):
         """Test that only read skills have their tools available."""
-        agent = Agent(name="agent", model="openai/gpt-4o-mini", skills_path=skills_dir)
+        agent = Agent(name="agent", model=TestModel(), skills_path=skills_dir)
 
         # Get cars and bikes skills
         cars_skill = next(t for t in agent.tools if isinstance(t, Skill) and t.name == "cars")
@@ -550,7 +553,7 @@ class TestSkillIntegration:
 
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             skills_path=skills_dir,
             tools=[Tool(handler=track_available_tools)],
             max_iter=10,
@@ -578,10 +581,11 @@ class TestSkillIntegration:
             # The skill was read, so in subsequent iterations search_cars should be available
             pass  # Full verification would require checking resolved tools per iteration
 
+    @pytest.mark.integration
     @pytest.mark.asyncio
     async def test_skill_persistence_across_turns(self, skills_dir):
         """Test that skills remain in context across multiple agent turns."""
-        agent = Agent(name="persistent_agent", model="openai/gpt-4o-mini", skills_path=skills_dir, max_iter=3)
+        agent = Agent(name="persistent_agent", model=TestModel(), skills_path=skills_dir, max_iter=3)
 
         # First turn: read the skill
         events1 = []

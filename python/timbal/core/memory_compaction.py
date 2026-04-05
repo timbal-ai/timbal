@@ -7,6 +7,7 @@ exceeding context limits. Strategies can be composed (applied in order).
 import json
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import structlog
 
@@ -156,7 +157,7 @@ Use this format:
 # ---------------------------------------------------------------------------
 
 
-async def _call_summarizer(model: str, prompt: str, max_summary_tokens: int) -> str | None:
+async def _call_summarizer(model: Any, prompt: str, max_summary_tokens: int) -> str | None:
     """Call _llm_router directly for summarization. No Tool/Agent overhead.
 
     Returns the summary text, or None if the LLM call produced no usable output.
@@ -361,7 +362,7 @@ def keep_last_n_turns(n: int) -> Callable[[list[Message]], list[Message]]:
 
 def summarize(
     threshold: int,
-    model: str | None = None,
+    model: Any | None = None,
     keep_last_n: int = 4,
     max_summary_tokens: int = 500,
 ) -> Callable[[list[Message]], Awaitable[list[Message]]]:

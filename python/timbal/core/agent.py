@@ -117,8 +117,8 @@ class AgentParams(BaseModel):
 class Agent(Runnable):
     """Orchestrates LLM interactions with autonomous tool calling."""
 
-    model: Model | str
-    """LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5')."""
+    model: SkipValidation[Model | str]
+    """LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5') or a TestModel for offline testing."""
     system_prompt: str | Callable[[], str] | Callable[[], Coroutine[Any, Any, str]] | None = None
     """System prompt. Can be a string, sync callable, or async callable returning a string."""
     tools: list[SkipValidation[RunnableLike]] = []
@@ -288,16 +288,20 @@ class Agent(Runnable):
                     else:
                         self.model_params.pop(key)
 
-        model_provider, model_name = self.model.split("/", 1)
-        if model_provider == "anthropic":
-            if not self.max_tokens:
-                raise ValueError("'max_tokens' is required for claude models.")
-            if self.output_model is not None:
-                logger.warning(
-                    "Anthropic's structured output (output_model) is currently in beta. "
-                    "The API may change in future releases. "
-                    "See: https://docs.anthropic.com/en/docs/build-with-claude/structured-output"
-                )
+        if getattr(self.model, "_is_test_model", False):
+            model_provider = "test"
+            model_name = "model"
+        else:
+            model_provider, model_name = self.model.split("/", 1)
+            if model_provider == "anthropic":
+                if not self.max_tokens:
+                    raise ValueError("'max_tokens' is required for claude models.")
+                if self.output_model is not None:
+                    logger.warning(
+                        "Anthropic's structured output (output_model) is currently in beta. "
+                        "The API may change in future releases. "
+                        "See: https://docs.anthropic.com/en/docs/build-with-claude/structured-output"
+                    )
 
         if self.tools and self.output_model is not None:
             logger.warning(

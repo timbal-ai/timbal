@@ -412,9 +412,10 @@ class TestPerformance:
         assert output1 == output2
 
 
+@pytest.mark.integration
 class TestLLMIntegration:
     """Test LLM integration through llm_router."""
-    
+
     @pytest.mark.asyncio
     async def test_llm_router_tool(self):
         """Test that llm_router works as a tool."""

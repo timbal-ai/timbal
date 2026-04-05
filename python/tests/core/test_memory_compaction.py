@@ -1,7 +1,5 @@
 """Tests for memory compaction strategies."""
 
-import os
-
 import pytest
 from timbal.core.memory_compaction import (
     _SUMMARY_MARKER,
@@ -11,6 +9,7 @@ from timbal.core.memory_compaction import (
     keep_last_n_turns,
     summarize,
 )
+from timbal.core.test_model import TestModel
 from timbal.types.content import TextContent, ToolResultContent, ToolUseContent
 from timbal.types.message import Message
 
@@ -490,19 +489,10 @@ class TestSummarizeOldMessages:
         assert result == memory
 
     @pytest.mark.asyncio
-    async def test_above_threshold_summarizes(self, monkeypatch) -> None:
+    async def test_above_threshold_summarizes(self) -> None:
         """When above threshold, older messages are summarized."""
-
-        async def fake_call_summarizer(_model, _prompt, _max_summary_tokens):
-            return "The user discussed topics 0 through 17."
-
-        monkeypatch.setattr(
-            "timbal.core.memory_compaction._call_summarizer",
-            fake_call_summarizer,
-        )
-
         memory = [_msg_user(f"Message {i}") for i in range(20)]
-        compactor = summarize(threshold=5, keep_last_n=2, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=5, keep_last_n=2, model=TestModel(responses=["The user discussed topics 0 through 17."]))
         result = await compactor(memory)
 
         assert len(result) < 20
@@ -515,18 +505,13 @@ class TestSummarizeOldMessages:
         assert result[-2].content[0].text == "Message 18"
 
     @pytest.mark.asyncio
-    async def test_incremental_uses_previous_summary(self, monkeypatch) -> None:
+    async def test_incremental_uses_previous_summary(self) -> None:
         """When a previous summary exists, the prompt uses incremental format."""
         captured_prompts = []
 
-        async def fake_call_summarizer(_model, prompt, _max_summary_tokens):
-            captured_prompts.append(prompt)
+        def capture_handler(messages):
+            captured_prompts.append(messages[-1].collect_text())
             return "Updated summary with new info."
-
-        monkeypatch.setattr(
-            "timbal.core.memory_compaction._call_summarizer",
-            fake_call_summarizer,
-        )
 
         # First message is a previous summary
         summary_msg = Message.validate(
@@ -536,7 +521,7 @@ class TestSummarizeOldMessages:
             summary_msg,
             *[_msg_user(f"New message {i}") for i in range(10)],
         ]
-        compactor = summarize(threshold=5, keep_last_n=2, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=5, keep_last_n=2, model=TestModel(handler=capture_handler))
         result = await compactor(memory)
 
         # The prompt should contain the previous summary
@@ -548,23 +533,19 @@ class TestSummarizeOldMessages:
         assert "Updated summary" in result[0].content[0].text
 
     @pytest.mark.asyncio
-    async def test_system_messages_preserved(self, monkeypatch) -> None:
+    async def test_system_messages_preserved(self) -> None:
         """System messages are never summarized and always preserved."""
 
-        async def fake_call_summarizer(_model, prompt, _max_summary_tokens):
-            assert "system instruction" not in prompt.lower()
+        def assert_handler(messages):
+            prompt_text = messages[-1].collect_text()
+            assert "system instruction" not in prompt_text.lower()
             return "Summary of user conversation."
-
-        monkeypatch.setattr(
-            "timbal.core.memory_compaction._call_summarizer",
-            fake_call_summarizer,
-        )
 
         memory = [
             _msg_system("You are a helpful assistant"),
             *[_msg_user(f"Message {i}") for i in range(10)],
         ]
-        compactor = summarize(threshold=5, keep_last_n=2, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=5, keep_last_n=2, model=TestModel(handler=assert_handler))
         result = await compactor(memory)
 
         # System message should be first, unchanged
@@ -582,111 +563,64 @@ class TestSummarizeOldMessages:
         assert result == memory
 
     @pytest.mark.asyncio
-    async def test_agent_model_injection(self, monkeypatch) -> None:
+    async def test_agent_model_injection(self) -> None:
         """Agent can inject its model via _compact._state['agent_model']."""
-        called_with_model = []
-
-        async def fake_call_summarizer(model, _prompt, _max_summary_tokens):
-            called_with_model.append(model)
-            return "Summary."
-
-        monkeypatch.setattr(
-            "timbal.core.memory_compaction._call_summarizer",
-            fake_call_summarizer,
-        )
-
+        test_model = TestModel(responses=["Summary."])
         memory = [_msg_user(f"msg{i}") for i in range(10)]
         compactor = summarize(threshold=2, model=None, keep_last_n=2)
-        compactor._state["agent_model"] = "openai/gpt-4.1-nano"
+        compactor._state["agent_model"] = test_model
         await compactor(memory)
 
-        assert called_with_model == ["openai/gpt-4.1-nano"]
+        assert test_model.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_keep_last_n_zero_summarizes_all(self, monkeypatch) -> None:
+    async def test_keep_last_n_zero_summarizes_all(self) -> None:
         """keep_last_n=0 means no messages are preserved unsummarized."""
-        captured = []
-
-        async def fake_call_summarizer(_model, prompt, _max_summary_tokens):
-            captured.append(prompt)
-            return "Full summary."
-
-        monkeypatch.setattr(
-            "timbal.core.memory_compaction._call_summarizer",
-            fake_call_summarizer,
-        )
-
+        test_model = TestModel(responses=["Full summary."])
         memory = [_msg_user(f"msg{i}") for i in range(6)]
-        compactor = summarize(threshold=3, keep_last_n=0, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=3, keep_last_n=0, model=test_model)
         result = await compactor(memory)
 
-        assert len(captured) == 1
+        assert test_model.call_count == 1
         # Only summary message — no unsummarized messages kept
         assert len(result) == 1
         assert result[0].content[0].text.startswith(_SUMMARY_MARKER)
 
     @pytest.mark.asyncio
-    async def test_nothing_to_summarize_returns_unchanged(self, monkeypatch) -> None:
+    async def test_nothing_to_summarize_returns_unchanged(self) -> None:
         """When keep_last_n covers all non-summary messages, return unchanged."""
-        fake_called = False
-
-        async def fake_call_summarizer(_model, _prompt, _max_summary_tokens):
-            nonlocal fake_called
-            fake_called = True
-            return "Should not be called."
-
-        monkeypatch.setattr(
-            "timbal.core.memory_compaction._call_summarizer",
-            fake_call_summarizer,
-        )
-
+        test_model = TestModel(responses=["Should not be called."])
         # 4 messages, threshold=3 (triggers), but keep_last_n=4 covers everything
         memory = [_msg_user(f"msg{i}") for i in range(4)]
-        compactor = summarize(threshold=3, keep_last_n=4, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=3, keep_last_n=4, model=test_model)
         result = await compactor(memory)
 
-        assert not fake_called
+        assert test_model.call_count == 0
         assert result == memory
 
     @pytest.mark.asyncio
-    async def test_previous_summary_nothing_new_returns_unchanged(self, monkeypatch) -> None:
+    async def test_previous_summary_nothing_new_returns_unchanged(self) -> None:
         """Existing summary + keep_last_n covers all remaining messages — no new call."""
-        fake_called = False
-
-        async def fake_call_summarizer(_model, _prompt, _max_summary_tokens):
-            nonlocal fake_called
-            fake_called = True
-            return "Should not be called."
-
-        monkeypatch.setattr(
-            "timbal.core.memory_compaction._call_summarizer",
-            fake_call_summarizer,
-        )
-
+        test_model = TestModel(responses=["Should not be called."])
         summary_msg = Message.validate(
             {"role": "user", "content": f"{_SUMMARY_MARKER}\nExisting summary."}
         )
         # summary + 2 new messages; keep_last_n=2 covers exactly those 2
         memory = [summary_msg, _msg_user("a"), _msg_user("b")]
-        compactor = summarize(threshold=2, keep_last_n=2, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=2, keep_last_n=2, model=test_model)
         result = await compactor(memory)
 
-        assert not fake_called
+        assert test_model.call_count == 0
         assert result == memory
 
     @pytest.mark.asyncio
-    async def test_tool_calls_formatted_in_prompt(self, monkeypatch) -> None:
+    async def test_tool_calls_formatted_in_prompt(self) -> None:
         """Tool call structure is preserved in the summarization prompt."""
         captured_prompts = []
 
-        async def fake_call_summarizer(_model, prompt, _max_summary_tokens):
-            captured_prompts.append(prompt)
+        def capture_handler(messages):
+            captured_prompts.append(messages[-1].collect_text())
             return "User called get_weather, got temperature 72."
-
-        monkeypatch.setattr(
-            "timbal.core.memory_compaction._call_summarizer",
-            fake_call_summarizer,
-        )
 
         memory = [
             _msg_user("What's the weather?"),
@@ -695,7 +629,7 @@ class TestSummarizeOldMessages:
             _msg_assistant_text("It's 72 degrees."),
             *[_msg_user(f"Message {i}") for i in range(10)],
         ]
-        compactor = summarize(threshold=5, keep_last_n=2, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=5, keep_last_n=2, model=TestModel(handler=capture_handler))
         await compactor(memory)
 
         assert len(captured_prompts) == 1
@@ -708,16 +642,10 @@ class TestSummarizeOldMessages:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_no_ack_when_to_keep_empty(self, monkeypatch) -> None:
+    async def test_no_ack_when_to_keep_empty(self) -> None:
         """keep_last_n=0: to_keep is empty, no alternation concern, no ack inserted."""
-
-        async def fake_call_summarizer(_model, _prompt, _max_summary_tokens):
-            return "Summary."
-
-        monkeypatch.setattr("timbal.core.memory_compaction._call_summarizer", fake_call_summarizer)
-
         memory = [_msg_user(f"msg{i}") for i in range(6)]
-        compactor = summarize(threshold=3, keep_last_n=0, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=3, keep_last_n=0, model=TestModel(responses=["Summary."]))
         result = await compactor(memory)
 
         assert len(result) == 1
@@ -725,21 +653,15 @@ class TestSummarizeOldMessages:
         assert result[0].content[0].text.startswith(_SUMMARY_MARKER)
 
     @pytest.mark.asyncio
-    async def test_no_ack_when_to_keep_starts_with_assistant(self, monkeypatch) -> None:
+    async def test_no_ack_when_to_keep_starts_with_assistant(self) -> None:
         """to_keep[0] is assistant: summary(user) → assistant is valid alternation, no ack inserted."""
-
-        async def fake_call_summarizer(_model, _prompt, _max_summary_tokens):
-            return "Summary."
-
-        monkeypatch.setattr("timbal.core.memory_compaction._call_summarizer", fake_call_summarizer)
-
         # 6 alternating messages ending with assistant; keep_last_n=1 → to_keep=[a3]
         memory = [
             _msg_user("u1"), _msg_assistant_text("a1"),
             _msg_user("u2"), _msg_assistant_text("a2"),
             _msg_user("u3"), _msg_assistant_text("a3"),
         ]
-        compactor = summarize(threshold=3, keep_last_n=1, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=3, keep_last_n=1, model=TestModel(responses=["Summary."]))
         result = await compactor(memory)
 
         assert result[0].role == "user"       # summary
@@ -749,21 +671,15 @@ class TestSummarizeOldMessages:
         assert roles == ["user", "assistant"]
 
     @pytest.mark.asyncio
-    async def test_ack_inserted_when_to_keep_starts_with_user(self, monkeypatch) -> None:
+    async def test_ack_inserted_when_to_keep_starts_with_user(self) -> None:
         """to_keep[0] is user: summary(user) + user would be consecutive — ack inserted."""
-
-        async def fake_call_summarizer(_model, _prompt, _max_summary_tokens):
-            return "Summary."
-
-        monkeypatch.setattr("timbal.core.memory_compaction._call_summarizer", fake_call_summarizer)
-
         # 5 alternating messages ending with user; keep_last_n=1 → to_keep=[u3(current)]
         memory = [
             _msg_user("u1"), _msg_assistant_text("a1"),
             _msg_user("u2"), _msg_assistant_text("a2"),
             _msg_user("u3"),
         ]
-        compactor = summarize(threshold=3, keep_last_n=1, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=3, keep_last_n=1, model=TestModel(responses=["Summary."]))
         result = await compactor(memory)
 
         assert result[0].role == "user"       # summary
@@ -774,14 +690,8 @@ class TestSummarizeOldMessages:
             assert prev.role != cur.role, f"Consecutive {prev.role!r} messages"
 
     @pytest.mark.asyncio
-    async def test_ack_inserted_odd_keep_last_n(self, monkeypatch) -> None:
+    async def test_ack_inserted_odd_keep_last_n(self) -> None:
         """Any odd keep_last_n over a clean alternating history ending with user triggers the ack."""
-
-        async def fake_call_summarizer(_model, _prompt, _max_summary_tokens):
-            return "Summary."
-
-        monkeypatch.setattr("timbal.core.memory_compaction._call_summarizer", fake_call_summarizer)
-
         # 9 messages: u1 a1 u2 a2 u3 a3 u4 a4 u5
         memory = []
         for i in range(1, 6):
@@ -790,7 +700,7 @@ class TestSummarizeOldMessages:
                 memory.append(_msg_assistant_text(f"a{i}"))
 
         for keep_last_n in (1, 3):
-            compactor = summarize(threshold=3, keep_last_n=keep_last_n, model="openai/gpt-4.1-nano")
+            compactor = summarize(threshold=3, keep_last_n=keep_last_n, model=TestModel(responses=["Summary."]))
             result = await compactor(memory)
             # to_keep[0] is user for odd keep_last_n on history ending with user
             assert result[1].role == "assistant", f"Expected ack for keep_last_n={keep_last_n}"
@@ -798,15 +708,9 @@ class TestSummarizeOldMessages:
                 assert prev.role != cur.role, f"Consecutive {prev.role!r} for keep_last_n={keep_last_n}"
 
     @pytest.mark.asyncio
-    async def test_no_ack_even_keep_last_n(self, monkeypatch) -> None:
+    async def test_no_ack_even_keep_last_n(self) -> None:
         """Even keep_last_n on a clean alternating history ending with user: to_keep[0] is
         assistant, so no ack is needed."""
-
-        async def fake_call_summarizer(_model, _prompt, _max_summary_tokens):
-            return "Summary."
-
-        monkeypatch.setattr("timbal.core.memory_compaction._call_summarizer", fake_call_summarizer)
-
         # 9 messages: u1 a1 u2 a2 u3 a3 u4 a4 u5
         memory = []
         for i in range(1, 6):
@@ -815,7 +719,7 @@ class TestSummarizeOldMessages:
                 memory.append(_msg_assistant_text(f"a{i}"))
 
         for keep_last_n in (2, 4):
-            compactor = summarize(threshold=3, keep_last_n=keep_last_n, model="openai/gpt-4.1-nano")
+            compactor = summarize(threshold=3, keep_last_n=keep_last_n, model=TestModel(responses=["Summary."]))
             result = await compactor(memory)
             # to_keep[0] is assistant for even keep_last_n — no ack
             assert result[1].role == "assistant", f"Expected no ack gap for keep_last_n={keep_last_n}"
@@ -825,16 +729,10 @@ class TestSummarizeOldMessages:
                 assert prev.role != cur.role, f"Consecutive {prev.role!r} for keep_last_n={keep_last_n}"
 
     @pytest.mark.asyncio
-    async def test_orphaned_tool_result_at_boundary_cleaned_up(self, monkeypatch) -> None:
+    async def test_orphaned_tool_result_at_boundary_cleaned_up(self) -> None:
         """When the keep_last_n cut falls mid-tool-call-sequence, the orphaned tool result
         is removed by _remove_orphaned_tool_parts before the ack check.
         The summary is followed by an assistant message (not an orphaned tool result)."""
-
-        async def fake_call_summarizer(_model, _prompt, _max_summary_tokens):
-            return "Summary."
-
-        monkeypatch.setattr("timbal.core.memory_compaction._call_summarizer", fake_call_summarizer)
-
         # Memory: u1, a1(tool_use t1), tool1_result, a2, u2(current)
         # keep_last_n=3 → raw to_keep = [tool1_result, a2, u2]
         # tool1_result is orphaned (tool_use t1 is in to_summarize)
@@ -846,7 +744,7 @@ class TestSummarizeOldMessages:
             _msg_assistant_text("a2"),
             _msg_user("u2"),
         ]
-        compactor = summarize(threshold=3, keep_last_n=3, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=3, keep_last_n=3, model=TestModel(responses=["Summary."]))
         result = await compactor(memory)
 
         # After orphan cleanup to_keep = [a2, u2] → starts with assistant → no ack
@@ -860,20 +758,18 @@ class TestSummarizeOldMessages:
             assert prev.role != cur.role
 
     @pytest.mark.asyncio
-    async def test_ack_incremental_ack_folded_into_next_summary(self, monkeypatch) -> None:
+    async def test_ack_incremental_ack_folded_into_next_summary(self) -> None:
         """The ack inserted in one run appears in to_summarize on the next run.
         It's formatted as [assistant]: Understood. — minimal noise, does not break detection."""
         captured_prompts = []
 
-        async def fake_call_summarizer(_model, prompt, _max_summary_tokens):
-            captured_prompts.append(prompt)
+        def capture_handler(messages):
+            captured_prompts.append(messages[-1].collect_text())
             return "Updated summary."
-
-        monkeypatch.setattr("timbal.core.memory_compaction._call_summarizer", fake_call_summarizer)
 
         # Run 1: produces [summary, ack, u_last] (keep_last_n=1, memory ends with user)
         memory = [_msg_user(f"msg{i}") for i in range(6)]
-        compactor = summarize(threshold=3, keep_last_n=1, model="openai/gpt-4.1-nano")
+        compactor = summarize(threshold=3, keep_last_n=1, model=TestModel(handler=capture_handler))
         result_run1 = await compactor(memory)
 
         # result_run1 = [summary(user), ack(assistant), msg5(user)]
@@ -1096,12 +992,12 @@ class TestCompactionMetadata:
 
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             memory_compaction=keep_last_n_turns(1),
             memory_compaction_ratio=0.75,
         )
 
-        ctx1 = RunContext()
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
         root1 = ctx1.root_span()
@@ -1109,7 +1005,7 @@ class TestCompactionMetadata:
         root1.usage["gpt-4o-mini:output_tokens"] = 10_000
         await ctx1._save_trace()
 
-        ctx2 = RunContext(parent_id=ctx1.id)
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx2)
         await agent(prompt="Turn 2").collect()
 
@@ -1136,12 +1032,12 @@ class TestCompactionMetadata:
 
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             memory_compaction=keep_last_n_turns(1),
             memory_compaction_ratio=0.75,
         )
 
-        ctx1 = RunContext()
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
         root1 = ctx1.root_span()
@@ -1149,7 +1045,7 @@ class TestCompactionMetadata:
         root1.usage["gpt-4o-mini:output_tokens"] = 5_000
         await ctx1._save_trace()
 
-        ctx2 = RunContext(parent_id=ctx1.id)
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx2)
         await agent(prompt="Turn 2").collect()
 
@@ -1171,7 +1067,7 @@ class TestCompactionMetadata:
 
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             memory_compaction=[
                 compact_tool_results(),
                 keep_last_n_turns(1),
@@ -1179,7 +1075,7 @@ class TestCompactionMetadata:
             memory_compaction_ratio=0.75,
         )
 
-        ctx1 = RunContext()
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
         root1 = ctx1.root_span()
@@ -1187,7 +1083,7 @@ class TestCompactionMetadata:
         root1.usage["gpt-4o-mini:output_tokens"] = 10_000
         await ctx1._save_trace()
 
-        ctx2 = RunContext(parent_id=ctx1.id)
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx2)
         await agent(prompt="Turn 2").collect()
 
@@ -1216,17 +1112,17 @@ class TestCompactionMetadata:
 
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             memory_compaction=keep_last_n_turns(1),
             memory_compaction_ratio=0.0,
         )
 
-        ctx1 = RunContext()
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
         await ctx1._save_trace()
 
-        ctx2 = RunContext(parent_id=ctx1.id)
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx2)
         await agent(prompt="Turn 2").collect()
 
@@ -1262,13 +1158,13 @@ class TestContextWindowTriggering:
 
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             memory_compaction=keep_last_n_turns(1),
             memory_compaction_ratio=0.75,
         )
 
         # --- Run 1: build up memory with high usage ---
-        ctx1 = RunContext()
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         result1 = agent(prompt="Turn 1 user message")
         output1 = await result1.collect()
@@ -1281,7 +1177,7 @@ class TestContextWindowTriggering:
         await ctx1._save_trace()
 
         # --- Run 2: should trigger compaction ---
-        ctx2 = RunContext(parent_id=ctx1.id)
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx2)
         result2 = agent(prompt="Turn 2 user message")
         output2 = await result2.collect()
@@ -1323,13 +1219,13 @@ class TestContextWindowTriggering:
 
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             memory_compaction=tracking_compactor(1),
             memory_compaction_ratio=0.75,
         )
 
         # --- Run 1: low usage ---
-        ctx1 = RunContext()
+        ctx1 = RunContext(tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx1)
         await agent(prompt="Hello").collect()
 
@@ -1340,7 +1236,7 @@ class TestContextWindowTriggering:
 
         # --- Run 2: should skip compaction (10% utilization < 75% threshold) ---
         compaction_called = False
-        ctx2 = RunContext(parent_id=ctx1.id)
+        ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
         set_run_context(ctx2)
         await agent(prompt="World").collect()
 
@@ -1354,10 +1250,7 @@ class TestContextWindowTriggering:
 # ---------------------------------------------------------------------------
 
 
-HAS_OPENAI_KEY = bool(os.environ.get("OPENAI_API_KEY"))
-
-
-@pytest.mark.skipif(not HAS_OPENAI_KEY, reason="OPENAI_API_KEY not set")
+@pytest.mark.integration
 class TestCompactionIntegrationFakeContextWindow:
     """Integration test with monkeypatched context window to force compaction."""
 
@@ -1410,7 +1303,7 @@ class TestCompactionIntegrationFakeContextWindow:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not HAS_OPENAI_KEY, reason="OPENAI_API_KEY not set")
+@pytest.mark.integration
 class TestCompactionIntegrationLowRatio:
     """Integration test with a very low ratio to always trigger compaction including summarization."""
 
@@ -1476,10 +1369,7 @@ class TestCompactionIntegrationLowRatio:
 # Integration test: Anthropic — alternation fix
 # ---------------------------------------------------------------------------
 
-HAS_ANTHROPIC_KEY = bool(os.environ.get("ANTHROPIC_API_KEY"))
-
-
-@pytest.mark.skipif(not HAS_ANTHROPIC_KEY, reason="ANTHROPIC_API_KEY not set")
+@pytest.mark.integration
 class TestCompactionIntegrationAnthropic:
     """Integration tests against the real Anthropic API.
 

@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 from timbal import Agent, Tool, Workflow
+from timbal.core.test_model import TestModel
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
@@ -15,51 +16,51 @@ from ..conftest import Timer, assert_has_output_event, assert_no_errors
 # ==============================================================================
 
 
-def long_running_sync_handler(duration: float = 10) -> str:
+def long_running_sync_handler(duration: float = 1) -> str:
     """Synchronous handler with long execution time."""
     time.sleep(duration)
     return f"sync_completed_after_{duration}s"
 
 
-async def long_running_async_handler(duration: float = 10) -> str:
+async def long_running_async_handler(duration: float = 1) -> str:
     """Asynchronous handler with long execution time."""
     await asyncio.sleep(duration)
     return f"async_completed_after_{duration}s"
 
 
-def sync_generator_handler(count: int = 100, delay: float = 0.5) -> Generator[str, None, None]:
+def sync_generator_handler(count: int = 100, delay: float = 0.1) -> Generator[str, None, None]:
     """Synchronous generator that yields values with delays."""
     for i in range(count):
         time.sleep(delay)
         yield f"sync_chunk_{i}"
 
 
-async def async_generator_handler(count: int = 100, delay: float = 0.5) -> AsyncGenerator[str, None]:
+async def async_generator_handler(count: int = 100, delay: float = 0.1) -> AsyncGenerator[str, None]:
     """Asynchronous generator that yields values with delays."""
     for i in range(count):
         await asyncio.sleep(delay)
         yield f"async_chunk_{i}"
 
 
-async def slow_step_handler(duration: float = 5) -> str:
+async def slow_step_handler(duration: float = 1) -> str:
     """Slow async step handler for workflow testing."""
     await asyncio.sleep(duration)
     return f"step_completed_after_{duration}s"
 
 
-def parallel_task_1(duration: float = 10) -> str:
+def parallel_task_1(duration: float = 1) -> str:
     """First parallel task that takes time."""
     time.sleep(duration)
     return "parallel_1_completed"
 
 
-def parallel_task_2(duration: float = 10) -> str:
+def parallel_task_2(duration: float = 1) -> str:
     """Second parallel task that takes time."""
     time.sleep(duration)
     return "parallel_2_completed"
 
 
-def parallel_task_3(duration: float = 10) -> str:
+def parallel_task_3(duration: float = 1) -> str:
     """Third parallel task that takes time."""
     time.sleep(duration)
     return "parallel_3_completed"
@@ -136,10 +137,10 @@ class TestToolInterruption:
     async def test_sync_tool_interruption(self, long_running_sync_tool):
         """Test that synchronous tool can be interrupted during execution."""
         # Start tool execution
-        task = asyncio.create_task(long_running_sync_tool(duration=10).collect())
+        task = asyncio.create_task(long_running_sync_tool(duration=1).collect())
 
         # Wait briefly to ensure execution starts
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.1)
 
         # Cancel the task
         task.cancel()
@@ -154,10 +155,10 @@ class TestToolInterruption:
     async def test_async_tool_interruption(self, long_running_async_tool):
         """Test that asynchronous tool can be interrupted during execution."""
         # Start tool execution
-        task = asyncio.create_task(long_running_async_tool(duration=10).collect())
+        task = asyncio.create_task(long_running_async_tool(duration=1).collect())
 
         # Wait briefly to ensure execution starts
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.1)
 
         # Cancel the task
         task.cancel()
@@ -172,10 +173,10 @@ class TestToolInterruption:
     async def test_sync_generator_interruption(self, sync_gen_tool):
         """Test that synchronous generator tool can be interrupted while yielding."""
         # Start generator tool execution
-        task = asyncio.create_task(sync_gen_tool(count=100, delay=0.5).collect())
+        task = asyncio.create_task(sync_gen_tool(count=100, delay=0.01).collect())
 
         # Wait for some chunks to be yielded
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.1)
 
         # Cancel while still yielding
         task.cancel()
@@ -190,10 +191,10 @@ class TestToolInterruption:
     async def test_async_generator_interruption(self, async_gen_tool):
         """Test that asynchronous generator tool can be interrupted while yielding."""
         # Start generator tool execution
-        task = asyncio.create_task(async_gen_tool(count=100, delay=0.5).collect())
+        task = asyncio.create_task(async_gen_tool(count=100, delay=0.01).collect())
 
         # Wait for some chunks to be yielded
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.1)
 
         # Cancel while still yielding
         task.cancel()
@@ -208,8 +209,8 @@ class TestToolInterruption:
     async def test_tool_reusability_after_interruption(self, long_running_async_tool):
         """Test that tools can be reused after being interrupted."""
         # First execution - interrupt it
-        task1 = asyncio.create_task(long_running_async_tool(duration=10).collect())
-        await asyncio.sleep(1)
+        task1 = asyncio.create_task(long_running_async_tool(duration=1).collect())
+        await asyncio.sleep(0.1)
         task1.cancel()
         result1 = await task1
 
@@ -230,13 +231,14 @@ class TestToolInterruption:
         tool = Tool(handler=long_running_async_handler)
 
         task = asyncio.create_task(tool(duration=duration).collect())
-        await asyncio.sleep(2)  # Interrupt after 2 seconds
+        await asyncio.sleep(0.1)  # Interrupt after 2 seconds
         task.cancel()
         result = await task
 
         assert result.status.code == "cancelled"
 
 
+@pytest.mark.integration
 class TestAgentInterruption:
     """Test agent interruption during execution."""
 
@@ -251,7 +253,7 @@ class TestAgentInterruption:
         task = asyncio.create_task(agent(prompt=prompt).collect())
 
         # Wait for LLM to start processing
-        await asyncio.sleep(4)
+        await asyncio.sleep(0.1)
 
         # Interrupt the agent
         task.cancel()
@@ -278,7 +280,7 @@ class TestAgentInterruption:
         task = asyncio.create_task(agent(prompt=prompt).collect())
 
         # Wait for tool to start executing
-        await asyncio.sleep(4)
+        await asyncio.sleep(0.1)
 
         # Interrupt the agent
         task.cancel()
@@ -296,7 +298,7 @@ class TestAgentInterruption:
         # First call - interrupt it
         prompt1 = Message.validate({"role": "user", "content": "Tell me a long story"})
         task1 = asyncio.create_task(agent(prompt=prompt1).collect())
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.1)
         task1.cancel()
         result1 = await task1
 
@@ -319,7 +321,7 @@ class TestAgentInterruption:
         task = asyncio.create_task(agent_with_long_tools(prompt=prompt).collect())
 
         # Wait for tools to start executing
-        await asyncio.sleep(4)
+        await asyncio.sleep(0.1)
 
         # Interrupt while tools are running
         task.cancel()
@@ -345,7 +347,7 @@ class TestAgentInterruption:
         prompt = Message.validate({"role": "user", "content": "Use both quick_tool and slow_tool"})
 
         task = asyncio.create_task(agent(prompt=prompt).collect())
-        await asyncio.sleep(4)
+        await asyncio.sleep(0.1)
         task.cancel()
         result = await task
 
@@ -360,13 +362,13 @@ class TestWorkflowInterruption:
     @pytest.mark.asyncio
     async def test_workflow_interruption_during_single_step(self, slow_step_tool):
         """Test workflow interruption during a single step execution."""
-        workflow = Workflow(name="single_step_workflow").step(slow_step_tool, duration=10)
+        workflow = Workflow(name="single_step_workflow").step(slow_step_tool, duration=1)
 
         # Start workflow execution
         task = asyncio.create_task(workflow().collect())
 
         # Wait for step to start
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.1)
 
         # Interrupt workflow
         task.cancel()
@@ -381,15 +383,15 @@ class TestWorkflowInterruption:
         """Test workflow interruption during sequential step execution."""
 
         async def step1() -> str:
-            await asyncio.sleep(3)
+            await asyncio.sleep(0.5)
             return "step1_done"
 
         async def step2() -> str:
-            await asyncio.sleep(3)
+            await asyncio.sleep(0.5)
             return "step2_done"
 
         async def step3() -> str:
-            await asyncio.sleep(3)
+            await asyncio.sleep(0.5)
             return "step3_done"
 
         workflow = (
@@ -403,7 +405,7 @@ class TestWorkflowInterruption:
         task = asyncio.create_task(workflow().collect())
 
         # Interrupt during execution
-        await asyncio.sleep(5)
+        await asyncio.sleep(0.1)
         task.cancel()
         result = await task
 
@@ -415,16 +417,16 @@ class TestWorkflowInterruption:
         """Test workflow interruption when parallel steps are executing."""
         workflow = (
             Workflow(name="parallel_workflow")
-            .step(parallel_task_1, duration=10)
-            .step(parallel_task_2, duration=10)
-            .step(parallel_task_3, duration=10)
+            .step(parallel_task_1, duration=1)
+            .step(parallel_task_2, duration=1)
+            .step(parallel_task_3, duration=1)
         )
 
         # Start workflow (all steps run in parallel)
         task = asyncio.create_task(workflow().collect())
 
         # Wait for steps to start
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.1)
 
         # Interrupt while parallel steps are running
         task.cancel()
@@ -439,15 +441,15 @@ class TestWorkflowInterruption:
         """Test workflow interruption with mixed parallel and sequential steps."""
 
         async def parallel_a() -> str:
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.5)
             return "parallel_a_done"
 
         async def parallel_b() -> str:
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.5)
             return "parallel_b_done"
 
         async def sequential_c() -> str:
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.5)
             return "sequential_c_done"
 
         workflow = (
@@ -461,7 +463,7 @@ class TestWorkflowInterruption:
         task = asyncio.create_task(workflow().collect())
 
         # Interrupt during parallel phase
-        await asyncio.sleep(3)
+        await asyncio.sleep(0.1)
         task.cancel()
         result = await task
 
@@ -473,14 +475,14 @@ class TestWorkflowInterruption:
         """Test that workflow can be reused after interruption."""
 
         async def simple_step(x: str) -> str:
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.5)
             return f"result:{x}"
 
         workflow = Workflow(name="reusable_workflow").step(simple_step, x="test")
 
         # First execution - interrupt it
         task1 = asyncio.create_task(workflow().collect())
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.1)
         task1.cancel()
         result1 = await task1
 
@@ -516,7 +518,7 @@ class TestWorkflowInterruption:
         task = asyncio.create_task(workflow().collect())
 
         # Wait for fast step to complete, interrupt during slow step
-        await asyncio.sleep(3)
+        await asyncio.sleep(0.1)
         task.cancel()
         result = await task
 
@@ -531,22 +533,22 @@ class TestWorkflowInterruption:
 
         async def step_a() -> str:
             executed_steps.append("step_a")
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
             return "a_done"
 
         async def step_b() -> str:
             executed_steps.append("step_b")
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.5)
             return "b_done"
 
         async def step_c() -> str:
             executed_steps.append("step_c")
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.5)
             return "c_done"
 
         async def step_d() -> str:
             executed_steps.append("step_d")
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.5)
             return "d_done"
 
         # Create workflow with conditional execution using 'when' clause
@@ -562,7 +564,7 @@ class TestWorkflowInterruption:
         task = asyncio.create_task(workflow().collect())
 
         # Wait for step_a to complete and step_b to start, then interrupt
-        await asyncio.sleep(4)
+        await asyncio.sleep(0.7)
         task.cancel()
         result = await task
 
@@ -601,7 +603,7 @@ class TestWorkflowInterruption:
 
         # Create workflow with function, tool, and agent steps
         tool_step = Tool(name="quick_tool", handler=quick_tool)
-        agent_step = Agent(name="slow_agent", model="openai/gpt-4o-mini")
+        agent_step = Agent(name="slow_agent", model=TestModel())
 
         workflow = (
             Workflow(name="mixed_step_workflow")
@@ -612,7 +614,7 @@ class TestWorkflowInterruption:
 
         # Start workflow and interrupt during normal function execution
         task = asyncio.create_task(workflow().collect())
-        await asyncio.sleep(2)  # Let tool complete and function start
+        await asyncio.sleep(0.1)  # Let tool complete and function start
         task.cancel()
         result = await task
 
@@ -647,7 +649,7 @@ class TestWorkflowInterruption:
         # Create workflow
         function_step = Tool(name="quick_function", handler=quick_function)
         tool_step = Tool(name="long_tool", handler=long_tool_handler)
-        agent_step = Agent(name="agent", model="openai/gpt-4o-mini")
+        agent_step = Agent(name="agent", model=TestModel())
 
         workflow = (
             Workflow(name="tool_interrupt_workflow")
@@ -658,7 +660,7 @@ class TestWorkflowInterruption:
 
         # Start workflow and interrupt during tool execution
         task = asyncio.create_task(workflow().collect())
-        await asyncio.sleep(2)  # Let function complete and tool start
+        await asyncio.sleep(0.1)  # Let function complete and tool start
         task.cancel()
         result = await task
 
@@ -669,6 +671,7 @@ class TestWorkflowInterruption:
         assert "agent" not in executed_steps
 
     @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_workflow_interruption_during_agent_step(self):
         """Test workflow interruption during execution of an Agent step."""
         executed_steps = []
@@ -697,7 +700,7 @@ class TestWorkflowInterruption:
 
         # Start workflow and interrupt during agent execution
         task = asyncio.create_task(workflow().collect())
-        await asyncio.sleep(4)  # Let function and tool complete, agent start
+        await asyncio.sleep(0.1)  # Let function and tool complete, agent start
         task.cancel()
         result = await task
 
@@ -716,7 +719,7 @@ class TestInterruptionEdgeCases:
         """Test interruption immediately after starting execution."""
         tool = Tool(handler=long_running_async_handler)
 
-        task = asyncio.create_task(tool(duration=10).collect())
+        task = asyncio.create_task(tool(duration=1).collect())
         # Interrupt almost immediately
         await asyncio.sleep(0.01)
         task.cancel()
@@ -730,15 +733,15 @@ class TestInterruptionEdgeCases:
         tool = Tool(handler=long_running_async_handler)
 
         # First interruption
-        task1 = asyncio.create_task(tool(duration=10).collect())
-        await asyncio.sleep(1)
+        task1 = asyncio.create_task(tool(duration=1).collect())
+        await asyncio.sleep(0.1)
         task1.cancel()
         result1 = await task1
         assert result1.status.code == "cancelled"
 
         # Second interruption
-        task2 = asyncio.create_task(tool(duration=10).collect())
-        await asyncio.sleep(1)
+        task2 = asyncio.create_task(tool(duration=1).collect())
+        await asyncio.sleep(0.1)
         task2.cancel()
         result2 = await task2
         assert result2.status.code == "cancelled"
@@ -754,13 +757,13 @@ class TestInterruptionEdgeCases:
 
         # Start multiple concurrent executions
         tasks = [
-            asyncio.create_task(tool(duration=10).collect()),
-            asyncio.create_task(tool(duration=10).collect()),
-            asyncio.create_task(tool(duration=10).collect()),
+            asyncio.create_task(tool(duration=1).collect()),
+            asyncio.create_task(tool(duration=1).collect()),
+            asyncio.create_task(tool(duration=1).collect()),
         ]
 
         # Wait a bit then interrupt all
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.1)
         for task in tasks:
             task.cancel()
 
@@ -802,7 +805,7 @@ class TestInterruptionPerformance:
 
         with Timer() as timer:
             task = asyncio.create_task(tool().collect())
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.5)
             task.cancel()
             await task
 
@@ -916,7 +919,7 @@ class TestComprehensiveInterruptionVerification:
         # Execute and interrupt
         with Timer() as timer:
             task = asyncio.create_task(workflow().collect())
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.7)
             task.cancel()
             result = await task
 
@@ -1068,26 +1071,36 @@ class TestDoubleCancellationStatusSet:
         No task may raise ValidationError."""
         from timbal.utils.serialization import dump as real_dump
 
+        # Per-task state: each tool task gets its own call_count and events.
+        # We use a single patch around the gather so context managers don't
+        # clobber each other (concurrent `with patch()` blocks in asyncio leave
+        # the attribute in an undefined state because they share the same slot).
+        task_state: dict[int, dict] = {}
+
+        async def dispatching_dump(value):
+            """Route dump calls to per-task tracked_dump based on current task id."""
+            task = asyncio.current_task()
+            state = task_state.get(id(task))
+            if state is None:
+                return await real_dump(value)
+            state["call_count"] += 1
+            if state["call_count"] == 1:
+                result = await real_dump(value)
+                state["input_done"].set()
+                return result
+            state["in_except_dump"].set()
+            await asyncio.sleep(3.0)
+            return await real_dump(value)
+
         async def run_one():
             input_done = asyncio.Event()
             in_except_dump = asyncio.Event()
-            call_count = [0]
-
-            async def tracked_dump(value):
-                call_count[0] += 1
-                if call_count[0] == 1:
-                    result = await real_dump(value)
-                    input_done.set()
-                    return result
-                in_except_dump.set()
-                await asyncio.sleep(3.0)
-                return await real_dump(value)
-
             tool = Tool(handler=_dict_generator)
 
-            with patch("timbal.core.runnable.dump", tracked_dump):
-                t = asyncio.create_task(tool(count=100).collect())
+            t = asyncio.create_task(tool(count=100).collect())
+            task_state[id(t)] = {"call_count": 0, "input_done": input_done, "in_except_dump": in_except_dump}
 
+            try:
                 try:
                     await asyncio.wait_for(input_done.wait(), timeout=3.0)
                 except asyncio.TimeoutError:
@@ -1114,8 +1127,11 @@ class TestDoubleCancellationStatusSet:
                     return None  # acceptable
                 except Exception as exc:
                     return exc   # reported below
+            finally:
+                task_state.pop(id(t), None)
 
-        results = await asyncio.gather(*[run_one() for _ in range(10)])
+        with patch("timbal.core.runnable.dump", dispatching_dump):
+            results = await asyncio.gather(*[run_one() for _ in range(10)])
 
         for i, r in enumerate(results):
             if r is None:

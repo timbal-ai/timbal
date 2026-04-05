@@ -12,7 +12,6 @@ logger = structlog.get_logger("timbal.state.config_loader")
 
 TIMBAL_CONFIG_DIR = Path.home() / ".timbal"
 
-# Shared with TIMBAL_SYNC_TRACES and ~/.timbal/config sync_traces option.
 _TRUTHY_STRINGS = frozenset({"true", "1", "t", "yes", "y", "enabled", "on"})
 
 
@@ -120,17 +119,8 @@ def load_file_config(
 
 
 def _merge_sync_traces_enabled(platform_config: PlatformConfig, file_config: FileConfig) -> None:
-    """Fill sync_traces_enabled from env then file then default (True) when not set on platform_config."""
+    """Fill sync_traces_enabled from file then default (True) when not set on platform_config."""
     if platform_config.sync_traces_enabled is not None:
-        return
-    if "TIMBAL_SYNC_TRACES" in os.environ:
-        platform_config.sync_traces_enabled = _is_truthy_string(
-            os.getenv("TIMBAL_SYNC_TRACES", "true"),
-        )
-        logger.debug(
-            "Resolved sync_traces_enabled from TIMBAL_SYNC_TRACES.",
-            value=platform_config.sync_traces_enabled,
-        )
         return
     if file_config.sync_traces_enabled is not None:
         platform_config.sync_traces_enabled = file_config.sync_traces_enabled
@@ -169,8 +159,8 @@ def resolve_platform_config(
     3. ~/.timbal/ config and credentials files
 
     Sync trace persistence uses ``sync_traces_enabled`` on ``PlatformConfig``.
-    When that field is unset, ``TIMBAL_SYNC_TRACES`` is checked first, then the ``sync_traces``
-    option in ~/.timbal/config, then defaults to True.
+    When that field is unset, the ``sync_traces`` option in ~/.timbal/config is checked,
+    then defaults to True.
 
     When called with default arguments (no platform_config, profile, or config_dir),
     the result is cached for subsequent calls. This avoids re-reading config files
