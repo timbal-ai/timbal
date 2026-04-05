@@ -1,8 +1,8 @@
 # Timbal
 
-> Preparing for **2.0** — battle-tested in production, now getting the API stability and tooling it deserves.
+> **Timbal 2.0 is in beta.** The API is stable — we're finalizing docs and tooling before the full release.
 
-Timbal is an open-source Python framework for building reliable AI applications. Simple, transparent architecture that eliminates complexity while delivering fast performance, robust typing, and API stability in an ever-changing ecosystem.
+Simple, performant, battle-tested framework for building reliable AI applications.
 
 Full documentation: [docs.timbal.ai](https://docs.timbal.ai)
 

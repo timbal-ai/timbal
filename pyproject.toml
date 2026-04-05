@@ -5,63 +5,63 @@ build-backend = "hatchling.build"
 [project]
 name = "timbal"
 dynamic = ["version"]
-description = "Simple, battle-tested framework for building reliable AI applications"
+description = "Simple, performant, battle-tested framework for building reliable AI applications"
 readme = "README.md"
 authors = [{ name = "Timbal", email = "team@timbal.ai" }]
 license.file = "LICENSE"
 urls."Source" = "https://github.com/timbal-ai/timbal"
 
 classifiers = [
-    "Development Status :: 4 - Beta",
-    "Programming Language :: Python",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
-    "Intended Audience :: Information Technology",
-    "Operating System :: OS Independent",
-    "Topic :: Software Development :: Libraries :: Python Modules",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Internet",
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Information Technology",
+  "Operating System :: OS Independent",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Internet",
 ]
 requires-python = ">=3.11"
 
 dependencies = [
-    "anthropic>=0.45.0",
-    "fastapi>=0.115.8",
-    "httpx>=0.28.0",
-    "libcst>=1.8.6",
-    "mcp>=1.26.0",
-    "nanoid>=2.0.0",
-    "openai>=1.60.0",
-    "openpyxl>=3.1.5",
-    "pandas>=2.2.3",
-    "pillow>=12.1.0",
-    "pydantic[email]>=2.10.6",
-    "pymupdf>=1.27.1",
-    "python-docx>=1.1.2",
-    "python-dotenv>=1.0.1",
-    "pytz>=2025.2",
-    "pyyaml>=6.0.2",
-    "requests>=2.32.3",
-    "ruff>=0.9.3",
-    "rich>=14.2.0",
-    "structlog>=25.1.0",
-    "typing-extensions>=4.14.1",
-    "uuid7>=0.1.0",
-    "uvicorn>=0.34.0",
-    "websockets>=15.0.1",
+  "anthropic>=0.45.0",
+  "fastapi>=0.115.8",
+  "httpx>=0.28.0",
+  "libcst>=1.8.6",
+  "mcp>=1.26.0",
+  "nanoid>=2.0.0",
+  "openai>=1.60.0",
+  "openpyxl>=3.1.5",
+  "pandas>=2.2.3",
+  "pillow>=12.1.0",
+  "pydantic[email]>=2.10.6",
+  "pymupdf>=1.27.1",
+  "python-docx>=1.1.2",
+  "python-dotenv>=1.0.1",
+  "pytz>=2025.2",
+  "pyyaml>=6.0.2",
+  "requests>=2.32.3",
+  "ruff>=0.9.3",
+  "rich>=14.2.0",
+  "structlog>=25.1.0",
+  "typing-extensions>=4.14.1",
+  "uuid7>=0.1.0",
+  "uvicorn>=0.34.0",
+  "websockets>=15.0.1",
 ]
 
 [dependency-groups]
 dev = [
-    "lancedb>=0.25.3",
-    "pyngrok>=7.2.3",
-    "pytest>=8.3.4",
-    "pytest-asyncio>=0.25.2",
-    "yappi>=1.7.6",
+  "lancedb>=0.25.3",
+  "pyngrok>=7.2.3",
+  "pytest>=8.3.4",
+  "pytest-asyncio>=0.25.2",
+  "yappi>=1.7.6",
 ]
 
 [project.scripts]
@@ -72,25 +72,29 @@ packages = ["python/timbal"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [
-    "/**/.*",
-    "/**/__pycache__",
-    "*.lock",
-    "*.md",
-    "/*.py",
-    "/.git",
-    "/.github",
-    "/cli",
-    "/tui",
-    "/dist",
-    "/docs",
-    "/examples",
-    "/python/tests",
-    "/sandbox",
-    "/scripts",
+  "/**/.*",
+  "/**/__pycache__",
+  "*.lock",
+  "*.md",
+  "/*.py",
+  "/.git",
+  "/.github",
+  "/cli",
+  "/tui",
+  "/dist",
+  "/docs",
+  "/examples",
+  "/python/tests",
+  "/sandbox",
+  "/scripts",
 ]
 
 [tool.uv]
-environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'", "sys_platform == 'win32'"]
+environments = [
+  "sys_platform == 'darwin'",
+  "sys_platform == 'linux'",
+  "sys_platform == 'win32'",
+]
 
 [tool.hatch.envs.default]
 path = "python"
@@ -106,25 +110,25 @@ line-length = 120
 
 [tool.ruff.lint]
 extend-select = [
-    "UP", # pyupgrade
-    # "D", # pydocstyle
-    "I", # isort
-    "B", # bugbear rules
-    "F401", # unused imports
-    "E722", # bare except statements
-    "ARG", # unused arguments
-    "T201", # print statements
-    "T203", # print statements
-    "TC004", # Prevents misuse of TYPE_CHECKING
-    "TID251", # Enforces import conventions
+  "UP", # pyupgrade
+  # "D", # pydocstyle
+  "I",      # isort
+  "B",      # bugbear rules
+  "F401",   # unused imports
+  "E722",   # bare except statements
+  "ARG",    # unused arguments
+  "T201",   # print statements
+  "T203",   # print statements
+  "TC004",  # Prevents misuse of TYPE_CHECKING
+  "TID251", # Enforces import conventions
 ]
 ignore = [
-    "B006", # mutable defaults
-    "B008", # function calls in argument defaults
+  "B006", # mutable defaults
+  "B008", # function calls in argument defaults
 ]
 unfixable = [
-    "T201", # print statements
-    "T203", # print statements
+  "T201", # print statements
+  "T203", # print statements
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -134,28 +138,26 @@ convention = "google"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
-    "integration: marks tests that require real LLM API keys (skip with '-m not integration')",
+  "integration: marks tests that require real LLM API keys (skip with '-m not integration')",
 ]
 addopts = [
-    "-v",
-    "--tb=short",
-    "--strict-markers",
-    "--color=yes",
-    "-W ignore::DeprecationWarning",
-    "--cov=timbal",
-    "--cov-report=term-missing",
-    "-m",
-    "not integration",
+  "-v",
+  "--tb=short",
+  "--strict-markers",
+  "--color=yes",
+  "-W ignore::DeprecationWarning",
+  "--cov=timbal",
+  "--cov-report=term-missing",
+  "-m",
+  "not integration",
 ]
-testpaths = [
-    "python/tests"
-]
+testpaths = ["python/tests"]
 
 [tool.coverage.run]
 omit = [
-    "*/timbal/tools/*",
-    # TODO: add evals coverage once the evals test suite is built out
-    "*/timbal/evals/*",
+  "*/timbal/tools/*",
+  # TODO: add evals coverage once the evals test suite is built out
+  "*/timbal/evals/*",
 ]
 
 [tool.uv.workspace]
