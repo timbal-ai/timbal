@@ -273,20 +273,19 @@ class Agent(Runnable):
 
         # Backward compat: silently promote known keys from model_params to individual fields
         if self.model_params:
-            _promoted = {"max_tokens", "temperature", "base_url", "api_key"}
-            _renamed = {"validation_context": "output_model_context"}
-            for old_key, new_key in _renamed.items():
+            _promote = {
+                "max_tokens": "max_tokens",
+                "temperature": "temperature",
+                "base_url": "base_url",
+                "api_key": "api_key",
+                "validation_context": "output_model_context",
+            }
+            for old_key, new_key in _promote.items():
                 if old_key in self.model_params:
                     if getattr(self, new_key) is None:
                         setattr(self, new_key, self.model_params.pop(old_key))
                     else:
                         self.model_params.pop(old_key)
-            for key in list(self.model_params.keys()):
-                if key in _promoted:
-                    if getattr(self, key) is None:
-                        setattr(self, key, self.model_params.pop(key))
-                    else:
-                        self.model_params.pop(key)
 
         if not isinstance(self.model, str):
             model_provider = getattr(self.model, "provider", "test")
