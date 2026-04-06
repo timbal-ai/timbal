@@ -391,8 +391,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """See base class."""
         if self._system_prompt_fn is not None:
             system_prompt = f"<{self._system_prompt_fn.__name__}>"
-        elif self._system_prompt_templates:
-            system_prompt = self.system_prompt
         else:
             system_prompt = self.system_prompt
 
