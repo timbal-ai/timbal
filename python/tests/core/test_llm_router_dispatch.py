@@ -185,9 +185,12 @@ class TestLlmRouterProviderValidation:
         _make_run_context()
 
         mock_client = MagicMock()
-        mock_response = AsyncMock()
-        mock_response.__aiter__ = AsyncMock(return_value=iter([]))
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        async def _empty_stream():
+            return
+            yield  # makes this an async generator
+
+        mock_client.messages.create = AsyncMock(return_value=_empty_stream())
 
         with patch("timbal.core.llm_router._get_anthropic_client", return_value=mock_client):
             try:

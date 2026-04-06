@@ -509,22 +509,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         if not len(self_spans):
             return
         if len(self_spans) > 1:
-            # TODO Handle multiple call_ids for this agent (we could access step spans)
-            raise NotImplementedError("Multiple spans for the same agent are not supported yet.")
+            logger.warning(
+                "Multiple spans found for agent path in parent trace; skipping memory resolution.",
+                path=self._path,
+                span_count=len(self_spans),
+            )
+            return
 
         previous_span = self_spans[0]
 
-        # >= 1.1.0: memory stored in agent span
-        if isinstance(previous_span.memory, list):
-            memory = [Message.validate(m) for m in previous_span.memory]
-        else:
-            # < 1.1.0: extract from LLM calls
-            llm_spans = parent_trace.get_path(self._llm._path)
-            if not len(llm_spans):
-                return
-            llm_input_messages = llm_spans[-1].input.get("messages", [])
-            llm_output_message = llm_spans[-1].output
-            memory = [*[Message.validate(m) for m in llm_input_messages], Message.validate(llm_output_message)]
+        if not isinstance(previous_span.memory, list):
+            return
+        memory = [Message.validate(m) for m in previous_span.memory]
 
         # Ensure interrupted tool calls have corresponding results.
         # When resuming from memory, the last assistant message may contain tool_use blocks
@@ -538,8 +534,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         #
         # For regular tool_use: append a tool_result message with an error.
         # For server_tool_use (e.g., web_search): append an inline error result in the same
-        # message, using the provider's expected error format (currently Anthropic only).
-        # TODO OpenAI & other server tool use providers
+        # message, using the provider's expected error format.
+        model_provider = str(self.model).split("/", 1)[0]
         has_followup_after_server_tool_use = False
         for content in memory[-1].content[::-1]:
             if content.type != "tool_use":
@@ -549,15 +545,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if has_followup_after_server_tool_use:
                     continue
                 # Server tool use was interrupted before completion. Synthesize an error result.
-                memory[-1].content.append(
-                    CustomContent(
-                        value={
-                            "type": "web_search_tool_result",
-                            "tool_use_id": content.id,
-                            "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
-                        },
+                if model_provider == "anthropic":
+                    memory[-1].content.append(
+                        CustomContent(
+                            value={
+                                "type": "web_search_tool_result",
+                                "tool_use_id": content.id,
+                                "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
+                            },
+                        )
                     )
-                )
+                else:
+                    logger.warning(
+                        "Interrupted server tool use on unsupported provider; skipping synthetic error result.",
+                        provider=model_provider,
+                        tool_use_id=content.id,
+                    )
             else:
                 # Regular tool use was interrupted. Append a tool_result message with error.
                 memory.append(
@@ -739,15 +742,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         await self.resolve_memory()
 
-
-        # Span memory will also be modified with messages array modification (it's the same object)
-        # current_span.memory = messages
-        current_span._memory_dump = await dump(
-            current_span.memory
-        )  # ? Can we optimize the dumping the llm already does next
+        current_span._memory_dump = await dump(current_span.memory)
         # Remove these so the llm runnable doesn't try to use/validate them again
         kwargs.pop("prompt", None)
         kwargs.pop("messages", None)
+
+        async def _append_memory(message: Message, dump_value: Any = None) -> None:
+            """Append a message to both memory and its serialized dump in lockstep."""
+            current_span.memory.append(message)
+            current_span._memory_dump.append(dump_value if dump_value is not None else await dump(message))
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
@@ -855,8 +858,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     )
 
                     # Add LLM response to conversation for next iteration
-                    current_span.memory.append(event.output)
-                    current_span._memory_dump.append(event._output_dump)
+                    await _append_memory(event.output, dump_value=event._output_dump)
 
                     if self.output_model is not None:
                         validation_error_msg = None
@@ -891,8 +893,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     ],
                                 }
                             )
-                            current_span.memory.append(error_feedback)
-                            current_span._memory_dump.append(await dump(error_feedback))
+                            await _append_memory(error_feedback)
                             i += 1
                             break  # Break out of async for to retry in while loop
 
