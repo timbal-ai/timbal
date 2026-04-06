@@ -346,23 +346,20 @@ class Agent(Runnable):
                 self.tools.append(skill)
 
         # Normalize tools and prevent duplicate names
-        names = set()
+        names: set[str] = set()
         skills = []
         for i, tool in enumerate(self.tools):
-            # ToolSet resolved later in _resolve_tools()
+            if isinstance(tool, Skill):
+                if tool.name in names:
+                    raise ValueError(f"Skill '{tool.name}' already exists. You can only add a skill once.")
+                names.add(tool.name)
+                skills.append(tool)
+                continue
             if isinstance(tool, ToolSet):
-                if isinstance(tool, Skill):
-                    if tool.name in names:
-                        raise ValueError(f"Skill '{tool.name}' already exists. You can only add a skill once.")
-                    names.add(tool.name)
-                    skills.append(tool)
-                    # skills_metadata.append(f"- **{tool.name}**: {tool.description}")
+                # Non-Skill ToolSets are resolved later in _resolve_tools()
                 continue
             if not isinstance(tool, Runnable):
-                if isinstance(tool, dict):
-                    tool = Tool(**tool)
-                else:
-                    tool = Tool(handler=tool)
+                tool = Tool(**tool) if isinstance(tool, dict) else Tool(handler=tool)
             if tool.name in names:
                 raise ValueError(f"Tool {tool.name} already exists. You can only add a tool once.")
             names.add(tool.name)
