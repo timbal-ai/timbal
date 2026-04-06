@@ -1,5 +1,5 @@
 import inspect
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 import pydantic
 
@@ -132,7 +132,7 @@ def transform_schema(
 
     elif type_ == "string":
         format = json_schema.pop("format", None)
-        if format and format in SupportedStringFormats:
+        if format and format in get_args(SupportedStringFormats):
             strict_schema["format"] = format
         elif format:
             # add it back so its treated as an extra property and appended to the description
