@@ -465,6 +465,57 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         return system_prompt
 
+    def _synthesize_missing_tool_results(self, memory: list[Message]) -> None:
+        """Append synthetic error results for any tool_use blocks that were interrupted.
+
+        Mutates memory in-place. Every tool_use the LLM emitted must have a corresponding
+        tool_result before the next LLM call, otherwise the API rejects the request.
+        Server tool_use (e.g. web_search) gets an inline error block; regular tool_use
+        gets a new tool-role message appended.
+        """
+        model_provider = str(self.model).split("/", 1)[0]
+        # Iterate in reverse: if any non-tool_use content follows a server_tool_use,
+        # the LLM already continued past it — no synthetic result needed.
+        has_followup_after_server_tool_use = False
+        for content in memory[-1].content[::-1]:
+            if content.type != "tool_use":
+                has_followup_after_server_tool_use = True
+                continue
+            if content.is_server_tool_use:
+                if has_followup_after_server_tool_use:
+                    continue
+                if model_provider == "anthropic":
+                    memory[-1].content.append(
+                        CustomContent(
+                            value={
+                                "type": "web_search_tool_result",
+                                "tool_use_id": content.id,
+                                "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
+                            },
+                        )
+                    )
+                else:
+                    logger.warning(
+                        "Interrupted server tool use on unsupported provider; skipping synthetic error result.",
+                        provider=model_provider,
+                        tool_use_id=content.id,
+                    )
+            else:
+                memory.append(
+                    Message.validate(
+                        {
+                            "role": "tool",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "id": content.id,
+                                    "content": "ERROR: There was an unexpected error executing the tool.",
+                                }
+                            ],
+                        }
+                    )
+                )
+
     async def resolve_memory(self) -> None:
         """Resolve conversation memory from previous agent trace."""
         run_context = get_run_context()
@@ -516,61 +567,8 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return
         memory = [Message.validate(m) for m in previous_span.memory]
 
-        # Ensure interrupted tool calls have corresponding results.
-        # When resuming from memory, the last assistant message may contain tool_use blocks
-        # that were interrupted before their results could be recorded. The LLM expects every
-        # tool_use to have a corresponding tool_result, so we need to synthesize error results
-        # for any missing ones.
-        #
-        # We iterate in reverse to detect if there's any non-tool_use content (text, etc.)
-        # after a server_tool_use block. If there is, the server tool completed and the LLM
-        # already continued, so no synthetic result is needed.
-        #
-        # For regular tool_use: append a tool_result message with an error.
-        # For server_tool_use (e.g., web_search): append an inline error result in the same
-        # message, using the provider's expected error format.
-        model_provider = str(self.model).split("/", 1)[0]
-        has_followup_after_server_tool_use = False
-        for content in memory[-1].content[::-1]:
-            if content.type != "tool_use":
-                has_followup_after_server_tool_use = True
-                continue
-            if content.is_server_tool_use:
-                if has_followup_after_server_tool_use:
-                    continue
-                # Server tool use was interrupted before completion. Synthesize an error result.
-                if model_provider == "anthropic":
-                    memory[-1].content.append(
-                        CustomContent(
-                            value={
-                                "type": "web_search_tool_result",
-                                "tool_use_id": content.id,
-                                "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
-                            },
-                        )
-                    )
-                else:
-                    logger.warning(
-                        "Interrupted server tool use on unsupported provider; skipping synthetic error result.",
-                        provider=model_provider,
-                        tool_use_id=content.id,
-                    )
-            else:
-                # Regular tool use was interrupted. Append a tool_result message with error.
-                memory.append(
-                    Message.validate(
-                        {
-                            "role": "tool",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "id": content.id,
-                                    "content": "ERROR: There was an unexpected error executing the tool.",
-                                }
-                            ],
-                        }
-                    )
-                )
+        # Ensure interrupted tool calls have corresponding results before resuming.
+        self._synthesize_missing_tool_results(memory)
         current_span.memory = memory + current_span.memory
 
         # Apply memory compaction if configured and context window utilization warrants it
