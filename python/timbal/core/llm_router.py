@@ -40,7 +40,31 @@ logger = structlog.get_logger("timbal.core.llm_router")
 # fresh TCP+TLS handshake on every LLM call (~200-300ms saved per request).
 # Per-request tracing headers (run_id, call_id) are passed via extra_headers
 # on each individual .create() call instead.
+# Concurrency-safe: all coroutines run on one thread in asyncio; the GIL
+# ensures check-and-assign is atomic (no await between the if and the write).
 _CLIENT_CACHE: dict[tuple, AsyncOpenAI | AsyncAnthropic] = {}
+
+# Shared httpx client for async file loading. Reused across LLM calls to
+# preserve connection pools to file origins (CDNs, S3, etc.). Lazy-initialized
+# on first use — never created if the conversation has no files.
+# Loop-aware: httpx.AsyncClient is bound to the event loop at creation time.
+# When the loop changes (e.g. between pytest-asyncio tests with per-function
+# loop scope), the old client becomes unusable ("Event loop is closed").
+# We detect this and transparently recreate the client.
+_FILE_CLIENT: Any = None
+_FILE_CLIENT_LOOP: Any = None
+
+
+def _get_file_client() -> Any:
+    global _FILE_CLIENT, _FILE_CLIENT_LOOP
+    loop = asyncio.get_running_loop()
+    if _FILE_CLIENT is not None and (_FILE_CLIENT.is_closed or _FILE_CLIENT_LOOP is not loop):
+        _FILE_CLIENT = None
+    if _FILE_CLIENT is None:
+        import httpx
+        _FILE_CLIENT = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+        _FILE_CLIENT_LOOP = loop
+    return _FILE_CLIENT
 
 
 def _get_client(cls: type, api_key: str, base_url: str | None, provider: str) -> AsyncOpenAI | AsyncAnthropic:
@@ -354,6 +378,15 @@ async def _llm_router(
             request_headers["x-timbal-version-id"] = run_context.platform_config.subject.version_id
 
     client, base_url = _resolve_client(provider, config, api_key, base_url, run_context)
+
+    # Eagerly load all unloaded file content (async, concurrent) before serialization.
+    from ..types.content import FileContent
+    _unloaded_files = [
+        c.file for m in messages for c in m.content
+        if isinstance(c, FileContent) and object.__getattribute__(c.file, "__fileobj__") is None
+    ]
+    if _unloaded_files:
+        await asyncio.gather(*(f.load(client=_get_file_client()) for f in _unloaded_files))
 
     if provider == "anthropic":
         anthropic_kwargs = {

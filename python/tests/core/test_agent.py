@@ -421,7 +421,55 @@ class TestAgentErrorHandling:
 
 class TestAgentMemory:
     """Test Agent memory and conversation continuity."""
-    
+
+    @pytest.mark.asyncio
+    async def test_memory_dump_matches_memory_across_turns(self):
+        """_memory_dump must be the serialized form of memory at every turn.
+
+        This exercises the _prev_memory_dump optimization: on turn 2+, we reuse
+        the already-serialized previous span memory and only dump new messages.
+        The resulting _memory_dump must be identical to what a full re-dump would
+        produce — i.e. the optimization must be transparent to the trace.
+        """
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.utils import dump
+
+        turn_count = 0
+
+        def counting_handler(messages):
+            nonlocal turn_count
+            turn_count += 1
+            return f"response {turn_count}"
+
+        provider = InMemoryTracingProvider.configured()
+        agent = Agent(
+            name="dump_agent",
+            model=TestModel(handler=counting_handler),
+            tracing_provider=provider,
+        )
+
+        # Run 4 turns — enough to exercise the incremental path multiple times
+        run_ids = []
+        for i in range(4):
+            out = await agent(prompt=f"message {i}").collect()
+            run_ids.append(out.run_id)
+
+        # For each stored trace, verify _memory_dump == dump(memory) for agent spans
+        for run_id in run_ids:
+            trace = provider._storage.get(run_id)
+            assert trace is not None, f"No trace stored for run {run_id}"
+            for call_id, span in trace.items():
+                if not hasattr(span, "_memory_dump") or span._memory_dump is None:
+                    continue
+                if not hasattr(span, "memory") or not isinstance(span.memory, list):
+                    continue
+                # Re-dump from scratch and compare — must equal the incremental result
+                expected = await dump([Message.validate(m) for m in span.memory])
+                assert span._memory_dump == expected, (
+                    f"_memory_dump mismatch for span {call_id} in run {run_id}: "
+                    f"got {len(span._memory_dump)} items, expected {len(expected)}"
+                )
+
     @pytest.mark.asyncio
     async def test_conversation_memory(self):
         """Test that agents pass conversation history to the LLM on subsequent calls."""

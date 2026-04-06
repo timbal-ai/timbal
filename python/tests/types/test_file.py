@@ -452,7 +452,7 @@ class TestFileSerialize:
 
 class TestFileFetchHttp:
     def test_fetch_http_uses_content_disposition_filename(self) -> None:
-        """Lines 406-410: filename is parsed from Content-Disposition header."""
+        """filename is parsed from Content-Disposition header."""
         from unittest.mock import MagicMock, patch
 
         mock_response = MagicMock()
@@ -463,13 +463,13 @@ class TestFileFetchHttp:
         }
         mock_response.raise_for_status = MagicMock()
 
-        with patch("requests.get", return_value=mock_response):
+        with patch("httpx.get", return_value=mock_response):
             fileobj = File._fetch_http_file(url="https://example.com/download")
 
         assert fileobj.name == "report.pdf"
 
     def test_fetch_http_content_disposition_single_quotes(self) -> None:
-        """Lines 406-410: filename parsing with single-quoted name."""
+        """filename parsing with single-quoted name."""
         from unittest.mock import MagicMock, patch
 
         mock_response = MagicMock()
@@ -480,13 +480,13 @@ class TestFileFetchHttp:
         }
         mock_response.raise_for_status = MagicMock()
 
-        with patch("requests.get", return_value=mock_response):
+        with patch("httpx.get", return_value=mock_response):
             fileobj = File._fetch_http_file(url="https://example.com/download")
 
         assert fileobj.name == "report.csv"
 
     def test_fetch_http_falls_back_to_url_when_no_content_disposition(self) -> None:
-        """Lines 411-413: Falls back to URL-based filename when no Content-Disposition."""
+        """Falls back to URL-based filename when no Content-Disposition."""
         from unittest.mock import MagicMock, patch
 
         headers_data = {
@@ -501,7 +501,7 @@ class TestFileFetchHttp:
         mock_response.headers = mock_headers
         mock_response.raise_for_status = MagicMock()
 
-        with patch("requests.get", return_value=mock_response):
+        with patch("httpx.get", return_value=mock_response):
             fileobj = File._fetch_http_file(url="https://example.com/path/data.json")
 
         assert fileobj.name == "data.json"
@@ -512,9 +512,177 @@ class TestFileFetchHttp:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# TestFileConstructor — File(source) smart constructor
+# ---------------------------------------------------------------------------
+
+
+class TestFileConstructor:
+    def test_bytes(self) -> None:
+        file = File(b"hello")
+        assert file.__source_scheme__ == "bytes"
+        assert file.read() == b"hello"
+
+    def test_bytes_with_extension_and_name(self) -> None:
+        file = File(b"hello", extension=".txt", name="readme.txt")
+        assert file.__source_extension__ == ".txt"
+        assert file.__wrapped__.name == "readme.txt"
+        assert file.__content_type__ == "text/plain"
+
+    def test_bytearray(self) -> None:
+        file = File(bytearray(b"data"))
+        assert file.__source_scheme__ == "bytes"
+        assert file.read() == b"data"
+
+    def test_io_base(self) -> None:
+        bio = BytesIO(b"content")
+        file = File(bio)
+        assert file.__source_scheme__ == "bytes"
+        assert file.read() == b"content"
+
+    def test_local_path_str(self, tmp_path: pathlib.Path) -> None:
+        test_file = tmp_path / "test.txt"
+        test_file.write_bytes(b"hello")
+        file = File(str(test_file))
+        assert file.__source_scheme__ == "local_path"
+        assert file.read() == b"hello"
+
+    def test_local_path_obj(self, tmp_path: pathlib.Path) -> None:
+        test_file = tmp_path / "test.txt"
+        test_file.write_bytes(b"hello")
+        file = File(test_file)
+        assert file.__source_scheme__ == "local_path"
+        assert file.read() == b"hello"
+
+    def test_data_url(self) -> None:
+        file = File("data:text/plain;base64,SGVsbG8=")
+        assert file.__source_scheme__ == "data_url"
+        assert file.__source_extension__ == ".txt"
+
+    def test_http_url(self) -> None:
+        file = File("https://example.com/file.pdf")
+        assert file.__source_scheme__ == "url"
+        assert file.__source_extension__ == ".pdf"
+
+    def test_identity_existing_file(self) -> None:
+        original = File(b"data")
+        same = File(original)
+        assert same is original
+
+    def test_invalid_source(self) -> None:
+        with pytest.raises(ValueError):
+            File(12345)
+
+    def test_invalid_scheme(self) -> None:
+        with pytest.raises(ValueError):
+            File("ftp://example.com/file.txt")
+
+    def test_backwards_compat_internal_init(self, tmp_path: pathlib.Path) -> None:
+        """Internal callers passing source_scheme still work."""
+        test_file = tmp_path / "test.txt"
+        test_file.write_bytes(b"hello")
+        file = File(
+            str(test_file),
+            source_scheme="local_path",
+            source_extension=".txt",
+            fetcher=lambda: File._fetch_local_file(path=test_file),
+        )
+        assert file.__source_scheme__ == "local_path"
+        assert file.read() == b"hello"
+
+
+# ---------------------------------------------------------------------------
+# TestFileLoad — async load() method
+# ---------------------------------------------------------------------------
+
+
+class TestFileLoad:
+    async def test_load_bytes_is_noop(self) -> None:
+        file = File(b"already loaded")
+        await file.load()
+        assert file.read() == b"already loaded"
+
+    async def test_load_local_path(self, tmp_path: pathlib.Path) -> None:
+        test_file = tmp_path / "test.txt"
+        test_file.write_bytes(b"local content")
+        file = File(str(test_file))
+        await file.load()
+        assert file.read() == b"local content"
+
+    async def test_load_url_async(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mock_response = MagicMock()
+        mock_response.content = b"fetched content"
+        mock_response.headers = {
+            "Content-Type": "text/plain",
+            "Content-Disposition": 'attachment; filename="doc.txt"',
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.aclose = AsyncMock()
+
+        file = File("https://example.com/doc.txt")
+        await file.load(client=mock_client)
+
+        assert file.read() == b"fetched content"
+        assert file.__content_type__ == "text/plain"
+        # Client should NOT be closed when passed in (caller owns it)
+        mock_client.aclose.assert_not_called()
+
+    async def test_load_idempotent(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_response = MagicMock()
+        mock_response.content = b"data"
+        mock_response.headers = {"Content-Type": "application/octet-stream"}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        file = File("https://example.com/file.bin")
+        await file.load(client=mock_client)
+        await file.load(client=mock_client)
+
+        # Only fetched once
+        assert mock_client.get.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# TestMessageLoad — Message.load() concurrent file loading
+# ---------------------------------------------------------------------------
+
+
+class TestMessageLoad:
+    async def test_load_no_files(self) -> None:
+        from timbal.types.message import Message
+
+        msg = Message.validate({"role": "user", "content": "hello"})
+        await msg.load()  # Should not raise
+
+    async def test_load_with_file_content(self, tmp_path: pathlib.Path) -> None:
+        from timbal.types.content import FileContent
+        from timbal.types.message import Message
+
+        test_file = tmp_path / "test.txt"
+        test_file.write_bytes(b"content")
+        file = File(str(test_file))
+        msg = Message(role="user", content=[FileContent(file=file)])
+        await msg.load()
+        file.seek(0)
+        assert file.read() == b"content"
+
+
+# ---------------------------------------------------------------------------
+# TestFilePydanticSchema — JSON schema generation
+# ---------------------------------------------------------------------------
+
+
 class TestFilePydanticSchema:
     def test_get_pydantic_json_schema_structure(self) -> None:
-        """Lines 428-433: __get_pydantic_json_schema__ returns expected schema dict."""
         schema = File.__get_pydantic_json_schema__(None, None)
         assert schema["type"] == "string"
         assert schema["format"] == "uri"

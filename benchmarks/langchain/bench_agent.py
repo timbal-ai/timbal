@@ -107,7 +107,8 @@ def _clear_traces():
 # TIMBAL — fake LLM agent factory
 # ═══════════════════════════════════════════════════════════════════════════════
 
-from timbal import Agent, TestModel  # noqa: E402
+from timbal import Agent  # noqa: E402
+from timbal.core.test_model import TestModel  # noqa: E402
 from timbal.types.message import Message  # noqa: E402
 from timbal.types.content import TextContent, ToolResultContent, ToolUseContent  # noqa: E402
 

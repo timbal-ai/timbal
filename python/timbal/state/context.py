@@ -102,6 +102,16 @@ class RunContext(BaseModel):
         # Explicit provider set on the runnable — skip auto-detection entirely.
         # None means tracing is disabled; a class means use that provider.
         if not isinstance(self.tracing_provider, _TracingProviderUnset):
+            if self.tracing_provider is not None and (
+                not isinstance(self.tracing_provider, type)
+                or not issubclass(self.tracing_provider, TracingProvider)
+            ):
+                raise TypeError(
+                    f"tracing_provider must be a TracingProvider subclass, None, or TRACING_UNSET — "
+                    f"got {self.tracing_provider!r}. "
+                    f"Pass the class itself (e.g. MyProvider), not an instance. "
+                    f"Use MyProvider.configured(...) to set provider-specific options."
+                )
             self._tracing_provider = self.tracing_provider
             return
 

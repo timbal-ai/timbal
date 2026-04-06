@@ -449,6 +449,17 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         self._synthesize_missing_tool_results(memory)
         current_span.memory = memory + current_span.memory
 
+        # Cache the already-serialized previous memory so handler() can skip re-dumping.
+        # Two cases:
+        #   InMemory provider  — previous_span is the live Span object; _memory_dump
+        #                        is set and contains dicts (serialized in prior handler()).
+        #   JSONL/disk reload  — previous_span was reconstructed from JSON; _memory_dump
+        #                        is not set, but span.memory holds the dicts from the file.
+        if hasattr(previous_span, "_memory_dump"):
+            current_span._prev_memory_dump = list(previous_span._memory_dump)
+        else:
+            current_span._prev_memory_dump = list(previous_span.memory)
+
         # Apply memory compaction if configured and context window utilization warrants it
         if self.memory_compaction is not None:
             should_compact = self.memory_compaction_ratio <= 0.0
@@ -606,7 +617,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         await self.resolve_memory()
 
-        current_span._memory_dump = await dump(current_span.memory)
+        prev_dump = getattr(current_span, "_prev_memory_dump", None)
+        if prev_dump is not None and "compaction" not in current_span.metadata:
+            # Reuse the already-serialized previous messages; only dump new ones
+            # (prompt + any synthetic tool results added by _synthesize_missing_tool_results).
+            # If compaction ran it rewrites memory, invalidating the cached dump.
+            new_messages = current_span.memory[len(prev_dump):]
+            current_span._memory_dump = prev_dump + await dump(new_messages)
+        else:
+            current_span._memory_dump = await dump(current_span.memory)
         # Remove these so the llm runnable doesn't try to use/validate them again
         kwargs.pop("prompt", None)
         kwargs.pop("messages", None)

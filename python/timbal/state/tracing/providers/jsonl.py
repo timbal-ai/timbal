@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 class JsonlTracingProvider(TracingProvider):
     """JSONL file tracing provider.
 
-    Appends one JSON record per run to a file. Each line has the form::
+    Stores one JSON record per run in a file. Each line has the form::
 
         {"run_id": "...", "parent_id": "...", "spans": [{...}, ...]}
 
@@ -34,6 +34,15 @@ class JsonlTracingProvider(TracingProvider):
 
     The file is created automatically if it does not exist.
     Multiple concurrent runs append safely via an asyncio lock.
+
+    .. warning::
+
+        **Not suitable for production use.** Every ``_store()`` call reads and
+        rewrites the entire file to update the record for a given run_id
+        (O(n) in lines). This is fine for local development, debugging, and
+        tests, but will degrade with large trace files or high-throughput
+        workloads. For production, use ``PlatformTracingProvider`` or implement
+        a provider backed by a proper database.
 
     This is a reference implementation — a practical starting point for building
     your own provider (OTel, Langfuse, Datadog, etc.). The interface is two methods:
@@ -89,12 +98,27 @@ class JsonlTracingProvider(TracingProvider):
                 "JsonlTracingProvider._path is not set. "
                 "Use JsonlTracingProvider.configured(_path=Path(...)) to create a configured provider."
             )
-        record = {
-            "run_id": str(run_context.id),
+        run_id = str(run_context.id)
+        new_record = {
+            "run_id": run_id,
             "parent_id": str(run_context.parent_id) if run_context.parent_id else None,
             "spans": run_context._trace.model_dump(),
         }
-        line = json.dumps(record, default=str) + "\n"
+        new_line = json.dumps(new_record, default=str) + "\n"
         async with cls._get_lock():
+            # Update existing record if present, otherwise append — mirrors the
+            # InMemoryTracingProvider dict overwrite behaviour. Providers emit
+            # intermediate snapshots on each span completion, so we keep only the
+            # latest (most complete) state per run_id, preventing file bloat.
+            if cls._path.exists():
+                lines = cls._path.read_text(encoding="utf-8").splitlines(keepends=True)
+                for i, line in enumerate(lines):
+                    try:
+                        if json.loads(line).get("run_id") == run_id:
+                            lines[i] = new_line
+                            cls._path.write_text("".join(lines), encoding="utf-8")
+                            return
+                    except json.JSONDecodeError:
+                        continue
             with cls._path.open("a", encoding="utf-8") as f:
-                f.write(line)
+                f.write(new_line)

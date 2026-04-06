@@ -53,7 +53,7 @@ class Read(Tool):
                     session["fs_state"] = {}
                 session["fs_state"][str(path)] = new_hash
 
-            file = File.validate(path)
+            file = File(path)
 
             # These are file types that are not text and handled specially by Timbal FileContent
             if file.__source_extension__ in [".xlsx", ".eml", ".docx"]:

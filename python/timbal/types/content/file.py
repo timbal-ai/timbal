@@ -84,11 +84,10 @@ def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
     for page_num in range(len(doc)):
         page = doc[page_num]
         pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
-        # TODO Use File.validate(bytes, {"extension": ".png"})
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp_path = Path(f.name)
         pix.save(tmp_path)
-        pix_file = File.validate(tmp_path)
+        pix_file = File(tmp_path)
         pages.append(pix_file)
     return pages
 
@@ -462,7 +461,7 @@ class FileContent(BaseContent):
                                 attachment_file = io.BytesIO(attachment['data'])
                                 attachment_file.name = attachment['filename']
                                 extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
-                                file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                                file_obj = File(attachment_file, extension=extension)
                                 converted = FileContent(file=file_obj).to_openai_chat_completions_input()
                                 if isinstance(converted, list):
                                     openai_input.extend(converted)
@@ -482,7 +481,7 @@ class FileContent(BaseContent):
                     attachment_file = io.BytesIO(attachment['data'])
                     attachment_file.name = attachment['filename']
                     extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
-                    file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                    file_obj = File(attachment_file, extension=extension)
                     converted = FileContent(file=file_obj).to_openai_chat_completions_input()
                     if isinstance(converted, list):
                         openai_input.extend(converted)
@@ -661,7 +660,7 @@ class FileContent(BaseContent):
                                 # Ensure the filename has the correct extension for MIME type detection
                                 if extension and not attachment['filename'].endswith(extension):
                                     attachment_file.name = attachment['filename'] + extension
-                                file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                                file_obj = File(attachment_file, extension=extension)
                                 converted = FileContent(file=file_obj).to_anthropic_input()
                                 if isinstance(converted, list):
                                     anthropic_input.extend(converted)
@@ -685,7 +684,7 @@ class FileContent(BaseContent):
                     # Ensure the filename has the correct extension for MIME type detection
                     if extension and not attachment['filename'].endswith(extension):
                         attachment_file.name = attachment['filename'] + extension
-                    file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                    file_obj = File(attachment_file, extension=extension)
                     converted = FileContent(file=file_obj).to_anthropic_input()
                     if isinstance(converted, list):
                         anthropic_input.extend(converted)

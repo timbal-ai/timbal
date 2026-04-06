@@ -63,24 +63,41 @@ class TracingProvider(ABC):
 
     **Why class-based, not instance-based?**
 
-    Providers are passed as types, not instances::
+    Providers are passed as **types** (classes), not instances::
 
         agent = Agent(..., tracing_provider=MyProvider)
 
-    This keeps the call-site ergonomic and lets the framework call provider
-    methods without managing provider lifecycle. It also means shared state
-    (e.g. an in-memory store) is naturally available across all runs without
-    the caller explicitly threading an instance through every call.
+    All methods are ``@classmethod`` — there is no ``self``. Shared state
+    lives in class-level attributes, so it is naturally available across all
+    runs without threading an instance through every call.
 
-    **Configuration**
+    **Configuration via ``configured()``**
 
-    Use ``configured()`` to create a provider subclass with specific class-level
-    attributes set, avoiding global state conflicts between providers::
+    Class-level attributes are the provider's configuration surface.
+    ``configured()`` creates an isolated **subclass** with those attributes
+    overridden — the original class is never mutated::
 
-        provider = MyProvider.configured(endpoint="http://...", api_key="...")
-        agent = Agent(..., tracing_provider=provider)
+        # Each call returns a new, independent subclass:
+        provider_a = JsonlTracingProvider.configured(_path=Path("a.jsonl"))
+        provider_b = JsonlTracingProvider.configured(_path=Path("b.jsonl"))
 
-    Each subclass returned by ``configured()`` has its own independent state.
+        # provider_a._path and provider_b._path are independent.
+        # JsonlTracingProvider._path is still None (unchanged).
+
+    Under the hood this is just ``type(cls.__name__, (cls,), kwargs)``, so
+    any attribute you declare at class level can be overridden:
+
+    1. Declare the attribute with a sensible default::
+
+        class MyProvider(TracingProvider):
+            endpoint: str = ""
+            _timeout: float = 30.0
+
+    2. Users override it at call-site::
+
+        provider = MyProvider.configured(endpoint="http://...", _timeout=5.0)
+
+    3. ``get()`` and ``_store()`` read ``cls.endpoint``, ``cls._timeout``, etc.
 
     **Attaching exporters**
 
