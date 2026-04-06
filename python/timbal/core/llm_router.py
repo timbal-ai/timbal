@@ -35,33 +35,22 @@ from .runnable import Runnable
 
 logger = structlog.get_logger("timbal.core.llm_router")
 
-# Module-level client caches keyed by (api_key, base_url).
+# Module-level client cache keyed by (client_class, api_key, base_url, provider).
 # Reusing clients preserves the underlying httpx connection pool, avoiding a
 # fresh TCP+TLS handshake on every LLM call (~200-300ms saved per request).
 # Per-request tracing headers (run_id, call_id) are passed via extra_headers
 # on each individual .create() call instead.
-_OPENAI_CLIENT_CACHE: dict[tuple, AsyncOpenAI] = {}
-_ANTHROPIC_CLIENT_CACHE: dict[tuple, AsyncAnthropic] = {}
+_CLIENT_CACHE: dict[tuple, AsyncOpenAI | AsyncAnthropic] = {}
 
 
-def _get_openai_client(api_key: str, base_url: str | None, provider: str) -> AsyncOpenAI:
-    cache_key = (api_key, base_url, provider)
-    if cache_key not in _OPENAI_CLIENT_CACHE:
+def _get_client(cls: type, api_key: str, base_url: str | None, provider: str) -> AsyncOpenAI | AsyncAnthropic:
+    cache_key = (cls, api_key, base_url, provider)
+    if cache_key not in _CLIENT_CACHE:
         kwargs: dict[str, Any] = {"api_key": api_key, "default_headers": {"x-provider": provider}}
         if base_url:
             kwargs["base_url"] = base_url
-        _OPENAI_CLIENT_CACHE[cache_key] = AsyncOpenAI(**kwargs)
-    return _OPENAI_CLIENT_CACHE[cache_key]
-
-
-def _get_anthropic_client(api_key: str, base_url: str | None) -> AsyncAnthropic:
-    cache_key = (api_key, base_url)
-    if cache_key not in _ANTHROPIC_CLIENT_CACHE:
-        kwargs: dict[str, Any] = {"api_key": api_key, "default_headers": {"x-provider": "anthropic"}}
-        if base_url:
-            kwargs["base_url"] = base_url
-        _ANTHROPIC_CLIENT_CACHE[cache_key] = AsyncAnthropic(**kwargs)
-    return _ANTHROPIC_CLIENT_CACHE[cache_key]
+        _CLIENT_CACHE[cache_key] = cls(**kwargs)
+    return _CLIENT_CACHE[cache_key]
 
 
 TIMBAL_OPENAI_API = os.getenv("TIMBAL_OPENAI_API", "responses")
@@ -182,8 +171,8 @@ def _resolve_client(
         raise APIKeyNotFoundError(f"{config.env_key} not found.")
 
     if config.client_type == "anthropic":
-        return _get_anthropic_client(api_key, base_url), base_url
-    return _get_openai_client(api_key, base_url or config.default_base_url, provider), base_url
+        return _get_client(AsyncAnthropic, api_key, base_url, "anthropic"), base_url
+    return _get_client(AsyncOpenAI, api_key, base_url or config.default_base_url, provider), base_url
 
 
 # ---------------------------------------------------------------------------
