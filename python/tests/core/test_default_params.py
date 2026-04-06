@@ -512,34 +512,31 @@ class TestDefaultParamsWithAgents:
         assert resolved2["counter"] > resolved1["counter"]
 
     @pytest.mark.asyncio
-    async def test_agent_default_params_with_system_prompt_templating(self):
-        """Test that default params work alongside system prompt templating."""
+    async def test_agent_default_params_with_callable_system_prompt(self):
+        """Test that default params work alongside a callable system prompt."""
+        import os
+
         agent = Agent(
             name="template_agent",
             model=TestModel(),
-            system_prompt="Current directory: {os::getcwd}. Process ID: {os::getpid}",
+            system_prompt=lambda: f"Current directory: {os.getcwd()}. Process ID: {os.getpid()}",
             default_params={
                 "context": lambda: "AI_ASSISTANT_SESSION",
-                "user_id": "user_123",  # Static
+                "user_id": "user_123",
             },
         )
 
-        # Should have both system prompt callables and default param callables
-        assert len(agent._system_prompt_templates) == 2  # os::getcwd and os::getpid
+        assert agent._system_prompt_fn is not None
         assert len(agent._default_runtime_params) == 1  # context callable
         assert agent._default_fixed_params == {"user_id": "user_123"}
 
-        # Test that both are resolved independently
+        # Both are resolved independently
         resolved_system = await agent._resolve_system_prompt()
         resolved_defaults = await agent._resolve_input_params()
 
-        # System prompt should have template functions resolved
-        assert "{os::getcwd}" not in resolved_system
-        assert "{os::getpid}" not in resolved_system
         assert "Current directory:" in resolved_system
         assert "Process ID:" in resolved_system
 
-        # Default params should be resolved
         assert resolved_defaults["context"] == "AI_ASSISTANT_SESSION"
         assert resolved_defaults["user_id"] == "user_123"
 

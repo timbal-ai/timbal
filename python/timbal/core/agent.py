@@ -1,10 +1,7 @@
 import asyncio
 import contextvars
-import importlib
 import inspect
 import json
-import re
-import sys
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
 from pathlib import Path
@@ -61,9 +58,6 @@ def _estimate_tokens_from_memory(memory: list[Message]) -> int:
                     if isinstance(item, TextContent):
                         total_chars += len(item.text)
     return max(1, total_chars // 4)
-
-
-SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)*\}")
 
 
 class AgentParams(BaseModel):
@@ -155,7 +149,6 @@ class Agent(Runnable):
     """Custom API key for the LLM API."""
 
     _llm: Tool = PrivateAttr()
-    _system_prompt_templates: dict[str, Any] = PrivateAttr(default_factory=dict)
     _system_prompt_fn: Callable | None = PrivateAttr(default=None)
     _system_prompt_fn_is_async: bool = PrivateAttr(default=False)
     _system_prompt_skills: str | None = PrivateAttr(default=None)
@@ -170,106 +163,6 @@ class Agent(Runnable):
             self._system_prompt_fn = self.system_prompt
             self._system_prompt_fn_is_async = self._inspect_callable(self.system_prompt)["is_coroutine"]
             self.system_prompt = None
-
-        if self.system_prompt:
-            for match in SYSTEM_PROMPT_FN_PATTERN.finditer(self.system_prompt):
-                text = match.group()
-                path = text[1:-1]  # Remove { and }
-                path_parts = path.split("::")
-                assert len(path_parts) >= 2, (
-                    f"Invalid path format for system prompt: {path}. Review the SYSTEM_PROMPT_FN_PATTERN regex."
-                )
-                module, fn_i = None, None
-                if path_parts[0] == "":
-                    # File-relative import: look in caller's globals first
-                    frame = inspect.currentframe()
-                    caller_globals = None
-                    while frame:
-                        frame = frame.f_back
-                        if frame is None:
-                            break
-                        frame_self = frame.f_locals.get("self")
-                        if not isinstance(frame_self, Agent):
-                            caller_globals = frame.f_globals
-                            break
-                    assert caller_globals is not None, "Could not determine caller globals for Agent constructor."
-
-                    # Try to resolve from caller's globals directly (handles same-file definitions)
-                    fn = caller_globals
-                    try:
-                        for attr_name in path_parts[1:]:
-                            fn = fn[attr_name] if isinstance(fn, dict) else getattr(fn, attr_name)
-                        logger.info(f"Resolved callable '{text}' from caller's globals")
-                    except (KeyError, AttributeError):
-                        # If not in globals, try loading the module
-                        caller_file = Path(caller_globals.get("__file__", "")).expanduser().resolve()
-                        agent_path = caller_file
-                        for fn_i in range(1, len(path_parts)):
-                            module_path = agent_path / "/".join(path_parts[:-fn_i])
-                            try:
-                                # Use absolute path as module identifier
-                                module_path_str = str(module_path.resolve())
-                                # Check if module is already loaded in sys.modules by absolute path
-                                if module_path_str in sys.modules:
-                                    module = sys.modules[module_path_str]
-                                    logger.info(
-                                        f"Using already loaded module '{module_path}' for system prompt callable '{text}'"
-                                    )
-                                    break
-                                # Load the module if not already loaded
-                                module_spec = importlib.util.spec_from_file_location(
-                                    module_path_str, module_path.as_posix()
-                                )
-                                if not module_spec or not module_spec.loader:
-                                    raise ValueError(f"Failed to load module {module_path}")
-                                module = importlib.util.module_from_spec(module_spec)
-                                # Register in sys.modules BEFORE executing to prevent re-entry
-                                sys.modules[module_path_str] = module
-                                module_spec.loader.exec_module(module)
-                                logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
-                                break
-                            except Exception:
-                                pass
-                        else:
-                            for fn_i in range(1, len(path_parts)):
-                                module_path = ".".join(path_parts[:-fn_i])
-                                try:
-                                    module = importlib.import_module(module_path)
-                                    logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
-                                    break
-                                except Exception:
-                                    pass
-                        fn = module
-                        for j in path_parts[-fn_i:]:
-                            fn = getattr(fn, j)
-
-                    inspect_result = self._inspect_callable(fn)
-                    self._system_prompt_templates[text] = {
-                        "start": match.start(),
-                        "end": match.end(),
-                        "callable": fn,
-                        "is_coroutine": inspect_result["is_coroutine"],
-                    }
-                else:
-                    # Package import (e.g., {os::getcwd})
-                    for fn_i in range(1, len(path_parts)):
-                        module_path = ".".join(path_parts[:-fn_i])
-                        try:
-                            module = importlib.import_module(module_path)
-                            logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
-                            break
-                        except Exception:
-                            pass
-                    fn = module
-                    for j in path_parts[-fn_i:]:
-                        fn = getattr(fn, j)
-                    inspect_result = self._inspect_callable(fn)
-                    self._system_prompt_templates[text] = {
-                        "start": match.start(),
-                        "end": match.end(),
-                        "callable": fn,
-                        "is_coroutine": inspect_result["is_coroutine"],
-                    }
 
         # Backward compat: silently promote known keys from model_params to individual fields
         if self.model_params:
@@ -437,17 +330,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = await self._execute_runtime_callable(
                 self._system_prompt_fn, self._system_prompt_fn_is_async
             )
-        elif self._system_prompt_templates:
-            assert isinstance(system_prompt, str)
-            # Execute template functions in parallel
-            system_prompt_tasks = []
-            for _, v in self._system_prompt_templates.items():
-                callable_fn = v["callable"]
-                system_prompt_tasks.append(self._execute_runtime_callable(callable_fn, v["is_coroutine"]))
-            results = await asyncio.gather(*system_prompt_tasks)
-            # Substitute results into template
-            for (k, _), result in zip(self._system_prompt_templates.items(), results, strict=False):
-                system_prompt = system_prompt.replace(k, str(result) if result is not None else "")
 
         if self._system_prompt_skills:
             if not isinstance(system_prompt, str):
