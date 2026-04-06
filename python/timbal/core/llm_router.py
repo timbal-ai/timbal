@@ -379,7 +379,13 @@ async def _llm_router(
 
     client, base_url = _resolve_client(provider, config, api_key, base_url, run_context)
 
-    # Eagerly load all unloaded file content (async, concurrent) before serialization.
+    # Eagerly load all unloaded file content (async, concurrent) before
+    # serialization.  This scan lives here — not inside to_*_input() — because:
+    #   1. gather() needs the full list upfront for concurrent downloads.
+    #   2. to_*_input() stays sync and pure (format conversion, no I/O).
+    # The double iteration (scan here + serialize in to_*_input) is intentional:
+    # content arrays are small (1-5 items) and the cost is negligible vs the
+    # network calls that follow.
     from ..types.content import FileContent
     _unloaded_files = [
         c.file for m in messages for c in m.content

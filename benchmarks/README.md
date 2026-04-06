@@ -79,6 +79,42 @@ Total: **~17k lines of source**, **~30k lines of tests**.
 
 `core` and `server` are the most thoroughly tested (4× test-to-source). `types` is relatively under-tested because the types are simple data containers exercised indirectly through core tests.
 
+## File handling
+
+Timbal's `File` type is a single class that accepts any source — local path, URL, raw
+bytes, or data-URL — and handles everything automatically: MIME detection, lazy loading,
+async concurrent downloads, file validation, and transparent conversion to each LLM
+provider's format. One line of code, works everywhere:
+
+```python
+agent = Agent(model="anthropic/claude-sonnet-4-6", ...)
+result = await agent(prompt=[File.validate("https://example.com/report.pdf"), "Summarize this"]).collect()
+```
+
+No other framework we benchmark against offers anything comparable:
+
+| Feature | Timbal | CrewAI | Pydantic-AI | LangChain | Agno |
+|---------|:------:|:------:|:-----------:|:---------:|:----:|
+| Unified File type (path/URL/bytes/data-URL) | **yes** | partial | no | no | no |
+| Works across all providers transparently | **yes** | yes | no | no | no |
+| Auto-detect MIME type | **yes** | partial | partial | no | no |
+| Async concurrent downloads | **yes** | no | no | no | no |
+| Lazy loading from URL | **yes** | no | partial | no | no |
+| File validation before LLM call | **yes** | no | no | no | no |
+| Format transformations (PDF → images) | **yes** | no | no | no | no |
+
+**LangChain** has no File type at all — you manually build provider-specific dicts.
+**Agno** has an `Image` class for images only; no PDFs, docs, or MIME detection.
+**Pydantic-AI** fragments files into separate types (`ImageUrl`, `AudioUrl`,
+`BinaryContent`, etc.) and requires manual `media_type` for local files.
+**CrewAI** is the closest with a `File` class and auto-detection, but lacks async
+loading, validation, lazy URL loading, and format transformations.
+
+Timbal's file pipeline: store the source lazily → batch-preload all files concurrently
+via a shared `httpx.AsyncClient` (connection reuse) → validate (PIL for images, fitz
+for PDFs) → convert to the target provider's format automatically. Zero boilerplate,
+zero provider-specific code in user land.
+
 ## Subdirectories
 
 | Directory | What it compares | Status |
