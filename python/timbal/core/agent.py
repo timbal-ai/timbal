@@ -1,6 +1,5 @@
 import asyncio
 import contextvars
-import inspect
 import json
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
@@ -44,20 +43,19 @@ from .tool_set import ToolSet
 logger = structlog.get_logger("timbal.core.agent")
 
 
+def _content_chars(c: TextContent | ToolUseContent | ToolResultContent) -> int:
+    if isinstance(c, TextContent):
+        return len(c.text)
+    if isinstance(c, ToolUseContent):
+        return len(c.name) + len(str(c.input))
+    if isinstance(c, ToolResultContent):
+        return sum(len(item.text) for item in c.content if isinstance(item, TextContent))
+    return 0
+
+
 def _estimate_tokens_from_memory(memory: list[Message]) -> int:
     """Rough token estimate from message content. 1 token ≈ 4 chars (standard approximation)."""
-    total_chars = 0
-    for msg in memory:
-        for content in msg.content:
-            if isinstance(content, TextContent):
-                total_chars += len(content.text)
-            elif isinstance(content, ToolUseContent):
-                total_chars += len(content.name) + len(str(content.input))
-            elif isinstance(content, ToolResultContent):
-                for item in content.content:
-                    if isinstance(item, TextContent):
-                        total_chars += len(item.text)
-    return max(1, total_chars // 4)
+    return max(1, sum(_content_chars(c) for msg in memory for c in msg.content) // 4)
 
 
 class AgentParams(BaseModel):
@@ -202,16 +200,14 @@ class Agent(Runnable):
             )
 
         # Build default params for the internal LLM tool from individual fields
-        _llm_default_params = {}
-        if self.max_tokens is not None:
-            _llm_default_params["max_tokens"] = self.max_tokens
-        if self.temperature is not None:
-            _llm_default_params["temperature"] = self.temperature
-        if self.base_url is not None:
-            _llm_default_params["base_url"] = self.base_url
-        if self.api_key is not None:
-            _llm_default_params["api_key"] = self.api_key
-        # Forward provider-specific params (e.g. thinking, cache_control, top_p, stop_sequences)
+        _llm_default_params = {
+            k: v for k, v in [
+                ("max_tokens", self.max_tokens),
+                ("temperature", self.temperature),
+                ("base_url", self.base_url),
+                ("api_key", self.api_key),
+            ] if v is not None
+        }
         if self.model_params:
             _llm_default_params["provider_params"] = self.model_params
 
@@ -433,7 +429,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return
 
         self_spans = parent_trace.get_path(self._path)
-        if not len(self_spans):
+        if not self_spans:
             return
         if len(self_spans) > 1:
             logger.warning(
@@ -522,42 +518,36 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """Resolve the tools to be provided to the LLM."""
         if i >= self.max_iter:
             return [], {}
+
         tools = []
-        tools_names = set()
-        commands = {}
+        tools_names: set[str] = set()
+        commands: dict[str, Tool] = {}
+
+        def _register(tool: Tool) -> None:
+            if tool.name in tools_names:
+                logger.warning(f"Tool with name '{tool.name}' already exists. You can only add a tool once.")
+                return
+            tools.append(tool)
+            tools_names.add(tool.name)
+            if tool.command:
+                commands[tool.command] = tool
+
         for t in self.tools:
             if isinstance(t, ToolSet):
-                resolved_toolset = await t.resolve()
-                for tool in resolved_toolset:
-                    if tool.name in tools_names:
-                        logger.warning(f"Tool with name '{tool.name}' already exists. You can only add a tool once.")
-                    else:
-                        tool.nest(self._path)
-                        tools.append(tool)
-                        tools_names.add(tool.name)
-                        if tool.command:
-                            commands[tool.command] = tool
+                for tool in await t.resolve():
+                    tool.nest(self._path)
+                    _register(tool)
             else:
-                if t.name in tools_names:
-                    logger.warning(f"Tool with name '{t.name}' already exists. You can only add a tool once.")
-                else:
-                    tools.append(t)
-                    tools_names.add(t.name)
-                    if t.command:
-                        commands[t.command] = t
+                _register(t)
 
         if self._bg_tasks:
-            get_background_task_tool = Tool(
+            bg_tool = Tool(
                 name="get_background_task",
                 description="Get the status and events of a background task.",
                 handler=self.get_background_task,
             )
-            get_background_task_tool.nest(self._path)
-            tools.append(get_background_task_tool)
-            tools_names.add("get_background_task")
-            # Add to commands dict if the tool has a command attribute
-            # if get_background_task_tool.command:
-            #     commands[get_background_task_tool.command] = get_background_task_tool
+            bg_tool.nest(self._path)
+            _register(bg_tool)
 
         return tools, commands
 

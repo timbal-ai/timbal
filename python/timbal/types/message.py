@@ -48,10 +48,7 @@ class Message:
             return f"Message(role={self.role}, content={self.content}, stop_reason={self.stop_reason})"
         return f"Message(role={self.role}, content={self.content})"
 
-    def __repr__(self) -> str:
-        if self.stop_reason:
-            return f"Message(role={self.role}, content={self.content}, stop_reason={self.stop_reason})"
-        return f"Message(role={self.role}, content={self.content})"
+    __repr__ = __str__
 
     def to_openai_responses_input(self) -> list[dict[str, Any]]:
         """Convert the message to OpenAI's responses api expected input format."""

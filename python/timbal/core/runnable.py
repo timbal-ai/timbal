@@ -44,7 +44,7 @@ from ..types.events import (
     OutputEvent,
     StartEvent,
 )
-from ..types.events.delta import Custom, DeltaEvent, DeltaItem, TextDelta
+from ..types.events.delta import Custom, DeltaEvent, DeltaItem
 from ..types.message import Message
 from ..types.run_status import RunStatus
 from ..utils import dump, sync_to_async_gen
@@ -622,18 +622,14 @@ class Runnable(ABC, BaseModel):
 
         # Resolve runtime params (lambdas), skipping any already in input
         if self._default_runtime_params:
-            tasks = []
-            callable_param_names = []
-            for param_name, callable_info in self._default_runtime_params.items():
-                if param_name in input:
-                    continue  # Already provided, skip resolution
-                tasks.append(self._execute_runtime_callable(callable_info["callable"], callable_info["is_coroutine"]))
-                callable_param_names.append(param_name)
-
-            if tasks:
-                results = await asyncio.gather(*tasks)
-                for param_name, result in zip(callable_param_names, results, strict=False):
-                    resolved[param_name] = result
+            pending = {
+                name: self._execute_runtime_callable(info["callable"], info["is_coroutine"])
+                for name, info in self._default_runtime_params.items()
+                if name not in input
+            }
+            if pending:
+                results = await asyncio.gather(*pending.values())
+                resolved.update(zip(pending.keys(), results, strict=True))
 
         # Input takes priority over defaults
         resolved.update(input)
