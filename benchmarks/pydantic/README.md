@@ -20,8 +20,6 @@ Raw output stored in `results/`.
 
 ## Setup
 
-From the repo root:
-
 ```bash
 uv sync --dev
 uv pip install pydantic-ai logfire
@@ -38,6 +36,10 @@ uv run python benchmarks/pydantic/bench_agent.py --quick
 # Full mode (~15–20 min)
 uv run python benchmarks/pydantic/bench_agent.py
 ```
+
+> `pydantic-ai` and `logfire` are not in `pyproject.toml` — they conflict with
+> `crewai`'s `opentelemetry-sdk` pin and can't share the same lockfile. Install
+> them ad-hoc with `uv pip install` as shown above.
 
 ---
 
