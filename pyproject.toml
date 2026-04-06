@@ -63,10 +63,6 @@ dev = [
   "pytest-asyncio>=0.25.2",
   "yappi>=1.7.6",
 ]
-bench-pydantic = [
-  "logfire>=4.31.0",
-  "pydantic-ai>=1.77.0",
-]
 
 [project.scripts]
 timbal-codegen = "timbal.codegen.__main__:main"
