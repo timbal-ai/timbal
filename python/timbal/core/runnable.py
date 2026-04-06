@@ -467,14 +467,13 @@ class Runnable(ABC, BaseModel):
         return_model_schema = TypeAdapter(self.return_model).json_schema()
         return return_model_schema
 
-    def format_params_model_schema(self) -> dict[str, Any]:
-        """Format the parameter schema based on filtering rules.
+    @cached_property
+    def _formatted_params_schema(self) -> dict[str, Any]:
+        """Cached implementation of format_params_model_schema().
 
-        Applies the schema_params_mode, schema_include_params, and schema_exclude_params settings
-        to filter which parameters are included in the final schema.
-
-        Returns:
-            A filtered JSON schema containing only the selected parameters
+        Computed once per instance; depends on schema_params_mode,
+        schema_include_params, schema_exclude_params, and background_mode —
+        all of which are fixed at construction time.
         """
         selected_params = set()
         # Start with either all params or just required ones
@@ -522,6 +521,17 @@ class Runnable(ABC, BaseModel):
             "required": required,
         }
 
+    def format_params_model_schema(self) -> dict[str, Any]:
+        """Format the parameter schema based on filtering rules.
+
+        Applies the schema_params_mode, schema_include_params, and schema_exclude_params settings
+        to filter which parameters are included in the final schema.
+
+        Returns:
+            A filtered JSON schema containing only the selected parameters
+        """
+        return self._formatted_params_schema
+
     @computed_field
     @cached_property
     def openai_chat_completions_schema(self) -> dict[str, Any]:
@@ -531,7 +541,7 @@ class Runnable(ABC, BaseModel):
             "function": {
                 "name": self.name,
                 "description": self.description or "",
-                "parameters": self.format_params_model_schema(),
+                "parameters": self._formatted_params_schema,
             },
         }
 
@@ -543,7 +553,7 @@ class Runnable(ABC, BaseModel):
             "type": "function",
             "name": self.name,
             "description": self.description or "",
-            "parameters": self.format_params_model_schema(),
+            "parameters": self._formatted_params_schema,
         }
 
     @computed_field
@@ -553,7 +563,7 @@ class Runnable(ABC, BaseModel):
         return {
             "name": self.name,
             "description": self.description or "",
-            "input_schema": self.format_params_model_schema(),
+            "input_schema": self._formatted_params_schema,
         }
 
     @model_serializer
