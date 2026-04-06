@@ -534,54 +534,36 @@ class Runnable(ABC, BaseModel):
     @computed_field
     @cached_property
     def openai_chat_completions_schema(self) -> dict[str, Any]:
-        """Generate OpenAI-compatible tool schema for this runnable.
-
-        Returns:
-            A dictionary conforming to OpenAI's function calling schema format
-        """
-        formatted_params_model_schema = self.format_params_model_schema()
-        schema = {
+        """Tool schema in OpenAI Chat Completions format."""
+        return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": self.description or "",
-                "parameters": formatted_params_model_schema,
+                "parameters": self.format_params_model_schema(),
             },
         }
-        return schema
 
     @computed_field
     @cached_property
     def openai_responses_schema(self) -> dict[str, Any]:
-        """Generate OpenAI-compatible tool schema for this runnable.
-
-        Returns:
-            A dictionary conforming to OpenAI's function calling schema format
-        """
-        formatted_params_model_schema = self.format_params_model_schema()
-        schema = {
+        """Tool schema in OpenAI Responses API format."""
+        return {
             "type": "function",
             "name": self.name,
             "description": self.description or "",
-            "parameters": formatted_params_model_schema,
+            "parameters": self.format_params_model_schema(),
         }
-        return schema
 
     @computed_field
     @cached_property
     def anthropic_schema(self) -> dict[str, Any]:
-        """Generate Anthropic-compatible tool schema for this runnable.
-
-        Returns:
-            A dictionary conforming to Anthropic's tool calling schema format
-        """
-        formatted_params_model_schema = self.format_params_model_schema()
-        anthropic_schema = {
+        """Tool schema in Anthropic format."""
+        return {
             "name": self.name,
             "description": self.description or "",
-            "input_schema": formatted_params_model_schema,
+            "input_schema": self.format_params_model_schema(),
         }
-        return anthropic_schema
 
     @model_serializer
     def serialize(self) -> dict[str, Any]:
