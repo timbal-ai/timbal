@@ -36,32 +36,15 @@ _SUMMARY_MARKER = "[Conversation Summary]"
 # ---------------------------------------------------------------------------
 
 
-def _collect_tool_use_ids(messages: list[Message]) -> set[str]:
-    """Collect all tool_use call ids from assistant messages."""
-    ids = set()
-    for msg in messages:
-        if msg.role == "assistant":
-            for c in msg.content:
-                if isinstance(c, ToolUseContent):
-                    ids.add(c.id)
-    return ids
-
-
-def _collect_tool_result_ids(messages: list[Message]) -> set[str]:
-    """Collect all tool_result call ids from tool messages."""
-    ids = set()
-    for msg in messages:
-        if msg.role == "tool":
-            for c in msg.content:
-                if isinstance(c, ToolResultContent):
-                    ids.add(c.id)
-    return ids
+def _collect_ids(messages: list[Message], role: str, content_type: type) -> set[str]:
+    """Collect all content ids of a given type from messages with the given role."""
+    return {c.id for msg in messages if msg.role == role for c in msg.content if isinstance(c, content_type)}
 
 
 def _remove_orphaned_tool_parts(memory: list[Message]) -> list[Message]:
     """Remove tool_use without tool_result, and tool_result without tool_use."""
-    tool_use_ids = _collect_tool_use_ids(memory)
-    tool_result_ids = _collect_tool_result_ids(memory)
+    tool_use_ids = _collect_ids(memory, "assistant", ToolUseContent)
+    tool_result_ids = _collect_ids(memory, "tool", ToolResultContent)
     valid_tool_ids = tool_use_ids & tool_result_ids
 
     result = []
