@@ -2,7 +2,7 @@ import pytest
 from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
 from timbal.core.agent import AgentParams
-from timbal.types.content import ToolUseContent
+from timbal.types.content import CustomContent, TextContent, ToolResultContent, ToolUseContent
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
 
@@ -539,3 +539,84 @@ class TestAgentIntegration:
         anthropic_schema = agent.anthropic_schema
         assert anthropic_schema["name"] == "calc_agent"
         assert anthropic_schema["description"] == "A calculator agent"
+
+
+def _make_agent(model: str = "anthropic/claude-sonnet-4-6") -> Agent:
+    kwargs = {"name": "test", "model": model, "tools": []}
+    if model.startswith("anthropic/"):
+        kwargs["max_tokens"] = 1024
+    return Agent(**kwargs)
+
+
+def _tool_use(id: str, *, server: bool = False) -> ToolUseContent:
+    return ToolUseContent(id=id, name="fn", input={}, is_server_tool_use=server)
+
+
+class TestSynthesizeMissingToolResults:
+    """Unit tests for Agent._synthesize_missing_tool_results."""
+
+    def test_no_tool_use_is_noop(self):
+        """Last message has only text — nothing to synthesize."""
+        agent = _make_agent()
+        memory = [Message(role="assistant", content=[TextContent(text="hello")])]
+        agent._synthesize_missing_tool_results(memory)
+        assert len(memory) == 1
+        assert len(memory[0].content) == 1
+
+    def test_regular_tool_use_appends_error_result(self):
+        """Interrupted regular tool_use gets a new tool-role message."""
+        agent = _make_agent()
+        memory = [Message(role="assistant", content=[_tool_use("tu_001")])]
+        agent._synthesize_missing_tool_results(memory)
+        assert len(memory) == 2
+        result_msg = memory[1]
+        assert result_msg.role == "tool"
+        assert len(result_msg.content) == 1
+        result = result_msg.content[0]
+        assert isinstance(result, ToolResultContent)
+        assert result.id == "tu_001"
+        assert "ERROR" in result.content[0].text
+
+    def test_multiple_regular_tool_uses_each_get_result(self):
+        """Two interrupted tool_use blocks → two appended result messages."""
+        agent = _make_agent()
+        memory = [Message(role="assistant", content=[_tool_use("tu_001"), _tool_use("tu_002")])]
+        agent._synthesize_missing_tool_results(memory)
+        # One result message per tool_use
+        assert len(memory) == 3
+        result_ids = {memory[i].content[0].id for i in (1, 2)}
+        assert result_ids == {"tu_001", "tu_002"}
+
+    def test_server_tool_use_anthropic_appends_inline_error(self):
+        """Interrupted server_tool_use on Anthropic → inline CustomContent added to same message."""
+        agent = _make_agent("anthropic/claude-sonnet-4-6")
+        memory = [Message(role="assistant", content=[_tool_use("svu_001", server=True)])]
+        agent._synthesize_missing_tool_results(memory)
+        # No new message — inline content appended to last message
+        assert len(memory) == 1
+        assert len(memory[0].content) == 2
+        inline = memory[0].content[1]
+        assert isinstance(inline, CustomContent)
+        assert inline.value["tool_use_id"] == "svu_001"
+        assert inline.value["type"] == "web_search_tool_result"
+
+    def test_server_tool_use_non_anthropic_skipped(self):
+        """Interrupted server_tool_use on a non-Anthropic provider is skipped (no mutation)."""
+        agent = _make_agent("openai/gpt-4o")
+        memory = [Message(role="assistant", content=[_tool_use("svu_001", server=True)])]
+        agent._synthesize_missing_tool_results(memory)
+        assert len(memory) == 1
+        assert len(memory[0].content) == 1
+
+    def test_server_tool_use_with_followup_is_skipped(self):
+        """server_tool_use followed by text content means the LLM already continued — no synthesis."""
+        agent = _make_agent("anthropic/claude-sonnet-4-6")
+        memory = [
+            Message(
+                role="assistant",
+                content=[_tool_use("svu_001", server=True), TextContent(text="Here is the answer")],
+            )
+        ]
+        agent._synthesize_missing_tool_results(memory)
+        assert len(memory) == 1
+        assert len(memory[0].content) == 2  # unchanged
