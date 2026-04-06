@@ -356,14 +356,9 @@ async def _llm_router(
     client, base_url = _resolve_client(provider, config, api_key, base_url, run_context)
 
     if provider == "anthropic":
-        anthropic_messages = []
-        for message in messages:
-            anthropic_message = message.to_anthropic_input()
-            anthropic_messages.append(anthropic_message)
-
         anthropic_kwargs = {
             "model": model_name,
-            "messages": anthropic_messages,
+            "messages": [message.to_anthropic_input() for message in messages],
             "max_tokens": max_tokens,
             "stream": True,
         }
@@ -372,16 +367,13 @@ async def _llm_router(
             anthropic_kwargs["system"] = system_prompt
 
         if tools:
-            anthropic_tools = []
-            for tool in tools:
-                anthropic_tools.append(tool.anthropic_schema)
+            anthropic_tools = [tool.anthropic_schema for tool in tools]
             if anthropic_tools:
                 anthropic_kwargs["tools"] = anthropic_tools
 
         if temperature is not None:
             anthropic_kwargs["temperature"] = temperature
 
-        # Forward any extra provider-specific params (e.g. top_p, top_k, stop_sequences)
         anthropic_kwargs.update(provider_params)
 
         async def _create_stream():
@@ -438,7 +430,6 @@ async def _llm_router(
                 }
             }
 
-        # Forward any extra provider-specific params (e.g. top_p, service_tier)
         responses_kwargs.update(provider_params)
 
         async def _create_stream():
@@ -478,9 +469,7 @@ async def _llm_router(
             chat_completions_kwargs["stream_options"] = {"include_usage": True}
 
         if tools:
-            chat_completions_tools = []
-            for tool in tools:
-                chat_completions_tools.append(tool.openai_chat_completions_schema)
+            chat_completions_tools = [tool.openai_chat_completions_schema for tool in tools]
             if chat_completions_tools:
                 chat_completions_kwargs["tools"] = chat_completions_tools
 
@@ -500,7 +489,6 @@ async def _llm_router(
                 },
             }
 
-        # Forward any extra provider-specific params (e.g. top_p, frequency_penalty, logprobs, stop)
         chat_completions_kwargs.update(provider_params)
 
         async def _create_stream():
