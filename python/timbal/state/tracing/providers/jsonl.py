@@ -44,10 +44,24 @@ class JsonlTracingProvider(TracingProvider):
         workloads. For production, use ``PlatformTracingProvider`` or implement
         a provider backed by a proper database.
 
-    This is a reference implementation — a practical starting point for building
-    your own provider (OTel, Langfuse, Datadog, etc.). The interface is two methods:
-    ``put()`` to persist a completed run, ``get()`` to retrieve a parent run's trace
-    for session chaining. Everything else is up to you.
+    **Why keep it at all?**
+
+    The human-readable JSON format makes this provider uniquely valuable for
+    testing serialization and deserialization correctness. Unlike
+    ``InMemoryTracingProvider`` (which stores live Python objects) and
+    ``SqliteTracingProvider`` (which stores opaque blobs), every round-trip
+    through ``JsonlTracingProvider`` exercises the full ``model_dump()`` →
+    ``json.dumps()`` → ``json.loads()`` → ``Trace(spans)`` pipeline. This
+    catches bugs that would only surface in production — e.g. non-serialisable
+    types in span fields, loss of precision in numeric values, or discrepancies
+    between the live ``_memory_dump`` private attribute and its reconstructed
+    counterpart after a reload. Use it in tests whenever you want to verify that
+    spans survive a real serialization round-trip.
+
+    This is also a reference implementation — a practical starting point for
+    building your own provider (OTel, Langfuse, Datadog, etc.). The interface
+    is two methods: ``put()`` to persist a completed run, ``get()`` to retrieve
+    a parent run's trace for session chaining. Everything else is up to you.
     """
 
     _path: Path | None = None

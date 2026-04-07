@@ -3,6 +3,7 @@ from .base import Exporter, TracingProvider
 from .in_memory import InMemoryTracingProvider
 from .jsonl import JsonlTracingProvider
 from .platform import PlatformTracingProvider
+from .sqlite import SqliteTracingProvider
 
 
 class _TracingProviderUnset:
