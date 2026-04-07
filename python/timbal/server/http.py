@@ -7,11 +7,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import structlog
-import uvicorn
+try:
+    import uvicorn
+    from fastapi import FastAPI, Request, Response
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse, StreamingResponse
+except ImportError as e:
+    raise ImportError(
+        "fastapi and uvicorn are required to run the timbal server. "
+        "Install them with: pip install 'timbal[server]'"
+    ) from e
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
 from ..logs import setup_logging

@@ -1,13 +1,13 @@
 import asyncio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from pytz import timezone as tz
 from timbal import Agent
 
 
 def get_datetime(timezone: str) -> str:
     """Get the current datetime in a specific timezone."""
-    now = datetime.now(tz(timezone))
+    now = datetime.now(ZoneInfo(timezone))
     return now.strftime("%Y-%m-%d %H:%M:%S")
 
 

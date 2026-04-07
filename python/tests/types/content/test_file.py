@@ -137,29 +137,64 @@ class TestValidatePdf:
 # ---------------------------------------------------------------------------
 
 class TestValidateImage:
-    def test_valid_image_no_exception(self):
-        mock_pil = MagicMock()
-        mock_image_module = MagicMock()
-        mock_img = MagicMock()
-        mock_image_module.open.return_value.__enter__ = MagicMock(return_value=mock_img)
-        mock_image_module.open.return_value.__exit__ = MagicMock(return_value=False)
-        mock_pil.Image = mock_image_module
-        file = File.validate(b"fake-png-data", {"extension": ".png"})
-        with patch.dict(sys.modules, {"PIL": mock_pil, "PIL.Image": mock_image_module}):
-            from timbal.types.content.file import validate_image
-            # Should not raise
+    def test_jpeg(self):
+        file = File.validate(b"\xff\xd8\xff" + b"\x00" * 20, {"extension": ".jpg"})
+        from timbal.types.content.file import validate_image
+        validate_image(file)  # should not raise
+
+    def test_png(self):
+        file = File.validate(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, {"extension": ".png"})
+        from timbal.types.content.file import validate_image
+        validate_image(file)
+
+    def test_gif87a(self):
+        file = File.validate(b"GIF87a" + b"\x00" * 20, {"extension": ".gif"})
+        from timbal.types.content.file import validate_image
+        validate_image(file)
+
+    def test_gif89a(self):
+        file = File.validate(b"GIF89a" + b"\x00" * 20, {"extension": ".gif"})
+        from timbal.types.content.file import validate_image
+        validate_image(file)
+
+    def test_webp(self):
+        file = File.validate(b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 10, {"extension": ".webp"})
+        from timbal.types.content.file import validate_image
+        validate_image(file)
+
+    def test_bmp(self):
+        file = File.validate(b"BM" + b"\x00" * 20, {"extension": ".bmp"})
+        from timbal.types.content.file import validate_image
+        validate_image(file)
+
+    def test_tiff_little_endian(self):
+        file = File.validate(b"II\x2a\x00" + b"\x00" * 20, {"extension": ".tiff"})
+        from timbal.types.content.file import validate_image
+        validate_image(file)
+
+    def test_tiff_big_endian(self):
+        file = File.validate(b"MM\x00\x2a" + b"\x00" * 20, {"extension": ".tiff"})
+        from timbal.types.content.file import validate_image
+        validate_image(file)
+
+    def test_empty_file_raises(self):
+        file = File.validate(b"", {"extension": ".png"})
+        from timbal.types.content.file import validate_image
+        with pytest.raises(ImageProcessingError, match="empty"):
             validate_image(file)
 
-    def test_invalid_image_raises(self):
-        mock_pil = MagicMock()
-        mock_image_module = MagicMock()
-        mock_image_module.open.side_effect = Exception("not an image")
-        mock_pil.Image = mock_image_module
-        file = File.validate(b"not-image", {"extension": ".png"})
-        with patch.dict(sys.modules, {"PIL": mock_pil, "PIL.Image": mock_image_module}):
-            from timbal.types.content.file import validate_image
-            with pytest.raises(ImageProcessingError):
-                validate_image(file)
+    def test_unrecognised_format_raises(self):
+        file = File.validate(b"not-an-image-at-all", {"extension": ".png"})
+        from timbal.types.content.file import validate_image
+        with pytest.raises(ImageProcessingError, match="Unrecognised"):
+            validate_image(file)
+
+    def test_webp_riff_without_webp_marker_raises(self):
+        # RIFF header but not WebP — should not validate
+        file = File.validate(b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 10, {"extension": ".webp"})
+        from timbal.types.content.file import validate_image
+        with pytest.raises(ImageProcessingError):
+            validate_image(file)
 
 
 # ---------------------------------------------------------------------------

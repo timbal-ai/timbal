@@ -30,28 +30,40 @@ requires-python = ">=3.11"
 
 dependencies = [
   "anthropic>=0.45.0",
-  "fastapi>=0.115.8",
   "httpx>=0.28.0",
-  "libcst>=1.8.6",
   "mcp>=1.26.0",
-  "nanoid>=2.0.0",
   "openai>=1.60.0",
-  "openpyxl>=3.1.5",
-  "pandas>=2.2.3",
-  "pillow>=12.1.0",
   "pydantic[email]>=2.10.6",
-  "pymupdf>=1.27.1",
-  "python-docx>=1.1.2",
   "python-dotenv>=1.0.1",
-  "pytz>=2025.2",
   "pyyaml>=6.0.2",
-  "ruff>=0.9.3",
-  "rich>=14.2.0",
   "structlog>=25.1.0",
   "typing-extensions>=4.14.1",
   "uuid7>=0.1.0",
+]
+
+[project.optional-dependencies]
+codegen = [
+  "libcst>=1.8.6",
+  "ruff>=0.9.3",
+]
+documents = [
+  "openpyxl>=3.1.5",
+  "pymupdf>=1.27.1",
+  "python-docx>=1.1.2",
+]
+evals = [
+  "rich>=14.2.0",
+]
+server = [
+  "fastapi>=0.115.8",
   "uvicorn>=0.34.0",
   "websockets>=15.0.1",
+]
+all = [
+  "timbal[codegen]",
+  "timbal[documents]",
+  "timbal[evals]",
+  "timbal[server]",
 ]
 
 [dependency-groups]

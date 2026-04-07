@@ -4,7 +4,13 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
-import libcst as cst
+try:
+    import libcst as cst
+except ImportError as e:
+    raise ImportError(
+        "libcst is required for codegen transformer operations. "
+        "Install it with: pip install 'timbal[codegen]'"
+    ) from e
 
 from timbal.codegen import parse_fqn
 from timbal.codegen.cst_utils import collect_assignments, resolve_runnable_name

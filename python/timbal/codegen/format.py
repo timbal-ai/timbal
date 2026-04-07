@@ -1,6 +1,13 @@
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+
+if importlib.util.find_spec("ruff") is None:
+    raise ImportError(
+        "ruff is required for codegen formatting. "
+        "Install it with: pip install 'timbal[codegen]'"
+    )
 
 _RUFF_CMD = [sys.executable, "-m", "ruff"]
 

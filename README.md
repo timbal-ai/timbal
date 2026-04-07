@@ -11,11 +11,23 @@ Full documentation: [docs.timbal.ai](https://docs.timbal.ai)
 ## Installation
 
 ```bash
-uv add timbal
+pip install timbal
 ```
 
+Timbal is modular. The bare install includes the agent/workflow engine, both Anthropic and OpenAI providers, MCP support, and tracing. Install extras only when you need them:
+
+| Extra | What it adds | When to use |
+|---|---|---|
+| `timbal[server]` | FastAPI + uvicorn | Serving agents over HTTP |
+| `timbal[documents]` | PyMuPDF + openpyxl + python-docx | Reading PDFs, Excel, Word files |
+| `timbal[evals]` | rich | Running the evals CLI |
+| `timbal[codegen]` | libcst + ruff | Using the code generation tools |
+| `timbal[all]` | Everything above | |
+
 ```bash
-pip install timbal
+pip install 'timbal[server]'
+pip install 'timbal[documents,evals]'
+pip install 'timbal[all]'
 ```
 
 ### From source
@@ -330,7 +342,7 @@ run2 = await agent.collect(prompt="What's my name?", run_context=ctx)
 
 ## HTTP serving
 
-Serve any agent or workflow over HTTP with one command.
+Requires `pip install 'timbal[server]'`. Serve any agent or workflow over HTTP with one command.
 
 ```bash
 python -m timbal.server.http \

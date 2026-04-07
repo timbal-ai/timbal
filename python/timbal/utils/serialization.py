@@ -11,10 +11,10 @@ from pydantic import BaseModel
 
 
 def safe_is_nan(value: Any) -> bool:
-    """Utility function to check if a value is NaN. Even for pd.NA values (without pandas dependency)."""
+    """Utility function to check if a value is NaN or NA-like."""
     if value is None:
         return True
-    # Catch pd.NA values.
+    # Catch NA sentinel types (e.g. NAType from numpy or similar libraries).
     if type(value).__name__ == "NAType":
         return True
     try:
@@ -105,7 +105,7 @@ def _dump_sync(value: Any) -> Any:
     if isinstance(value, Exception):
         return {"error_type": type(value).__name__, "message": str(value)}
 
-    # NaN/NA check for non-float types (pd.NA, np.nan boxed in object, etc.)
+    # NaN/NA check for non-float types (NA sentinels, np.nan boxed in object, etc.)
     if safe_is_nan(value):
         return None
 

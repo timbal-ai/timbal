@@ -10,7 +10,8 @@ from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
 from typing import Any, Literal
 
-from nanoid import generate
+import secrets
+
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -851,7 +852,7 @@ class Runnable(ABC, BaseModel):
                 if not parent_span:
                     raise ValueError("Parent span not found. Cannot run in background.")
                 # task_id = uuid7(as_type="str").replace("-", "")
-                task_id = generate(alphabet=ALPHABET, size=6)
+                task_id = "".join(secrets.choice(ALPHABET) for _ in range(6))
                 event_queue = asyncio.Queue()
 
                 async def _bg_handler_execution():

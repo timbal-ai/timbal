@@ -2,10 +2,16 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from typing import Any
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.text import Text
-from rich.tree import Tree
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.tree import Tree
+except ImportError as e:
+    raise ImportError(
+        "rich is required to display eval results. "
+        "Install it with: pip install 'timbal[evals]'"
+    ) from e
 
 from .models import Eval, EvalResult, EvalSummary, ValidatorResult
 from .validators.base import BaseValidator
