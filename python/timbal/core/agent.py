@@ -669,7 +669,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span._memory_dump.append(tool_result_dump)
 
         i = 0
+        need_retry = False
         while True:
+            need_retry = False
             # ? We could resolve the system prompt at each iteration
             tools, commands = await self._resolve_tools(i)
             if commands:
@@ -761,31 +763,37 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     logger.warning(f"Output validation failed: {validation_error_msg}")
                                     continue
 
-                        if validation_error_msg and i < self.max_iter - 1:
-                            # Feed the error back to the LLM so it can correct itself
-                            error_feedback = Message.validate(
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": (
-                                                f"Your output failed validation:\n{validation_error_msg}\n\nTry again."
-                                            ),
-                                        }
-                                    ],
-                                }
-                            )
-                            await _append_memory(error_feedback)
-                            i += 1
-                            break  # Break out of async for to retry in while loop
+                        if validation_error_msg:
+                            if i < self.max_iter - 1:
+                                # Feed the error back to the LLM so it can correct itself
+                                error_feedback = Message.validate(
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": (
+                                                    f"Your output failed validation:\n{validation_error_msg}\n\nTry again."
+                                                ),
+                                            }
+                                        ],
+                                    }
+                                )
+                                await _append_memory(error_feedback)
+                                i += 1
+                                need_retry = True
+                                break  # Break out of async for to retry in while loop
+                            else:
+                                raise RuntimeError(
+                                    f"Output model validation failed after {self.max_iter} attempts: {validation_error_msg}"
+                                )
 
                     # Propagate the interruption with the processed output
                     if interrupted:
                         raise InterruptError(event.call_id, output=event.output)
                 yield event
 
-            if self.output_model is not None:
+            if self.output_model is not None and not need_retry:
                 break
 
             tool_calls = [
