@@ -158,8 +158,6 @@ omit = [
   "*/timbal/tools/*",
   # TODO: add evals coverage once the evals test suite is built out
   "*/timbal/evals/*",
-  # probe.py is a subprocess-based CLI script; pytest-cov can't instrument it
-  "*/timbal/server/probe.py",
   # __main__.py files are CLI entry points, not unit-testable
   "*/__main__.py",
 ]

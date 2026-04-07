@@ -4,9 +4,6 @@ const utils = @import("utils.zig");
 
 const add_cmd = @import("commands/add.zig");
 const create_cmd = @import("commands/create.zig");
-const init_cmd = @import("commands/init.zig");
-const build_cmd = @import("commands/build.zig");
-const push_cmd = @import("commands/push.zig");
 const configure_cmd = @import("commands/configure.zig");
 const credential_helper_cmd = @import("commands/credential_helper.zig");
 const start_cmd = @import("commands/start.zig");
@@ -31,11 +28,6 @@ fn printUsage() !void {
         "    \x1b[1;36mstart     \x1b[0mStart a project (UI, API, agents, and workflows)\n" ++
         "    \x1b[1;36mupgrade   \x1b[0mUpgrade timbal to the latest version\n" ++
         "    \x1b[1;36mversion   \x1b[0mDisplay the current version\n" ++
-        "\n" ++
-        "\x1b[1;32mDeprecated commands:\n" ++
-        "    \x1b[0;90minit  Initialize a new application\n" ++
-        "    \x1b[0;90mbuild Build the application into a container\n" ++
-        "    \x1b[0;90mpush  Push an application to the Timbal Platform\x1b[0m\n" ++
         "\n" ++
         utils.global_options_help ++
         "\n");
@@ -66,15 +58,6 @@ pub fn main() !void {
         try add_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "create")) {
         try create_cmd.run(allocator, args[2..]);
-    } else if (std.mem.eql(u8, action, "init")) {
-        std.debug.print("\x1b[1;33mWarning:\x1b[0m 'timbal init' is deprecated, use 'create' instead.\n\n", .{});
-        try init_cmd.run(allocator, args[2..]);
-    } else if (std.mem.eql(u8, action, "build")) {
-        std.debug.print("\x1b[1;33mWarning:\x1b[0m 'timbal build' is deprecated.\n\n", .{});
-        try build_cmd.run(allocator, args[2..]);
-    } else if (std.mem.eql(u8, action, "push")) {
-        std.debug.print("\x1b[1;33mWarning:\x1b[0m 'timbal push' is deprecated.\n\n", .{});
-        try push_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "start")) {
         try start_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "configure")) {

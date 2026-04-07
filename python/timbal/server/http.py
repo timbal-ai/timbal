@@ -183,13 +183,6 @@ if __name__ == "__main__":
     import_spec = args.import_spec
     if not import_spec:
         import_spec = os.getenv("TIMBAL_RUNNABLE")
-        if not import_spec:
-            import_spec = os.getenv("TIMBAL_FLOW")  # Legacy
-            if import_spec:
-                print(  # noqa: T201
-                    "TIMBAL_FLOW environment variable is deprecated. Please use TIMBAL_RUNNABLE instead.",
-                    file=sys.stderr,
-                )
 
     if not import_spec:
         print(  # noqa: T201
