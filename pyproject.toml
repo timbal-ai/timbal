@@ -86,6 +86,7 @@ exclude = [
   "/python/tests",
   "/sandbox",
   "/scripts",
+  "/benchmarks",
 ]
 
 [tool.uv]
