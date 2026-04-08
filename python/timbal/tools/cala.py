@@ -9,13 +9,13 @@ from ..platform.integrations import Integration
 _BASE_URL = "https://api.cala.ai/v1"
 
 
-async def _resolve_api_key(tool: Any) -> str:
+async def _resolve_api_key(*, integration: Any = None, api_key: SecretStr | None = None) -> str:
     """Resolve Cala API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
+    if isinstance(integration, Integration):
+        credentials = await integration.resolve()
         return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
+    if api_key is not None:
+        return api_key.get_secret_value()
     env_key = os.getenv("CALA_API_KEY")
     if env_key:
         return env_key
@@ -42,7 +42,7 @@ class CalaSearch(Tool):
         async def _cala_search(
             query: str = Field(..., description="Natural language search query"),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
             async with httpx.AsyncClient() as client:
