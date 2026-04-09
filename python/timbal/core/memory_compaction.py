@@ -11,7 +11,7 @@ from typing import Any
 
 import structlog
 
-from ..types.content import TextContent, ToolResultContent, ToolUseContent
+from ..types.content import CustomContent, TextContent, ToolResultContent, ToolUseContent
 from ..types.message import Message
 
 logger = structlog.get_logger("timbal.core.memory_compaction")
@@ -55,7 +55,30 @@ def _remove_orphaned_tool_parts(memory: list[Message]) -> list[Message]:
                 continue
             result.append(Message(role=msg.role, content=kept, stop_reason=msg.stop_reason))
         elif msg.role == "assistant":
-            kept = [c for c in msg.content if not isinstance(c, ToolUseContent) or c.id in valid_tool_ids]
+            # Server tool use blocks (e.g. web search) are self-contained: both the
+            # server_tool_use ToolUseContent and its paired result CustomContent live in
+            # the same assistant message with no separate tool-role message — never treat
+            # them as orphans. Conversely, drop any CustomContent whose tool_use_id has
+            # no matching server_tool_use in this message.
+            server_tool_ids = {
+                c.id for c in msg.content
+                if isinstance(c, ToolUseContent) and c.is_server_tool_use
+            }
+            kept = [
+                c for c in msg.content
+                if not isinstance(c, ToolUseContent)
+                or c.id in valid_tool_ids
+                or c.is_server_tool_use
+            ]
+            kept = [
+                c for c in kept
+                if not (
+                    isinstance(c, CustomContent)
+                    and isinstance(c.value, dict)
+                    and "tool_use_id" in c.value
+                    and c.value["tool_use_id"] not in server_tool_ids
+                )
+            ]
             if not kept:
                 continue
             result.append(Message(role=msg.role, content=kept, stop_reason=msg.stop_reason))
@@ -280,7 +303,24 @@ def compact_tool_results(
                 result.append(Message(role=msg.role, content=new_content, stop_reason=msg.stop_reason))
             elif msg.role == "assistant":
                 if drop_mode:
+                    # Collect IDs of server tool use blocks that are being dropped so we
+                    # can also remove their paired result blocks (CustomContent with a
+                    # matching tool_use_id). Both live in the same assistant message and
+                    # must always travel together, regardless of the result block type.
+                    dropped_server_ids = {
+                        c.id for c in msg.content
+                        if isinstance(c, ToolUseContent) and c.is_server_tool_use and c.id not in kept_ids
+                    }
                     kept = [c for c in msg.content if not isinstance(c, ToolUseContent) or c.id in kept_ids]
+                    if dropped_server_ids:
+                        kept = [
+                            c for c in kept
+                            if not (
+                                isinstance(c, CustomContent)
+                                and isinstance(c.value, dict)
+                                and c.value.get("tool_use_id") in dropped_server_ids
+                            )
+                        ]
                     if not kept:
                         continue
                     result.append(Message(role=msg.role, content=kept, stop_reason=msg.stop_reason))
@@ -339,8 +379,6 @@ def keep_last_n_turns(n: int) -> Callable[[list[Message]], list[Message]]:
         return _remove_orphaned_tool_parts(memory[start:])
 
     return _compact
-
-
 
 
 def summarize(
