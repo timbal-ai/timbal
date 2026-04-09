@@ -3,11 +3,9 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import BaseModel, SecretStr
-
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
-
+from pydantic import BaseModel, SecretStr
 from timbal.core.llm_router import _PROVIDERS, _get_client, _resolve_client
 
 
@@ -23,7 +21,7 @@ from timbal.state.context import RunContext
 @pytest.fixture(autouse=True)
 def clean_context():
     """Reset context vars after each test to avoid state pollution."""
-    from timbal.state import _run_context_var, _call_id
+    from timbal.state import _call_id, _run_context_var
     token_ctx = _run_context_var.set(None)
     token_cid = _call_id.set(None)
     yield
@@ -365,8 +363,8 @@ class TestLlmRouterChatCompletionsKwargs:
     async def test_flatten_text_content_for_xiaomi(self):
         """xiaomi provider has flatten_text_content=True."""
         from timbal.core.llm_router import _llm_router
-        from timbal.types.message import Message
         from timbal.types.content.text import TextContent
+        from timbal.types.message import Message
         _make_run_context()
 
         captured_kwargs = {}
@@ -631,10 +629,10 @@ class TestLlmRouterPlatformHeaders:
 
 
 class TestLlmRouterAnthropicStructuredOutput:
-    """Test that output_model routes to client.beta.messages.create."""
+    """Test that output_model uses the stable messages endpoint with output_config."""
 
     @pytest.mark.asyncio
-    async def test_output_model_uses_beta_endpoint(self):
+    async def test_output_model(self):
         from timbal.core.llm_router import _llm_router
 
         _make_run_context()
@@ -642,23 +640,15 @@ class TestLlmRouterAnthropicStructuredOutput:
         class MyOutput(BaseModel):
             answer: str
 
-        beta_captured = {}
         stable_captured = {}
-
-        async def fake_beta_create(**kwargs):
-            beta_captured.update(kwargs)
-            return _empty_async_stream()
 
         async def fake_stable_create(**kwargs):
             stable_captured.update(kwargs)
             return _empty_async_stream()
 
-        mock_beta_messages = MagicMock()
-        mock_beta_messages.create = fake_beta_create
-
         mock_client = MagicMock()
         mock_client.messages.create = fake_stable_create
-        mock_client.beta.messages.create = fake_beta_create
+        mock_client.beta.messages.create = AsyncMock(side_effect=AssertionError("should not call beta"))
 
         with patch("timbal.core.llm_router._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
@@ -672,12 +662,10 @@ class TestLlmRouterAnthropicStructuredOutput:
                 except (RuntimeError, StopAsyncIteration):
                     pass
 
-        # Beta endpoint was called; stable endpoint was not.
-        assert beta_captured, "Expected client.beta.messages.create to be called"
-        assert not stable_captured, "Expected client.messages.create NOT to be called"
+        assert stable_captured, "Expected client.messages.create to be called"
 
     @pytest.mark.asyncio
-    async def test_output_model_sets_betas_flag(self):
+    async def test_output_model_sets_output_config(self):
         from timbal.core.llm_router import _llm_router
 
         _make_run_context()
@@ -687,13 +675,13 @@ class TestLlmRouterAnthropicStructuredOutput:
 
         captured_kwargs = {}
 
-        async def fake_beta_create(**kwargs):
+        async def fake_stable_create(**kwargs):
             captured_kwargs.update(kwargs)
             return _empty_async_stream()
 
         mock_client = MagicMock()
-        mock_client.messages.create = AsyncMock(side_effect=AssertionError("should not call stable"))
-        mock_client.beta.messages.create = fake_beta_create
+        mock_client.messages.create = fake_stable_create
+        mock_client.beta.messages.create = AsyncMock(side_effect=AssertionError("should not call beta"))
 
         with patch("timbal.core.llm_router._get_client", return_value=mock_client):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "key"}):
@@ -707,8 +695,8 @@ class TestLlmRouterAnthropicStructuredOutput:
                 except (RuntimeError, StopAsyncIteration):
                     pass
 
-        assert "structured-outputs-2025-11-13" in captured_kwargs.get("betas", [])
-        assert captured_kwargs.get("output_format", {}).get("type") == "json_schema"
+        assert "betas" not in captured_kwargs
+        assert captured_kwargs.get("output_config", {}).get("format", {}).get("type") == "json_schema"
 
     @pytest.mark.asyncio
     async def test_no_output_model_uses_stable_endpoint(self):
@@ -1028,8 +1016,8 @@ class TestLlmRouterYieldsChunks:
     async def test_anthropic_path_yields_chunks_with_messages(self):
         """Cover lines 372-373 (message building) and 412, 415 (yield chunk)."""
         from timbal.core.llm_router import _llm_router
-        from timbal.types.message import Message
         from timbal.types.content.text import TextContent
+        from timbal.types.message import Message
 
         _make_run_context()
 

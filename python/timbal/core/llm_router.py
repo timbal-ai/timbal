@@ -417,17 +417,13 @@ async def _llm_router(
 
         async def _create_stream():
             if output_model is not None:
-                # TODO: Review when Anthropic promotes structured outputs to stable API.
-                # Currently using beta endpoint because structured outputs (output_format with json_schema)
-                # is only available via the beta API with the "structured-outputs-2025-11-13" feature flag.
-                # See: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
-                anthropic_kwargs["output_format"] = {
-                    "type": "json_schema",
-                    "schema": transform_schema(output_model),
+                anthropic_kwargs["output_config"] = {
+                    "format": {
+                        "type": "json_schema",
+                        "schema": transform_schema(output_model),
+                    }
                 }
-                res = await client.beta.messages.create(betas=["structured-outputs-2025-11-13"], extra_headers=request_headers, **anthropic_kwargs)  # type: ignore[attr-defined]
-            else:
-                res = await client.messages.create(extra_headers=request_headers, **anthropic_kwargs)  # type: ignore[attr-defined]
+            res = await client.messages.create(extra_headers=request_headers, **anthropic_kwargs)  # type: ignore[attr-defined]
             async for chunk in res:
                 yield chunk
 
