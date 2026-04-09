@@ -4,13 +4,14 @@ import pytest
 from timbal.core.memory_compaction import (
     _SUMMARY_MARKER,
     _format_message_for_summary,
+    _remove_orphaned_tool_parts,
     compact_tool_results,
     keep_last_n_messages,
     keep_last_n_turns,
     summarize,
 )
 from timbal.core.test_model import TestModel
-from timbal.types.content import TextContent, ToolResultContent, ToolUseContent
+from timbal.types.content import CustomContent, TextContent, ToolResultContent, ToolUseContent
 from timbal.types.message import Message
 
 
@@ -1505,3 +1506,188 @@ class TestCompactionIntegrationAnthropic:
         assert "pepper" in response_text, f"Expected 'Pepper' in response, got: {response_text}"
 
         InMemoryTracingProvider._storage.clear()
+
+
+# ---------------------------------------------------------------------------
+# Server tool use (Anthropic built-in tools like web_search)
+# ---------------------------------------------------------------------------
+
+
+def _msg_assistant_server_tool(uid: str, name: str = "web_search") -> Message:
+    """Assistant message with a server_tool_use and its paired result CustomContent.
+
+    Both blocks live in the same assistant message — there is no separate tool-role
+    message for Anthropic server-side tools.
+    """
+    return Message(
+        role="assistant",
+        content=[
+            ToolUseContent(id=uid, name=name, input={}, is_server_tool_use=True),
+            CustomContent(value={"type": "web_search_tool_result", "tool_use_id": uid, "content": []}),
+        ],
+    )
+
+
+class TestServerToolUse:
+    """Tests for memory compaction with Anthropic server-side tools (e.g. web_search).
+
+    Server tools are self-contained: the ToolUseContent (is_server_tool_use=True)
+    and its paired result CustomContent both live in the same assistant message.
+    There is no separate tool-role message.
+    """
+
+    def test_compact_drop_removes_both_server_tool_use_and_result(self) -> None:
+        """compact_tool_results in drop mode removes both the server_tool_use ToolUseContent
+        and its paired CustomContent result from the assistant message."""
+        memory = [
+            _msg_user("search something"),
+            _msg_assistant_server_tool("srvtoolu_1"),
+            _msg_assistant_text("Here is what I found."),
+        ]
+        compactor = compact_tool_results()
+        result = compactor(memory)
+
+        # Server tool message has no content left — it should be dropped entirely.
+        assert len(result) == 2
+        assert result[0].role == "user"
+        assert result[1].role == "assistant"
+        assert result[1].content[0].text == "Here is what I found."
+
+    def test_compact_drop_keeps_text_drops_server_tool_pair(self) -> None:
+        """If the assistant message has text alongside a server tool use, only the
+        server tool use + result are dropped; the text is preserved."""
+        memory = [
+            _msg_user("hi"),
+            Message(
+                role="assistant",
+                content=[
+                    TextContent(text="Let me search for you."),
+                    ToolUseContent(id="srvtoolu_1", name="web_search", input={}, is_server_tool_use=True),
+                    CustomContent(value={"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": []}),
+                ],
+            ),
+            _msg_assistant_text("Done."),
+        ]
+        compactor = compact_tool_results()
+        result = compactor(memory)
+
+        assert len(result) == 3
+        mixed = result[1]
+        assert mixed.role == "assistant"
+        assert len(mixed.content) == 1
+        assert isinstance(mixed.content[0], TextContent)
+        assert mixed.content[0].text == "Let me search for you."
+
+    def test_compact_drop_multiple_server_tools_all_removed(self) -> None:
+        """Multiple server tool rounds across different assistant messages are all dropped."""
+        memory = [
+            _msg_user("q1"),
+            _msg_assistant_server_tool("srvtoolu_1"),
+            _msg_user("q2"),
+            _msg_assistant_server_tool("srvtoolu_2"),
+            _msg_assistant_text("Final."),
+        ]
+        compactor = compact_tool_results()
+        result = compactor(memory)
+
+        assert not any(isinstance(c, ToolUseContent) for m in result for c in m.content)
+        assert not any(isinstance(c, CustomContent) for m in result for c in m.content)
+
+    def test_compact_keep_last_n_preserves_last_server_tool_pair(self) -> None:
+        """With keep_last_n=1 the last server tool batch is kept intact (both
+        ToolUseContent and its paired CustomContent)."""
+        memory = [
+            _msg_user("first search"),
+            _msg_assistant_server_tool("srvtoolu_1"),
+            _msg_user("second search"),
+            _msg_assistant_server_tool("srvtoolu_2"),
+            _msg_assistant_text("Final answer."),
+        ]
+        compactor = compact_tool_results(keep_last_n=1)
+        result = compactor(memory)
+
+        tool_ids_kept = {
+            c.id for m in result for c in m.content if isinstance(c, ToolUseContent)
+        }
+        custom_ids_kept = {
+            c.value.get("tool_use_id") for m in result for c in m.content
+            if isinstance(c, CustomContent) and isinstance(c.value, dict)
+        }
+        assert "srvtoolu_1" not in tool_ids_kept
+        assert "srvtoolu_2" in tool_ids_kept
+        assert "srvtoolu_1" not in custom_ids_kept
+        assert "srvtoolu_2" in custom_ids_kept
+
+    def test_remove_orphaned_preserves_server_tool_pair(self) -> None:
+        """_remove_orphaned_tool_parts must not remove server_tool_use blocks.
+        They have no corresponding tool-role message but are never orphaned."""
+        memory = [
+            _msg_user("search"),
+            _msg_assistant_server_tool("srvtoolu_1"),
+            _msg_assistant_text("Result."),
+        ]
+        result = _remove_orphaned_tool_parts(memory)
+
+        assert len(result) == 3
+        server_msg = result[1]
+        assert any(isinstance(c, ToolUseContent) and c.is_server_tool_use for c in server_msg.content)
+        assert any(isinstance(c, CustomContent) for c in server_msg.content)
+
+    def test_remove_orphaned_drops_custom_result_without_server_tool_use(self) -> None:
+        """A CustomContent with a tool_use_id that has no matching server_tool_use in
+        the same message is considered orphaned and must be dropped."""
+        orphaned_msg = Message(
+            role="assistant",
+            content=[
+                TextContent(text="Some text."),
+                CustomContent(value={"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": []}),
+            ],
+        )
+        memory = [_msg_user("hi"), orphaned_msg, _msg_assistant_text("done")]
+        result = _remove_orphaned_tool_parts(memory)
+
+        cleaned = next(
+            m for m in result
+            if m.role == "assistant"
+            and any(isinstance(c, TextContent) and c.text == "Some text." for c in m.content)
+        )
+        assert not any(isinstance(c, CustomContent) for c in cleaned.content)
+
+    def test_keep_last_n_messages_preserves_server_tool_pair_in_kept_window(self) -> None:
+        """keep_last_n_messages retains server tool pairs that fall within the window."""
+        memory = [
+            _msg_user("old"),
+            _msg_assistant_server_tool("srvtoolu_old"),
+            _msg_user("recent"),
+            _msg_assistant_server_tool("srvtoolu_recent"),
+            _msg_assistant_text("Answer."),
+        ]
+        compactor = keep_last_n_messages(3)
+        result = compactor(memory)
+
+        assert len(result) == 3
+        server_msg = result[1]
+        assert any(isinstance(c, ToolUseContent) and c.is_server_tool_use for c in server_msg.content)
+        assert any(isinstance(c, CustomContent) for c in server_msg.content)
+
+    def test_mixed_regular_and_server_tools_drop_mode(self) -> None:
+        """Regular tool calls and server tool calls in the same memory are both
+        fully dropped (ToolUseContent + ToolResultContent for regular; both
+        ToolUseContent + CustomContent for server tools)."""
+        memory = [
+            _msg_user("hi"),
+            _msg_assistant_tool("regular_1", "lookup"),
+            _msg_tool("regular_1", "some data"),
+            _msg_assistant_server_tool("srvtoolu_1"),
+            _msg_assistant_text("Summary."),
+        ]
+        compactor = compact_tool_results()
+        result = compactor(memory)
+
+        assert not any(isinstance(c, ToolUseContent) for m in result for c in m.content)
+        assert not any(isinstance(c, ToolResultContent) for m in result for c in m.content)
+        assert not any(isinstance(c, CustomContent) for m in result for c in m.content)
+        assert any(
+            m.role == "assistant" and any(isinstance(c, TextContent) and c.text == "Summary." for c in m.content)
+            for m in result
+        )
