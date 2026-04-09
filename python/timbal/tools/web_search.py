@@ -10,6 +10,11 @@ When ``provider`` is set to ``"tavily"``, ``"scraperapi"``, ``"cala"``, or
 ``"firecrawl"``,
 WebSearch becomes a fully executable function-calling tool that works with
 **every** LLM provider (Anthropic, OpenAI, Gemini, Groq, Cerebras, …).
+
+**Credentials (executable mode):** resolution order is explicit ``api_key`` on the
+tool, then ``Integration("web_search")`` when the org stores a bundled web-search
+credential, then the provider-specific environment variable (``TAVILY_API_KEY``,
+``SCRAPERAPI_KEY``, ``CALA_API_KEY``, ``FIRECRAWL_API_KEY``).
 """
 
 from functools import cached_property
@@ -198,6 +203,8 @@ def _make_firecrawl_handler(*, integration=None, api_key=None, max_results=None)
 # ---------------------------------------------------------------------------
 
 class WebSearch(Tool):
+    """See module docstring for native vs provider-backed behaviour and credential order."""
+
     name: str = "web_search"
     description: str | None = None
 

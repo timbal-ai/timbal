@@ -64,7 +64,10 @@ class FirecrawlScrape(Tool):
                 None, description="Milliseconds to wait for the page to load before scraping"
             ),
             mobile: bool = Field(False, description="Emulate a mobile device when scraping"),
-            skip_tls_verification: bool = Field(True, description="Skip TLS certificate verification"),
+            skip_tls_verification: bool = Field(
+                False,
+                description="Skip TLS certificate verification (insecure; enable only for misconfigured targets)",
+            ),
             location_country: str | None = Field(
                 None, description="ISO 3166-1 alpha-2 country code for geo-located scraping (e.g. 'US', 'DE')"
             ),
@@ -133,7 +136,9 @@ class FirecrawlSearch(Tool):
     name: str = "firecrawl_search"
     description: str | None = (
         "Search the web and optionally scrape full page content from each result in one call. "
-        "Supports web, news, and image sources with time-based filtering."
+        "Supports web, news, and image sources with time-based filtering. "
+        "Geo: pass ``location`` as a human-readable place (e.g. 'Germany') and ``country`` as an ISO 3166-1 alpha-2 code (e.g. 'DE'); "
+        "they map to Firecrawl v2 ``location`` and ``country`` JSON fields respectively."
     )
     integration: Annotated[str, Integration("firecrawl")] | None = None
     api_key: SecretStr | None = None

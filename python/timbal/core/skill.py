@@ -142,7 +142,6 @@ class ReadSkill(Tool):
             if name not in session["__in_context_skills"][_agent_path]:
                 session["__in_context_skills"][_agent_path].append(name)
 
-
             if reference:
                 return skill.get_reference(reference)
             else:
