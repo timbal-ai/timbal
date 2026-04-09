@@ -186,12 +186,6 @@ class Agent(Runnable):
             if model_provider == "anthropic":
                 if not self.max_tokens:
                     raise ValueError("'max_tokens' is required for claude models.")
-                if self.output_model is not None:
-                    logger.warning(
-                        "Anthropic's structured output (output_model) is currently in beta. "
-                        "The API may change in future releases. "
-                        "See: https://docs.anthropic.com/en/docs/build-with-claude/structured-output"
-                    )
 
         if self.tools and self.output_model is not None:
             logger.warning(
