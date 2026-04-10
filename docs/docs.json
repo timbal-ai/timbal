@@ -278,7 +278,9 @@
                 "group": "Runs",
                 "pages": [
                   "api-reference/projects/runs/list",
-                  "api-reference/projects/runs/get"
+                  "api-reference/projects/runs/get",
+                  "api-reference/projects/runs/reactions-list",
+                  "api-reference/projects/runs/reactions-add"
                 ]
               }
             ]

@@ -2933,6 +2933,124 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/runs/{run_id}/reactions": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "description": "List reactions for a project run (admin only)",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Platform run id or idempotency key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reactions listed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListReactionsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "description": "Add a reaction to a project run",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Platform run id or idempotency key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewReactionReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Reaction created"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects/{project_id}/users": {
       "get": {
         "tags": [
@@ -5286,6 +5404,26 @@
           }
         ]
       },
+      "ListReactionsResBody": {
+        "type": "object",
+        "required": [
+          "reactions"
+        ],
+        "properties": {
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Reaction"
+            }
+          }
+        }
+      },
       "ListRunsResBody": {
         "type": "object",
         "required": [
@@ -5350,6 +5488,23 @@
           },
           "role": {
             "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "NewReactionReqBody": {
+        "type": "object",
+        "required": [
+          "sentiment"
+        ],
+        "properties": {
+          "feedback": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sentiment": {
+            "type": "string"
           }
         }
       },
@@ -6014,6 +6169,36 @@
           "sql": {
             "type": "string",
             "description": "SQL query to execute against the knowledge base.\nUse $1, $2, etc. for parameter placeholders."
+          }
+        }
+      },
+      "Reaction": {
+        "type": "object",
+        "required": [
+          "id",
+          "user",
+          "sentiment",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "feedback": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "sentiment": {
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserRef"
           }
         }
       },
