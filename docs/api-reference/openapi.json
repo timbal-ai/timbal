@@ -797,8 +797,7 @@
         "tags": [
           "k2"
         ],
-        "summary": "Create Directory",
-        "description": "Create a folder in the knowledge base. It appears in file listings; folder rows use content type `application/vnd.timbal.k2-directory`.",
+        "description": "Create a virtual directory in the knowledge base",
         "operationId": "create",
         "parameters": [
           {
@@ -848,6 +847,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "A file with the same name already exists at this path",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -862,7 +871,7 @@
         "tags": [
           "k2"
         ],
-        "description": "List files and folders. Folder rows use content type `application/vnd.timbal.k2-directory`.",
+        "description": "List files and directories in a knowledge base",
         "operationId": "list",
         "parameters": [
           {
@@ -993,6 +1002,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/K2File"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A file with the same name already exists in this directory",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
                 }
               }
             }
@@ -4311,6 +4330,23 @@
           "name": {
             "type": "string",
             "description": "Environment name"
+          }
+        }
+      },
+      "ErrorMessage": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Machine-readable error code (e.g. `ALREADY_EXISTS`, `BAD_REQUEST`)."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable description."
           }
         }
       },

@@ -2,3 +2,7 @@
 title: "Get File"
 openapi: "GET /orgs/{org_id}/k2/{kb_id}/files/{file_id}"
 ---
+
+Listings from `GET /orgs/{org_id}/k2/{kb_id}/files` include **folder rows** (`content_type` `application/vnd.timbal.k2-directory`). This **get file** endpoint is only for **regular uploaded files** (parsings, embeddings, etc.).
+
+If you pass a **directory row’s `id`** from the list endpoint, the API responds with **`404` Not Found** — virtual directories do not have a full file payload here.

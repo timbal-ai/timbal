@@ -2,3 +2,7 @@
 title: "Add File"
 openapi: "POST /orgs/{org_id}/k2/{kb_id}/files"
 ---
+
+File names must be unique within a directory. Uploading `report.pdf` to `docs/` when it already exists returns `409`.
+
+Folders and files share the same namespace: you cannot upload a file whose name matches an existing folder in the same directory.
