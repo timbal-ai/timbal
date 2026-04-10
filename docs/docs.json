@@ -292,7 +292,7 @@
                 "pages": [
                   "api-reference/knowledge-bases/files/list",
                   "api-reference/knowledge-bases/files/add",
-                  "api-reference/knowledge-bases/files/create_dir",
+                  "api-reference/knowledge-bases/files/create-dir",
                   "api-reference/knowledge-bases/files/get",
                   "api-reference/knowledge-bases/files/delete"
                 ]
