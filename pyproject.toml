@@ -150,7 +150,7 @@ convention = "google"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
-  "integration: marks tests that require real LLM API keys (skip with '-m not integration')",
+  "integration: marks tests that need real services (LLM keys, Timbal platform/KB, network); default run uses '-m not integration'",
 ]
 addopts = [
   "-v",

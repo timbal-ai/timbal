@@ -82,7 +82,7 @@ class AgentParams(BaseModel):
         return self
 
     @classmethod
-    def model_json_schema(cls, **kwargs: Any) -> dict[str, Any]:
+    def model_json_schema(cls, **_kwargs: Any) -> dict[str, Any]:
         """Custom schema for using agents as tools."""
         return {
             "type": "object",
@@ -209,6 +209,7 @@ class Agent(Runnable):
             name="llm",
             handler=_llm_router,
             default_params=_llm_default_params,
+            record_default_request_usage=False,
             metadata={
                 "type": "LLM",
                 "model_provider": model_provider,

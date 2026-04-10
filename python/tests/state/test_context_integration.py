@@ -10,7 +10,7 @@ import pytest
 from timbal import Agent, Tool
 from timbal.core.test_model import TestModel
 from timbal.state import get_run_context
-from timbal.types.content import ToolUseContent
+from timbal.types.content import TextContent, ToolUseContent
 from timbal.types.file import File
 from timbal.types.message import Message
 
@@ -213,6 +213,99 @@ class TestRunContextTraceAccess:
 
         assert hasattr(output, 'output')
         assert output.output is not None
+
+    @pytest.mark.asyncio
+    async def test_record_tool_requests(self):
+        """Default tool hook records ``{tool_name}:requests`` on the Tool span (by call_id) and rolls up."""
+
+        def track_tool_api() -> str:
+            return "ok"
+
+        agent_name = "record_tool_requests_agent"
+        model = TestModel(
+            responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="t1", name="track_tool_api", input={})],
+                    stop_reason="tool_use",
+                ),
+                Message(role="assistant", content=[TextContent(text="done")], stop_reason="end_turn"),
+            ]
+        )
+        agent = Agent(
+            name=agent_name,
+            model=model,
+            tools=[track_tool_api],
+        )
+        prompt = Message.validate({"role": "user", "content": "Use track_tool_api"})
+        result = agent(prompt=prompt)
+        output = await result.collect()
+
+        assert output.usage.get("track_tool_api:requests") == 1
+
+        ctx = get_run_context()
+        assert ctx is not None
+        root = ctx.root_span()
+        assert root is not None
+        assert root.path == agent_name
+
+        tool_path = f"{agent_name}.track_tool_api"
+        tool_spans = ctx._trace.get_path(tool_path)
+        assert len(tool_spans) == 1
+        tool_span = tool_spans[0]
+        assert isinstance(tool_span.runnable, Tool)
+        assert tool_span.runnable.name == "track_tool_api"
+        assert tool_span.usage.get("track_tool_api:requests") == 1
+        assert tool_span.parent_call_id == root.call_id
+        assert root.usage.get("track_tool_api:requests") == 1
+
+    @pytest.mark.asyncio
+    async def test_default_tool_usage_parallel_tools_distinct_spans(self):
+        """Concurrent tool runs each get their own span, call_id, and per-tool usage keys."""
+
+        def tool_a() -> str:
+            return "a"
+
+        def tool_b() -> str:
+            return "b"
+
+        agent_name = "parallel_tool_usage_agent"
+        model = TestModel(
+            responses=[
+                Message(
+                    role="assistant",
+                    content=[
+                        ToolUseContent(id="t1", name="tool_a", input={}),
+                        ToolUseContent(id="t2", name="tool_b", input={}),
+                    ],
+                    stop_reason="tool_use",
+                ),
+                Message(role="assistant", content=[TextContent(text="done")], stop_reason="end_turn"),
+            ]
+        )
+        agent = Agent(name=agent_name, model=model, tools=[tool_a, tool_b])
+        prompt = Message.validate({"role": "user", "content": "Call tool_a and tool_b"})
+        output = await agent(prompt=prompt).collect()
+
+        assert output.usage.get("tool_a:requests") == 1
+        assert output.usage.get("tool_b:requests") == 1
+
+        ctx = get_run_context()
+        assert ctx is not None
+        root = ctx.root_span()
+        assert root is not None
+        assert root.path == agent_name
+
+        spans_a = ctx._trace.get_path(f"{agent_name}.tool_a")
+        spans_b = ctx._trace.get_path(f"{agent_name}.tool_b")
+        assert len(spans_a) == 1
+        assert len(spans_b) == 1
+        sa, sb = spans_a[0], spans_b[0]
+        assert sa.call_id != sb.call_id
+        assert sa.parent_call_id == root.call_id
+        assert sb.parent_call_id == root.call_id
+        assert sa.usage.get("tool_a:requests") == 1
+        assert sb.usage.get("tool_b:requests") == 1
 
     @pytest.mark.asyncio
     async def test_error_handling_missing_traces(self):

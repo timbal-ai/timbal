@@ -185,6 +185,7 @@ if TYPE_CHECKING:
         HubSpotUpdateTicket,
         UpdateEngagement,
     )
+    from .knowledge_base import KnowledgeBaseQuery
     from .lancedb import (
         LanceDBCreateFTSIndex,
         LanceDBCreateTable,
@@ -938,6 +939,7 @@ __all__ = [
     "GoogleMapsPlaceDetails",
     "GoogleMapsTextSearch",
     "GoogleMapsValidateAddress",
+    "KnowledgeBaseQuery",
     "OutlookArchive",
     "OutlookCreateDraft",
     "OutlookForward",
@@ -1781,6 +1783,7 @@ _LAZY_IMPORTS = {
     "GoogleMapsPlaceDetails": ".google_maps",
     "GoogleMapsTextSearch": ".google_maps",
     "GoogleMapsValidateAddress": ".google_maps",
+    "KnowledgeBaseQuery": ".knowledge_base",
     "OutlookArchive": ".outlook",
     "OutlookCreateDraft": ".outlook",
     "OutlookForward": ".outlook",

@@ -50,3 +50,6 @@ node_modules/
 
 # Internal planning docs
 planning/
+
+.claude/
+.cursor/

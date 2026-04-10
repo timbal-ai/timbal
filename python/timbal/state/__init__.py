@@ -12,6 +12,7 @@ may need to set the context manually when creating custom execution flows.
 See the function docstrings for usage details and warnings.
 """
 
+import re
 from contextvars import ContextVar
 
 from .context import RunContext
@@ -77,3 +78,32 @@ def set_parent_call_id(parent_call_id: str | None) -> None:
     parent call ID can lead to unexpected behavior if not handled correctly.
     """
     _parent_call_id.set(parent_call_id)
+
+
+def _normalize_tool_request_kind(kind: str) -> str:
+    """Lowercase snake_case label safe for usage keys (``[a-z0-9_]+``)."""
+    t = kind.strip().lower().replace("-", "_")
+    t = re.sub(r"[^a-z0-9_]+", "_", t)
+    t = re.sub(r"_+", "_", t).strip("_")
+    return t or "standard"
+
+
+def _record_tool_requests(tool_name: str, count: int = 1, *, kind: str | None = None) -> None:
+    """Framework-only: increment ``{tool_name}:requests`` (or kind-suffixed) on the current span.
+
+    Used by :class:`~timbal.core.tool.Tool` completion for default billing keys; not a supported
+    extension point—prefer letting the framework record usage or using :meth:`RunContext.update_usage`
+    directly for custom metrics.
+
+    No-op when there is no run context or ``count`` <= 0.
+    """
+    if count <= 0:
+        return
+    run_context = get_run_context()
+    if not run_context:
+        return
+    if kind:
+        suffix = f"{_normalize_tool_request_kind(kind)}_requests"
+    else:
+        suffix = "requests"
+    run_context.update_usage(f"{tool_name}:{suffix}", count)

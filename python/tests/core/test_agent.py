@@ -1,7 +1,7 @@
 import pytest
 from timbal import Agent, Tool
-from timbal.core.test_model import TestModel
 from timbal.core.agent import AgentParams
+from timbal.core.test_model import TestModel
 from timbal.types.content import CustomContent, TextContent, ToolResultContent, ToolUseContent
 from timbal.types.events import OutputEvent
 from timbal.types.message import Message
@@ -156,6 +156,15 @@ class TestAgentExecution:
         assert_no_errors(output)
         assert isinstance(output.output, Message)
         assert output.output.role == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_internal_llm_tool_does_not_emit_default_request_usage(self, math_agent):
+        """Internal ``llm`` is a :class:`~timbal.core.tool.Tool` but must not bill ``llm:requests``."""
+        prompt = Message.validate({"role": "user", "content": "What is 15 + 27?"})
+        output = await math_agent(prompt=prompt).collect()
+        assert_no_errors(output)
+        assert output.usage.get("llm:requests", 0) == 0
+        assert output.usage.get("calculate:requests") == 1
     
     @pytest.mark.asyncio
     async def test_agent_with_single_tool(self, math_agent):
@@ -222,7 +231,7 @@ class TestAgentExecution:
     @pytest.mark.asyncio
     async def test_concurrent_tool_execution(self):
         """Test that multiple tools can be called concurrently."""
-        def slow_tool_1(delay: float) -> str:
+        def slow_tool_1(_delay: float) -> str:
             import time
             time.sleep(0.2)
             return "tool1_result"
@@ -436,7 +445,7 @@ class TestAgentMemory:
 
         turn_count = 0
 
-        def counting_handler(messages):
+        def counting_handler(_messages):
             nonlocal turn_count
             turn_count += 1
             return f"response {turn_count}"

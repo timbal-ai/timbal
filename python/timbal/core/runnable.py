@@ -3,14 +3,13 @@ import asyncio
 import contextvars
 import inspect
 import os
+import secrets
 import time
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
 from typing import Any, Literal
-
-import secrets
 
 from pydantic import (
     BaseModel,
@@ -55,6 +54,19 @@ def _get_logger():
     import structlog
 
     return structlog.get_logger("timbal.core.runnable")
+
+
+def _emit_default_tool_usage(runnable: Any) -> None:
+    """On successful Tool completion, record ``{tool.name}:requests`` for billing defaults."""
+    from .tool import Tool
+
+    if not isinstance(runnable, Tool):
+        return
+    if not getattr(runnable, "record_default_request_usage", True):
+        return
+    from ..state import _record_tool_requests
+
+    _record_tool_requests(runnable.name)
 
 
 def _timbal_collector_wrap(fn):
@@ -869,6 +881,7 @@ class Runnable(ABC, BaseModel):
                         # Post hook might modify the output, so we dump afterwards
                         span._output_dump = await dump(output)
                         span.output = output
+                        _emit_default_tool_usage(self)
 
                         set_parent_call_id(_new_parent_call_id)
                         set_call_id(_new_call_id)
@@ -918,6 +931,9 @@ class Runnable(ABC, BaseModel):
                 span.status = RunStatus(code="success", reason=stop_reason, message=None)
 
             span.output = output
+
+            if not run_in_background and span.status.code == "success":
+                _emit_default_tool_usage(self)
 
             set_parent_call_id(_new_parent_call_id)
             set_call_id(_new_call_id)
