@@ -6122,7 +6122,7 @@
 
           },
           "user": {
-            "$ref": "#/components/schemas/UserRefOpenApi"
+            "$ref": "#/components/schemas/UserRef"
           }
         },
         "additionalProperties": {
@@ -6188,7 +6188,7 @@
             "type": "string"
           },
           "user": {
-            "$ref": "#/components/schemas/UserRefOpenApi"
+            "$ref": "#/components/schemas/UserRef"
           }
         }
       },
@@ -6330,9 +6330,8 @@
           }
         }
       },
-      "UserRefOpenApi": {
+      "UserRef": {
         "type": "object",
-        "description": "OpenAPI-only: same JSON shape as [`UserRef`], with `id` documented as a string (runs API).",
         "required": [
           "id",
           "name",
