@@ -273,6 +273,13 @@
                   "api-reference/projects/vars/delete",
                   "api-reference/projects/vars/update"
                 ]
+              },
+              {
+                "group": "Runs",
+                "pages": [
+                  "api-reference/projects/runs/list",
+                  "api-reference/projects/runs/get"
+                ]
               }
             ]
           },
@@ -298,10 +305,6 @@
                 ]
               }
             ]
-          },
-          {
-            "group": "Runs",
-            "pages": ["api-reference/runs/list", "api-reference/runs/upsert"]
           }
         ]
       },

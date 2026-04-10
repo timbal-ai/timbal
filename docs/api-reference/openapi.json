@@ -138,233 +138,6 @@
         ]
       }
     },
-    "/orgs/{org_id}/apps/{app_id}/runs": {
-      "get": {
-        "tags": [
-          "runs"
-        ],
-        "description": "List runs for a specific application",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "app_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "user_id",
-            "in": "query",
-            "description": "Filter runs by user ID",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
-            }
-          },
-          {
-            "name": "version_id",
-            "in": "query",
-            "description": "Filter runs by version ID",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
-            }
-          },
-          {
-            "name": "status",
-            "in": "query",
-            "description": "Filter runs by status",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "sentiment",
-            "in": "query",
-            "description": "Filter runs by sentiment",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "group_id",
-            "in": "query",
-            "description": "Filter runs by group ID",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
-            }
-          },
-          {
-            "name": "from",
-            "in": "query",
-            "description": "Filter runs by start time (epoch timestamp in milliseconds)",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
-            },
-            "example": 1729540800000
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "description": "Filter runs by end time (epoch timestamp in milliseconds)",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
-            },
-            "example": 1729627200000
-          },
-          {
-            "name": "metadata",
-            "in": "query",
-            "description": "Filter runs by metadata",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "page_token",
-            "in": "query",
-            "description": "Page token",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Runs listed successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListRunsResBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/apps/{app_id}/runs/{run_id}": {
-      "patch": {
-        "tags": [
-          "runs"
-        ],
-        "description": "Update an existing platform run or link a local run with the platform",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "app_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          },
-          {
-            "name": "run_id",
-            "in": "path",
-            "description": "This can be a platform-defined id or a custom id.\nThe platform will map the custom id to an internal one afterwards.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateRunReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Run updated successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RunPreview"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
     "/orgs/{org_id}/domains": {
       "get": {
         "tags": [
@@ -2963,6 +2736,203 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/runs": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "description": "List runs for a specific project",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "description": "Filter runs by user ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter runs by status",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "sentiment",
+            "in": "query",
+            "description": "Filter runs by sentiment",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "group_id",
+            "in": "query",
+            "description": "Filter runs by group ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Filter runs by start time (epoch timestamp in milliseconds)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "example": 1729540800000
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Filter runs by end time (epoch timestamp in milliseconds)",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "example": 1729627200000
+          },
+          {
+            "name": "metadata",
+            "in": "query",
+            "description": "Filter runs by metadata",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Page token",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Runs listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRunsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "description": "Get a single run for a project (by run id or idempotency key)",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Platform run id or idempotency key.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects/{project_id}/users": {
       "get": {
         "tags": [
@@ -5322,20 +5292,11 @@
           "runs"
         ],
         "properties": {
-          "group_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The `group_id` filter applied to the query"
-          },
           "next_page_token": {
             "type": [
-              "integer",
+              "string",
               "null"
             ],
-            "format": "int64",
             "description": "Cursor for the next page"
           },
           "runs": {
@@ -5344,14 +5305,6 @@
               "$ref": "#/components/schemas/RunPreview"
             },
             "description": "List of runs"
-          },
-          "user_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The `user_id` filter applied to the query"
           }
         }
       },
@@ -6104,12 +6057,11 @@
           "assistant"
         ]
       },
-      "RunPreview": {
+      "RunDetail": {
         "type": "object",
         "required": [
           "id",
           "user",
-          "version",
           "status",
           "cost_usd",
           "cost_credits",
@@ -6138,14 +6090,12 @@
           },
           "group_id": {
             "type": [
-              "integer",
+              "string",
               "null"
-            ],
-            "format": "int64"
+            ]
           },
           "id": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "idempotency_key": {
             "type": "string"
@@ -6158,10 +6108,9 @@
           },
           "parent_id": {
             "type": [
-              "integer",
+              "string",
               "null"
-            ],
-            "format": "int64"
+            ]
           },
           "status": {
             "type": "string"
@@ -6173,14 +6122,74 @@
 
           },
           "user": {
-            "$ref": "#/components/schemas/UserRef"
-          },
-          "version": {
-            "$ref": "#/components/schemas/VersionRef"
+            "$ref": "#/components/schemas/UserRefOpenApi"
           }
         },
         "additionalProperties": {
 
+        }
+      },
+      "RunPreview": {
+        "type": "object",
+        "required": [
+          "id",
+          "user",
+          "status",
+          "cost_usd",
+          "cost_credits",
+          "created_at",
+          "idempotency_key"
+        ],
+        "properties": {
+          "cost_credits": {
+            "type": "number",
+            "format": "double"
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "group_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "last_reaction_sentiment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserRefOpenApi"
+          }
         }
       },
       "SessionDetail": {
@@ -6294,31 +6303,6 @@
           }
         }
       },
-      "UpdateRunReqBody": {
-        "type": "object",
-        "properties": {
-          "metadata": {
-            "description": "Custom metadata"
-          },
-          "parent_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "This can be a platform-defined id or a custom id.\nThe platform will map the custom id to an internal one afterwards."
-          },
-          "trace": {
-            "description": "Trace data"
-          },
-          "version_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Version identifier (if any)"
-          }
-        }
-      },
       "UpdateVarReqBody": {
         "type": "object",
         "properties": {
@@ -6346,8 +6330,9 @@
           }
         }
       },
-      "UserRef": {
+      "UserRefOpenApi": {
         "type": "object",
+        "description": "OpenAPI-only: same JSON shape as [`UserRef`], with `id` documented as a string (runs API).",
         "required": [
           "id",
           "name",
@@ -6358,8 +6343,7 @@
             "type": "string"
           },
           "id": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "name": {
             "type": "string"
@@ -6569,36 +6553,6 @@
             }
           }
         ]
-      },
-      "VersionRef": {
-        "type": "object",
-        "required": [
-          "id",
-          "name",
-          "is_prod"
-        ],
-        "properties": {
-          "deployment": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Deployment"
-              }
-            ]
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "is_prod": {
-            "type": "boolean"
-          },
-          "name": {
-            "type": "string"
-          }
-        }
       },
       "WorkforceItem": {
         "type": "object",
