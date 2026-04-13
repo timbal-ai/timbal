@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "1.3.0"
+    "version": "2.0.0"
   },
   "servers": [
     {
@@ -129,6 +129,83 @@
         "responses": {
           "204": {
             "description": "Organization updated successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/billing/overage": {
+      "post": {
+        "tags": [
+          "billing"
+        ],
+        "description": "Enable or disable usage-based overage billing and set an optional credit cap for the organization.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingOverageReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Overage settings updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not an org admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Cannot apply overage (plan, payments, or subscription state)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -3752,6 +3829,25 @@
           }
         }
       },
+      "BillingOverageReqBody": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "cap_credits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Max overage **credits** the user allows (null = unlimited)."
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
       "ComposeRequest": {
         "type": "object",
         "required": [
@@ -6819,6 +6915,10 @@
     }
   },
   "tags": [
+    {
+      "name": "billing",
+      "description": "Subscriptions, usage, and payment-related operations"
+    },
     {
       "name": "compose",
       "description": "Compose — AI coding agent sessions"

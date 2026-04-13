@@ -172,6 +172,10 @@
               "api-reference/orgs/get",
               "api-reference/orgs/update",
               {
+                "group": "Billing",
+                "pages": ["api-reference/orgs/billing/overage"]
+              },
+              {
                 "group": "Domains",
                 "pages": [
                   "api-reference/orgs/domains/list",
