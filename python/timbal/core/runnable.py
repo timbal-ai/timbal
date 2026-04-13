@@ -56,6 +56,37 @@ def _get_logger():
     return structlog.get_logger("timbal.core.runnable")
 
 
+def _collector_output_on_interrupt(collector: Any) -> Any:
+    """Best-effort partial output when the handler async generator stops abruptly.
+
+    Core collectors' ``result()`` implementations are trivial and do not raise, but
+    user-defined collectors may validate in ``result()`` and fail on incomplete
+    streams.  We log failures and fall back to known private fields on bundled
+    collectors (duck-typed to avoid import cycles).
+    """
+    raw: Any
+    try:
+        raw = collector.result()
+    except Exception as e:
+        _get_logger().warning(
+            "collector_result_failed_on_interrupt",
+            collector_type=type(collector).__name__,
+            error=str(e),
+            exc_info=True,
+        )
+        raw = None
+        ev = getattr(collector, "_output_event", None)
+        if ev is not None:
+            raw = ev
+        else:
+            msg = getattr(collector, "_message", None)
+            if msg is not None:
+                raw = msg
+    if isinstance(raw, OutputEvent):
+        return raw.output
+    return raw
+
+
 def _emit_default_tool_usage(runnable: Any) -> None:
     """On successful Tool completion, record ``{tool.name}:requests`` for billing defaults."""
     from .tool import Tool
@@ -946,6 +977,8 @@ class Runnable(ABC, BaseModel):
         except GeneratorExit:
             _generator_closed = True
             span.status = RunStatus(code="cancelled", reason="interrupted", message="")
+            if collector is not None:
+                span.output = _collector_output_on_interrupt(collector)
             raise
 
         except EarlyExit as early_exit:
@@ -978,10 +1011,7 @@ class Runnable(ABC, BaseModel):
                     type="asyncio.CancelledError",
                 )
                 if collector is not None:
-                    output = collector.result()
-                    # When a tool is cancelled, the CancelledError is raised by the Agent._multiplex_tools
-                    if isinstance(output, OutputEvent):
-                        output = output.output
+                    output = _collector_output_on_interrupt(collector)
                     span.output = output
                     span._output_dump = await dump(output)
 

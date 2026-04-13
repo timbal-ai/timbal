@@ -597,6 +597,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+    def _salvage_interrupted_llm_output(self, run_context: Any, current_span: Any) -> None:
+        """Append any partial LLM output to memory when the agent loop is interrupted.
+
+        Called from the handler's finally block when _append_memory never ran
+        (GeneratorExit / CancelledError killed the generator before the LLM
+        OutputEvent was processed).  The inner LLM span may still have captured
+        a partial result via the collector snapshot in Runnable.__call__, so we
+        look it up in the trace and synchronously append it to memory.
+        """
+        llm_path = f"{self._path}.llm"
+        for span in reversed(run_context._trace.as_records()):
+            if span.path == llm_path and isinstance(span.output, Message):
+                current_span.memory.append(span.output)
+                break
+
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """Execute the autonomous agent loop."""
         run_context = get_run_context()
@@ -665,142 +680,149 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         i = 0
         need_retry = False
-        while True:
-            need_retry = False
-            # ? We could resolve the system prompt at each iteration
-            tools, commands = await self._resolve_tools(i)
-            if commands:
-                # Commands will only be user messages with a single text content
-                if len(current_span.memory[-1].content) == 1:
-                    content = current_span.memory[-1].content[0]
-                    if isinstance(content, TextContent) and content.text.startswith("/"):
-                        import shlex
+        _llm_memory_saved = False
+        try:
+            while True:
+                need_retry = False
+                _llm_memory_saved = False
+                # ? We could resolve the system prompt at each iteration
+                tools, commands = await self._resolve_tools(i)
+                if commands:
+                    # Commands will only be user messages with a single text content
+                    if len(current_span.memory[-1].content) == 1:
+                        content = current_span.memory[-1].content[0]
+                        if isinstance(content, TextContent) and content.text.startswith("/"):
+                            import shlex
 
-                        args = shlex.split(content.text)
-                        command = args[0].strip("/")
-                        args = args[1:]
-                        # If no command is found, we'll simply let the message pass through the LLM
-                        if command in commands:
-                            tool = commands[command]
-                            tool_input = {}
-                            for i, field_name in enumerate(tool.params_model.model_fields.keys()):
-                                # Params model preserves the ordering of the fields as they appear in the signature
-                                # We grab as many arguments as we can. If there are too few arguments, we'll let the tool params model validator give a better error
-                                if i >= len(args):
-                                    break
-                                tool_input[field_name] = args[i]
-                            # Craft a fake tool_use so we can keep this interaction in the agent memory
-                            tool_use_id = uuid7(as_type="str").replace("-", "")
-                            current_span._memory_dump.append(
-                                {
-                                    "role": "assistant",
-                                    "content": [
-                                        {"type": "tool_use", "id": tool_use_id, "name": tool.name, "input": tool_input}
-                                    ],
-                                }
-                            )
-                            # Run the tool
-                            async for event in tool(**tool_input):
-                                await _process_tool_event(event, tool_use_id, append_to_messages=False)
-                                if isinstance(event, OutputEvent) and event.output is not None:
-                                    current_span.memory.append(
-                                        Message.validate(
-                                            {
-                                                "role": "assistant",
-                                                "content": [TextContent(text=str(event.output))],
-                                            }
-                                        )
-                                    )
-                                yield event
-                            return
-
-            async for event in self._llm(
-                model=model,
-                messages=current_span.memory,
-                system_prompt=system_prompt,
-                tools=tools,
-                output_model=self.output_model,
-                **kwargs,
-            ):
-                if isinstance(event, OutputEvent):
-                    # If the LLM call fails, we want to propagate the error upwards
-                    if event.error is not None:
-                        raise RuntimeError(event.error)
-
-                    interrupted = event.status.code == "cancelled" and event.status.reason == "interrupted"
-
-                    # Handle case where LLM was interrupted before any output was received
-                    if event.output is None and interrupted:
-                        raise InterruptError(event.call_id, output=None)
-
-                    assert isinstance(event.output, Message), (
-                        f"Expected event.output to be a Message, got {type(event.output)}"
-                    )
-
-                    # Add LLM response to conversation for next iteration
-                    await _append_memory(event.output, dump_value=event._output_dump)
-
-                    if self.output_model is not None:
-                        validation_error_msg = None
-                        validation_context = self.output_model_context
-                        for content in event.output.content:
-                            # TODO Refactor this. If the llm should return a fixed output model, we should error if it doesn't return it
-                            if isinstance(content, TextContent):
-                                try:
-                                    output = coerce_to_dict(content.text)
-                                    validated_output = self.output_model.model_validate(
-                                        output, context=validation_context
-                                    )
-                                    event.output = validated_output
-                                    break
-                                except (json.JSONDecodeError, ValueError, ValidationError) as e:
-                                    validation_error_msg = str(e)
-                                    logger.warning(f"Output validation failed: {validation_error_msg}")
-                                    continue
-
-                        if validation_error_msg:
-                            if i < self.max_iter - 1:
-                                # Feed the error back to the LLM so it can correct itself
-                                error_feedback = Message.validate(
+                            args = shlex.split(content.text)
+                            command = args[0].strip("/")
+                            args = args[1:]
+                            # If no command is found, we'll simply let the message pass through the LLM
+                            if command in commands:
+                                tool = commands[command]
+                                tool_input = {}
+                                for i, field_name in enumerate(tool.params_model.model_fields.keys()):
+                                    # Params model preserves the ordering of the fields as they appear in the signature
+                                    # We grab as many arguments as we can. If there are too few arguments, we'll let the tool params model validator give a better error
+                                    if i >= len(args):
+                                        break
+                                    tool_input[field_name] = args[i]
+                                # Craft a fake tool_use so we can keep this interaction in the agent memory
+                                tool_use_id = uuid7(as_type="str").replace("-", "")
+                                current_span._memory_dump.append(
                                     {
-                                        "role": "user",
+                                        "role": "assistant",
                                         "content": [
-                                            {
-                                                "type": "text",
-                                                "text": (
-                                                    f"Your output failed validation:\n{validation_error_msg}\n\nTry again."
-                                                ),
-                                            }
+                                            {"type": "tool_use", "id": tool_use_id, "name": tool.name, "input": tool_input}
                                         ],
                                     }
                                 )
-                                await _append_memory(error_feedback)
-                                i += 1
-                                need_retry = True
-                                break  # Break out of async for to retry in while loop
-                            else:
-                                raise RuntimeError(
-                                    f"Output model validation failed after {self.max_iter} attempts: {validation_error_msg}"
-                                )
+                                # Run the tool
+                                async for event in tool(**tool_input):
+                                    await _process_tool_event(event, tool_use_id, append_to_messages=False)
+                                    if isinstance(event, OutputEvent) and event.output is not None:
+                                        current_span.memory.append(
+                                            Message.validate(
+                                                {
+                                                    "role": "assistant",
+                                                    "content": [TextContent(text=str(event.output))],
+                                                }
+                                            )
+                                        )
+                                    yield event
+                                return
 
-                    # Propagate the interruption with the processed output
-                    if interrupted:
-                        raise InterruptError(event.call_id, output=event.output)
-                yield event
+                async for event in self._llm(
+                    model=model,
+                    messages=current_span.memory,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    output_model=self.output_model,
+                    **kwargs,
+                ):
+                    if isinstance(event, OutputEvent):
+                        # If the LLM call fails, we want to propagate the error upwards
+                        if event.error is not None:
+                            raise RuntimeError(event.error)
 
-            if self.output_model is not None and not need_retry:
-                break
+                        interrupted = event.status.code == "cancelled" and event.status.reason == "interrupted"
 
-            tool_calls = [
-                content
-                for content in current_span.memory[-1].content
-                if isinstance(content, ToolUseContent) and not content.is_server_tool_use
-            ]
+                        # Handle case where LLM was interrupted before any output was received
+                        if event.output is None and interrupted:
+                            raise InterruptError(event.call_id, output=None)
 
-            if not tool_calls:
-                break
+                        assert isinstance(event.output, Message), (
+                            f"Expected event.output to be a Message, got {type(event.output)}"
+                        )
 
-            async for tool_call, event in self._multiplex_tools(tools, tool_calls):
-                await _process_tool_event(event, tool_call.id, append_to_messages=True)
-                yield event
-            i += 1
+                        # Add LLM response to conversation for next iteration
+                        await _append_memory(event.output, dump_value=event._output_dump)
+                        _llm_memory_saved = True
+
+                        if self.output_model is not None:
+                            validation_error_msg = None
+                            validation_context = self.output_model_context
+                            for content in event.output.content:
+                                # TODO Refactor this. If the llm should return a fixed output model, we should error if it doesn't return it
+                                if isinstance(content, TextContent):
+                                    try:
+                                        output = coerce_to_dict(content.text)
+                                        validated_output = self.output_model.model_validate(
+                                            output, context=validation_context
+                                        )
+                                        event.output = validated_output
+                                        break
+                                    except (json.JSONDecodeError, ValueError, ValidationError) as e:
+                                        validation_error_msg = str(e)
+                                        logger.warning(f"Output validation failed: {validation_error_msg}")
+                                        continue
+
+                            if validation_error_msg:
+                                if i < self.max_iter - 1:
+                                    # Feed the error back to the LLM so it can correct itself
+                                    error_feedback = Message.validate(
+                                        {
+                                            "role": "user",
+                                            "content": [
+                                                {
+                                                    "type": "text",
+                                                    "text": (
+                                                        f"Your output failed validation:\n{validation_error_msg}\n\nTry again."
+                                                    ),
+                                                }
+                                            ],
+                                        }
+                                    )
+                                    await _append_memory(error_feedback)
+                                    i += 1
+                                    need_retry = True
+                                    break  # Break out of async for to retry in while loop
+                                else:
+                                    raise RuntimeError(
+                                        f"Output model validation failed after {self.max_iter} attempts: {validation_error_msg}"
+                                    )
+
+                        # Propagate the interruption with the processed output
+                        if interrupted:
+                            raise InterruptError(event.call_id, output=event.output)
+                    yield event
+
+                if self.output_model is not None and not need_retry:
+                    break
+
+                tool_calls = [
+                    content
+                    for content in current_span.memory[-1].content
+                    if isinstance(content, ToolUseContent) and not content.is_server_tool_use
+                ]
+
+                if not tool_calls:
+                    break
+
+                async for tool_call, event in self._multiplex_tools(tools, tool_calls):
+                    await _process_tool_event(event, tool_call.id, append_to_messages=True)
+                    yield event
+                i += 1
+        finally:
+            if not _llm_memory_saved:
+                self._salvage_interrupted_llm_output(run_context, current_span)
