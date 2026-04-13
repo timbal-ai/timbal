@@ -1355,6 +1355,296 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/analytics/credits": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "description": "Time-binned credits and USD cost breakdown for a project.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "description": "Bucket size for aggregation (`minute`, `hour`, or `day`).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/BinSize"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive range start (epoch milliseconds). Defaults: 1h / 1d / 30d before `to` by `group_by`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive range end (epoch milliseconds). Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "description": "Restrict to a specific user’s runs.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credits analytics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectAnalyticsCreditsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/analytics/usage": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "description": "Time-binned run counts, user counts, and duration percentiles for a project.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "description": "Bucket size for aggregation (`minute`, `hour`, or `day`).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/BinSize"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Usage analytics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectAnalyticsUsageBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/analytics/users": {
+      "get": {
+        "tags": [
+          "analytics"
+        ],
+        "description": "Per-user run and spend aggregates for a project.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Inclusive range start (epoch milliseconds).",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Exclusive range end (epoch milliseconds).",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Opaque offset for the next page (from the previous response’s `next_page_token`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User analytics page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectAnalyticsUsersBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "500": {
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects/{project_id}/compose": {
       "post": {
         "tags": [
@@ -3848,6 +4138,14 @@
           }
         }
       },
+      "BinSize": {
+        "type": "string",
+        "enum": [
+          "minute",
+          "hour",
+          "day"
+        ]
+      },
       "ComposeRequest": {
         "type": "object",
         "required": [
@@ -3970,6 +4268,60 @@
             }
           }
         ]
+      },
+      "Cost": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "unit",
+          "usd",
+          "credits"
+        ],
+        "properties": {
+          "credits": {
+            "type": "number",
+            "format": "double"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "usd": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "CostBin": {
+        "type": "object",
+        "required": [
+          "interval_starts_at",
+          "interval_ends_at",
+          "costs"
+        ],
+        "properties": {
+          "costs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Cost"
+            }
+          },
+          "interval_ends_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interval_starts_at": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
       "CreateDomainReqBody": {
         "type": "object",
@@ -5800,6 +6152,92 @@
           }
         }
       },
+      "ProjectAnalyticsCreditsBody": {
+        "type": "object",
+        "required": [
+          "group_by",
+          "from",
+          "to",
+          "bins"
+        ],
+        "properties": {
+          "bins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CostBin"
+            }
+          },
+          "from": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "group_by": {
+            "$ref": "#/components/schemas/BinSize"
+          },
+          "to": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ProjectAnalyticsUsageBody": {
+        "type": "object",
+        "required": [
+          "group_by",
+          "from",
+          "to",
+          "bins"
+        ],
+        "properties": {
+          "bins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageBin"
+            }
+          },
+          "from": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "group_by": {
+            "$ref": "#/components/schemas/BinSize"
+          },
+          "to": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ProjectAnalyticsUsersBody": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "users"
+        ],
+        "properties": {
+          "from": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserRow"
+            }
+          }
+        }
+      },
       "ProjectConnection": {
         "type": "object",
         "required": [
@@ -6611,6 +7049,76 @@
           }
         }
       },
+      "UsageBin": {
+        "type": "object",
+        "required": [
+          "interval_starts_at",
+          "interval_ends_at",
+          "n_success",
+          "n_error",
+          "n_running",
+          "n_timeout",
+          "n_users"
+        ],
+        "properties": {
+          "interval_ends_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interval_starts_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "n_error": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "n_running": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "n_success": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "n_timeout": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "n_users": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "p50": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "p90": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "p95": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "p99": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
       "UserRef": {
         "type": "object",
         "required": [
@@ -6629,6 +7137,62 @@
             "type": "string"
           },
           "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UserRow": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "user_name",
+          "user_email",
+          "n_success",
+          "n_error",
+          "n_running",
+          "n_timeout",
+          "usd",
+          "credits"
+        ],
+        "properties": {
+          "credits": {
+            "type": "number",
+            "format": "double"
+          },
+          "n_error": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "n_running": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "n_success": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "n_timeout": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "user_email": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "user_name": {
+            "type": "string"
+          },
+          "user_photo_url": {
             "type": [
               "string",
               "null"
@@ -6915,6 +7479,10 @@
     }
   },
   "tags": [
+    {
+      "name": "analytics",
+      "description": "Project analytics"
+    },
     {
       "name": "billing",
       "description": "Subscriptions, usage, and payment-related operations"

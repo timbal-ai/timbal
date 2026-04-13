@@ -210,6 +210,14 @@
               "api-reference/projects/link-knowledge-base",
               "api-reference/projects/unlink-knowledge-base",
               {
+                "group": "Analytics",
+                "pages": [
+                  "api-reference/projects/analytics/credits",
+                  "api-reference/projects/analytics/usage",
+                  "api-reference/projects/analytics/users"
+                ]
+              },
+              {
                 "group": "Compose",
                 "tag": "Beta",
                 "pages": [
