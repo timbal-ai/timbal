@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Voice playground · Timbal AI</title>
+<style>
+  :root {
+    --bg: #f4f4f5;
+    --surface: #ffffff;
+    --text: #09090b;
+    --text-muted: #71717a;
+    --border: #e4e4e7;
+    --border-strong: #d4d4d8;
+    --primary: #000000;
+    --primary-fg: #ffffff;
+    --success: #15803d;
+    --success-soft: #dcfce7;
+    --danger: #dc2626;
+    --danger-bg: #fef2f2;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --shadow: 0 1px 3px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.06);
+    --font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html {
+    height: 100%;
+  }
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    height: 100%;
+    max-height: 100dvh;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  .shell {
+    max-width: 480px;
+    margin: 0 auto;
+    height: 100%;
+    max-height: 100dvh;
+    min-height: 0;
+    padding: 1.5rem 1rem 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    overflow: hidden;
+  }
+  .top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1rem;
+    letter-spacing: -0.03em;
+  }
+  .brand-mark {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    flex-shrink: 0;
+    object-fit: contain;
+    display: block;
+  }
+  .brand .logo { font-weight: 700; color: var(--primary); }
+  .brand .sep {
+    color: #a1a1aa;
+    font-weight: 300;
+    margin-left: 0.55rem;
+    margin-right: 0.2rem;
+  }
+  .brand .title { font-weight: 500; color: var(--text-muted); font-size: 0.9375rem; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    transition: opacity 0.2s ease;
+  }
+  .card.card--inactive {
+    opacity: 0.88;
+  }
+
+  .conn-strip {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.35rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #fafafa 0%, var(--surface) 100%);
+  }
+  .conn-version {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    letter-spacing: -0.02em;
+  }
+  .conn-agent {
+    text-align: left;
+    width: 100%;
+    min-width: 0;
+  }
+  .conn-agent[hidden] {
+    display: none !important;
+  }
+  .conn-runnable-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+  }
+  .conn-runnable-spec {
+    display: block;
+    font-size: 0.65625rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: var(--text-muted);
+    margin-top: 0.2rem;
+    line-height: 1.3;
+    word-break: break-word;
+  }
+  .conn-runnable-spec[hidden] {
+    display: none !important;
+  }
+  .foot-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-top: 0.35rem;
+    flex-shrink: 0;
+    background: #a1a1aa;
+  }
+  .foot-status[data-state="connecting"] .foot-status-dot {
+    animation: pulse-dot 1.2s ease-in-out infinite;
+    background: #71717a;
+  }
+  .foot-status[data-state="live"] .foot-status-dot {
+    background: var(--success);
+    box-shadow: 0 0 0 3px var(--success-soft);
+  }
+  .foot-status[data-state="error"] .foot-status-dot {
+    background: var(--danger);
+  }
+  .foot-status[data-state="ended"] .foot-status-dot {
+    background: #a1a1aa;
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
+  }
+
+  #mic-select {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-size: 0.8125rem;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.65rem;
+    outline: none;
+    cursor: pointer;
+  }
+  #mic-select:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(0,0,0,.07);
+  }
+  .mic-viz {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 3px;
+    height: 28px;
+    flex: 0 0 56px;
+    padding-bottom: 2px;
+  }
+  .mic-bar {
+    width: 4px;
+    min-height: 4px;
+    border-radius: 2px;
+    background: var(--border-strong);
+    transform-origin: bottom;
+    transition: height 0.05s ease, background 0.15s;
+  }
+  .mic-viz.active .mic-bar {
+    background: var(--success);
+  }
+
+  .transcript-wrap {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #transcript {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    padding: 1rem;
+    font-size: 0.875rem;
+    line-height: 1.55;
+    scroll-behavior: smooth;
+  }
+  #voice-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+    text-align: center;
+    pointer-events: none;
+  }
+  #voice-empty[hidden] { display: none !important; }
+  .orb-wrap {
+    width: 72px;
+    height: 72px;
+    margin-bottom: 1rem;
+    position: relative;
+  }
+  .orb {
+    position: absolute;
+    inset: 12px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 30% 30%, #fafafa, #e4e4e7);
+    border: 1px solid var(--border);
+  }
+  .card.card--live #voice-empty .orb-wrap .ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 2px solid var(--success-soft);
+    animation: ring-pulse 2s ease-out infinite;
+  }
+  @keyframes ring-pulse {
+    0% { transform: scale(0.85); opacity: 0.8; }
+    100% { transform: scale(1.35); opacity: 0; }
+  }
+  .empty-title {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+  .empty-sub {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    margin-top: 0.35rem;
+    max-width: 240px;
+    line-height: 1.4;
+  }
+
+  .msg { margin-bottom: 0.65rem; max-width: 90%; }
+  .msg.user {
+    margin-left: auto;
+    padding: 0.55rem 0.8rem;
+    border-radius: 12px 12px 4px 12px;
+    background: var(--primary);
+    color: var(--primary-fg);
+    font-size: 0.875rem;
+  }
+  .msg.assistant {
+    padding: 0.55rem 0.8rem;
+    border-radius: 12px 12px 12px 4px;
+    background: #f4f4f5;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 0.875rem;
+  }
+  .msg.partial {
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 0.8125rem;
+    padding: 0 0.25rem;
+    max-width: 100%;
+  }
+  .msg.system {
+    display: none;
+  }
+  .msg.error {
+    color: var(--danger);
+    font-size: 0.8125rem;
+    padding: 0.55rem 0.7rem;
+    background: var(--danger-bg);
+    border-radius: var(--radius-sm);
+    border: 1px solid #fecaca;
+    max-width: 100%;
+  }
+
+  .foot {
+    padding: 0.65rem 1rem 0.75rem;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    background: #fafafa;
+  }
+  .foot-row--top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.65rem;
+  }
+  .foot-status {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    min-width: 0;
+    flex: 1;
+  }
+  .foot-status-lines {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+  .foot-status-title {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+  }
+  .foot-status-detail {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    line-height: 1.35;
+  }
+  .foot-row--mic {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+  .foot-row--mic #mic-select {
+    flex: 1;
+    min-width: 0;
+  }
+  .foot-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+  .foot-warn {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    line-height: 1.45;
+    margin: 0;
+    padding-top: 0.35rem;
+    border-top: 1px solid var(--border);
+  }
+  button {
+    font: inherit;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.9rem;
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+  }
+  button:hover:not(:disabled) {
+    background: #fafafa;
+  }
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .btn-stop {
+    flex-shrink: 0;
+    width: 2.5rem;
+    height: 2.5rem;
+    padding: 0;
+    border: none;
+    border-radius: 10px;
+    background: var(--danger);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  }
+  .btn-stop:hover:not(:disabled) {
+    background: #b91c1c;
+  }
+  .btn-stop:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+  .btn-stop-icon {
+    width: 11px;
+    height: 11px;
+    border-radius: 2px;
+    background: var(--primary-fg);
+  }
+  button.primary {
+    background: var(--primary);
+    color: var(--primary-fg);
+    border-color: var(--primary);
+  }
+  button.primary:hover:not(:disabled) {
+    opacity: 0.92;
+  }
+  #btn-reconnect { display: none; }
+  #btn-reconnect.visible { display: inline-block; }
+
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="top">
+    <div class="brand">
+      <img class="brand-mark" src="https://content.timbal.ai/assets/timbal_favicon.png" alt="" width="28" height="28" decoding="async" />
+      <div>
+        <span class="logo">Timbal AI</span><span class="sep">/</span><span class="title">Voice playground</span>
+      </div>
+    </div>
+  </header>
+
+  <main id="card" class="card">
+    <div id="conn-strip" class="conn-strip">
+      <span id="conn-version" class="conn-version"></span>
+      <div id="conn-agent" class="conn-agent" hidden>
+        <div id="conn-runnable-title" class="conn-runnable-title"></div>
+        <span id="conn-runnable-spec" class="conn-runnable-spec" hidden></span>
+      </div>
+    </div>
+    <div class="transcript-wrap">
+      <div id="voice-empty">
+        <div class="orb-wrap">
+          <div class="ring"></div>
+          <div class="orb"></div>
+        </div>
+        <p class="empty-title">Listening</p>
+        <p class="empty-sub">When you’re connected, speak normally. Transcripts and replies show up here.</p>
+      </div>
+      <div id="transcript" role="log" aria-live="polite" aria-relevant="additions"></div>
+    </div>
+    <div class="foot">
+      <div class="foot-row foot-row--top">
+        <div id="foot-status" class="foot-status" data-state="connecting">
+          <span class="foot-status-dot" aria-hidden="true"></span>
+          <div class="foot-status-lines">
+            <span id="foot-status-title" class="foot-status-title">Getting ready</span>
+            <span id="foot-status-detail" class="foot-status-detail">Microphone and server connection…</span>
+          </div>
+        </div>
+        <div class="foot-actions">
+          <button type="button" id="btn-reconnect" class="primary">Reload page</button>
+          <button type="button" id="btn-stop" class="btn-stop" disabled aria-label="End session">
+            <span class="btn-stop-icon" aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+      <div class="foot-row foot-row--mic">
+        <select id="mic-select" aria-label="Microphone"><option value="">Loading devices…</option></select>
+        <div id="mic-viz" class="mic-viz" aria-hidden="true">
+          <div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div><div class="mic-bar"></div>
+        </div>
+      </div>
+      <p class="foot-warn">Audio is captured in your browser (microphone) and streamed to this server. Use a private session and only on sites you trust; anyone with access to this page may be able to use the same agent.</p>
+    </div>
+  </main>
+
+</div>
+<script type="application/json" id="timbal-voice-runnable-meta">__TIMBAL_VOICE_RUNNABLE_META_JSON__</script>
+<script>
+const SAMPLE_RATE = 16000;
+const CHUNK_MS = 100;
+
+const cardEl = document.getElementById('card');
+const footStatus = document.getElementById('foot-status');
+const footStatusTitle = document.getElementById('foot-status-title');
+const footStatusDetail = document.getElementById('foot-status-detail');
+const transcriptEl = document.getElementById('transcript');
+const voiceEmpty = document.getElementById('voice-empty');
+const btnStop = document.getElementById('btn-stop');
+const btnReconnect = document.getElementById('btn-reconnect');
+const micSelect = document.getElementById('mic-select');
+const micViz = document.getElementById('mic-viz');
+const micBars = () => [...micViz.querySelectorAll('.mic-bar')];
+
+function truncateMiddle(s, max) {
+  if (s.length <= max) return s;
+  const inner = max - 1;
+  const front = Math.ceil(inner / 2);
+  const back = Math.floor(inner / 2);
+  return s.slice(0, front) + '…' + s.slice(s.length - back);
+}
+
+function initRunnableStrip() {
+  const raw = document.getElementById('timbal-voice-runnable-meta');
+  const verEl = document.getElementById('conn-version');
+  const wrap = document.getElementById('conn-agent');
+  const titleEl = document.getElementById('conn-runnable-title');
+  const specEl = document.getElementById('conn-runnable-spec');
+  if (!raw || !verEl || !wrap || !titleEl || !specEl) return;
+  let meta;
+  try {
+    meta = JSON.parse(raw.textContent);
+  } catch {
+    return;
+  }
+  const v = (meta.version || '').trim();
+  verEl.textContent = v ? `Timbal ${v}` : 'Timbal';
+  const spec = (meta.import_spec || '').trim();
+  const nm = (meta.name || '').trim();
+  const kind = (meta.kind || '').trim();
+  const title = nm ? (kind ? `${nm} · ${kind}` : nm) : kind;
+  if (!title && !spec) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  titleEl.textContent = title || 'Runnable';
+  if (spec) {
+    specEl.textContent = truncateMiddle(spec, 44);
+    specEl.title = spec;
+    specEl.hidden = false;
+  } else {
+    specEl.textContent = '';
+    specEl.removeAttribute('title');
+    specEl.hidden = true;
+  }
+}
+
+let ws, audioCtx, micStream, worklet, analyser, currentSource, meterRAF;
+/** False until WS is open, config frame sent, and AudioContext is running (worklet processes mic). */
+let micAudioToWs = false;
+let nextPlayTime = 0;
+const playbackSources = new Set();
+let userEndedSession = false;
+let sessionReady = false;
+/** @type {'connecting'|'live'|'ended'|'error'} */
+let connVisual = 'connecting';
+
+function setConn(state, title, detail) {
+  connVisual = state;
+  const ds = state === 'error' ? 'error' : state === 'ended' ? 'ended' : state === 'live' ? 'live' : 'connecting';
+  footStatus.dataset.state = ds;
+  footStatusTitle.textContent = title;
+  footStatusDetail.textContent = detail;
+  cardEl.classList.toggle('card--inactive', state === 'ended' || state === 'error');
+  cardEl.classList.toggle('card--live', state === 'live');
+  btnReconnect.classList.toggle('visible', state === 'ended' || state === 'error');
+}
+
+function updateEmptyState() {
+  const hasDialogue = transcriptEl.querySelector('.msg.user, .msg.assistant');
+  const show = connVisual === 'live' && sessionReady && !hasDialogue && !transcriptEl.querySelector('.msg.partial');
+  voiceEmpty.hidden = !show;
+}
+
+function stopAssistantAudio() {
+  for (const s of playbackSources) {
+    try { s.stop(0); } catch (e) {}
+  }
+  playbackSources.clear();
+  nextPlayTime = 0;
+}
+
+function log(cls, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  transcriptEl.appendChild(d);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  updateEmptyState();
+  return d;
+}
+
+let partialEl = null;
+function setPartial(text) {
+  if (!text) {
+    if (partialEl) { partialEl.remove(); partialEl = null; }
+    updateEmptyState();
+    return;
+  }
+  if (!partialEl) partialEl = log('partial', '');
+  partialEl.textContent = '… ' + text;
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  updateEmptyState();
+}
+
+async function populateDevices() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const mics = devices.filter(d => d.kind === 'audioinput');
+  micSelect.innerHTML = '';
+  for (const mic of mics) {
+    const opt = document.createElement('option');
+    opt.value = mic.deviceId;
+    opt.textContent = mic.label || `Microphone (${mic.deviceId.slice(0, 8)}…)`;
+    micSelect.appendChild(opt);
+  }
+  if (micStream) {
+    const activeId = micStream.getAudioTracks()[0]?.getSettings().deviceId;
+    if (activeId) micSelect.value = activeId;
+  }
+  return mics;
+}
+
+function pickPreferredMic(mics) {
+  const bt = mics.find(m => /airpods|bluetooth|wireless|beats/i.test(m.label));
+  if (bt) return bt.deviceId;
+  const def = mics.find(m => m.deviceId === 'default');
+  if (def) return def.deviceId;
+  return mics.length ? mics[0].deviceId : undefined;
+}
+
+async function startMic(deviceId) {
+  if (currentSource) { currentSource.disconnect(); currentSource = null; }
+  if (worklet) { worklet.disconnect(); worklet = null; }
+  if (analyser) { analyser.disconnect(); analyser = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+
+  const constraints = {
+    audio: {
+      echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+      sampleRate: SAMPLE_RATE,
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+    }
+  };
+  micStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+  if (!audioCtx) {
+    audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    await audioCtx.audioWorklet.addModule('data:text/javascript,' + encodeURIComponent(`
+      class Capture extends AudioWorkletProcessor {
+        constructor() { super(); this._buf = []; }
+        process(inputs) {
+          const ch = inputs[0][0];
+          if (!ch) return true;
+          for (let i = 0; i < ch.length; i++) this._buf.push(ch[i]);
+          const needed = Math.floor(sampleRate * ${CHUNK_MS / 1000});
+          while (this._buf.length >= needed) {
+            const slice = this._buf.splice(0, needed);
+            const i16 = new Int16Array(slice.length);
+            for (let j = 0; j < slice.length; j++) {
+              let s = Math.max(-1, Math.min(1, slice[j]));
+              i16[j] = s < 0 ? s * 32768 : s * 32767;
+            }
+            this.port.postMessage(i16.buffer, [i16.buffer]);
+          }
+          return true;
+        }
+      }
+      registerProcessor('capture', Capture);
+    `));
+  }
+
+  currentSource = audioCtx.createMediaStreamSource(micStream);
+  worklet = new AudioWorkletNode(audioCtx, 'capture');
+  worklet.port.onmessage = (e) => {
+    if (!micAudioToWs || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(new Uint8Array(e.data));
+  };
+  currentSource.connect(worklet);
+  const silent = audioCtx.createGain();
+  silent.gain.value = 0;
+  worklet.connect(silent);
+  silent.connect(audioCtx.destination);
+
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  currentSource.connect(analyser);
+  const pcmBuf = new Float32Array(analyser.fftSize);
+  const bars = micBars();
+  const barLevel = bars.map(() => 0);
+  if (meterRAF) cancelAnimationFrame(meterRAF);
+  (function drawMeter() {
+    analyser.getFloatTimeDomainData(pcmBuf);
+    let peak = 0;
+    for (let i = 0; i < pcmBuf.length; i++) peak = Math.max(peak, Math.abs(pcmBuf[i]));
+    const pct = Math.min(100, Math.round(peak * 280));
+    micViz.classList.toggle('active', pct > 3 && connVisual === 'live');
+    for (let i = 0; i < bars.length; i++) {
+      const target = pct * (0.35 + i * 0.14);
+      barLevel[i] = Math.max(target, barLevel[i] * 0.82);
+      const h = 4 + barLevel[i] * 0.22;
+      bars[i].style.height = `${Math.min(26, h)}px`;
+    }
+    meterRAF = requestAnimationFrame(drawMeter);
+  })();
+
+  try {
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+  } catch (_) { /* autoplay policy may block until user gesture */ }
+
+  await populateDevices();
+}
+
+micSelect.onchange = () => {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'mic_change'}));
+  startMic(micSelect.value);
+};
+
+navigator.mediaDevices.addEventListener('devicechange', async () => {
+  await populateDevices();
+});
+
+function playPCM(b64) {
+  if (!audioCtx) return;
+  if (audioCtx.state === 'suspended') void audioCtx.resume();
+  const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const i16 = new Int16Array(raw.buffer);
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+  const buf = audioCtx.createBuffer(1, f32.length, SAMPLE_RATE);
+  buf.getChannelData(0).set(f32);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(audioCtx.destination);
+  const startAt = Math.max(nextPlayTime, audioCtx.currentTime);
+  src.start(startAt);
+  nextPlayTime = startAt + buf.duration;
+  playbackSources.add(src);
+  src.onended = () => playbackSources.delete(src);
+}
+
+btnReconnect.onclick = () => location.reload();
+
+async function start() {
+  setConn('connecting', 'Getting ready', 'Microphone and server connection…');
+  userEndedSession = false;
+  sessionReady = false;
+
+  await startMic();
+  const mics = await populateDevices();
+  const preferred = pickPreferredMic(mics);
+  const activeId = micStream?.getAudioTracks()[0]?.getSettings().deviceId;
+  if (preferred && preferred !== activeId) {
+    await startMic(preferred);
+    await populateDevices();
+  }
+
+  setConn('connecting', 'Connecting', 'Opening WebSocket to this server…');
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  micAudioToWs = false;
+  ws = new WebSocket(`${proto}://${location.host}/voice/ws`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    transcriptEl.innerHTML = '';
+    window._assistantEl = null;
+    partialEl = null;
+    stopAssistantAudio();
+    sessionReady = false;
+    const sr = audioCtx ? Math.round(audioCtx.sampleRate) : SAMPLE_RATE;
+    ws.send(JSON.stringify({ sample_rate: sr }));
+    const tryArmMic = async () => {
+      try {
+        if (audioCtx?.state === 'suspended') await audioCtx.resume();
+      } catch (_) {}
+      if (audioCtx?.state === 'running') {
+        micAudioToWs = true;
+        return true;
+      }
+      return false;
+    };
+    void (async () => {
+      if (await tryArmMic()) return;
+      setConn('live', 'Tap to capture', 'Your browser paused the mic graph — click or press a key here to start streaming audio.');
+      const kick = async () => {
+        if (await tryArmMic()) {
+          window.removeEventListener('pointerdown', kick);
+          window.removeEventListener('keydown', kick);
+          if (sessionReady) {
+            setConn('live', 'Listening', 'Speak naturally — audio streams to your Timbal agent.');
+          } else {
+            setConn('live', 'Connected', 'Waiting for voice session…');
+          }
+        }
+      };
+      window.addEventListener('pointerdown', kick, { passive: true });
+      window.addEventListener('keydown', kick);
+    })();
+    setConn('live', 'Connected', 'Waiting for voice session…');
+    btnStop.disabled = false;
+    updateEmptyState();
+  };
+
+  ws.onclose = (ev) => {
+    micAudioToWs = false;
+    btnStop.disabled = true;
+    sessionReady = false;
+    micViz.classList.remove('active');
+    if (connVisual === 'ended' || connVisual === 'error') {
+      updateEmptyState();
+      return;
+    }
+    if (userEndedSession) {
+      setConn('ended', 'Session ended', 'You stopped the session. Reload to start again.');
+    } else {
+      setConn('ended', 'Disconnected', ev.wasClean
+        ? 'The connection closed. Reload if you want another session.'
+        : 'Connection dropped — check the server and reload.');
+    }
+    updateEmptyState();
+  };
+
+  ws.onerror = () => {
+    setConn('error', 'Connection error', 'Could not keep the WebSocket open. Is the server running?');
+  };
+
+  ws.onmessage = (e) => {
+    let msg;
+    try {
+      msg = JSON.parse(e.data);
+    } catch (err) {
+      console.error('voice ws: bad json', err);
+      return;
+    }
+    switch (msg.type) {
+      case 'session_started':
+        sessionReady = true;
+        setConn('live', 'Listening', 'Speak naturally — audio streams to your Timbal agent.');
+        updateEmptyState();
+        break;
+      case 'transcript_partial':
+        setPartial(msg.text);
+        break;
+      case 'transcript_committed':
+        setPartial(null);
+        log('user', msg.text);
+        break;
+      case 'agent_text_delta':
+        if (!window._assistantEl) window._assistantEl = log('assistant', '');
+        window._assistantEl.textContent += msg.text;
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        updateEmptyState();
+        break;
+      case 'agent_text_done':
+        window._assistantEl = null;
+        updateEmptyState();
+        break;
+      case 'audio':
+        playPCM(msg.data);
+        break;
+      case 'interrupted':
+        window._assistantEl = null;
+        stopAssistantAudio();
+        updateEmptyState();
+        break;
+      case 'error':
+        log('error', msg.message);
+        break;
+      case 'session_transcript':
+        window._sessionTranscript = msg.entries;
+        break;
+      case 'session_ended':
+        setConn('ended', 'Session ended', 'The agent closed this voice session.');
+        break;
+    }
+  };
+}
+
+btnStop.onclick = () => {
+  userEndedSession = true;
+  stopAssistantAudio();
+  if (ws) ws.close();
+  micStream?.getTracks().forEach(t => t.stop());
+};
+
+initRunnableStrip();
+start();
+</script>
+</body>
+</html>
