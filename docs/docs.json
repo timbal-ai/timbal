@@ -257,13 +257,22 @@
                 ]
               },
               {
-                "group": "Workforce",
+                "group": "Previews",
+                "tag": "Beta",
                 "pages": [
-                  "api-reference/projects/workforce/list",
-                  "api-reference/projects/workforce/create",
-                  "api-reference/projects/workforce/delete",
-                  "api-reference/projects/workforce/call",
-                  "api-reference/projects/workforce/codegen"
+                  "api-reference/projects/previews/list",
+                  "api-reference/projects/previews/get",
+                  "api-reference/projects/previews/start",
+                  "api-reference/projects/previews/stop"
+                ]
+              },
+              {
+                "group": "Runs",
+                "pages": [
+                  "api-reference/projects/runs/list",
+                  "api-reference/projects/runs/get",
+                  "api-reference/projects/runs/reactions-list",
+                  "api-reference/projects/runs/reactions-add"
                 ]
               },
               {
@@ -287,19 +296,19 @@
                 ]
               },
               {
-                "group": "Runs",
+                "group": "Workforce",
                 "pages": [
-                  "api-reference/projects/runs/list",
-                  "api-reference/projects/runs/get",
-                  "api-reference/projects/runs/reactions-list",
-                  "api-reference/projects/runs/reactions-add"
+                  "api-reference/projects/workforce/list",
+                  "api-reference/projects/workforce/create",
+                  "api-reference/projects/workforce/delete",
+                  "api-reference/projects/workforce/call",
+                  "api-reference/projects/workforce/codegen"
                 ]
               }
             ]
           },
           {
             "group": "Knowledge Bases",
-            "tag": "Beta",
             "pages": [
               "api-reference/knowledge-bases/list",
               "api-reference/knowledge-bases/create",

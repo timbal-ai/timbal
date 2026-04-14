@@ -1138,6 +1138,68 @@
         ]
       }
     },
+    "/orgs/{org_id}/previews": {
+      "get": {
+        "tags": [
+          "preview"
+        ],
+        "description": "List project previews for the organization",
+        "operationId": "list_previews",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "preview_status",
+            "in": "query",
+            "description": "Filter by preview status (`starting`, `running`). Omit for all active previews.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/PreviewStatus"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Previews listed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPreviewsResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a member of the org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects": {
       "get": {
         "tags": [
@@ -3094,6 +3156,227 @@
           },
           "403": {
             "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/preview": {
+      "get": {
+        "tags": [
+          "preview"
+        ],
+        "description": "Get status and health for a running preview on a branch",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch / rev the preview was started for",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "main"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Preview status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewInfo"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller has no access to the project",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No preview for this branch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "preview"
+        ],
+        "description": "Start dev preview servers (API/UI) for a branch worktree",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Preview started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid branch, worktree not ready, or preview already starting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a project admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/preview/stop": {
+      "post": {
+        "tags": [
+          "preview"
+        ],
+        "description": "Stop preview dev servers for a branch",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StopPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Preview stopped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a project admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No preview running for this branch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -5806,6 +6089,20 @@
           }
         }
       },
+      "ListPreviewsResponse": {
+        "type": "object",
+        "required": [
+          "previews"
+        ],
+        "properties": {
+          "previews": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewInfo"
+            }
+          }
+        }
+      },
       "ListProjectUsersResBody": {
         "type": "object",
         "required": [
@@ -6151,6 +6448,85 @@
             "description": "User's role in the organization"
           }
         }
+      },
+      "PreviewComponent": {
+        "type": "object",
+        "required": [
+          "component"
+        ],
+        "properties": {
+          "component": {
+            "type": "string",
+            "description": "\"api\" or \"ui\""
+          },
+          "healthy": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the dev server is responding. `None` if not checked."
+          }
+        }
+      },
+      "PreviewInfo": {
+        "type": "object",
+        "required": [
+          "slug",
+          "started_at",
+          "rev",
+          "components"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewComponent"
+            }
+          },
+          "project_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Set on org-level list responses."
+          },
+          "rev": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the preview start was accepted (UTC)."
+          },
+          "status": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PreviewStatus"
+              }
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Full preview URL (if PREVIEW_DOMAIN is configured)"
+          }
+        }
+      },
+      "PreviewStatus": {
+        "type": "string",
+        "enum": [
+          "starting",
+          "running"
+        ]
       },
       "ProjectAnalyticsCreditsBody": {
         "type": "object",
@@ -6957,6 +7333,30 @@
           }
         }
       },
+      "StartPreviewRequest": {
+        "type": "object",
+        "required": [
+          "rev"
+        ],
+        "properties": {
+          "rev": {
+            "type": "string",
+            "example": "main"
+          }
+        }
+      },
+      "StopPreviewRequest": {
+        "type": "object",
+        "required": [
+          "rev"
+        ],
+        "properties": {
+          "rev": {
+            "type": "string",
+            "example": "main"
+          }
+        }
+      },
       "Target": {
         "type": "object",
         "required": [
@@ -7502,6 +7902,10 @@
     {
       "name": "orgs",
       "description": "Organization operations"
+    },
+    {
+      "name": "preview",
+      "description": "Project dev previews (branch worktree dev servers)"
     },
     {
       "name": "projects",
