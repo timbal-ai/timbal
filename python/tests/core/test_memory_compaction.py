@@ -1002,8 +1002,8 @@ class TestCompactionMetadata:
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
         root1 = ctx1.root_span()
-        root1.usage["gpt-4o-mini:input_tokens"] = 80_000
-        root1.usage["gpt-4o-mini:output_tokens"] = 10_000
+        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
+        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1042,8 +1042,8 @@ class TestCompactionMetadata:
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
         root1 = ctx1.root_span()
-        root1.usage["gpt-4o-mini:input_tokens"] = 5_000
-        root1.usage["gpt-4o-mini:output_tokens"] = 5_000
+        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 5_000
+        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 5_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1080,8 +1080,8 @@ class TestCompactionMetadata:
         set_run_context(ctx1)
         await agent(prompt="Turn 1").collect()
         root1 = ctx1.root_span()
-        root1.usage["gpt-4o-mini:input_tokens"] = 80_000
-        root1.usage["gpt-4o-mini:output_tokens"] = 10_000
+        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
+        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
         await ctx1._save_trace()
 
         ctx2 = RunContext(parent_id=ctx1.id, tracing_provider=InMemoryTracingProvider)
@@ -1173,8 +1173,8 @@ class TestContextWindowTriggering:
 
         # Manually inflate the span's usage to simulate 90% utilization
         root1 = ctx1.root_span()
-        root1.usage["gpt-4o-mini:input_tokens"] = 80_000
-        root1.usage["gpt-4o-mini:output_tokens"] = 10_000
+        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 80_000
+        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 10_000
         await ctx1._save_trace()
 
         # --- Run 2: should trigger compaction ---
@@ -1231,8 +1231,8 @@ class TestContextWindowTriggering:
         await agent(prompt="Hello").collect()
 
         root1 = ctx1.root_span()
-        root1.usage["gpt-4o-mini:input_tokens"] = 5_000
-        root1.usage["gpt-4o-mini:output_tokens"] = 5_000
+        root1.usage["openai/gpt-4o-mini:input_text_tokens"] = 5_000
+        root1.usage["openai/gpt-4o-mini:output_text_tokens"] = 5_000
         await ctx1._save_trace()
 
         # --- Run 2: should skip compaction (10% utilization < 75% threshold) ---

@@ -48,7 +48,7 @@ from anthropic.types.beta import (
     BetaWebSearchToolResultBlock,
 )
 
-from ...state import get_run_context
+from ...state import get_billing_id, get_run_context
 from ...types.content.custom import CustomContent
 from ...types.content.text import TextContent
 from ...types.content.thinking import ThinkingContent
@@ -258,14 +258,14 @@ class AnthropicCollector(BaseCollector):
         run_context = get_run_context()
         if not run_context:
             return None
-        anthropic_model = self.anthropic_model  # Resolved in RawMessageStartEvent
+        billing_id = get_billing_id() or self.anthropic_model  # anthropic_model from RawMessageStartEvent
 
         def _update_usage(usage):
             for k, v in usage.items():
                 if isinstance(v, dict):
                     _update_usage(v)
                 elif isinstance(v, int) and v > 0:
-                    run_context.update_usage(f"{anthropic_model}:{k}", v)
+                    run_context.update_usage(f"{billing_id}:{k}", v)
 
         _update_usage(event.usage.model_dump())
 

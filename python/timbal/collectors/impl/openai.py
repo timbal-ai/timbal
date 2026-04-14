@@ -43,7 +43,7 @@ from openai.types.responses import (
 )
 from uuid_extensions import uuid7
 
-from ...state import get_run_context
+from ...state import get_billing_id, get_run_context
 from ...types.content.text import TextContent
 from ...types.content.thinking import ThinkingContent
 from ...types.content.tool_use import ToolUseContent
@@ -149,10 +149,14 @@ class ChatCompletionCollector(BaseCollector):
         if event.choices[0].delta.content:
             return self._handle_text_content(event)
 
+    @staticmethod
+    def _usage_billing_id(api_model: str) -> str:
+        return get_billing_id() or api_model
+
     def _handle_usage(self, event: ChatCompletionEvent) -> None:
         """Handle usage statistics from OpenAI events."""
         run_context = get_run_context()
-        openai_model = event.model
+        billing_id = self._usage_billing_id(event.model)
         openai_usage = event.usage
         input_tokens = int(openai_usage.prompt_tokens)
         input_tokens_details = openai_usage.prompt_tokens_details
@@ -160,13 +164,13 @@ class ChatCompletionCollector(BaseCollector):
             input_cached_tokens = int(input_tokens_details.cached_tokens)
             if input_cached_tokens:
                 input_tokens -= input_cached_tokens
-                run_context.update_usage(f"{openai_model}:input_cached_tokens", input_cached_tokens)
+                run_context.update_usage(f"{billing_id}:input_cached_tokens", input_cached_tokens)
         if hasattr(input_tokens_details, "audio_tokens") and input_tokens_details.audio_tokens is not None:
             input_audio_tokens = int(input_tokens_details.audio_tokens)
             if input_audio_tokens:
                 input_tokens -= input_audio_tokens
-                run_context.update_usage(f"{openai_model}:input_audio_tokens", input_audio_tokens)
-        run_context.update_usage(f"{openai_model}:input_text_tokens", input_tokens)
+                run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
+        run_context.update_usage(f"{billing_id}:input_text_tokens", input_tokens)
         output_tokens = int(openai_usage.completion_tokens)
         self._output_tokens += output_tokens
         output_tokens_details = openai_usage.completion_tokens_details
@@ -174,8 +178,8 @@ class ChatCompletionCollector(BaseCollector):
             output_audio_tokens = int(output_tokens_details.audio_tokens)
             if output_audio_tokens:
                 output_tokens -= output_audio_tokens
-                run_context.update_usage(f"{openai_model}:output_audio_tokens", output_audio_tokens)
-        run_context.update_usage(f"{openai_model}:output_text_tokens", output_tokens)
+                run_context.update_usage(f"{billing_id}:output_audio_tokens", output_audio_tokens)
+        run_context.update_usage(f"{billing_id}:output_text_tokens", output_tokens)
 
     def _handle_tool_calls(self, event: ChatCompletionEvent) -> TimbalToolUse | TimbalToolUseDelta | None:
         """Handle tool call events from OpenAI."""
@@ -334,6 +338,17 @@ class ResponseCollector(BaseCollector):
         """Handle created events from OpenAI."""
         self.model = event.response.model
 
+    def _usage_billing_id(self, *, response_fallback: str | None = None) -> str:
+        bid = get_billing_id()
+        if bid:
+            return bid
+        m = getattr(self, "model", None)
+        if m:
+            return m
+        if response_fallback:
+            return response_fallback
+        return ""
+
     def _handle_output_item_added(self, event: ResponseOutputItemAddedEvent) -> None:
         """Handle output item added events from OpenAI."""
         if isinstance(event.item, ResponseFunctionToolCall):
@@ -475,9 +490,11 @@ class ResponseCollector(BaseCollector):
     def _handle_output_item_done(self, event: ResponseOutputItemDoneEvent) -> None:
         """Handle output item done events from OpenAI."""
         if isinstance(event.item, ResponseFunctionWebSearch):
-            get_run_context().update_usage(
-                f"{self.model}:web_search_requests", 1
-            )  # TODO Review. Do they only perform one query?
+            bid = self._usage_billing_id()
+            if bid:
+                get_run_context().update_usage(
+                    f"{bid}:web_search_requests", 1
+                )  # TODO Review. Do they only perform one query?
             # TODO Grab the query and return the result
             content_block_id = event.item.id
             if content_block_id in self.content_blocks:
@@ -493,7 +510,9 @@ class ResponseCollector(BaseCollector):
         elif isinstance(event.item, ResponseCustomToolCall):
             # Track server-side custom tool requests for cost tracking.
             tool_name = event.item.name
-            get_run_context().update_usage(f"{self.model}:{tool_name}_requests", 1)
+            bid = self._usage_billing_id()
+            if bid:
+                get_run_context().update_usage(f"{bid}:{tool_name}_requests", 1)
             content_block_id = event.item.id
             if content_block_id in self.content_blocks:
                 return TimbalContentBlockStop(id=content_block_id)
@@ -514,19 +533,20 @@ class ResponseCollector(BaseCollector):
 
         run_context = get_run_context()
         usage = event.response.usage
+        billing_id = self._usage_billing_id(response_fallback=event.response.model)
         input_tokens = int(usage.input_tokens)
         input_tokens_details = usage.input_tokens_details
         if hasattr(input_tokens_details, "cached_tokens"):
             input_cached_tokens = int(input_tokens_details.cached_tokens)
             if input_cached_tokens:
                 input_tokens -= input_cached_tokens
-                run_context.update_usage(f"{self.model}:input_cached_tokens", input_cached_tokens)
+                run_context.update_usage(f"{billing_id}:input_cached_tokens", input_cached_tokens)
         if hasattr(input_tokens_details, "audio_tokens"):
             input_audio_tokens = int(input_tokens_details.audio_tokens)
             if input_audio_tokens:
                 input_tokens -= input_audio_tokens
-                run_context.update_usage(f"{self.model}:input_audio_tokens", input_audio_tokens)
-        run_context.update_usage(f"{self.model}:input_text_tokens", input_tokens)
+                run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
+        run_context.update_usage(f"{billing_id}:input_text_tokens", input_tokens)
         output_tokens = int(usage.output_tokens)
         self._output_tokens += output_tokens
         output_tokens_details = usage.output_tokens_details
@@ -534,8 +554,8 @@ class ResponseCollector(BaseCollector):
             output_audio_tokens = int(output_tokens_details.audio_tokens)
             if output_audio_tokens:
                 output_tokens -= output_audio_tokens
-                run_context.update_usage(f"{self.model}:output_audio_tokens", output_audio_tokens)
-        run_context.update_usage(f"{self.model}:output_text_tokens", output_tokens)
+                run_context.update_usage(f"{billing_id}:output_audio_tokens", output_audio_tokens)
+        run_context.update_usage(f"{billing_id}:output_text_tokens", output_tokens)
 
     @override
     def result(self) -> Message:

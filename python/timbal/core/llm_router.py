@@ -28,7 +28,7 @@ from openai import RateLimitError as OpenAIRateLimitError  # APIError as OpenAIA
 from pydantic import BaseModel, SecretStr
 
 from ..errors import APIKeyNotFoundError
-from ..state import get_call_id, get_or_create_run_context
+from ..state import get_call_id, get_or_create_run_context, set_billing_id
 from ..types.message import Message
 from ..utils import transform_schema
 from .runnable import Runnable
@@ -354,6 +354,7 @@ async def _llm_router(
     if "/" not in model:
         raise ValueError("Model must be in format 'provider/model_name'")
 
+    set_billing_id(model)
     provider, model_name = model.split("/", 1)
 
     config = _PROVIDERS.get(provider)

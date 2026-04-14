@@ -88,6 +88,23 @@ def _normalize_tool_request_kind(kind: str) -> str:
     return t or "standard"
 
 
+_billing_id: ContextVar[str | None] = ContextVar("billing_id", default=None)
+
+
+def get_billing_id() -> str | None:
+    """Retrieves the canonical billing model id (e.g. ``openai/gpt-4o``) for the current LLM call."""
+    return _billing_id.get()
+
+
+def set_billing_id(billing_id: str | None) -> None:
+    """Sets the billing model id for the current LLM call.
+
+    Called by the LLM router before yielding chunks so that collectors
+    can use the stable timbal model id instead of whatever the API echoes.
+    """
+    _billing_id.set(billing_id)
+
+
 def _record_tool_requests(tool_name: str, count: int = 1, *, kind: str | None = None) -> None:
     """Framework-only: increment ``{tool_name}:requests`` (or kind-suffixed) on the current span.
 

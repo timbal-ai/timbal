@@ -33,7 +33,7 @@ from openai.types.responses import (
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails, ResponseUsage
 
 from timbal.collectors.impl.openai import ChatCompletionCollector, ResponseCollector
-from timbal.state import set_call_id, set_run_context
+from timbal.state import set_billing_id, set_call_id, set_run_context
 from timbal.state.context import RunContext
 from timbal.state.tracing.span import Span
 from timbal.types.content.text import TextContent
@@ -58,12 +58,14 @@ async def _empty_gen():
 @pytest.fixture(autouse=True)
 def clean_context():
     """Reset context vars after each test to avoid state pollution."""
-    from timbal.state import _run_context_var, _call_id
+    from timbal.state import _run_context_var, _call_id, _billing_id
     token_ctx = _run_context_var.set(None)
     token_cid = _call_id.set(None)
+    token_bid = _billing_id.set(None)
     yield
     _run_context_var.reset(token_ctx)
     _call_id.reset(token_cid)
+    _billing_id.reset(token_bid)
 
 
 def _make_context():
@@ -596,6 +598,7 @@ class TestChatCompletionCollectorHandleUsage:
         from openai.types.completion_usage import CompletionUsage, PromptTokensDetails, CompletionTokensDetails
 
         ctx = _make_context()
+        set_billing_id("openai/gpt-4o")
         collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
 
         # Fire a text chunk so _first_token is set (needed for result())
@@ -623,14 +626,15 @@ class TestChatCompletionCollectorHandleUsage:
 
         span = ctx._trace["test_call"]
         # cached tokens should be tracked, plain input should be 20-8=12
-        assert span.usage.get("gpt-4o:input_cached_tokens") == 8
-        assert span.usage.get("gpt-4o:input_text_tokens") == 12
+        assert span.usage.get("openai/gpt-4o:input_cached_tokens") == 8
+        assert span.usage.get("openai/gpt-4o:input_text_tokens") == 12
 
     def test_usage_with_audio_input_tokens(self):
         """Audio input tokens are deducted from plain input and tracked separately."""
         from openai.types.completion_usage import CompletionUsage, PromptTokensDetails, CompletionTokensDetails
 
         ctx = _make_context()
+        set_billing_id("openai/gpt-4o")
         collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
         collector.process(_make_cc_chunk(content="hi"))
 
@@ -653,14 +657,15 @@ class TestChatCompletionCollectorHandleUsage:
         collector.result()
 
         span = ctx._trace["test_call"]
-        assert span.usage.get("gpt-4o:input_audio_tokens") == 6
-        assert span.usage.get("gpt-4o:input_text_tokens") == 14  # 20 - 6
+        assert span.usage.get("openai/gpt-4o:input_audio_tokens") == 6
+        assert span.usage.get("openai/gpt-4o:input_text_tokens") == 14  # 20 - 6
 
     def test_usage_with_audio_output_tokens(self):
         """Audio output tokens are deducted from plain output and tracked separately."""
         from openai.types.completion_usage import CompletionUsage, PromptTokensDetails, CompletionTokensDetails
 
         ctx = _make_context()
+        set_billing_id("openai/gpt-4o")
         collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
         collector.process(_make_cc_chunk(content="hi"))
 
@@ -683,8 +688,8 @@ class TestChatCompletionCollectorHandleUsage:
         collector.result()
 
         span = ctx._trace["test_call"]
-        assert span.usage.get("gpt-4o:output_audio_tokens") == 4
-        assert span.usage.get("gpt-4o:output_text_tokens") == 6  # 10 - 4
+        assert span.usage.get("openai/gpt-4o:output_audio_tokens") == 4
+        assert span.usage.get("openai/gpt-4o:output_text_tokens") == 6  # 10 - 4
 
 
 class TestChatCompletionCollectorGoogleThoughtSignature:
@@ -926,6 +931,7 @@ class TestResponseCollectorOutputItemDone:
         from openai.types.responses.response_function_web_search import ActionSearch
 
         ctx = _make_context()
+        set_billing_id("openai/gpt-4o")
         collector = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
         collector.process(ResponseCreatedEvent(
             type="response.created", response=_make_response(model="gpt-4o"), sequence_number=0,
@@ -953,7 +959,7 @@ class TestResponseCollectorOutputItemDone:
         assert isinstance(item, ContentBlockStop)
         assert item.id == "ws_done_001"
         span = ctx._trace["test_call"]
-        assert span.usage.get("gpt-4o:web_search_requests") == 1
+        assert span.usage.get("openai/gpt-4o:web_search_requests") == 1
 
     def test_web_search_done_without_content_block_returns_none(self):
         """Web search done returns None when content_block_id was never registered."""
@@ -1026,6 +1032,7 @@ class TestResponseCollectorOutputItemDone:
         from openai.types.responses import ResponseCustomToolCall
 
         ctx = _make_context()
+        set_billing_id("xai/grok-3")
         collector = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
         collector.process(ResponseCreatedEvent(
             type="response.created", response=_make_response(model="xai/grok-3"), sequence_number=0,
@@ -1129,6 +1136,7 @@ class TestResponseCollectorHandleCompleted:
         from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails, ResponseUsage
 
         ctx = _make_context()
+        set_billing_id("openai/gpt-4o")
         collector = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
         collector.process(ResponseCreatedEvent(
             type="response.created", response=_make_response(model="gpt-4o"), sequence_number=0,
@@ -1160,14 +1168,15 @@ class TestResponseCollectorHandleCompleted:
         ))
 
         span = ctx._trace["test_call"]
-        assert span.usage.get("gpt-4o:input_cached_tokens") == 7
-        assert span.usage.get("gpt-4o:input_text_tokens") == 13  # 20 - 7
+        assert span.usage.get("openai/gpt-4o:input_cached_tokens") == 7
+        assert span.usage.get("openai/gpt-4o:input_text_tokens") == 13  # 20 - 7
 
     def test_completed_with_audio_input_tokens(self):
         """Audio input tokens are tracked and deducted from plain input tokens."""
         from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails, ResponseUsage
 
         ctx = _make_context()
+        set_billing_id("openai/gpt-4o")
         collector = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
         collector.process(ResponseCreatedEvent(
             type="response.created", response=_make_response(model="gpt-4o"), sequence_number=0,
@@ -1199,14 +1208,15 @@ class TestResponseCollectorHandleCompleted:
         ))
 
         span = ctx._trace["test_call"]
-        assert span.usage.get("gpt-4o:input_audio_tokens") == 5
-        assert span.usage.get("gpt-4o:input_text_tokens") == 15  # 20 - 5
+        assert span.usage.get("openai/gpt-4o:input_audio_tokens") == 5
+        assert span.usage.get("openai/gpt-4o:input_text_tokens") == 15  # 20 - 5
 
     def test_completed_with_audio_output_tokens(self):
         """Audio output tokens are tracked and deducted from plain output tokens."""
         from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails, ResponseUsage
 
         ctx = _make_context()
+        set_billing_id("openai/gpt-4o")
         collector = ResponseCollector(async_gen=_empty_gen(), start=time.perf_counter())
         collector.process(ResponseCreatedEvent(
             type="response.created", response=_make_response(model="gpt-4o"), sequence_number=0,
@@ -1238,8 +1248,8 @@ class TestResponseCollectorHandleCompleted:
         ))
 
         span = ctx._trace["test_call"]
-        assert span.usage.get("gpt-4o:output_audio_tokens") == 3
-        assert span.usage.get("gpt-4o:output_text_tokens") == 7  # 10 - 3
+        assert span.usage.get("openai/gpt-4o:output_audio_tokens") == 3
+        assert span.usage.get("openai/gpt-4o:output_text_tokens") == 7  # 10 - 3
 
 
 class TestResponseCollectorResult:
