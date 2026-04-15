@@ -1138,6 +1138,177 @@
         ]
       }
     },
+    "/orgs/{org_id}/notifications/channels": {
+      "get": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "List notification channels for the org",
+        "description": "Returns all `NotificationChannels` rows for this organization (email and future types). Any org member may call.",
+        "operationId": "list_org_notification_channels",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Channels for the org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgNotificationChannelsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Create a notification channel",
+        "description": "Creates or **reuses** an email channel for this org (same dedupe as rule creation: `type` + `config`). **Org admin** only.",
+        "operationId": "create_org_notification_channel",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Email channel: `type: \"email\"` and `config.to`.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNotificationChannelReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Channel id and whether it was created or reused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateNotificationChannelOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not an org admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/notifications/channels/{channel_id}": {
+      "delete": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Delete a notification channel",
+        "description": "Removes the channel for this org; rule–channel links are removed automatically. Rules may remain with no channels. **Org admin** only.",
+        "operationId": "delete_org_notification_channel",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Channel deleted"
+          },
+          "403": {
+            "description": "Caller is not an org admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Channel not found for this org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/notifications/rules": {
       "get": {
         "tags": [
@@ -1235,6 +1406,64 @@
           },
           "403": {
             "description": "Caller is not an org admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/notifications/rules/{rule_id}": {
+      "delete": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Delete an org-wide notification rule",
+        "description": "Deletes a rule with `project_id` unset only. **Org admin** only.",
+        "operationId": "delete_org_notification_rule",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Rule deleted"
+          },
+          "403": {
+            "description": "Caller is not an org admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Rule not found or not org-scoped",
             "content": {
               "application/json": {
                 "schema": {
@@ -3097,6 +3326,72 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/notifications/rules/{rule_id}": {
+      "delete": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Delete a project-scoped notification rule",
+        "description": "Deletes a rule tied to this project. **Project admin** only.",
+        "operationId": "delete_project_notification_rule",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Rule deleted"
+          },
+          "403": {
+            "description": "Caller is not a project admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Rule not found for this project",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects/{project_id}/preview": {
       "get": {
         "tags": [
@@ -4130,7 +4425,7 @@
         "tags": [
           "projects"
         ],
-        "description": "List all workforce components for the project. The `url` field is included only when that component has a **running** deployment for the git **branch** given by `rev` (same URL shape as the workforce HTTP proxy).",
+        "description": "List workforce components for the project. When `rev` is provided the response is scoped to that git branch and includes deployment URLs; when omitted all registered components are returned.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4152,8 +4447,8 @@
           {
             "name": "rev",
             "in": "query",
-            "description": "Git branch name (for example `main`).",
-            "required": true,
+            "description": "Git branch name (for example `main`). When omitted, all registered (non-deleted) workforce components are returned without deployment status.",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -5208,6 +5503,40 @@
           "placeholder_file_id": {
             "type": "string",
             "description": "Listing id for this folder; remove it with `DELETE /orgs/{org_id}/k2/{kb_id}/files/{file_id}`."
+          }
+        }
+      },
+      "CreateNotificationChannelOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "channel_action"
+        ],
+        "properties": {
+          "channel_action": {
+            "$ref": "#/components/schemas/ChannelAction"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CreateNotificationChannelReq": {
+        "type": "object",
+        "description": "Body for **POST** `/orgs/{org_id}/notifications/channels` (standalone channel; same validation as inline rule channel, no `id`).",
+        "properties": {
+          "config": {
+            "type": "object"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
           }
         }
       },
@@ -6601,6 +6930,21 @@
           }
         }
       },
+      "ListOrgNotificationChannelsResBody": {
+        "type": "object",
+        "title": "ListOrgNotificationChannelsResponse",
+        "required": [
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotificationChannelOut"
+            }
+          }
+        }
+      },
       "ListOrgNotificationRulesResBody": {
         "type": "object",
         "title": "ListOrgNotificationRulesResponse",
@@ -7869,6 +8213,7 @@
         "required": [
           "id",
           "user",
+          "workforce",
           "status",
           "cost_usd",
           "cost_credits",
@@ -7924,6 +8269,9 @@
           },
           "user": {
             "$ref": "#/components/schemas/UserRef"
+          },
+          "workforce": {
+            "$ref": "#/components/schemas/WorkforcePreview"
           }
         }
       },
@@ -8446,6 +8794,14 @@
           "name"
         ],
         "properties": {
+          "deleted_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Set when the workforce component has been deleted. Only returned from endpoints that include soft-deleted rows (e.g. runs list)."
+          },
           "description": {
             "type": [
               "string",

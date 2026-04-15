@@ -201,7 +201,11 @@
                 "group": "Notifications",
                 "pages": [
                   "api-reference/orgs/notifications/list-rules",
-                  "api-reference/orgs/notifications/create-rule"
+                  "api-reference/orgs/notifications/create-rule",
+                  "api-reference/orgs/notifications/delete-rule",
+                  "api-reference/orgs/notifications/list-channels",
+                  "api-reference/orgs/notifications/create-channel",
+                  "api-reference/orgs/notifications/delete-channel"
                 ]
               }
             ]
@@ -286,7 +290,8 @@
                 "group": "Notifications",
                 "pages": [
                   "api-reference/projects/notifications/list-rules",
-                  "api-reference/projects/notifications/create-rule"
+                  "api-reference/projects/notifications/create-rule",
+                  "api-reference/projects/notifications/delete-rule"
                 ]
               },
               {
