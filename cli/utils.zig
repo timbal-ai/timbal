@@ -26,7 +26,6 @@ pub const ProjectType = enum {
 };
 
 pub const blueprint_api_url = "https://github.com/timbal-ai/blueprint-api/archive/refs/heads/main.tar.gz";
-pub const blueprint_ui_url = "https://github.com/timbal-ai/blueprint-ui/archive/refs/heads/main.tar.gz";
 pub const blueprint_ui_simple_chat_url = "https://github.com/timbal-ai/blueprint-ui-simple-chat/archive/refs/heads/main.tar.gz";
 
 // Embed template files into the binary.

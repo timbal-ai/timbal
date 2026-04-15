@@ -8,8 +8,8 @@ const Color = utils.Color;
 const ProjectType = utils.ProjectType;
 
 const UIType = enum {
-    chat,
-    blank,
+    /// blueprint-ui-simple-chat
+    simple_chat,
     none,
 };
 
@@ -96,25 +96,44 @@ fn printBanner() !void {
     try stdout.print("  {s}───────────────────────────{s}\n\n", .{ Color.dim, Color.reset });
 }
 
+fn optionColumnWidth(comptime opts: []const []const u8) usize {
+    var w: usize = 0;
+    for (opts) |o| w = @max(w, o.len);
+    return w;
+}
+
+fn writeSpaces(stdout: anytype, n: usize) !void {
+    var i: usize = 0;
+    while (i < n) : (i += 1) try stdout.writeAll(" ");
+}
+
 fn printSelector(comptime options: []const []const u8, comptime descriptions: []const []const u8, selected: usize) !void {
     const stdout = std.io.getStdOut().writer();
+    const col_w = optionColumnWidth(options);
 
     for (options, 0..) |option, i| {
+        const pad = col_w - option.len;
         if (i == selected) {
-            try stdout.print("  {s}❯ {s}{s}{s}  {s}{s}{s}\n", .{
+            try stdout.print("  {s}❯ {s}{s}{s}", .{
                 Color.bold_cyan,
                 Color.bold,
                 option,
                 Color.reset,
+            });
+            try writeSpaces(stdout, pad);
+            try stdout.print("  {s}{s}{s}\n", .{
                 Color.dim,
                 descriptions[i],
                 Color.reset,
             });
         } else {
-            try stdout.print("  {s}  {s}{s}  {s}{s}{s}\n", .{
+            try stdout.print("  {s}  {s}{s}", .{
                 Color.dim,
                 option,
                 Color.reset,
+            });
+            try writeSpaces(stdout, pad);
+            try stdout.print("  {s}{s}{s}\n", .{
                 Color.dim,
                 descriptions[i],
                 Color.reset,
@@ -233,20 +252,18 @@ fn selectProjectType() !ProjectType {
     };
 }
 
-fn selectUI() !UIType {
-    const options = [_][]const u8{ "Chat", "Blank", "None" };
+fn selectWantUI() !UIType {
+    const options = [_][]const u8{ "Yes", "No" };
     const descriptions = [_][]const u8{
-        "Simple chat interface for your agent",
-        "Blank canvas to build your own UI",
-        "API only, no user interface",
+        "Our default web UI—sensible defaults and config so you can customize and ship faster",
+        "Skip the web UI for now (API only)",
     };
 
-    const selected = try selectOption("What UI do you want for your project?", &options, &descriptions);
+    const selected = try selectOption("Do you want a UI?", &options, &descriptions);
 
     return switch (selected) {
-        0 => .chat,
-        1 => .blank,
-        2 => .none,
+        0 => .simple_chat,
+        1 => .none,
         else => unreachable,
     };
 }
@@ -454,9 +471,8 @@ fn printSummary(config: ProjectConfig) !void {
     };
 
     const ui_str = switch (config.ui_type) {
-        .chat => "Chat",
-        .blank => "Blank",
-        .none => "None",
+        .simple_chat => "Yes (default web UI)",
+        .none => "No",
     };
 
     try stdout.writeAll("\n");
@@ -511,8 +527,7 @@ fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config:
     // Download blueprints
     if (config.ui_type != .none) {
         const ui_url = switch (config.ui_type) {
-            .chat => utils.blueprint_ui_simple_chat_url,
-            .blank => utils.blueprint_ui_url,
+            .simple_chat => utils.blueprint_ui_simple_chat_url,
             .none => unreachable,
         };
         try utils.fetchBlueprint(allocator, config.path, "ui", ui_url);
@@ -820,7 +835,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
-    const ui_type = selectUI() catch |err| {
+    const ui_type = selectWantUI() catch |err| {
         if (err == error.UserCancelled) {
             showCursor();
             std.debug.print("\n{s}Cancelled.{s}\n", .{ Color.dim, Color.reset });
