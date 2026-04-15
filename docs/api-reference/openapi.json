@@ -2820,253 +2820,6 @@
         ]
       }
     },
-    "/orgs/{org_id}/projects/{project_id}/envs/{env}/workforce": {
-      "get": {
-        "tags": [
-          "projects"
-        ],
-        "description": "List running workforce deployments in an environment",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "description": "Organization identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "description": "Project identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "env",
-            "in": "path",
-            "description": "Environment id or branch name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "List of running workforce items",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListWorkforceResBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "projects"
-        ],
-        "description": "Create a new workforce component (agent or workflow)",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "description": "Organization identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "description": "Project identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "env",
-            "in": "path",
-            "description": "Environment id or branch name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateWorkforceReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Workforce component created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CreateWorkforceResponse"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "projects"
-        ],
-        "description": "Delete a workforce component (agent or workflow)",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "description": "Organization identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "description": "Project identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "env",
-            "in": "path",
-            "description": "Environment id or branch name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DeleteWorkforceReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "Workforce component deleted"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/projects/{project_id}/envs/{env}/workforce/{workforce}/codegen": {
-      "post": {
-        "tags": [
-          "projects"
-        ],
-        "description": "Run a codegen command against a workforce component. Commands include: test, get-flow, get-tools, get-models, add-tool, remove-tool, etc. The `env` can be the numeric id or branch name. The `workforce` can be the numeric id, uid, or name.",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "description": "Organization identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "description": "Project identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "env",
-            "in": "path",
-            "description": "Environment id or branch name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "workforce",
-            "in": "path",
-            "description": "Workforce identifier (id, uid, or name)",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Codegen command output"
-          },
-          "204": {
-            "description": "Command produced no output"
-          },
-          "400": {
-            "description": "Invalid request or missing files"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
     "/orgs/{org_id}/projects/{project_id}/k2": {
       "put": {
         "tags": [
@@ -3170,7 +2923,7 @@
         "tags": [
           "preview"
         ],
-        "description": "Get status and health for a running preview on a branch",
+        "description": "Get preview status (starting or running) and health when running",
         "operationId": "handler",
         "parameters": [
           {
@@ -3222,7 +2975,7 @@
             }
           },
           "404": {
-            "description": "No preview for this branch",
+            "description": "No preview or start in progress for this branch",
             "content": {
               "application/json": {
                 "schema": {
@@ -3242,7 +2995,7 @@
         "tags": [
           "preview"
         ],
-        "description": "Start dev preview servers (API/UI) for a branch worktree",
+        "description": "Start dev preview servers (API/UI) for a branch worktree; returns starting immediately, then ready after health checks",
         "operationId": "handler",
         "parameters": [
           {
@@ -3274,7 +3027,7 @@
         },
         "responses": {
           "200": {
-            "description": "Preview started",
+            "description": "Preview starting or already running",
             "content": {
               "application/json": {
                 "schema": {
@@ -3295,6 +3048,16 @@
           },
           "403": {
             "description": "Caller is not a project admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Org preview concurrency limit reached",
             "content": {
               "application/json": {
                 "schema": {
@@ -4184,6 +3947,165 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/workforce": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "description": "List running workforce deployments for an environment",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Must match the environment or branch name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "main"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of running workforce items",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListWorkforceResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Create a new workforce component (agent or workflow)",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkforceReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Workforce component created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateWorkforceResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Delete a workforce component (agent or workflow)",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteWorkforceReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Workforce component deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/users": {
       "get": {
         "tags": [
@@ -4778,13 +4700,21 @@
       },
       "CreateWorkforceReqBody": {
         "type": "object",
+        "required": [
+          "rev"
+        ],
         "properties": {
           "name": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Display name (e.g. \"email-summary\"). If omitted, a random name is generated."
+            "description": "Workforce component display name (e.g. \"email-summary\"). If omitted, a random name is generated."
+          },
+          "rev": {
+            "type": "string",
+            "description": "Must match the environment or branch name.",
+            "example": "main"
           },
           "type": {
             "type": "string",
@@ -4824,10 +4754,16 @@
       "DeleteWorkforceReqBody": {
         "type": "object",
         "required": [
-          "name"
+          "rev",
+          "workforce"
         ],
         "properties": {
-          "name": {
+          "rev": {
+            "type": "string",
+            "description": "Must match the environment or branch name.",
+            "example": "main"
+          },
+          "workforce": {
             "type": "string",
             "description": "Workforce name or uid to delete."
           }
@@ -6214,7 +6150,7 @@
           "workforce": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/WorkforceItem"
+              "$ref": "#/components/schemas/WorkforcePreview"
             }
           }
         }
@@ -7124,26 +7060,6 @@
           }
         }
       },
-      "ReqBody": {
-        "type": "object",
-        "required": [
-          "command"
-        ],
-        "properties": {
-          "args": {
-            "type": "object",
-            "additionalProperties": {
-
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "command": {
-            "type": "string"
-          }
-        }
-      },
       "Role": {
         "type": "string",
         "enum": [
@@ -7798,41 +7714,6 @@
           }
         ]
       },
-      "WorkforceItem": {
-        "type": "object",
-        "required": [
-          "id",
-          "type",
-          "name",
-          "url"
-        ],
-        "properties": {
-          "description": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          },
-          "uid": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "url": {
-            "type": "string"
-          }
-        }
-      },
       "WorkforcePreview": {
         "type": "object",
         "required": [
@@ -7866,6 +7747,13 @@
               "null"
             ],
             "description": "Unique identifier from the project manifest (timbal.yaml)"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Proxy URL for a running deployment; omitted in project detail payloads."
           }
         }
       }

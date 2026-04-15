@@ -301,8 +301,7 @@
                   "api-reference/projects/workforce/list",
                   "api-reference/projects/workforce/create",
                   "api-reference/projects/workforce/delete",
-                  "api-reference/projects/workforce/call",
-                  "api-reference/projects/workforce/codegen"
+                  "api-reference/projects/workforce/call"
                 ]
               }
             ]
