@@ -23,7 +23,7 @@ fn printUsage() !void {
         "\n" ++
         "\x1b[1;32mCommands:\n" ++
         "    \x1b[1;36mconfigure \x1b[0mConfigure Timbal credentials and settings\n" ++
-        "    \x1b[1;36mcreate    \x1b[0mCreate a new project with interactive setup\n" ++
+        "    \x1b[1;36mcreate    \x1b[0mCreate a new project (interactive or use --type + --ui)\n" ++
         "    \x1b[1;36madd       \x1b[0mAdd a component to an existing project\n" ++
         "    \x1b[1;36mstart     \x1b[0mStart a project (UI, API, agents, and workflows)\n" ++
         "    \x1b[1;36mupgrade   \x1b[0mUpgrade timbal to the latest version\n" ++

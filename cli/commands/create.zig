@@ -21,7 +21,7 @@ fn printUsageWithError(err: []const u8) !void {
 
 fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
-    try stderr.writeAll("Create a new timbal project with interactive setup.\n" ++
+    try stderr.writeAll("Create a new timbal project (interactive by default, or pass flags for scripts).\n" ++
         "\n" ++
         "\x1b[1;32mUsage: \x1b[1;36mtimbal create \x1b[0;36m[OPTIONS] [PATH]\n" ++
         "\n" ++
@@ -29,10 +29,28 @@ fn printUsage() !void {
         "    \x1b[0;36m[PATH]\x1b[0m The path where the project will be created (default: current directory)\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
+        "    \x1b[1;36m--type <KIND>\x1b[0m   \x1b[0;36magent\x1b[0m or \x1b[0;36mworkflow\x1b[0m (with \x1b[0;36m--ui\x1b[0m, skips prompts)\n" ++
+        "    \x1b[1;36m--ui <yes|no>\x1b[0m Include the default web UI or API-only (with \x1b[0;36m--type\x1b[0m, skips prompts)\n" ++
+        "    \x1b[1;36m--no-ui\x1b[0m         Same as \x1b[0;36m--ui no\x1b[0m\n" ++
         "    \x1b[1;36m--template <URL>\x1b[0m Use a template from a URL\n" ++
         "\n" ++
         utils.global_options_help ++
+        "\n" ++
+        "\x1b[1;32mNon-interactive:\x1b[0m Pass \x1b[0;36m--type\x1b[0m and \x1b[0;36m--ui\x1b[0m together (no prompts, no editor).\n" ++
+        "    \x1b[0;36m-q\x1b[0m / \x1b[0;36m--quiet\x1b[0m only works with non-interactive create (prints the project path only).\n" ++
         "\n");
+}
+
+fn parseUiFlag(value: []const u8) ?UIType {
+    if (std.ascii.eqlIgnoreCase(value, "yes") or
+        std.ascii.eqlIgnoreCase(value, "y") or
+        std.ascii.eqlIgnoreCase(value, "true") or
+        std.mem.eql(u8, value, "1")) return .simple_chat;
+    if (std.ascii.eqlIgnoreCase(value, "no") or
+        std.ascii.eqlIgnoreCase(value, "n") or
+        std.ascii.eqlIgnoreCase(value, "false") or
+        std.mem.eql(u8, value, "0")) return .none;
+    return null;
 }
 
 const Editor = enum {
@@ -752,6 +770,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var template: ?[]const u8 = null;
     var verbose: bool = false;
     var quiet: bool = false;
+    var project_type_opt: ?ProjectType = null;
+    var ui_type_opt: ?UIType = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -763,6 +783,35 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "--no-ui")) {
+            ui_type_opt = .none;
+        } else if (std.mem.eql(u8, arg, "--type")) {
+            i += 1;
+            if (i >= args.len) {
+                try printUsageWithError("Error: --type requires agent or workflow");
+                return;
+            }
+            const v = args[i];
+            if (std.ascii.eqlIgnoreCase(v, "agent")) {
+                project_type_opt = .agent;
+            } else if (std.ascii.eqlIgnoreCase(v, "workflow")) {
+                project_type_opt = .workflow;
+            } else {
+                try printUsageWithError("Error: --type must be agent or workflow");
+                return;
+            }
+        } else if (std.mem.eql(u8, arg, "--ui")) {
+            i += 1;
+            if (i >= args.len) {
+                try printUsageWithError("Error: --ui requires yes or no");
+                return;
+            }
+            if (parseUiFlag(args[i])) |u| {
+                ui_type_opt = u;
+            } else {
+                try printUsageWithError("Error: --ui must be yes or no");
+                return;
+            }
         } else if (std.mem.eql(u8, arg, "--template")) {
             i += 1;
             if (i >= args.len) {
@@ -782,6 +831,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
+    const non_interactive = (project_type_opt != null and ui_type_opt != null);
+
+    if (quiet and !non_interactive) {
+        try printUsageWithError("Error: -q/--quiet only works with non-interactive create (pass both --type and --ui)");
+        return;
+    }
+
     // TODO: use verbose for detailed output
     // TODO: implement template support
     if (verbose) {
@@ -793,12 +849,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const target_path = arg_path orelse ".";
 
-    // Get absolute path for display
     const cwd = fs.cwd();
     const use_current_dir = std.mem.eql(u8, target_path, ".");
 
-    if (quiet) {
-        // In quiet mode, create dir and use defaults
+    if (non_interactive) {
+        const project_type = project_type_opt.?;
+        const ui_type = ui_type_opt.?;
+
         var app_dir: fs.Dir = undefined;
         if (use_current_dir) {
             app_dir = cwd;
@@ -809,9 +866,27 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             };
             app_dir = try cwd.openDir(target_path, .{});
         }
+
         const path = try app_dir.realpathAlloc(allocator, ".");
         defer allocator.free(path);
-        std.debug.print("Creating project in {s}...\n", .{path});
+
+        const config = ProjectConfig{
+            .project_type = project_type,
+            .ui_type = ui_type,
+            .path = path,
+            .relative_path = target_path,
+        };
+
+        try createProjectStructure(allocator, app_dir, config);
+
+        if (quiet) {
+            // Machine-friendly: absolute path only
+            const stdout = std.io.getStdOut().writer();
+            try stdout.print("{s}\n", .{path});
+        } else {
+            try printSuccess();
+            try printSummary(config);
+        }
         return;
     }
 
@@ -822,11 +897,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer terminal.disableRawMode(original_termios);
 
-    // Show banner
     try printBanner();
 
-    // Interactive prompts (before creating any directories)
-    const project_type = selectProjectType() catch |err| {
+    const project_type = if (project_type_opt) |p| p else selectProjectType() catch |err| {
         if (err == error.UserCancelled) {
             showCursor();
             std.debug.print("\n{s}Cancelled.{s}\n", .{ Color.dim, Color.reset });
@@ -835,7 +908,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
-    const ui_type = selectWantUI() catch |err| {
+    const ui_type = if (ui_type_opt) |u| u else selectWantUI() catch |err| {
         if (err == error.UserCancelled) {
             showCursor();
             std.debug.print("\n{s}Cancelled.{s}\n", .{ Color.dim, Color.reset });
@@ -844,7 +917,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
-    // All prompts completed — now create the directory
     var app_dir: fs.Dir = undefined;
     if (use_current_dir) {
         app_dir = cwd;
@@ -866,18 +938,14 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .relative_path = target_path,
     };
 
-    // Create the project structure
     try createProjectStructure(allocator, app_dir, config);
 
-    // Show success message and summary
     try printSuccess();
     try printSummary(config);
 
-    // Detect available editors
     const available_editors = detectAvailableEditors(allocator);
     defer allocator.free(available_editors);
 
-    // Ask if user wants to open the project
     const selected_editor = selectOpenProject(available_editors) catch |err| {
         if (err == error.UserCancelled) {
             showCursor();
@@ -887,7 +955,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
-    // Open editor if selected
     if (selected_editor) |editor| {
         try openEditor(allocator, editor, target_path);
     }
