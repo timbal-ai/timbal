@@ -2945,12 +2945,11 @@
           {
             "name": "rev",
             "in": "query",
-            "description": "Git branch / rev the preview was started for",
+            "description": "Project env or branch name, e.g. \"main\"",
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "example": "main"
+            }
           }
         ],
         "responses": {
@@ -3974,12 +3973,11 @@
           {
             "name": "rev",
             "in": "query",
-            "description": "Must match the environment or branch name.",
+            "description": "Project env or branch name, e.g. \"main\"",
             "required": true,
             "schema": {
               "type": "string"
-            },
-            "example": "main"
+            }
           }
         ],
         "responses": {
@@ -4018,6 +4016,15 @@
           {
             "name": "project_id",
             "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Project env or branch name, e.g. \"main\"",
             "required": true,
             "schema": {
               "type": "string"
@@ -4070,6 +4077,15 @@
           {
             "name": "project_id",
             "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Project env or branch name, e.g. \"main\"",
             "required": true,
             "schema": {
               "type": "string"
@@ -4700,9 +4716,6 @@
       },
       "CreateWorkforceReqBody": {
         "type": "object",
-        "required": [
-          "rev"
-        ],
         "properties": {
           "name": {
             "type": [
@@ -4710,11 +4723,6 @@
               "null"
             ],
             "description": "Workforce component display name (e.g. \"email-summary\"). If omitted, a random name is generated."
-          },
-          "rev": {
-            "type": "string",
-            "description": "Must match the environment or branch name.",
-            "example": "main"
           },
           "type": {
             "type": "string",
@@ -4754,15 +4762,9 @@
       "DeleteWorkforceReqBody": {
         "type": "object",
         "required": [
-          "rev",
           "workforce"
         ],
         "properties": {
-          "rev": {
-            "type": "string",
-            "description": "Must match the environment or branch name.",
-            "example": "main"
-          },
           "workforce": {
             "type": "string",
             "description": "Workforce name or uid to delete."
@@ -7257,7 +7259,7 @@
         "properties": {
           "rev": {
             "type": "string",
-            "example": "main"
+            "description": "Project env or branch name, e.g. \"main\""
           }
         }
       },
@@ -7269,7 +7271,7 @@
         "properties": {
           "rev": {
             "type": "string",
-            "example": "main"
+            "description": "Project env or branch name, e.g. \"main\""
           }
         }
       },
