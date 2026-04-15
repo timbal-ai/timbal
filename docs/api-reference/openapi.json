@@ -1336,7 +1336,7 @@
           "notifications"
         ],
         "summary": "List org-wide notification rules",
-        "description": "Returns notification rules that apply at the **organization** level (e.g. credits low, billing payment failed). Each rule includes linked **channels** (typically one email channel). Any authenticated org member may call this; use **POST** `/orgs/{org_id}/notifications/rules` to create rules (org **admin** only).",
+        "description": "List org-wide notification rules with their linked channels.",
         "operationId": "list_org_notification_rules",
         "parameters": [
           {
@@ -1381,7 +1381,7 @@
           "notifications"
         ],
         "summary": "Create an org-wide notification rule",
-        "description": "Creates a rule with `project_id` unset (org-wide). Exactly one **channel** per request: inline `type: \"email\"` + `config.to`, or `channel.id` pointing at an existing email channel in this org. Allowed `event_type` values: `org.credits.low`, `org.billing.payment_failed`. Response includes `channel_action` (`linked` | `reused` | `created`). **Org admin** role required.",
+        "description": "Create an org-wide notification rule with one email channel.",
         "operationId": "create_org_notification_rule",
         "parameters": [
           {
@@ -3277,7 +3277,7 @@
           "notifications"
         ],
         "summary": "Create a project-scoped notification rule",
-        "description": "Creates a rule tied to this **project** (all environments in that project for deployment-style events). Same channel semantics as org rules: inline email or `channel.id`. Allowed `event_type` values: `project.deployment.failed`, `project.deployment.running`. Response includes `channel_action`. **Project admin** role required.",
+        "description": "Create a project-scoped notification rule with one email channel.",
         "operationId": "create_project_notification_rule",
         "parameters": [
           {
@@ -5433,7 +5433,7 @@
             ]
           },
           "type": {
-            "type": "string"
+            "$ref": "#/components/schemas/NotificationChannelType"
           }
         }
       },
@@ -5569,7 +5569,7 @@
             ]
           },
           "type": {
-            "type": "string"
+            "$ref": "#/components/schemas/NotificationChannelType"
           }
         }
       },
@@ -5618,7 +5618,7 @@
             "format": "int32"
           },
           "event_type": {
-            "type": "string"
+            "$ref": "#/components/schemas/NotificationEventType"
           },
           "name": {
             "type": "string"
@@ -7254,9 +7254,23 @@
             ]
           },
           "type": {
-            "type": "string"
+            "$ref": "#/components/schemas/NotificationChannelType"
           }
         }
+      },
+      "NotificationChannelType": {
+        "type": "string",
+        "enum": [
+          "email"
+        ]
+      },
+      "NotificationEventType": {
+        "type": "string",
+        "enum": [
+          "org.credits.usage",
+          "project.deployment.failed",
+          "project.deployment.running"
+        ]
       },
       "NotificationRuleOut": {
         "type": "object",
@@ -7289,7 +7303,7 @@
             "type": "boolean"
           },
           "event_type": {
-            "type": "string"
+            "$ref": "#/components/schemas/NotificationEventType"
           },
           "id": {
             "type": "integer",
