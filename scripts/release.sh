@@ -1,6 +1,40 @@
 #!/bin/bash
 set -e
 
+# To refresh CLI binaries on an existing release without recreating the release
+# or changing tags, use: scripts/upload-cli-release-assets.sh <VERSION>
+
+gh_repo_from_origin() {
+    local url
+    url=$(git config --get remote.origin.url) || return 1
+    case "$url" in
+        git@github.com:*)
+            url="${url#git@github.com:}"
+            ;;
+        https://github.com/*)
+            url="${url#https://github.com/}"
+            ;;
+        ssh://git@github.com/*)
+            url="${url#ssh://git@github.com/}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    url="${url%.git}"
+    url="${url%/}"
+    echo "$url"
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "$REPO_ROOT"
+
+GH_REPO=$(gh_repo_from_origin) || {
+    echo "Error: could not derive owner/repo from git remote origin (use a github.com URL)."
+    exit 1
+}
+
 VERSION="$1"
 if [ -z "$VERSION" ]; then
     echo "Usage: $0 <new-version>"
@@ -147,13 +181,13 @@ ASSETS=(
 )
 
 # Check if GitHub release already exists
-if gh release view "v$VERSION" > /dev/null 2>&1; then
+if gh release view "v$VERSION" -R "$GH_REPO" > /dev/null 2>&1; then
     echo "GitHub release v$VERSION already exists."
     read -p "Do you want to override it? (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "Deleting existing release v$VERSION..."
-        gh release delete "v$VERSION" --yes
+        gh release delete "v$VERSION" --yes -R "$GH_REPO"
     else
         echo "Aborting release creation."
         exit 0
@@ -165,4 +199,5 @@ gh release create "v$VERSION" \
     "${ASSETS[@]}" \
     --title "v$VERSION" \
     --notes "$RELEASE_NOTES" \
-    --target "$TAG_COMMIT"
+    --target "$TAG_COMMIT" \
+    -R "$GH_REPO"
