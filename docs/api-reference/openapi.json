@@ -1157,7 +1157,7 @@
           {
             "name": "preview_status",
             "in": "query",
-            "description": "Filter by preview status (`starting`, `running`). Omit for all active previews.",
+            "description": "Return only previews in this lifecycle state. Omit to include every active preview (`starting` or `running`).",
             "required": false,
             "schema": {
               "oneOf": [
@@ -2757,69 +2757,6 @@
         ]
       }
     },
-    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/workforce/{workforce}": {
-      "post": {
-        "tags": [
-          "projects"
-        ],
-        "description": "Proxy a request to a running workforce deployment. Accepts any HTTP method and forwards to the deployment's internal URL. The `workforce` can be the numeric id, name, or uid of the workforce item.",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "description": "Organization identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "description": "Project identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "env_id",
-            "in": "path",
-            "description": "Environment identifier",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "workforce",
-            "in": "path",
-            "description": "Workforce identifier (id, name, or uid)",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Proxied response from workforce deployment"
-          },
-          "404": {
-            "description": "No running workforce deployment found"
-          },
-          "502": {
-            "description": "Workforce deployment not responding"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
     "/orgs/{org_id}/projects/{project_id}/k2": {
       "put": {
         "tags": [
@@ -2945,7 +2882,7 @@
           {
             "name": "rev",
             "in": "query",
-            "description": "Project env or branch name, e.g. \"main\"",
+            "description": "Git branch name of the preview to inspect (for example `main`).",
             "required": true,
             "schema": {
               "type": "string"
@@ -3951,7 +3888,7 @@
         "tags": [
           "projects"
         ],
-        "description": "List running workforce deployments for an environment",
+        "description": "List all workforce components for the project. The `url` field is included only when that component has a **running** deployment for the git **branch** given by `rev` (same URL shape as the workforce HTTP proxy).",
         "operationId": "handler",
         "parameters": [
           {
@@ -3973,7 +3910,7 @@
           {
             "name": "rev",
             "in": "query",
-            "description": "Project env or branch name, e.g. \"main\"",
+            "description": "Git branch name (for example `main`).",
             "required": true,
             "schema": {
               "type": "string"
@@ -3982,7 +3919,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List of running workforce items",
+            "description": "List of workforce items",
             "content": {
               "application/json": {
                 "schema": {
@@ -4002,7 +3939,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Create a new workforce component (agent or workflow)",
+        "description": "Create a workforce component (agent or workflow) on the git **branch** given by `rev`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4024,7 +3961,7 @@
           {
             "name": "rev",
             "in": "query",
-            "description": "Project env or branch name, e.g. \"main\"",
+            "description": "Git branch name (for example `main`).",
             "required": true,
             "schema": {
               "type": "string"
@@ -4063,7 +4000,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Delete a workforce component (agent or workflow)",
+        "description": "Delete a workforce component on the git **branch** given by `rev`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4085,7 +4022,7 @@
           {
             "name": "rev",
             "in": "query",
-            "description": "Project env or branch name, e.g. \"main\"",
+            "description": "Git branch name (for example `main`).",
             "required": true,
             "schema": {
               "type": "string"
@@ -4113,6 +4050,358 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/workforce/{workforce}/{*path}": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). The HTTP method and body are forwarded unchanged. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. WebSocket upgrades are not supported on this route.",
+        "operationId": "workforce_proxy_get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workforce",
+            "in": "path",
+            "description": "Workforce component: numeric id, manifest UUID, or name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path on the deployment server after the component segment (for example `run` or `healthcheck`). Leave empty to call the deployment root.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch name (for example `main`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response from the workforce deployment"
+          },
+          "404": {
+            "description": "No running deployment found for this component on this branch"
+          },
+          "502": {
+            "description": "The deployment did not return a successful HTTP response"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). The HTTP method and body are forwarded unchanged. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. WebSocket upgrades are not supported on this route.",
+        "operationId": "workforce_proxy_put",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workforce",
+            "in": "path",
+            "description": "Workforce component: numeric id, manifest UUID, or name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path on the deployment server after the component segment (for example `run` or `healthcheck`). Leave empty to call the deployment root.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch name (for example `main`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response from the workforce deployment"
+          },
+          "404": {
+            "description": "No running deployment found for this component on this branch"
+          },
+          "502": {
+            "description": "The deployment did not return a successful HTTP response"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). The HTTP method and body are forwarded unchanged. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. WebSocket upgrades are not supported on this route.",
+        "operationId": "workforce_proxy_post",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workforce",
+            "in": "path",
+            "description": "Workforce component: numeric id, manifest UUID, or name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path on the deployment server after the component segment (for example `run` or `healthcheck`). Leave empty to call the deployment root.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch name (for example `main`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response from the workforce deployment"
+          },
+          "404": {
+            "description": "No running deployment found for this component on this branch"
+          },
+          "502": {
+            "description": "The deployment did not return a successful HTTP response"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). The HTTP method and body are forwarded unchanged. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. WebSocket upgrades are not supported on this route.",
+        "operationId": "workforce_proxy_delete",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workforce",
+            "in": "path",
+            "description": "Workforce component: numeric id, manifest UUID, or name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path on the deployment server after the component segment (for example `run` or `healthcheck`). Leave empty to call the deployment root.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch name (for example `main`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response from the workforce deployment"
+          },
+          "404": {
+            "description": "No running deployment found for this component on this branch"
+          },
+          "502": {
+            "description": "The deployment did not return a successful HTTP response"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). The HTTP method and body are forwarded unchanged. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. WebSocket upgrades are not supported on this route.",
+        "operationId": "workforce_proxy_patch",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workforce",
+            "in": "path",
+            "description": "Workforce component: numeric id, manifest UUID, or name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path on the deployment server after the component segment (for example `run` or `healthcheck`). Leave empty to call the deployment root.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch name (for example `main`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response from the workforce deployment"
+          },
+          "404": {
+            "description": "No running deployment found for this component on this branch"
+          },
+          "502": {
+            "description": "The deployment did not return a successful HTTP response"
           }
         },
         "security": [
@@ -4722,11 +5011,11 @@
               "string",
               "null"
             ],
-            "description": "Workforce component display name (e.g. \"email-summary\"). If omitted, a random name is generated."
+            "description": "Optional display name for the new component. If omitted, a unique name is generated."
           },
           "type": {
             "type": "string",
-            "description": "Component type: \"agent\" or \"workflow\". Defaults to \"agent\"."
+            "description": "Either `agent` or `workflow`. Defaults to `agent`."
           }
         }
       },
@@ -4749,13 +5038,14 @@
           },
           "path": {
             "type": "string",
-            "description": "Relative path in the worktree, e.g. \"workforce/jolly-ferret\""
+            "description": "Path to the new component inside the repository worktree (for example `workforce/my-agent`)."
           },
           "type": {
             "type": "string"
           },
           "uid": {
-            "type": "string"
+            "type": "string",
+            "description": "Identifier assigned in the project manifest for this component."
           }
         }
       },
@@ -4767,7 +5057,7 @@
         "properties": {
           "workforce": {
             "type": "string",
-            "description": "Workforce name or uid to delete."
+            "description": "Component to delete: numeric id, manifest UUID (`uid`), or configured name."
           }
         }
       },
@@ -6029,6 +6319,7 @@
       },
       "ListPreviewsResponse": {
         "type": "object",
+        "description": "Previews currently visible for the organization.",
         "required": [
           "previews"
         ],
@@ -6145,6 +6436,7 @@
       },
       "ListWorkforceResBody": {
         "type": "object",
+        "description": "Workforce components registered for the project. The `url` field is set only when the component has a **running** deployment for the git **branch** you queried (`rev`).",
         "required": [
           "workforce"
         ],
@@ -6395,14 +6687,14 @@
         "properties": {
           "component": {
             "type": "string",
-            "description": "\"api\" or \"ui\""
+            "description": "Which part of the preview this row describes: `api` (backend dev server) or `ui` (frontend dev server)."
           },
           "healthy": {
             "type": [
               "boolean",
               "null"
             ],
-            "description": "Whether the dev server is responding. `None` if not checked."
+            "description": "Whether the dev server answered a health check on its port. Absent when no check was performed."
           }
         }
       },
@@ -6427,18 +6719,20 @@
               "null"
             ],
             "format": "int64",
-            "description": "Set on org-level list responses."
+            "description": "Included on organization-wide preview listings so you can tell which project a row belongs to."
           },
           "rev": {
-            "type": "string"
+            "type": "string",
+            "description": "Git branch name this preview is tied to."
           },
           "slug": {
-            "type": "string"
+            "type": "string",
+            "description": "Opaque token used with your organization’s preview hostname."
           },
           "started_at": {
             "type": "string",
             "format": "date-time",
-            "description": "When the preview start was accepted (UTC)."
+            "description": "UTC timestamp when acceptance of the preview start was recorded."
           },
           "status": {
             "oneOf": [
@@ -6455,7 +6749,7 @@
               "string",
               "null"
             ],
-            "description": "Full preview URL (if PREVIEW_DOMAIN is configured)"
+            "description": "Public HTTPS URL for the running preview, when preview hosting is configured for your organization."
           }
         }
       },
@@ -6709,7 +7003,7 @@
             "items": {
               "$ref": "#/components/schemas/WorkforcePreview"
             },
-            "description": "List of workforce items in this project"
+            "description": "Workforce components (agents and workflows) defined for this project in the manifest."
           }
         }
       },
@@ -7259,7 +7553,7 @@
         "properties": {
           "rev": {
             "type": "string",
-            "description": "Project env or branch name, e.g. \"main\""
+            "description": "Git branch name to run the preview for (for example `main`)."
           }
         }
       },
@@ -7271,7 +7565,7 @@
         "properties": {
           "rev": {
             "type": "string",
-            "description": "Project env or branch name, e.g. \"main\""
+            "description": "Git branch name you used when starting the preview (for example `main`)."
           }
         }
       },
@@ -7729,33 +8023,33 @@
               "string",
               "null"
             ],
-            "description": "Workforce item description"
+            "description": "Optional short description."
           },
           "id": {
             "type": "string",
-            "description": "Unique workforce item identifier"
+            "description": "Identifier of this workforce component within the project."
           },
           "name": {
             "type": "string",
-            "description": "Workforce item name"
+            "description": "Display name of the component."
           },
           "type": {
             "$ref": "#/components/schemas/AppType",
-            "description": "Workforce item type"
+            "description": "Component category (for example agent or workflow)."
           },
           "uid": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Unique identifier from the project manifest (timbal.yaml)"
+            "description": "Stable identifier from the project manifest (`timbal.yaml`), when defined."
           },
           "url": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Proxy URL for a running deployment; omitted in project detail payloads."
+            "description": "When present, the authenticated Timbal API URL used to call this component’s **running** deployment (for example from the list-workforce response). Omitted where the response does not expose a callable URL, such as on project detail."
           }
         }
       }
