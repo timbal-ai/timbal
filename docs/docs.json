@@ -196,6 +196,13 @@
                   "api-reference/orgs/users/delete",
                   "api-reference/orgs/users/update"
                 ]
+              },
+              {
+                "group": "Notifications",
+                "pages": [
+                  "api-reference/orgs/notifications/list-rules",
+                  "api-reference/orgs/notifications/create-rule"
+                ]
               }
             ]
           },
@@ -273,6 +280,13 @@
                   "api-reference/projects/runs/get",
                   "api-reference/projects/runs/reactions-list",
                   "api-reference/projects/runs/reactions-add"
+                ]
+              },
+              {
+                "group": "Notifications",
+                "pages": [
+                  "api-reference/projects/notifications/list-rules",
+                  "api-reference/projects/notifications/create-rule"
                 ]
               },
               {

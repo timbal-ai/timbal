@@ -1138,6 +1138,119 @@
         ]
       }
     },
+    "/orgs/{org_id}/notifications/rules": {
+      "get": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "List org-wide notification rules",
+        "description": "Returns notification rules that apply at the **organization** level (e.g. credits low, billing payment failed). Each rule includes linked **channels** (typically one email channel). Any authenticated org member may call this; use **POST** `/orgs/{org_id}/notifications/rules` to create rules (org **admin** only).",
+        "operationId": "list_org_notification_rules",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of rules with channels",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgNotificationRulesResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Create an org-wide notification rule",
+        "description": "Creates a rule with `project_id` unset (org-wide). Exactly one **channel** per request: inline `type: \"email\"` + `config.to`, or `channel.id` pointing at an existing email channel in this org. Allowed `event_type` values: `org.credits.low`, `org.billing.payment_failed`. Response includes `channel_action` (`linked` | `reused` | `created`). **Org admin** role required.",
+        "operationId": "create_org_notification_rule",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Rule name, allowlisted org `event_type`, optional `condition`, cooldown, and a single channel.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNotificationRuleReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Rule and channel link created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateNotificationRuleOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error (unknown event type, bad email, empty name, etc.)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not an org admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/previews": {
       "get": {
         "tags": [
@@ -2846,6 +2959,135 @@
           },
           "403": {
             "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/notifications/rules": {
+      "get": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "List project notification rules",
+        "description": "Returns rules scoped to a single **project** (e.g. deployment lifecycle emails). Each rule includes linked channels. Any authenticated project member may call; **POST** on the same path requires **project admin**.",
+        "operationId": "list_project_notification_rules",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of rules with channels",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListProjectNotificationRulesResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a member of this project",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "notifications"
+        ],
+        "summary": "Create a project-scoped notification rule",
+        "description": "Creates a rule tied to this **project** (all environments in that project for deployment-style events). Same channel semantics as org rules: inline email or `channel.id`. Allowed `event_type` values: `project.deployment.failed`, `project.deployment.running`. Response includes `channel_action`. **Project admin** role required.",
+        "operationId": "create_project_notification_rule",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Rule name, allowlisted project `event_type`, optional `condition`, cooldown, and a single channel.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNotificationRuleReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Rule and channel link created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateNotificationRuleOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error (unknown event type, bad email, empty name, etc.)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a project admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4656,6 +4898,15 @@
           "day"
         ]
       },
+      "ChannelAction": {
+        "type": "string",
+        "description": "How the rule was wired to `NotificationChannels` for this create call.",
+        "enum": [
+          "linked",
+          "reused",
+          "created"
+        ]
+      },
       "ComposeRequest": {
         "type": "object",
         "required": [
@@ -4833,6 +5084,31 @@
           }
         }
       },
+      "CreateChannelReq": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "object",
+            "description": "Omitted or null when linking by `id` only."
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Existing `NotificationChannels.id` for this org. When set, `type` / `config` / `name` are ignored."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
       "CreateDomainReqBody": {
         "type": "object",
         "required": [
@@ -4932,6 +5208,58 @@
           "placeholder_file_id": {
             "type": "string",
             "description": "Listing id for this folder; remove it with `DELETE /orgs/{org_id}/k2/{kb_id}/files/{file_id}`."
+          }
+        }
+      },
+      "CreateNotificationRuleOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "channel_id",
+          "channel_action"
+        ],
+        "properties": {
+          "channel_action": {
+            "$ref": "#/components/schemas/ChannelAction"
+          },
+          "channel_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CreateNotificationRuleReq": {
+        "type": "object",
+        "description": "Body for POST org-wide or project-scoped notification rules (same shape).",
+        "required": [
+          "name",
+          "event_type",
+          "channel"
+        ],
+        "properties": {
+          "channel": {
+            "$ref": "#/components/schemas/CreateChannelReq",
+            "description": "Channel: inline `type` + `config`, or reuse with `{ \"id\": \u003Cchannel id\u003E }` (same org)."
+          },
+          "condition": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "cooldown_seconds": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -6273,6 +6601,22 @@
           }
         }
       },
+      "ListOrgNotificationRulesResBody": {
+        "type": "object",
+        "title": "ListOrgNotificationRulesResponse",
+        "description": "Wrapper for **GET** `/orgs/{org_id}/notifications/rules` — org-scoped rules only (`project_id` is null in storage).",
+        "required": [
+          "rules"
+        ],
+        "properties": {
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgNotificationRuleOut"
+            }
+          }
+        }
+      },
       "ListOrgUsersResBody": {
         "type": "object",
         "required": [
@@ -6328,6 +6672,22 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/PreviewInfo"
+            }
+          }
+        }
+      },
+      "ListProjectNotificationRulesResBody": {
+        "type": "object",
+        "title": "ListProjectNotificationRulesResponse",
+        "description": "Wrapper for **GET** `/orgs/{org_id}/projects/{project_id}/notifications/rules`.",
+        "required": [
+          "rules"
+        ],
+        "properties": {
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgNotificationRuleOut"
             }
           }
         }
@@ -6483,6 +6843,32 @@
           }
         }
       },
+      "NotificationChannelOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "type": "object"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
       "Org": {
         "type": "object",
         "required": [
@@ -6577,6 +6963,48 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "OrgNotificationRuleOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "event_type",
+          "cooldown_seconds",
+          "enabled",
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotificationChannelOut"
+            }
+          },
+          "condition": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "cooldown_seconds": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
