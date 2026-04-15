@@ -189,15 +189,6 @@
                 "pages": ["api-reference/files/upload"]
               },
               {
-                "group": "Users",
-                "pages": [
-                  "api-reference/orgs/users/list",
-                  "api-reference/orgs/users/add",
-                  "api-reference/orgs/users/delete",
-                  "api-reference/orgs/users/update"
-                ]
-              },
-              {
                 "group": "Notifications",
                 "pages": [
                   "api-reference/orgs/notifications/list-rules",
@@ -207,7 +198,16 @@
                   "api-reference/orgs/notifications/create-channel",
                   "api-reference/orgs/notifications/delete-channel"
                 ]
-              }
+              },
+              {
+                "group": "Users",
+                "pages": [
+                  "api-reference/orgs/users/list",
+                  "api-reference/orgs/users/add",
+                  "api-reference/orgs/users/delete",
+                  "api-reference/orgs/users/update"
+                ]
+              }              
             ]
           },
           {

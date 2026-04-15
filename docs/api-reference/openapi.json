@@ -1256,8 +1256,8 @@
         "tags": [
           "notifications"
         ],
-        "summary": "Delete a notification channel",
-        "description": "Removes the channel for this org; rule–channel links are removed automatically. Rules may remain with no channels. **Org admin** only.",
+        "summary": "Delete a notification channel.",
+        "description": "Removes the channel for this org. Fails with 409 if rules reference it unless `force: true`.",
         "operationId": "delete_org_notification_channel",
         "parameters": [
           {
@@ -1277,6 +1277,17 @@
             }
           }
         ],
+        "requestBody": {
+          "description": "Optional — omit entirely or send `{}` for default (non-force) behavior.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteChannelBody"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "204": {
             "description": "Channel deleted"
@@ -1293,6 +1304,16 @@
           },
           "404": {
             "description": "Channel not found for this org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Channel is referenced by rules",
             "content": {
               "application/json": {
                 "schema": {
@@ -3695,6 +3716,18 @@
             }
           },
           {
+            "name": "workforce_id",
+            "in": "query",
+            "description": "Filter runs by workforce ID",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "from",
             "in": "query",
             "description": "Filter runs by start time (epoch timestamp in milliseconds)",
@@ -5706,6 +5739,18 @@
           }
         }
       },
+      "DeleteChannelBody": {
+        "type": "object",
+        "properties": {
+          "force": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "When `true`, delete even if rules reference this channel (cascading unlink)."
+          }
+        }
+      },
       "DeleteWorkforceReqBody": {
         "type": "object",
         "required": [
@@ -6956,7 +7001,7 @@
           "rules": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/OrgNotificationRuleOut"
+              "$ref": "#/components/schemas/NotificationRuleOut"
             }
           }
         }
@@ -7031,7 +7076,7 @@
           "rules": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/OrgNotificationRuleOut"
+              "$ref": "#/components/schemas/NotificationRuleOut"
             }
           }
         }
@@ -7213,6 +7258,48 @@
           }
         }
       },
+      "NotificationRuleOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "event_type",
+          "cooldown_seconds",
+          "enabled",
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotificationChannelOut"
+            }
+          },
+          "condition": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "cooldown_seconds": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "Org": {
         "type": "object",
         "required": [
@@ -7307,48 +7394,6 @@
               "string",
               "null"
             ]
-          }
-        }
-      },
-      "OrgNotificationRuleOut": {
-        "type": "object",
-        "required": [
-          "id",
-          "name",
-          "event_type",
-          "cooldown_seconds",
-          "enabled",
-          "channels"
-        ],
-        "properties": {
-          "channels": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NotificationChannelOut"
-            }
-          },
-          "condition": {
-            "type": [
-              "object",
-              "null"
-            ]
-          },
-          "cooldown_seconds": {
-            "type": "integer",
-            "format": "int32"
-          },
-          "enabled": {
-            "type": "boolean"
-          },
-          "event_type": {
-            "type": "string"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "name": {
-            "type": "string"
           }
         }
       },
