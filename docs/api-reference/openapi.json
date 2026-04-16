@@ -1189,7 +1189,7 @@
           "notifications"
         ],
         "summary": "Create a notification channel",
-        "description": "Creates or **reuses** an email channel for this org (same dedupe as rule creation: `type` + `config`). **Org admin** only.",
+        "description": "Create or reuse a notification channel for this org.",
         "operationId": "create_org_notification_channel",
         "parameters": [
           {
@@ -1202,11 +1202,31 @@
           }
         ],
         "requestBody": {
-          "description": "Email channel: `type: \"email\"` and `config.to`.",
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CreateNotificationChannelReq"
+              },
+              "examples": {
+                "Email": {
+                  "value": {
+                    "type": "email",
+                    "name": "Finance inbox",
+                    "config": {
+                      "to": "finance@example.com"
+                    }
+                  }
+                },
+                "Slack": {
+                  "value": {
+                    "type": "slack",
+                    "name": "Deploy alerts",
+                    "config": {
+                      "token": "xoxb-1234567890123-1234567890123",
+                      "channel": "C0123456789"
+                    }
+                  }
+                }
               }
             }
           },
@@ -1381,7 +1401,7 @@
           "notifications"
         ],
         "summary": "Create an org-wide notification rule",
-        "description": "Create an org-wide notification rule with one email channel.",
+        "description": "Create an org-wide notification rule.",
         "operationId": "create_org_notification_rule",
         "parameters": [
           {
@@ -1394,11 +1414,41 @@
           }
         ],
         "requestBody": {
-          "description": "Rule name, allowlisted org `event_type`, optional `condition`, cooldown, and a single channel.",
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CreateNotificationRuleReq"
+              },
+              "examples": {
+                "Email channel": {
+                  "value": {
+                    "name": "Credits usage alert",
+                    "event_type": "org.credits.usage",
+                    "cooldown_seconds": 3600,
+                    "condition": {
+                      "threshold_pct": 80
+                    },
+                    "channel": {
+                      "type": "email",
+                      "config": {
+                        "to": "finance@example.com"
+                      }
+                    }
+                  }
+                },
+                "Slack channel": {
+                  "value": {
+                    "name": "Credits usage to Slack",
+                    "event_type": "org.credits.usage",
+                    "channel": {
+                      "type": "slack",
+                      "config": {
+                        "token": "xoxb-1234567890123-1234567890123",
+                        "channel": "C0123456789"
+                      }
+                    }
+                  }
+                }
               }
             }
           },
@@ -1416,7 +1466,7 @@
             }
           },
           "400": {
-            "description": "Validation error (unknown event type, bad email, empty name, etc.)",
+            "description": "Validation error (event type, channel config, empty name, etc.)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3277,7 +3327,7 @@
           "notifications"
         ],
         "summary": "Create a project-scoped notification rule",
-        "description": "Create a project-scoped notification rule with one email channel.",
+        "description": "Create a project-scoped notification rule.",
         "operationId": "create_project_notification_rule",
         "parameters": [
           {
@@ -3298,11 +3348,38 @@
           }
         ],
         "requestBody": {
-          "description": "Rule name, allowlisted project `event_type`, optional `condition`, cooldown, and a single channel.",
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/CreateNotificationRuleReq"
+              },
+              "examples": {
+                "Email channel": {
+                  "value": {
+                    "name": "Deployment failures",
+                    "event_type": "project.deployment.failed",
+                    "cooldown_seconds": 3600,
+                    "channel": {
+                      "type": "email",
+                      "config": {
+                        "to": "oncall@example.com"
+                      }
+                    }
+                  }
+                },
+                "Slack channel": {
+                  "value": {
+                    "name": "Deployment failures to Slack",
+                    "event_type": "project.deployment.failed",
+                    "channel": {
+                      "type": "slack",
+                      "config": {
+                        "token": "xoxb-1234567890123-1234567890123",
+                        "channel": "C0123456789"
+                      }
+                    }
+                  }
+                }
               }
             }
           },
@@ -3320,7 +3397,7 @@
             }
           },
           "400": {
-            "description": "Validation error (unknown event type, bad email, empty name, etc.)",
+            "description": "Validation error (event type, channel config, empty name, etc.)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7261,7 +7338,8 @@
       "NotificationChannelType": {
         "type": "string",
         "enum": [
-          "email"
+          "email",
+          "slack"
         ]
       },
       "NotificationEventType": {
