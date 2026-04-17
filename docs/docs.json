@@ -331,10 +331,19 @@
               "api-reference/knowledge-bases/list",
               "api-reference/knowledge-bases/create",
               "api-reference/knowledge-bases/get",
+              "api-reference/knowledge-bases/update",
               "api-reference/knowledge-bases/delete",
               "api-reference/knowledge-bases/query",
               "api-reference/knowledge-bases/schema",
               "api-reference/knowledge-bases/upload",
+              {
+                "group": "Backups",
+                "pages": [
+                  "api-reference/knowledge-bases/backups/list",
+                  "api-reference/knowledge-bases/backups/create",
+                  "api-reference/knowledge-bases/backups/get"
+                ]
+              },
               {
                 "group": "Files",
                 "pages": [

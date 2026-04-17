@@ -640,6 +640,217 @@
             "bearer_auth": []
           }
         ]
+      },
+      "patch": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Update a knowledge base.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditK2Request"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated knowledge base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K2Detail"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/backups": {
+      "get": {
+        "tags": [
+          "k2"
+        ],
+        "description": "List backups for a knowledge base.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backup list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListBackupsResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Create an on-demand backup of a knowledge base.",
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBackupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Backup created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbBackupResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/backups/{backup_id}": {
+      "get": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Get a single backup.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "backup_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backup details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbBackupResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/k2/{kb_id}/directories": {
@@ -1665,7 +1876,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Create a new project",
+        "description": "Create a new project.",
         "operationId": "handler",
         "parameters": [
           {
@@ -5489,6 +5700,14 @@
           }
         }
       },
+      "CreateBackupRequest": {
+        "type": "object",
+        "properties": {
+          "dry_run": {
+            "type": "boolean"
+          }
+        }
+      },
       "CreateChannelReq": {
         "type": "object",
         "properties": {
@@ -5995,6 +6214,54 @@
           }
         }
       },
+      "EditK2Request": {
+        "type": "object",
+        "properties": {
+          "backup_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "backup_retention_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "backup_s3_bucket": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "backup_s3_key_prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "backup_schedule_cron": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "EditOrgReqBody": {
         "type": "object",
         "properties": {
@@ -6462,10 +6729,65 @@
           "row_count",
           "vector_count",
           "index_count",
+          "backup_enabled",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "backup_enabled": {
+            "type": "boolean"
+          },
+          "backup_last_completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "backup_last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "backup_last_started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "backup_last_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "backup_retention_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "backup_s3_bucket": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "backup_s3_key_prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "backup_schedule_cron": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -6901,6 +7223,65 @@
           "vectors"
         ]
       },
+      "KbBackupResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "kb_id",
+          "status",
+          "triggered_by",
+          "dry_run",
+          "started_at"
+        ],
+        "properties": {
+          "bytes_uploaded": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kb_id": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "triggered_by": {
+            "type": "string"
+          }
+        }
+      },
       "KbPreview": {
         "type": "object",
         "required": [
@@ -6939,6 +7320,26 @@
           "kb_id": {
             "type": "string",
             "description": "ID of the K2 knowledge base to link to this project"
+          }
+        }
+      },
+      "ListBackupsResponse": {
+        "type": "object",
+        "required": [
+          "backups"
+        ],
+        "properties": {
+          "backups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KbBackupResponse"
+            }
+          },
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -8028,10 +8429,32 @@
               "has_ui": {
                 "type": "boolean"
               },
+              "kb_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Knowledge base to attach to the project. Provide an existing KB's\nid to link it, or omit to auto-create an empty one."
+              },
               "type": {
                 "type": "string",
                 "enum": [
                   "Scratch"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "Blank"
                 ]
               }
             }
