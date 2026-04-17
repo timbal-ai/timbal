@@ -2437,6 +2437,13 @@
                     "prompt": "Add error handling to the upload endpoint"
                   }
                 },
+                "Plan mode (read-only, produces a plan)": {
+                  "value": {
+                    "rev": "main",
+                    "prompt": "How would you refactor the upload endpoint for better error handling?",
+                    "mode": "plan"
+                  }
+                },
                 "Text with inline image (base64)": {
                   "value": {
                     "rev": "main",
@@ -5523,6 +5530,14 @@
           "created"
         ]
       },
+      "ComposeMode": {
+        "type": "string",
+        "description": "Compose session behavior. Maps to Claude Code's `--permission-mode` flag.",
+        "enum": [
+          "default",
+          "plan"
+        ]
+      },
       "ComposeRequest": {
         "type": "object",
         "required": [
@@ -5537,6 +5552,17 @@
             ],
             "description": "Effort level: low, medium, high, max",
             "example": "high"
+          },
+          "mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComposeMode",
+                "description": "Session behavior mode. `default` bypasses all tool-permission prompts and lets the agent\nedit files, run shell commands, and call MCP tools freely. `plan` restricts the agent to\nread-only tools — it analyses the codebase and produces a plan, without mutating anything."
+              }
+            ]
           },
           "model": {
             "type": [

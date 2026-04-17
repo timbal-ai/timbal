@@ -229,13 +229,13 @@
                 ]
               },
               {
-                "group": "Compose",
+                "group": "Composer",
                 "tag": "Beta",
                 "pages": [
-                  "api-reference/projects/compose/prompt",
-                  "api-reference/projects/compose/list",
-                  "api-reference/projects/compose/single",
-                  "api-reference/projects/compose/stop"
+                  "api-reference/projects/composer/prompt",
+                  "api-reference/projects/composer/list",
+                  "api-reference/projects/composer/single",
+                  "api-reference/projects/composer/stop"
                 ]
               },
               {
