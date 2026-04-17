@@ -5542,12 +5542,31 @@
           "created"
         ]
       },
+      "ComposeEffort": {
+        "type": "string",
+        "description": "Reasoning effort level for the session.",
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      },
       "ComposeMode": {
         "type": "string",
-        "description": "Compose session behavior. Maps to Claude Code's `--permission-mode` flag.",
+        "description": "Compose session behavior.",
         "enum": [
           "default",
           "plan"
+        ]
+      },
+      "ComposeModel": {
+        "type": "string",
+        "description": "Model family to use for the session. Always resolves to the latest released version.",
+        "enum": [
+          "sonnet",
+          "opus",
+          "haiku"
         ]
       },
       "ComposeRequest": {
@@ -5558,12 +5577,15 @@
         ],
         "properties": {
           "effort": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Effort level: low, medium, high, max",
-            "example": "high"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComposeEffort",
+                "description": "Reasoning effort level. Higher levels let the model think longer before responding,\nat proportionally higher cost and latency."
+              }
+            ]
           },
           "mode": {
             "oneOf": [
@@ -5577,12 +5599,15 @@
             ]
           },
           "model": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Model alias or full name (e.g. \"sonnet\", \"opus\", \"claude-sonnet-4-6\")",
-            "example": "sonnet"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComposeModel",
+                "description": "Model family to use. Always resolves to the latest version of that family —\nspecific version pinning is not exposed."
+              }
+            ]
           },
           "prompt": {
             "$ref": "#/components/schemas/Message",
