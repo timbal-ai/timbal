@@ -3875,6 +3875,114 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/preview/logs": {
+      "get": {
+        "tags": [
+          "preview"
+        ],
+        "description": "Tail the last N lines of a running preview component's dev server log (stdout+stderr merged). Admin only. Logs disappear when the preview exits.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch name of the preview to read logs from (for example `main`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "component",
+            "in": "query",
+            "description": "Which component to fetch logs for.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "api",
+                "ui"
+              ]
+            }
+          },
+          {
+            "name": "tail",
+            "in": "query",
+            "description": "Max number of lines to return from the end of the log. Default 200, max 10000.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Last N lines of the log as plain text.",
+            "headers": {
+              "x-log-truncated": {
+                "schema": {
+                  "type": "boolean"
+                },
+                "description": "`true` if the log had more lines than `tail` (or more than ~16 MiB of tail content was skipped); `false` if the full log fits."
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a project admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No running preview for this branch/component, or log file missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects/{project_id}/preview/stop": {
       "post": {
         "tags": [

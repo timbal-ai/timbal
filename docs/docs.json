@@ -273,6 +273,7 @@
                 "pages": [
                   "api-reference/projects/previews/list",
                   "api-reference/projects/previews/get",
+                  "api-reference/projects/previews/logs",
                   "api-reference/projects/previews/start",
                   "api-reference/projects/previews/stop"
                 ]

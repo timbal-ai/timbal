@@ -1,0 +1,6 @@
+---
+title: "Preview Logs"
+openapi: "GET /orgs/{org_id}/projects/{project_id}/preview/logs"
+---
+
+Tail of the dev server log (stdout and stderr merged) for a running preview. **Project admin** only. Requires query params **`rev`** (branch) and **`component`**. Optional **`tail`** caps bytes from the end (default 64 KiB, max 1 MiB). Response is **text/plain**; **`x-log-truncated`** is set when the tail was clipped.
