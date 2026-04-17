@@ -2519,6 +2519,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Filter sessions by git branch (worktree revision)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -8552,49 +8564,29 @@
         "required": [
           "id",
           "uid",
-          "project_id",
           "user_id",
           "rev",
           "status",
           "turn_count",
           "iteration_count",
           "tool_call_count",
-          "input_tokens",
-          "output_tokens",
-          "cache_creation_tokens",
-          "cache_read_tokens",
-          "cost_usd",
-          "model_usage",
           "created_at",
           "last_active_at"
         ],
         "properties": {
-          "cache_creation_tokens": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Total cache creation tokens"
-          },
-          "cache_read_tokens": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Total cache read tokens"
-          },
-          "cost_usd": {
-            "type": "number",
-            "format": "double",
-            "description": "Accumulated cost in USD"
-          },
           "created_at": {
             "type": "string",
             "format": "date-time"
           },
+          "first_prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Truncated text of the first user prompt — used as a session title."
+          },
           "id": {
             "type": "string"
-          },
-          "input_tokens": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Total input tokens across all turns"
           },
           "iteration_count": {
             "type": "integer",
@@ -8611,17 +8603,6 @@
               "null"
             ],
             "description": "Model used in this session"
-          },
-          "model_usage": {
-            "description": "Per-model token and cost breakdown"
-          },
-          "output_tokens": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Total output tokens across all turns"
-          },
-          "project_id": {
-            "type": "string"
           },
           "rev": {
             "type": "string",
