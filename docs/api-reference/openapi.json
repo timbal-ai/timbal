@@ -2484,6 +2484,110 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/compose/plans": {
+      "get": {
+        "tags": [
+          "compose"
+        ],
+        "description": "List plan files produced by compose plan-mode sessions, most recently modified first",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plans listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectPlan"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/compose/plans/{plan_id}": {
+      "get": {
+        "tags": [
+          "compose"
+        ],
+        "description": "Get a plan's metadata and full markdown body",
+        "operationId": "single",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "plan_id",
+            "in": "path",
+            "description": "Plan id — the markdown filename without the `.md` extension.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "create-a-new-section-logical-hennessy"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plan details with content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Plan not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects/{project_id}/compose/sessions": {
       "get": {
         "tags": [
@@ -3951,6 +4055,16 @@
               "text/plain": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid component",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
                 }
               }
             }
@@ -8160,6 +8274,26 @@
           }
         }
       },
+      "PlanDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ProjectPlan"
+          },
+          {
+            "type": "object",
+            "required": [
+              "content"
+            ],
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "Raw markdown body of the plan file."
+              }
+            }
+          }
+        ],
+        "description": "A plan markdown file plus its full body."
+      },
       "PreviewComponent": {
         "type": "object",
         "required": [
@@ -8631,6 +8765,44 @@
             }
           }
         ]
+      },
+      "ProjectPlan": {
+        "type": "object",
+        "description": "A plan markdown file produced by a compose `plan` mode session. Plans live\non EFS at `{EFS}/orgs/{org_id}/projects/{project_id}/.claude/plans/*.md`\nand are authored by the Claude CLI — the API only reads them.",
+        "required": [
+          "id",
+          "size_bytes",
+          "modified_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Filename without the `.md` extension (e.g. `create-a-new-section-logical-hennessy`)."
+          },
+          "modified_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "preview": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short body preview (first non-empty paragraph after the title, trimmed)."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Title parsed from the first `# ` heading (with an optional `Plan: ` prefix stripped)."
+          }
+        }
       },
       "ProjectPreview": {
         "type": "object",

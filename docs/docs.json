@@ -233,6 +233,8 @@
                 "tag": "Beta",
                 "pages": [
                   "api-reference/projects/composer/prompt",
+                  "api-reference/projects/composer/plans-list",
+                  "api-reference/projects/composer/plans-single",
                   "api-reference/projects/composer/list",
                   "api-reference/projects/composer/single",
                   "api-reference/projects/composer/stop"
