@@ -3013,6 +3013,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "trigger",
+            "in": "query",
+            "description": "Optional trigger filter. Accepts:\n  * `latest` — return every row sharing the most recent `trigger_id` for\n    the resolved env; if the most recent row has no `trigger_id` (legacy\n    data), falls back to `DISTINCT ON (image_type, manifest_id)` i.e.\n    the latest row per component.\n  * a UUID — return every row with `trigger_id = \u003Cuuid\u003E`.\nRequires an env filter (`rev` or `project_env_id`). No-op otherwise.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
