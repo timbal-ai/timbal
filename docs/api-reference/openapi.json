@@ -19,6 +19,50 @@
     }
   ],
   "paths": {
+    "/ace/{ace_uid}/policies": {
+      "get": {
+        "tags": [
+          "ace"
+        ],
+        "description": "List the policies declared in an ACE playbook. Reads the live `playbook.json` from EFS.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "ace_uid",
+            "in": "path",
+            "description": "ACE uid (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPoliciesResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "ACE not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/me/orgs": {
       "get": {
         "tags": [
@@ -2926,6 +2970,20 @@
           {
             "name": "project_env_id",
             "in": "query",
+            "description": "DEPRECATED: use `rev` (git branch name) instead. Will be removed once all\nfrontends migrate. When both are passed, `rev` wins.",
+            "required": false,
+            "deprecated": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch name of the env to filter by (e.g. `main`). Resolved\nserver-side against `ProjectEnvs.branch` for the current project.",
             "required": false,
             "schema": {
               "type": [
@@ -3942,7 +4000,7 @@
             }
           },
           "400": {
-            "description": "Invalid branch, worktree not ready, or preview already starting",
+            "description": "Invalid branch or worktree not ready",
             "content": {
               "application/json": {
                 "schema": {
@@ -5684,6 +5742,38 @@
   },
   "components": {
     "schemas": {
+      "AcePolicy": {
+        "type": "object",
+        "description": "A single policy entry.\n\n- `id` is the human-readable stable key (e.g. `\"ev_subsidy\"`).\n- `requires` / `provides` / `tool_action` are kept as raw JSON because\n  their shape is still evolving.",
+        "required": [
+          "id",
+          "condition",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "condition": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requires": {
+
+          },
+          "tool_action": {
+
+          }
+        }
+      },
       "AddProjectUserReqBody": {
         "type": "object",
         "required": [
@@ -7134,6 +7224,7 @@
           "content_type",
           "content_length",
           "metadata",
+          "parse_state",
           "url",
           "created_at",
           "updated_at"
@@ -7169,6 +7260,10 @@
           },
           "name": {
             "type": "string"
+          },
+          "parse_state": {
+            "type": "string",
+            "description": "Pipeline state for parsing + embedding.\n\nOne of `pending` (pipeline in flight), `success` (parse + embed both completed),\n`failed` (latest attempt failed), or `skipped` (format unsupported, never parsed).\nUnsupported files are stored as-is; the indicator lets clients flag them in listings\nrather than rejecting the upload."
           },
           "uid": {
             "type": "string"
@@ -7810,6 +7905,20 @@
               "$ref": "#/components/schemas/OrgPreview"
             },
             "description": "List of organizations"
+          }
+        }
+      },
+      "ListPoliciesResBody": {
+        "type": "object",
+        "required": [
+          "policies"
+        ],
+        "properties": {
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AcePolicy"
+            }
           }
         }
       },
@@ -8508,7 +8617,6 @@
           "id",
           "name",
           "has_ui",
-          "workforce",
           "role",
           "use_platform_iam",
           "is_public_template",
@@ -8612,13 +8720,6 @@
           "use_platform_iam": {
             "type": "boolean",
             "description": "Whether the project uses the platform's IAM system for access control"
-          },
-          "workforce": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/WorkforcePreview"
-            },
-            "description": "Workforce components (agents and workflows) defined for this project in the manifest."
           }
         }
       },
@@ -9199,6 +9300,10 @@
           "rev"
         ],
         "properties": {
+          "force": {
+            "type": "boolean",
+            "description": "If true and the org preview concurrency cap is reached, evict the\noldest running (or in-flight) preview in the org to free a slot\ninstead of returning 429. Defaults to false."
+          },
           "rev": {
             "type": "string",
             "description": "Git branch name to run the preview for (for example `main`)."
@@ -9719,6 +9824,10 @@
     }
   },
   "tags": [
+    {
+      "name": "ace",
+      "description": "Action Control Engine (ACE) operations"
+    },
     {
       "name": "analytics",
       "description": "Project analytics"
