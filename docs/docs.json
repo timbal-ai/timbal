@@ -344,7 +344,10 @@
                 "pages": [
                   "api-reference/knowledge-bases/backups/list",
                   "api-reference/knowledge-bases/backups/create",
-                  "api-reference/knowledge-bases/backups/get"
+                  "api-reference/knowledge-bases/backups/get",
+                  "api-reference/knowledge-bases/restores/list",
+                  "api-reference/knowledge-bases/restores/create",
+                  "api-reference/knowledge-bases/restores/get"
                 ]
               },
               {
@@ -355,6 +358,28 @@
                   "api-reference/knowledge-bases/files/create-dir",
                   "api-reference/knowledge-bases/files/get",
                   "api-reference/knowledge-bases/files/delete"
+                ]
+              }
+            ]
+          },
+          {
+            "group": "ACE",
+            "tag": "Pro",
+            "pages": [
+              "api-reference/ace/create-from-workforce",
+              "api-reference/ace/link",
+              "api-reference/ace/unlink",
+              "api-reference/ace/list-policies",
+              "api-reference/ace/chat-completions",
+              "api-reference/ace/responses",
+              "api-reference/ace/messages",
+              {
+                "group": "Jobs",
+                "pages": [
+                  "api-reference/ace/jobs/list",
+                  "api-reference/ace/jobs/get",
+                  "api-reference/ace/jobs/cancel",
+                  "api-reference/ace/jobs/retry"
                 ]
               }
             ]

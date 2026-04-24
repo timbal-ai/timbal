@@ -19,12 +19,221 @@
     }
   ],
   "paths": {
+    "/ace/{ace_uid}/jobs": {
+      "get": {
+        "tags": [
+          "ace"
+        ],
+        "description": "List jobs for an ACE, most recent first.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "ace_uid",
+            "in": "path",
+            "description": "ACE uid (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max rows to return (clamped to 200). Defaults to 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListAceJobsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "ACE not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/ace/{ace_uid}/jobs/{job_uid}": {
+      "get": {
+        "tags": [
+          "ace"
+        ],
+        "description": "Fetch a single job. Poll this until `status` reaches a terminal value (`succeeded`, `failed`, `cancelled`, `error`).",
+        "operationId": "get_one",
+        "parameters": [
+          {
+            "name": "ace_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "job_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AceJobView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Job or ACE not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/ace/{ace_uid}/jobs/{job_uid}/cancel": {
+      "post": {
+        "tags": [
+          "ace"
+        ],
+        "description": "Cancel an active job. The job transitions to `status = 'cancelled'` once the cancellation takes effect. Returns `204` on accept; `409` if the job is not currently active.",
+        "operationId": "cancel",
+        "parameters": [
+          {
+            "name": "ace_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "job_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Cancel signal sent"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Job not found"
+          },
+          "409": {
+            "description": "Job is not currently queued/running"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/ace/{ace_uid}/jobs/{job_uid}/retry": {
+      "post": {
+        "tags": [
+          "ace"
+        ],
+        "description": "Re-enqueue a failed/cancelled/errored job with the same kind and input, returning a new `job_uid`. Returns `409` if the source job is still active or already succeeded, or if another job is active on this ACE.",
+        "operationId": "retry",
+        "parameters": [
+          {
+            "name": "ace_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "job_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Retry enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnqueueJobResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Job not found"
+          },
+          "409": {
+            "description": "Source job not retriable, or ACE has a live job"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/ace/{ace_uid}/policies": {
       "get": {
         "tags": [
           "ace"
         ],
-        "description": "List the policies declared in an ACE playbook. Reads the live `playbook.json` from EFS.",
+        "description": "List the policies declared on an ACE.",
         "operationId": "list",
         "parameters": [
           {
@@ -54,6 +263,144 @@
           },
           "404": {
             "description": "ACE not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/ace/{ace_uid}/v1/chat/completions": {
+      "post": {
+        "tags": [
+          "ace"
+        ],
+        "description": "OpenAI-compatible **Chat Completions** endpoint scoped to an ACE. Accepts the native OpenAI `/v1/chat/completions` request body; set `stream: true` for an SSE response. The upstream provider is resolved from the `model` field: either explicit (`anthropic/claude-opus-4-7`, `google/gemini-2.5-pro`, …) or best-effort from the model name prefix (`gpt-*`, `claude-*`, `gemini-*`, `grok-*`); otherwise falls back to OpenAI. Supported providers: `openai`, `google`, `togetherai`, `xai`, `groq`, `fireworks`, `xiaomi`, `byteplus`. Request body remains OpenAI-shaped regardless of provider. Authenticate with a Timbal API key via `Authorization: Bearer \u003Ckey\u003E`. Usage is billed to the organization that owns the ACE.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "ace_uid",
+            "in": "path",
+            "description": "ACE uid (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upstream response (JSON or SSE depending on `stream`)"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          },
+          "402": {
+            "description": "Credits limit exceeded"
+          },
+          "404": {
+            "description": "ACE not found"
+          },
+          "500": {
+            "description": "Upstream provider error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/ace/{ace_uid}/v1/messages": {
+      "post": {
+        "tags": [
+          "ace"
+        ],
+        "description": "Anthropic-compatible **Messages** endpoint scoped to an ACE. Accepts the native Anthropic `/v1/messages` request body; set `stream: true` for an SSE response. The `model` field accepts either a bare model name (`claude-opus-4-7`) or an explicit `anthropic/\u003Cmodel\u003E` prefix; any other provider prefix is rejected with `400`. Authenticate with a Timbal API key passed in the `x-api-key` header (same header the Anthropic SDK sends). Optional `anthropic-version` and `anthropic-beta` headers are forwarded upstream. Usage is billed to the organization that owns the ACE.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "ace_uid",
+            "in": "path",
+            "description": "ACE uid (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upstream response (JSON or SSE depending on `stream`)"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          },
+          "402": {
+            "description": "Credits limit exceeded"
+          },
+          "404": {
+            "description": "ACE not found"
+          },
+          "500": {
+            "description": "Upstream provider error"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/ace/{ace_uid}/v1/responses": {
+      "post": {
+        "tags": [
+          "ace"
+        ],
+        "description": "OpenAI-compatible **Responses API** endpoint scoped to an ACE. Accepts the native OpenAI `/v1/responses` request body; streaming responses are delivered as SSE. The upstream provider is resolved from the `model` field: either explicit (`google/gemini-2.5-pro`, `xai/grok-3`, …) or best-effort from the model name prefix (`gpt-*`, `gemini-*`, `grok-*`); otherwise falls back to OpenAI. Supported providers: `openai`, `google`, `togetherai`, `xai`, `groq`, `fireworks`. Request body remains OpenAI-shaped regardless of provider. Authenticate with a Timbal API key via `Authorization: Bearer \u003Ckey\u003E`. Usage is billed to the organization that owns the ACE.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "ace_uid",
+            "in": "path",
+            "description": "ACE uid (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upstream response (JSON or SSE depending on `stream`)"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          },
+          "402": {
+            "description": "Credits limit exceeded"
+          },
+          "404": {
+            "description": "ACE not found"
+          },
+          "500": {
+            "description": "Upstream provider error"
           }
         },
         "security": [
@@ -1265,6 +1612,168 @@
             "content": {
               "application/json": {
 
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/restores": {
+      "get": {
+        "tags": [
+          "k2"
+        ],
+        "description": "List restore attempts for a knowledge base.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Restore list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRestoresResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Restore a knowledge base from a previously completed backup. While running, all read/write traffic on the KB returns 503 (Maintenance). A mutually-exclusive lock prevents concurrent backup/restore on the same KB (409 Conflict).",
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRestoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Restore accepted; poll via GET /restores/{id}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbRestoreResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "KB is already under maintenance"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/restores/{restore_id}": {
+      "get": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Get a single restore.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "restore_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Restore details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbRestoreResponse"
+                }
               }
             }
           }
@@ -5228,12 +5737,215 @@
         ]
       }
     },
+    "/orgs/{org_id}/projects/{project_id}/workforce/{workforce}/ace": {
+      "put": {
+        "tags": [
+          "ace"
+        ],
+        "description": "Link an existing ACE to a workforce component. Replaces any previously linked ACE.",
+        "operationId": "link",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workforce",
+            "in": "path",
+            "description": "Workforce component: numeric id, manifest UUID, or name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkAceReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "ACE linked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "ACE or workforce not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "ace"
+        ],
+        "description": "Create a new ACE attached to a workforce component and enqueue the initial generation job, seeded from the component's current source on the given branch. Returns `202` immediately with `{ace_uid, job_uid}`; poll `GET /ace/{ace_uid}/jobs/{job_uid}` for terminal state. The ACE's name defaults to `{project_name}/{workforce_name}`.",
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workforce",
+            "in": "path",
+            "description": "Workforce component: numeric id, manifest UUID, or name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch name (for example `main`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "ACE created; generation job enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnqueueJobResBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Workforce not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "ace"
+        ],
+        "description": "Detach the ACE currently attached to a workforce component. The ACE itself is preserved and can be reattached to any workforce component. Active jobs on the ACE are NOT cancelled — use `POST /ace/{ace_uid}/jobs/{job_uid}/cancel` if that's what you want.",
+        "operationId": "unlink",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "Project id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workforce",
+            "in": "path",
+            "description": "Workforce component: numeric id, manifest UUID, or name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "ACE unlinked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Workforce not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/projects/{project_id}/workforce/{workforce}/{*path}": {
       "get": {
         "tags": [
           "projects"
         ],
-        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). The HTTP method and body are forwarded unchanged. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. WebSocket upgrades are not supported on this route.",
+        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). For non-serverless deployments, the method and most headers pass through; JSON bodies on paths ending in `/run` or `/stream` get `context.platform_config` merged in (same shape as serverless / `timbal.server.http` + `RunContext`). For `type = serverless`, the request is handled like `timbal codegen test`. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. Responses include `X-Timbal-Workforce-Deployment-Type` (`serverless` | `ecs` | `on-premise`). WebSocket upgrades are not supported on this route.",
         "operationId": "workforce_proxy_get",
         "parameters": [
           {
@@ -5303,7 +6015,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). The HTTP method and body are forwarded unchanged. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. WebSocket upgrades are not supported on this route.",
+        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). For non-serverless deployments, the method and most headers pass through; JSON bodies on paths ending in `/run` or `/stream` get `context.platform_config` merged in (same shape as serverless / `timbal.server.http` + `RunContext`). For `type = serverless`, the request is handled like `timbal codegen test`. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. Responses include `X-Timbal-Workforce-Deployment-Type` (`serverless` | `ecs` | `on-premise`). WebSocket upgrades are not supported on this route.",
         "operationId": "workforce_proxy_put",
         "parameters": [
           {
@@ -5373,7 +6085,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). The HTTP method and body are forwarded unchanged. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. WebSocket upgrades are not supported on this route.",
+        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). For non-serverless deployments, the method and most headers pass through; JSON bodies on paths ending in `/run` or `/stream` get `context.platform_config` merged in (same shape as serverless / `timbal.server.http` + `RunContext`). For `type = serverless`, the request is handled like `timbal codegen test`. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. Responses include `X-Timbal-Workforce-Deployment-Type` (`serverless` | `ecs` | `on-premise`). WebSocket upgrades are not supported on this route.",
         "operationId": "workforce_proxy_post",
         "parameters": [
           {
@@ -5443,7 +6155,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). The HTTP method and body are forwarded unchanged. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. WebSocket upgrades are not supported on this route.",
+        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). For non-serverless deployments, the method and most headers pass through; JSON bodies on paths ending in `/run` or `/stream` get `context.platform_config` merged in (same shape as serverless / `timbal.server.http` + `RunContext`). For `type = serverless`, the request is handled like `timbal codegen test`. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. Responses include `X-Timbal-Workforce-Deployment-Type` (`serverless` | `ecs` | `on-premise`). WebSocket upgrades are not supported on this route.",
         "operationId": "workforce_proxy_delete",
         "parameters": [
           {
@@ -5513,7 +6225,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). The HTTP method and body are forwarded unchanged. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. WebSocket upgrades are not supported on this route.",
+        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). For non-serverless deployments, the method and most headers pass through; JSON bodies on paths ending in `/run` or `/stream` get `context.platform_config` merged in (same shape as serverless / `timbal.server.http` + `RunContext`). For `type = serverless`, the request is handled like `timbal codegen test`. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. Responses include `X-Timbal-Workforce-Deployment-Type` (`serverless` | `ecs` | `on-premise`). WebSocket upgrades are not supported on this route.",
         "operationId": "workforce_proxy_patch",
         "parameters": [
           {
@@ -5754,6 +6466,70 @@
   },
   "components": {
     "schemas": {
+      "AceJobView": {
+        "type": "object",
+        "description": "Public view of a background job against an ACE.",
+        "required": [
+          "uid",
+          "kind",
+          "status",
+          "iteration_count",
+          "tool_call_count",
+          "queued_at"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present when the job terminated unsuccessfully (`failed`, `error`, `cancelled`)."
+          },
+          "iteration_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "queued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tool_call_count": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "uid": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "AcePolicy": {
         "type": "object",
         "description": "A single policy entry.\n\n- `id` is the human-readable stable key (e.g. `\"ev_subsidy\"`).\n- `requires` / `provides` / `tool_action` are kept as raw JSON because\n  their shape is still evolving.",
@@ -6341,6 +7117,17 @@
           }
         }
       },
+      "CreateRestoreRequest": {
+        "type": "object",
+        "required": [
+          "source_backup_id"
+        ],
+        "properties": {
+          "source_backup_id": {
+            "type": "string"
+          }
+        }
+      },
       "CreateVarReqBody": {
         "type": "object",
         "required": [
@@ -6783,6 +7570,29 @@
       },
       "EmbeddingModel": {
         "type": "string"
+      },
+      "EnqueueJobResBody": {
+        "type": "object",
+        "description": "Response body returned by any endpoint that enqueues a new job. The\nHTTP status is `202 Accepted` — poll `GET /ace/{ace_uid}/jobs/{job_uid}`\nfor terminal state.",
+        "required": [
+          "ace_uid",
+          "job_uid",
+          "kind"
+        ],
+        "properties": {
+          "ace_uid": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "job_uid": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Job kind (e.g. `\"generate_initial\"`, `\"regenerate\"`)."
+          }
+        }
       },
       "EnvPreview": {
         "type": "object",
@@ -7703,6 +8513,72 @@
           }
         }
       },
+      "KbRestoreResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "kb_id",
+          "source_backup_id",
+          "status",
+          "triggered_by",
+          "started_at"
+        ],
+        "properties": {
+          "bytes_downloaded": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kb_id": {
+            "type": "string"
+          },
+          "source_backup_id": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          },
+          "triggered_by": {
+            "type": "string"
+          }
+        }
+      },
+      "LinkAceReqBody": {
+        "type": "object",
+        "description": "Request body for linking an existing ACE to a workforce.",
+        "required": [
+          "ace_uid"
+        ],
+        "properties": {
+          "ace_uid": {
+            "type": "string",
+            "format": "uuid",
+            "description": "`uid` of an existing ACE in the same organization."
+          }
+        }
+      },
       "LinkKbRequest": {
         "type": "object",
         "required": [
@@ -7712,6 +8588,24 @@
           "kb_id": {
             "type": "string",
             "description": "ID of the K2 knowledge base to link to this project"
+          }
+        }
+      },
+      "ListAceJobsResBody": {
+        "type": "object",
+        "required": [
+          "jobs",
+          "total"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AceJobView"
+            }
+          },
+          "total": {
+            "type": "string"
           }
         }
       },
@@ -8027,6 +8921,26 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Reaction"
+            }
+          }
+        }
+      },
+      "ListRestoresResponse": {
+        "type": "object",
+        "required": [
+          "restores"
+        ],
+        "properties": {
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "restores": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KbRestoreResponse"
             }
           }
         }
