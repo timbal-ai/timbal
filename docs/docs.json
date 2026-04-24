@@ -370,6 +370,7 @@
               "api-reference/ace/link",
               "api-reference/ace/unlink",
               "api-reference/ace/list-policies",
+              "api-reference/ace/list-context-vars",
               "api-reference/ace/chat-completions",
               "api-reference/ace/responses",
               "api-reference/ace/messages",

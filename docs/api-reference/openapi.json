@@ -410,6 +410,50 @@
         ]
       }
     },
+    "/ace/{ace_uid}/vars": {
+      "get": {
+        "tags": [
+          "ace"
+        ],
+        "description": "List the variables declared on an ACE.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "ace_uid",
+            "in": "path",
+            "description": "ACE uid (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Variables",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListVarsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "ACE not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/me/orgs": {
       "get": {
         "tags": [
@@ -1143,7 +1187,7 @@
         "tags": [
           "k2"
         ],
-        "description": "Create an on-demand backup of a knowledge base.",
+        "description": "Create an on-demand backup of a knowledge base. While running, all read/write traffic on the KB returns 503 (Maintenance). A mutually-exclusive lock prevents concurrent backup/restore on the same KB (409 Conflict). `dry_run = true` skips the lock and the upload.",
         "operationId": "create",
         "parameters": [
           {
@@ -1175,7 +1219,7 @@
         },
         "responses": {
           "201": {
-            "description": "Backup created",
+            "description": "Backup accepted; KB is already paused for maintenance (non-dry-run). Poll via GET /backups/{id}.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1183,6 +1227,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "KB is already under maintenance (no backup row created)"
           }
         },
         "security": [
@@ -1713,7 +1760,7 @@
         },
         "responses": {
           "201": {
-            "description": "Restore accepted; poll via GET /restores/{id}",
+            "description": "Restore accepted; KB is already paused for maintenance. Poll via GET /restores/{id}.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1723,7 +1770,7 @@
             }
           },
           "409": {
-            "description": "KB is already under maintenance"
+            "description": "KB is already under maintenance (no restore row created)"
           }
         },
         "security": [
@@ -6559,6 +6606,39 @@
           },
           "tool_action": {
 
+          }
+        }
+      },
+      "AceVar": {
+        "type": "object",
+        "description": "A single variable declaration.\n\n- `id` is the human-readable stable key (e.g. `\"flow\"`, `\"presupuesto_max\"`).\n- `choices`, when present, restricts the variable to an enum of string values.\n- `match_mode` tweaks how the matcher compares extracted vs expected values\n  (e.g. `\"semantic\"`).",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "choices": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "match_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
