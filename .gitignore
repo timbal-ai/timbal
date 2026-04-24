@@ -40,6 +40,8 @@ node_modules/
 
 **/ace/
 !/tui/src/screens/ace/
+!/docs/api-reference/ace/
+!/docs/api-reference/ace/**
 
 **/target/
 

@@ -121,6 +121,7 @@ Any provider, one interface. Model strings follow `provider/model-name`:
 
 ```
 anthropic/claude-sonnet-4-6       openai/gpt-4o
+anthropic/claude-opus-4-7         openai/gpt-5.5
 anthropic/claude-opus-4-6         openai/gpt-4o-mini
 anthropic/claude-haiku-4-5        openai/o3
 google/gemini-2.5-flash           groq/llama-3.3-70b-versatile

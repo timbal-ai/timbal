@@ -43,6 +43,7 @@ def get_context_window(model_id: str) -> int | None:
 # ---------------------------------------------------------------------------
 # Model type with provider prefixes
 Model = Literal[
+    "anthropic/claude-opus-4-7",
     "anthropic/claude-opus-4-6",
     "anthropic/claude-opus-4-5",
     "anthropic/claude-opus-4-1",
@@ -55,6 +56,7 @@ Model = Literal[
     "anthropic/claude-3-5-haiku-latest",
     "anthropic/claude-3-opus-latest",
     "anthropic/claude-3-haiku-20240307",
+    "openai/gpt-5.5",
     "openai/gpt-5.4",
     "openai/gpt-5.4-mini",
     "openai/gpt-5.4-nano",
@@ -170,12 +172,12 @@ Model = Literal[
     "sambanova/DeepSeek-V3.1-cb",
     "sambanova/DeepSeek-V3.1-Terminus",
     "sambanova/DeepSeek-V3.2",
+    "sambanova/Meta-Llama-3.3-70B-Instruct",
     "sambanova/Llama-3.3-Swallow-70B-Instruct-v0.4",
     "sambanova/Llama-4-Maverick-17B-128E-Instruct",
     "sambanova/Meta-Llama-3.1-8B-Instruct",
-    "sambanova/Meta-Llama-3.3-70B-Instruct",
-    "sambanova/MiniMax-M2.5",
-    "sambanova/Qwen3-32B",
     "sambanova/Qwen3-235B-A22B-Instruct-2507",
+    "sambanova/Qwen3-32B",
+    "sambanova/MiniMax-M2.5",
     "sambanova/gpt-oss-120b",
 ]
