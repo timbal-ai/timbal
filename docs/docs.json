@@ -161,7 +161,8 @@
               "api-reference/introduction",
               "api-reference/authentication",
               "api-reference/errors",
-              "api-reference/pagination"
+              "api-reference/pagination",
+              "api-reference/files/upload"
             ]
           },
           {
@@ -183,10 +184,6 @@
                   "api-reference/orgs/domains/get",
                   "api-reference/orgs/domains/delete"
                 ]
-              },
-              {
-                "group": "Files",
-                "pages": ["api-reference/files/upload"]
               },
               {
                 "group": "Notifications",
@@ -357,7 +354,17 @@
                   "api-reference/knowledge-bases/files/add",
                   "api-reference/knowledge-bases/files/create-dir",
                   "api-reference/knowledge-bases/files/get",
-                  "api-reference/knowledge-bases/files/delete"
+                  "api-reference/knowledge-bases/files/delete",
+                  {
+                    "group": "Chunks",
+                    "pages": [
+                      "api-reference/knowledge-bases/files/chunks/list",
+                      "api-reference/knowledge-bases/files/chunks/insert",
+                      "api-reference/knowledge-bases/files/chunks/get",
+                      "api-reference/knowledge-bases/files/chunks/update",
+                      "api-reference/knowledge-bases/files/chunks/delete"
+                    ]
+                  }
                 ]
               }
             ]

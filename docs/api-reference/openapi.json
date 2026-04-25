@@ -454,6 +454,159 @@
         ]
       }
     },
+    "/files": {
+      "post": {
+        "tags": [
+          "files"
+        ],
+        "description": "Upload a short-lived file (auto-deleted ~24h after upload).",
+        "operationId": "handler",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "format": "int32",
+                      "minimum": 0
+                    },
+                    "description": "Binary contents of the file. Max 100 MB.",
+                    "contentMediaType": "application/octet-stream"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "File uploaded",
+            "headers": {
+              "RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Max requests per window for this user."
+              },
+              "RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Requests left in the current window."
+              },
+              "RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds until the current window resets."
+              },
+              "X-RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Limit`."
+              },
+              "X-RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Remaining`."
+              },
+              "X-RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Reset`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TempFile"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "File exceeds 100MB limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Per-user rate limit exceeded",
+            "headers": {
+              "RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Max requests per window for this user."
+              },
+              "RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Requests left in the current window."
+              },
+              "RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds until the current window resets."
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds the client should wait before retrying."
+              },
+              "X-RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Limit`."
+              },
+              "X-RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Remaining`."
+              },
+              "X-RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Reset`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/me/orgs": {
       "get": {
         "tags": [
@@ -834,66 +987,6 @@
                     "text-embedding-3-small",
                     "text-embedding-3-large"
                   ]
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/files": {
-      "post": {
-        "tags": [
-          "files"
-        ],
-        "description": "Upload a file to an org",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "file"
-                ],
-                "properties": {
-                  "file": {
-                    "type": "array",
-                    "items": {
-                      "type": "integer",
-                      "format": "int32",
-                      "minimum": 0
-                    },
-                    "contentMediaType": "application/octet-stream"
-                  }
-                }
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "File uploaded successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/File"
                 }
               }
             }
@@ -1609,6 +1702,405 @@
         "responses": {
           "204": {
             "description": "File deleted"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/files/{file_id}/chunks": {
+      "get": {
+        "tags": [
+          "k2"
+        ],
+        "description": "List chunks for a knowledge base file, in document order. Layout metadata (`blocks`) is omitted from each item to keep responses small; fetch a single chunk by `uid` to retrieve it.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Cursor: pass `next_page_token` from the previous response to fetch\nthe next page. Treat the value as opaque.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size. Defaults to 100; max 500.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chunks listed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListK2ChunksResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Insert a new chunk. Place via `after_uid` / `before_uid` (mutually exclusive) or omit both to append.",
+        "operationId": "insert",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InsertK2ChunkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Chunk inserted. Search results reflect the change after re-indexing completes (`index_status` field).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K2Chunk"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid placement or payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No insertion slot available between the specified neighbors. Retry with a different placement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/files/{file_id}/chunks/{chunk_uid}": {
+      "get": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Get a single chunk by uid.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chunk_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chunk",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K2Chunk"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Chunk not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Delete a chunk. Requires `If-Match: \u003Crevision\u003E` from the prior GET. The chunk disappears from listings immediately and stops affecting search after the next re-index pass.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chunk_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Chunk deleted"
+          },
+          "404": {
+            "description": "Chunk not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "`If-Match` revision does not match the current chunk",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Edit a chunk's content / embed / page range. Requires `If-Match: \u003Crevision\u003E` from the prior GET.",
+        "operationId": "patch",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "chunk_uid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchK2ChunkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Chunk updated. Search results reflect the change after re-indexing completes (`index_status` field).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K2Chunk"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty patch or empty content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Chunk not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "`If-Match` revision does not match the current chunk",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -7720,54 +8212,6 @@
           }
         }
       },
-      "File": {
-        "type": "object",
-        "required": [
-          "content_length",
-          "content_type",
-          "created_at",
-          "name",
-          "id",
-          "url"
-        ],
-        "properties": {
-          "content_length": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The content length of the file in bytes"
-          },
-          "content_type": {
-            "type": "string",
-            "description": "The content type of the file"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "description": "The time the file was created"
-          },
-          "expires_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time",
-            "description": "The time the file expires at"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Unique identifier for the file"
-          },
-          "name": {
-            "type": "string",
-            "description": "The name of the file"
-          },
-          "url": {
-            "type": "string",
-            "description": "The URL where the file can be accessed"
-          }
-        }
-      },
       "FileRef": {
         "type": "object",
         "required": [
@@ -7894,6 +8338,54 @@
           }
         }
       },
+      "InsertK2ChunkRequest": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "after_uid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Place the new chunk immediately after this `chunk_uid`. Mutually\nexclusive with `before_uid`. If neither is set, the chunk is\nappended at the end of the file."
+          },
+          "before_uid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Place the new chunk immediately before this `chunk_uid`. Mutually\nexclusive with `after_uid`."
+          },
+          "content": {
+            "type": "string"
+          },
+          "embed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Text used for vector / full-text indexing. Defaults to `content`\nwhen omitted; provide an explicit value to keep an\nindexing-optimized variant distinct from the user-visible text."
+          },
+          "page_end": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "page_start": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "IntegrationPreview": {
         "type": "object",
         "required": [
@@ -7931,6 +8423,171 @@
         "properties": {
           "email": {
             "type": "string"
+          }
+        }
+      },
+      "K2Chunk": {
+        "type": "object",
+        "required": [
+          "uid",
+          "kb_file_id",
+          "ordinal",
+          "content",
+          "embed",
+          "blocks",
+          "index_status",
+          "revision",
+          "source",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "blocks": {
+            "type": "object",
+            "description": "Source-document layout metadata (e.g. bounding boxes, page coords)\nwhen available. `null` for chunks created or edited by the user."
+          },
+          "content": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "embed": {
+            "type": "string"
+          },
+          "index_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "index_status": {
+            "type": "string",
+            "description": "Indexing state. One of `pending`, `indexing`, `indexed`, `failed`.\nWhile not `indexed`, the chunk's contribution to search results may\nbe stale."
+          },
+          "indexed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "kb_file_id": {
+            "type": "string"
+          },
+          "ordinal": {
+            "type": "string",
+            "description": "Ordering key. Chunks in a file are returned in ascending `ordinal`\norder. Treat the value as opaque — placement on insert is controlled\nby `after_uid` / `before_uid`, not by setting `ordinal` directly."
+          },
+          "page_end": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "page_start": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "revision": {
+            "type": "string",
+            "description": "Optimistic concurrency token. Send back as `If-Match: \u003Crevision\u003E`\non the next mutation (`PATCH` / `DELETE`)."
+          },
+          "source": {
+            "type": "string",
+            "description": "Origin of the chunk: `parser`, `user_edit`, or `insert`."
+          },
+          "uid": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable per-chunk identity."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "K2ChunkSummary": {
+        "type": "object",
+        "description": "List-endpoint payload. Same fields as [`K2Chunk`] except `blocks`,\nwhich is omitted to keep list responses small. Fetch a single chunk\nby `uid` to retrieve `blocks`.",
+        "required": [
+          "uid",
+          "kb_file_id",
+          "ordinal",
+          "content",
+          "embed",
+          "index_status",
+          "revision",
+          "source",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "embed": {
+            "type": "string"
+          },
+          "index_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "index_status": {
+            "type": "string"
+          },
+          "indexed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "kb_file_id": {
+            "type": "string"
+          },
+          "ordinal": {
+            "type": "string"
+          },
+          "page_end": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "page_start": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "uid": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -8779,6 +9436,26 @@
           }
         }
       },
+      "ListK2ChunksResponse": {
+        "type": "object",
+        "required": [
+          "chunks"
+        ],
+        "properties": {
+          "chunks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/K2ChunkSummary"
+            }
+          },
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ListK2FilesResponse": {
         "type": "object",
         "required": [
@@ -9386,6 +10063,39 @@
           "role": {
             "type": "string",
             "description": "User's role in the organization"
+          }
+        }
+      },
+      "PatchK2ChunkRequest": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "embed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Text used for vector / full-text indexing. When `content` is\nprovided and `embed` is omitted, `embed` is auto-set to the new\n`content`. Send an explicit value to keep an indexing-optimized\nvariant distinct from the user-visible text."
+          },
+          "page_end": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "page_start": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Tri-state: omit to leave unchanged, send `null` to clear, send an\ninteger to set."
           }
         }
       },
@@ -10057,7 +10767,7 @@
             "items": {
 
             },
-            "description": "Optional parameters for the query. Parameters used inside Lance vector\nsearch functions (lance_vector_search, lance_hybrid_search) are\nautomatically embedded into vectors."
+            "description": "Optional parameters for the query. Parameters passed to the vector\nsearch functions (`lance_vector_search`, `lance_hybrid_search`) are\nautomatically converted to embedding vectors before the query runs."
           },
           "sql": {
             "type": "string",
@@ -10357,6 +11067,47 @@
               "null"
             ],
             "format": "int64"
+          }
+        }
+      },
+      "TempFile": {
+        "type": "object",
+        "description": "Stateless temporary file metadata. Stored under a dedicated `tmp/` prefix\nin object storage and removed by storage lifecycle policy ~24h after upload.\nNo database row is created; clients must persist the URL/name themselves\nif they need to track it.",
+        "required": [
+          "name",
+          "content_type",
+          "content_length",
+          "url",
+          "created_at",
+          "expires_at"
+        ],
+        "properties": {
+          "content_length": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size of the uploaded payload in bytes."
+          },
+          "content_type": {
+            "type": "string",
+            "description": "MIME type as reported by the client."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Time the file was uploaded."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Advisory expiration (~24h after upload). Object deletion is performed by\nstorage lifecycle and may lag this timestamp by up to a day. Treat HTTP\n404 from `url` as \"expired\"."
+          },
+          "name": {
+            "type": "string",
+            "description": "Original filename (sanitized — slashes / control characters replaced)."
+          },
+          "url": {
+            "type": "string",
+            "description": "Public URL where the file can be downloaded until it expires."
           }
         }
       },
