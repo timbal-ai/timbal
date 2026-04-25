@@ -219,19 +219,36 @@ const PipeReaderCtx = struct {
     prefix: []const u8,
     color: []const u8,
     mutex: *std.Thread.Mutex,
+    allocator: std.mem.Allocator,
 };
 
 /// Thread function that reads from a pipe line by line, printing each with a colored prefix.
+///
+/// Uses a heap-allocated dynamic buffer so a single oversized log line (e.g. a structlog
+/// event whose context dumps a Message or a tool result) does not kill the reader thread
+/// and silently swallow all subsequent child output.
 fn pipeReaderFn(ctx: PipeReaderCtx) void {
     const stdout = std.io.getStdOut().writer();
-    var buf: [4096]u8 = undefined;
     const reader = ctx.pipe.reader();
 
+    // 16 MiB cap per line — well above anything a sane log line should produce, but
+    // bounded so a runaway producer can't OOM us. Lines longer than this are split.
+    const max_line_size: usize = 16 * 1024 * 1024;
+
     while (true) {
-        const line = reader.readUntilDelimiter(&buf, '\n') catch |err| {
-            if (err == error.EndOfStream) break;
-            break;
+        const line = reader.readUntilDelimiterAlloc(ctx.allocator, '\n', max_line_size) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.StreamTooLong => {
+                // Single line longer than max_line_size; emit a marker and resync at next '\n'.
+                ctx.mutex.lock();
+                stdout.print("{s}{s}{s} <line too long, truncated>\n", .{ ctx.color, ctx.prefix, Color.reset }) catch {};
+                ctx.mutex.unlock();
+                reader.skipUntilDelimiterOrEof('\n') catch break;
+                continue;
+            },
+            else => continue,
         };
+        defer ctx.allocator.free(line);
         if (line.len == 0) continue;
 
         ctx.mutex.lock();
@@ -267,6 +284,7 @@ fn spawnService(
             .prefix = prefix,
             .color = color,
             .mutex = mutex,
+            .allocator = allocator,
         }});
         try threads.append(thread);
     }
@@ -276,6 +294,7 @@ fn spawnService(
             .prefix = prefix,
             .color = color,
             .mutex = mutex,
+            .allocator = allocator,
         }});
         try threads.append(thread);
     }
