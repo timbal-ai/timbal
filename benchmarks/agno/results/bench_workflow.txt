@@ -1,0 +1,174 @@
+
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal Workflow vs Agno Workflow — workflow benchmark[0m
+  200 iters · 200 burst · 200 mem · 500 throughput ops
+  Agno found — telemetry=False
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+
+  [2mSpot-checking correctness (sequential)...[0m
+  Timbal: ✓  |  Agno: ✓
+
+  [2m[Scenario · sequential][0m
+    Timbal latency... p50=1.00 ms
+    Timbal memory... 57.6 KB peak
+    Timbal burst (200 concurrent)... p50=94.48 ms
+    Timbal throughput conc=1... 1070/s
+    Timbal throughput conc=10... 1636/s
+    Timbal throughput conc=50... 1527/s
+    Timbal throughput conc=200... 1510/s
+    Agno latency... p50=440.2 µs
+    Agno memory... 98.1 KB peak
+    Agno burst (200 concurrent)... p50=437.4 µs
+    Agno throughput conc=1... 2081/s
+    Agno throughput conc=10... 2190/s
+    Agno throughput conc=50... 1882/s
+    Agno throughput conc=200... 1640/s
+
+  [2m[Scenario · fanout][0m
+    Timbal latency... p50=1.10 ms
+    Timbal memory... 73.3 KB peak
+    Timbal burst (200 concurrent)... p50=126.37 ms
+    Timbal throughput conc=1... 870/s
+    Timbal throughput conc=10... 1111/s
+    Timbal throughput conc=50... 1135/s
+    Timbal throughput conc=200... 1066/s
+    Agno latency... p50=620.1 µs
+    Agno memory... 101.3 KB peak
+    Agno burst (200 concurrent)... p50=55.70 ms
+    Agno throughput conc=1... 1629/s
+    Agno throughput conc=10... 1827/s
+    Agno throughput conc=50... 1923/s
+    Agno throughput conc=200... 1941/s
+
+  [2m[Scenario · diamond][0m
+    Timbal latency... p50=997.7 µs
+    Timbal memory... 65.7 KB peak
+    Timbal burst (200 concurrent)... p50=95.19 ms
+    Timbal throughput conc=1... 1147/s
+    Timbal throughput conc=10... 1623/s
+    Timbal throughput conc=50... 1491/s
+    Timbal throughput conc=200... 1464/s
+    Agno latency... p50=539.5 µs
+    Agno memory... 100.4 KB peak
+    Agno burst (200 concurrent)... p50=58.66 ms
+    Agno throughput conc=1... 1765/s
+    Agno throughput conc=10... 2042/s
+    Agno throughput conc=50... 2064/s
+    Agno throughput conc=200... 2072/s
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  sequential: A → B → C → D[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×200)[0m
+                        Timbal            Agno
+  ────────────  ──────────────  ──────────────
+          mean         1.04 ms        461.1 µs
+           p50         1.00 ms        440.2 µs
+           p95         1.35 ms        570.9 µs
+           p99         1.77 ms        694.9 µs
+
+  [1mMemory  (×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                      57.6 KB         295  B
+  Agno                        98.1 KB         502  B
+
+  [1mBurst  (200 concurrent)[0m
+                        Timbal            Agno
+  ────────────  ──────────────  ──────────────
+           p50        94.48 ms        437.4 µs
+           p75        96.05 ms        448.0 µs
+           p95        97.26 ms        587.0 µs
+           p99        97.42 ms        754.5 µs
+           max        97.43 ms         1.78 ms
+
+  [2mwall: Timbal: 97.4 ms | Agno: 1.8 ms[0m
+
+  [1mThroughput  (500 loops)[0m
+                        Timbal            Agno
+  ────────────  ──────────────  ──────────────
+             1          1070/s          2081/s
+            10          1636/s          2190/s
+            50          1527/s          1882/s
+           200          1510/s          1640/s
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  fanout: A → [B, C, D] → E[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×200)[0m
+                        Timbal            Agno
+  ────────────  ──────────────  ──────────────
+          mean         1.15 ms        668.3 µs
+           p50         1.10 ms        620.1 µs
+           p95         1.47 ms        948.5 µs
+           p99         1.94 ms         1.35 ms
+
+  [1mMemory  (×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                      73.3 KB         375  B
+  Agno                       101.3 KB         518  B
+
+  [1mBurst  (200 concurrent)[0m
+                        Timbal            Agno
+  ────────────  ──────────────  ──────────────
+           p50       126.37 ms        55.70 ms
+           p75       136.99 ms        73.54 ms
+           p95       137.72 ms        87.92 ms
+           p99       137.88 ms        90.95 ms
+           max       137.90 ms        91.53 ms
+
+  [2mwall: Timbal: 137.9 ms | Agno: 91.5 ms[0m
+
+  [1mThroughput  (500 loops)[0m
+                        Timbal            Agno
+  ────────────  ──────────────  ──────────────
+             1           870/s          1629/s
+            10          1111/s          1827/s
+            50          1135/s          1923/s
+           200          1066/s          1941/s
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  diamond: A → [B, C] → D[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×200)[0m
+                        Timbal            Agno
+  ────────────  ──────────────  ──────────────
+          mean         1.86 ms        566.7 µs
+           p50        997.7 µs        539.5 µs
+           p95         6.73 ms        732.2 µs
+           p99        16.97 ms        857.5 µs
+
+  [1mMemory  (×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                      65.7 KB         336  B
+  Agno                       100.4 KB         514  B
+
+  [1mBurst  (200 concurrent)[0m
+                        Timbal            Agno
+  ────────────  ──────────────  ──────────────
+           p50        95.19 ms        58.66 ms
+           p75       101.43 ms        76.19 ms
+           p95       102.97 ms        90.17 ms
+           p99       103.07 ms        92.89 ms
+           max       103.07 ms        93.42 ms
+
+  [2mwall: Timbal: 103.1 ms | Agno: 93.4 ms[0m
+
+  [1mThroughput  (500 loops)[0m
+                        Timbal            Agno
+  ────────────  ──────────────  ──────────────
+             1          1147/s          1765/s
+            10          1623/s          2042/s
+            50          1491/s          2064/s
+           200          1464/s          2072/s
+
+[2m────────────────────────────────────────────────────────────────────────────────────────
+  Timbal: Workflow DAG with built-in InMemory tracing always on.
+  Agno: Workflow/Parallel primitives with telemetry=False.
+────────────────────────────────────────────────────────────────────────────────────────[0m
+

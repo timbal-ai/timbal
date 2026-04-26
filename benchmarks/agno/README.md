@@ -1,14 +1,33 @@
 # Timbal vs Agno — Benchmarks
 
-> **⚠ WIP** — Only `bench_agent.py` exists so far. Workflow, parallel workflow, and
-> double fan-out benchmarks are not yet written. Numbers are real but this page is incomplete.
+Pure framework overhead benchmarks. No real LLM API calls. Agent model responses are
+faked, and workflow steps are intentionally tiny so the numbers isolate framework cost.
 
-Pure framework overhead benchmarks. No LLM API calls — all handlers are trivial
-synthetic functions. Results are deterministic and reproducible.
+**Environment:** Apple Silicon M-series, Python 3.12, asyncio event loop.  
+**All numbers below are from full-mode runs.** Raw output is stored in `results/`.
 
-**Environment:** Apple Silicon M-series, Python 3.12, asyncio event loop.
-**All numbers from full-mode runs** (100 iters, 200 throughput ops, 50-burst).
-Raw output stored in `results/`.
+---
+
+## The Short Version
+
+Timbal is very strong on **agent loops**. Against Agno with telemetry disabled, Timbal is
+**2.2-4.3x faster at p50**, allocates **~9-14x less memory per run**, and handles
+concurrent agent bursts much better.
+
+Agno Workflow is the opposite story. With telemetry disabled, Agno's `Workflow` and
+`Parallel` primitives are leaner than Timbal Workflow on tiny synthetic DAGs and large
+fan-outs. That is real signal. Timbal's Workflow runtime gives richer DAG semantics and
+built-in tracing, but it currently pays too much overhead for high-cardinality, tiny-step
+graphs.
+
+So the narrative is:
+
+- **Agents:** Timbal wins clearly.
+- **Workflow DAGs:** Agno is faster/lighter on tiny steps and wide `Parallel` workloads.
+- **Telemetry:** Agno's default telemetry is still a serious footgun for agents: the
+  network call is awaited on the hot path. Benchmarks use `telemetry=False`.
+- **Next work:** keep the agent advantage, then optimize Timbal Workflow scheduling,
+  branch fan-out, and concurrent burst behavior.
 
 ---
 
@@ -17,6 +36,9 @@ Raw output stored in `results/`.
 | File | What it measures |
 |------|-----------------|
 | `bench_agent.py` | Full agent loop: fake LLM + tool calls, latency/memory/throughput |
+| `bench_workflow.py` | Small workflow shapes: sequential, fan-out/in, diamond |
+| `bench_parallel.py` | Wide fan-out: root -> [N branches] -> sink |
+| `bench_double_fanout.py` | Double fan-out: root -> [N phase 1] -> aggregate -> [N phase 2] -> sink |
 
 ## Setup
 
@@ -25,220 +47,159 @@ uv sync --dev
 uv pip install agno
 ```
 
-No API keys required — all LLM calls are faked.
+`agno` is not in `pyproject.toml`; install it ad-hoc for this benchmark.
 
-## How to run
+## How To Run
 
 ```bash
-# Quick mode (~2–3 min, fewer iterations)
+# Quick mode
 uv run python benchmarks/agno/bench_agent.py --quick
+uv run python benchmarks/agno/bench_workflow.py --quick
+uv run python benchmarks/agno/bench_parallel.py --quick
+uv run python benchmarks/agno/bench_double_fanout.py --quick
 
-# Full mode (~15–20 min)
+# Full mode
 uv run python benchmarks/agno/bench_agent.py
+uv run python benchmarks/agno/bench_workflow.py
+uv run python benchmarks/agno/bench_parallel.py
+uv run python benchmarks/agno/bench_double_fanout.py
 ```
 
-> `agno` is not in `pyproject.toml` — install it ad-hoc with `uv pip install agno`.
+---
+
+## Telemetry Fairness
+
+Agno agents default to `telemetry=True`, which sends an awaited HTTP POST to
+`https://os-api.agno.com/telemetry/runs` at the end of every run. In earlier measurement
+this added roughly **400-500 ms per run**. That is network latency, not framework compute.
+
+The agent benchmark reports:
+
+- `Agno (no tel)`: `telemetry=False`, the production-sane baseline.
+- `Agno (tel mock)`: `telemetry=True` with the HTTP call mocked, measuring local
+  serialization overhead only.
+
+Workflow benchmarks use `telemetry=False`. Timbal includes `InMemoryTracingProvider`
+by default; there is no "Timbal bare" column.
+
+Important caveat: same high-level observability does not mean identical granularity.
+Timbal records each workflow step as a first-class span. Agno `Parallel` also records
+parallel branch outputs, but its execution model is not identical to Timbal's DAG
+scheduler.
 
 ---
 
-## The telemetry problem
+## Agent Loop Results
 
-**Before reading any numbers**, you need to understand Agno's default behaviour.
+Full loop: prompt -> fake LLM -> tool call(s) -> fake LLM -> answer.
 
-Out of the box, `agno` sends an HTTP POST to `https://os-api.agno.com/telemetry/runs` at the
-end of **every single agent run**. This call is **awaited** — it blocks the hot path.
-It is not fire-and-forget, there is no batching, there is no queue.
-Measured overhead: **~400–500 ms per run**.
+| Scenario | Timbal p50 | Agno no-tel p50 | Timbal advantage |
+|----------|-----------:|----------------:|-----------------:|
+| Single tool | 786.6 us | 1.75 ms | 2.2x faster |
+| 3-step chain | 946.9 us | 4.05 ms | 4.3x faster |
+| Parallel tools | 749.8 us | 3.25 ms | 4.3x faster |
 
-This means the out-of-the-box Agno experience is unusable for any latency-sensitive workload.
-You cannot benchmark it, you cannot reason about it, and you cannot run it in production
-without explicitly opting out first.
+| Scenario | Timbal memory/run | Agno no-tel memory/run | Timbal advantage |
+|----------|------------------:|-----------------------:|-----------------:|
+| Single tool | 590 B | 8,363 B | 14.2x less |
+| 3-step chain | 1,014 B | 9,042 B | 8.9x less |
+| Parallel tools | 979 B | 9,077 B | 9.3x less |
 
-To disable: `Agent(..., telemetry=False)` or set `AGNO_TELEMETRY=false`.
+| Scenario | Timbal throughput c=10 | Agno no-tel throughput c=10 | Timbal advantage |
+|----------|-----------------------:|----------------------------:|-----------------:|
+| Single tool | 1,634/s | 711/s | 2.3x higher |
+| 3-step chain | 773/s | 302/s | 2.6x higher |
+| Parallel tools | 1,167/s | 291/s | 4.0x higher |
 
-The benchmark measures two Agno configurations:
-- **Agno (no tel)** — `telemetry=False`: the explicit opt-out required for production use
-- **Agno (tel mock)** — `telemetry=True` with the HTTP call replaced by an `AsyncMock`:
-  measures the JSON-serialisation overhead in isolation. It turns out to be essentially
-  zero — the 400–500 ms is 100% network latency.
-
----
-
-## On Agno's own benchmarks
-
-Agno publishes benchmark numbers showing agent instantiation in **~3 µs** vs 170 µs for
-PydanticAI and 1,587 µs for LangGraph. These numbers are real.
-
-They are also almost entirely irrelevant.
-
-In any serious production deployment you instantiate your agent **once** — at startup,
-as a class variable, as a module-level singleton. You are not paying that cost on every
-request. The cost you pay on every request is execution time: prompt preparation,
-the tool-call loop, message history management, memory allocation per run.
-
-Measuring agent instantiation as a proxy for framework performance is like benchmarking
-a web framework by how fast it imports — technically accurate, practically meaningless.
-The numbers below measure what actually matters.
+Timbal's agent loop is the headline win. Agno carries much more per-run state and the
+gap grows in multi-step and parallel-tool cases.
 
 ---
 
-## Results
+## Small Workflow Results
 
-### Agent loop (`bench_agent.py`)
+`bench_workflow.py` uses Agno's real `Workflow` and `Parallel` primitives.
 
-Full agent loop: prompt → LLM (faked via `FakeModel`) → tool(s) → LLM → answer.
+| Scenario | Timbal p50 | Agno p50 | Notes |
+|----------|-----------:|---------:|-------|
+| Sequential A -> B -> C -> D | 1.00 ms | 440.2 us | Agno is 2.3x faster |
+| Fan-out A -> [B,C,D] -> E | 1.10 ms | 620.1 us | Agno is 1.8x faster |
+| Diamond A -> [B,C] -> D | 997.7 us | 539.5 us | Agno is 1.8x faster |
 
-Three scenarios:
+| Scenario | Timbal memory/run | Agno memory/run |
+|----------|------------------:|----------------:|
+| Sequential | 295 B | 502 B |
+| Fan-out | 375 B | 518 B |
+| Diamond | 336 B | 514 B |
 
-1. **Single tool:** `LLM → add(1,2) → LLM → "3"` — 2 LLM calls, 1 tool
-2. **Multi-step:** `LLM → add → LLM → mul → LLM → sub → LLM → "9"` — 4 LLM calls, 3 tools sequential
-3. **Parallel tools:** `LLM → [add, mul, neg] → LLM → "done"` — 2 LLM calls, 3 tools concurrent
-
-Both Timbal and Agno dispatch multiple tool calls from a single LLM response concurrently
-(Agno uses `asyncio.gather` over `function_calls_to_run` in `aresponse()`).
-
-**Fake LLM strategy:**
-- Timbal uses `TestModel(handler=fn)` — plain callable, inspects message history
-- Agno uses a custom `FakeModel` subclassing `agno.models.base.Model` — stateless,
-  counts `role == "tool"` messages in history to determine which step to return
-
----
-
-#### Scenario 1 — Single tool call: `LLM → add(1,2) → LLM → "3"`
-
-**Latency** (×100 sequential runs)
-
-| | Timbal | Agno (no tel) | Agno (tel mock) |
-|--|--------|--------------|----------------|
-| mean | **943 µs** | 1.30 ms | 1.64 ms |
-| p50  | **982 µs** | 1.25 ms | 1.28 ms |
-| p95  | **1.52 ms** | 1.53 ms | 2.25 ms |
-| p99  | **1.70 ms** | 1.92 ms | 16.33 ms |
-
-Timbal is **1.3× faster** than Agno (no tel) at p50.
-
-**Memory** (×100 runs)
-
-| | Timbal | Agno (no tel) | Agno (tel mock) |
-|--|--------|--------------|----------------|
-| peak    | **55 KB**  | 814 KB | 815 KB |
-| per run | **563 B**  | 8,340 B | 8,341 B |
-
-Timbal allocates **14.8× less memory per run** than Agno.
-
-**Burst** (50 concurrent) and **Throughput** (200 loops)
-
-| | Timbal | Agno (no tel) | Agno (tel mock) |
-|--|--------|--------------|----------------|
-| burst p50       | **14.74 ms** | 29.32 ms | 28.86 ms |
-| burst wall      | **15.3 ms**  | 51.0 ms  | 50.7 ms  |
-| throughput c=1  | **1,713/s**  | 808/s    | 814/s    |
-| throughput c=10 | **1,861/s**  | 886/s    | 875/s    |
-| throughput c=50 | **1,933/s**  | 900/s    | 914/s    |
+Timbal allocates less in these small workflow runs, but Agno's runtime latency and
+concurrent burst behavior are better. This points at scheduler/event overhead rather than
+raw allocation volume.
 
 ---
 
-#### Scenario 2 — Multi-step: `LLM → add → LLM → mul → LLM → sub → LLM → "9"`
+## Wide Fan-Out Results
 
-**Latency** (×100 sequential runs)
+`bench_parallel.py` measures `root -> [N branches] -> sink`.
 
-| | Timbal | Agno (no tel) | Agno (tel mock) |
-|--|--------|--------------|----------------|
-| mean | **1.12 ms** | 3.44 ms | 3.39 ms |
-| p50  | **981 µs**  | 3.32 ms | 3.27 ms |
-| p95  | **2.29 ms** | 4.00 ms | 4.18 ms |
-| p99  | **4.90 ms** | 7.12 ms | 4.56 ms |
+| Width | Timbal trivial p50 | Agno trivial p50 | Timbal async p50 | Agno async p50 |
+|------:|-------------------:|-----------------:|-----------------:|---------------:|
+| 4 | 1.03 ms | 578.6 us | 2.13 ms | 1.85 ms |
+| 8 | 1.51 ms | 746.7 us | 2.55 ms | 1.99 ms |
+| 16 | 2.49 ms | 1.01 ms | 3.29 ms | 2.05 ms |
+| 32 | 4.24 ms | 1.26 ms | 4.74 ms | 2.38 ms |
+| 64 | 7.98 ms | 2.44 ms | 8.79 ms | 3.25 ms |
 
-Timbal is **3.4× faster** than Agno (no tel) at p50.
+| Width | Timbal burst p50 | Agno burst p50 | Timbal memory/run | Agno memory/run |
+|------:|-----------------:|---------------:|------------------:|----------------:|
+| 4 | 171.4 ms | 62.9 ms | 389 B | 525 B |
+| 8 | 254.4 ms | 79.3 ms | 586 B | 583 B |
+| 16 | 544.8 ms | 118.9 ms | 957 B | 613 B |
+| 32 | 1,224.4 ms | 228.0 ms | 1,728 B | 842 B |
+| 64 | 3,153.5 ms | 1,542.4 ms | 3,182 B | 1,142 B |
 
-**Memory** (×100 runs)
-
-| | Timbal | Agno (no tel) | Agno (tel mock) |
-|--|--------|--------------|----------------|
-| peak    | **98 KB**   | 882 KB | 881 KB |
-| per run | **1,004 B** | 9,027 B | 9,023 B |
-
-Timbal allocates **9.0× less per run** than Agno for a 3-tool chain.
-
-**Burst** (30 concurrent) and **Throughput** (200 loops)
-
-| | Timbal | Agno (no tel) | Agno (tel mock) |
-|--|--------|--------------|----------------|
-| burst p50       | **26.93 ms** | 51.52 ms | 50.51 ms |
-| burst wall      | **27.2 ms**  | 87.3 ms  | 86.6 ms  |
-| throughput c=1  | **753/s**    | 283/s    | 286/s    |
-| throughput c=10 | **920/s**    | 337/s    | 314/s    |
-| throughput c=50 | **895/s**    | 341/s    | 335/s    |
+Agno scales better as branch count rises. Timbal's per-branch scheduling and tracing cost
+is visible, especially under concurrent bursts.
 
 ---
 
-#### Scenario 3 — Parallel tools: `LLM → [add, mul, neg] concurrent → LLM → "done"`
+## Double Fan-Out Results
 
-**Latency** (×100 sequential runs)
+`bench_double_fanout.py` measures two explicit fan-out phases:
+`root -> [N phase 1] -> aggregate -> [N phase 2] -> sink`.
 
-| | Timbal | Agno (no tel) | Agno (tel mock) |
-|--|--------|--------------|----------------|
-| mean | **970 µs**  | 3.05 ms | 3.12 ms |
-| p50  | **974 µs**  | 2.98 ms | 2.97 ms |
-| p95  | **1.57 ms** | 3.62 ms | 3.88 ms |
-| p99  | **1.73 ms** | 3.84 ms | 4.78 ms |
+| Width per phase | Timbal trivial p50 | Agno trivial p50 | Timbal async p50 | Agno async p50 |
+|----------------:|-------------------:|-----------------:|-----------------:|---------------:|
+| 4 | 1.82 ms | 757.0 us | 4.16 ms | 3.29 ms |
+| 8 | 2.69 ms | 1.02 ms | 5.26 ms | 3.47 ms |
+| 16 | 4.99 ms | 1.17 ms | 5.89 ms | 3.61 ms |
+| 32 | 7.49 ms | 1.68 ms | 8.06 ms | 3.99 ms |
 
-Timbal is **3.1× faster** than Agno (no tel) at p50.
+| Width per phase | Timbal burst p50 | Agno burst p50 | Timbal memory/run | Agno memory/run |
+|----------------:|-----------------:|---------------:|------------------:|----------------:|
+| 4 | 121.5 ms | 53.2 ms | 1,033 B | 750 B |
+| 8 | 301.4 ms | 64.3 ms | 1,661 B | 850 B |
+| 16 | 524.4 ms | 101.5 ms | 2,845 B | 1,107 B |
+| 32 | 1,119.0 ms | 209.1 ms | 5,244 B | 1,544 B |
 
-**Memory** (×100 runs)
-
-| | Timbal | Agno (no tel) | Agno (tel mock) |
-|--|--------|--------------|----------------|
-| peak    | **89 KB**  | 887 KB | 887 KB |
-| per run | **911 B**  | 9,083 B | 9,082 B |
-
-**Burst** (40 concurrent) and **Throughput** (200 loops)
-
-| | Timbal | Agno (no tel) | Agno (tel mock) |
-|--|--------|--------------|----------------|
-| burst p50       | **17.95 ms** | 62.59 ms  | 63.33 ms  |
-| burst wall      | **19.4 ms**  | 108.5 ms  | 109.4 ms  |
-| throughput c=1  | **1,025/s**  | 320/s     | 332/s     |
-| throughput c=10 | **1,294/s**  | 350/s     | 344/s     |
-| throughput c=50 | **1,345/s**  | 343/s     | 355/s     |
+This is the strongest workflow signal for Agno. It keeps latency relatively flat as the
+number of parallel steps grows, while Timbal pays more for each first-class branch.
 
 ---
 
-#### Agent loop summary
+## Notes On The Comparison
 
-| Metric | Timbal vs Agno (no tel) |
-|--------|------------------------|
-| Latency p50 — single tool  | **1.3× faster** (982 µs vs 1.25 ms) |
-| Latency p50 — 3-step chain | **3.4× faster** (981 µs vs 3.32 ms) |
-| Latency p50 — parallel (3) | **3.1× faster** (974 µs vs 2.98 ms) |
-| Memory per run — single tool  | **14.8× less** (563 B vs 8,340 B) |
-| Memory per run — 3-step chain | **9.0× less** (1,004 B vs 9,027 B) |
-| Throughput c=10 — single tool | **2.1× more ops/s** (1,861 vs 886) |
-| Throughput c=10 — multi-step  | **2.7× more ops/s** (920 vs 337) |
-| Burst wall — 40 concurrent (parallel) | **5.6× faster** (19.4 ms vs 108.5 ms) |
+**Agent loops are not workflow graphs.** Timbal is substantially better in the full
+agent loop, even though Agno Workflow is leaner in standalone DAG microbenchmarks.
 
----
+**Agno telemetry must be disabled for latency-sensitive agent use.** The mocked telemetry
+column is close to no-telemetry, confirming the expensive part is the awaited network
+call, not JSON serialization.
 
-## Notes on the comparison
+**Workflow is the Timbal improvement target.** The fan-out results show concrete areas to
+optimize: task scheduling, branch result collection, event emission, and burst behavior
+when thousands of tiny step tasks are alive at once.
 
-**Agno (tel mock) ≈ Agno (no tel).** The two columns are nearly identical across all
-scenarios. This confirms that the 400–500 ms overhead in the default configuration is
-entirely network — the JSON serialisation cost is noise.
-
-**Timbal includes full tracing out of the box.** Every run records spans in
-`InMemoryTracingProvider`. There is no "Timbal bare" column because tracing is always
-on. This is the fair comparison — production deployments need observability.
-
-**The memory gap is large.** At 563 B vs 8,340 B per run for a single tool call (~14.8×),
-the gap is framework overhead alone — no disk I/O, no network, no external storage.
-Agno's `Agent` carries significantly more per-run state than Timbal's. At scale or under
-concurrent load this matters for GC pressure and memory headroom.
-
-**The burst gap widens with concurrency.** Scenario 3 at 40 concurrent: 19.4 ms (Timbal)
-vs 108.5 ms (Agno) — 5.6× wall time. This is where the per-run overhead compounds: more
-allocations, more GC, more contention in the event loop.
-
-**Both frameworks dispatch parallel tool calls correctly.** Agno uses `asyncio.gather`
-over `function_calls_to_run` in `aresponse()`. Scenario 3 latency (2.98 ms) is only
-slightly above scenario 1 (1.25 ms), confirming real parallel dispatch rather than
-sequential execution.
+**The right narrative is balanced.** Timbal is already excellent for agents. Agno's
+Workflow runtime gives us a useful lower-overhead reference point for where Timbal
+Workflow should go next.
