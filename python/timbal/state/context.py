@@ -128,6 +128,7 @@ class RunContext(BaseModel):
                         "prompt": approval.get("prompt"),
                         "description": approval.get("description"),
                         "metadata": approval.get("metadata", {}),
+                        "input": approval.get("input"),
                     }
                     if approval.get("expired"):
                         entry["expired"] = True

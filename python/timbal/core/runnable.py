@@ -198,6 +198,21 @@ class Runnable(ABC, BaseModel):
     """Optional approval prompt, or a callable that receives the validated runnable input."""
     approval_description: str | None = None
     """Optional approval description shown in ApprovalEvent."""
+    approval_redactor: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    """Optional callable to redact sensitive fields before they reach any
+    public approval surface (``ApprovalEvent.input``, persisted ``span.input``,
+    ``span.metadata['approval']['input']``, exporters).
+
+    Receives a copy of the validated input dict and must return a dict.
+    The handler still runs with the unredacted validated input on resume.
+    Takes precedence over ``approval_redact_keys`` when both are set.
+    A redactor that raises or returns a non-dict falls back to a placeholder
+    so the secret never leaks — see :meth:`_redact_validated_input`.
+    """
+    approval_redact_keys: list[str] | None = None
+    """Ergonomic shortcut for ``approval_redactor``: each listed key in the
+    validated input is replaced with ``"***"`` on the public approval
+    surfaces. The handler still receives the unredacted input."""
 
     schema_params_mode: Literal["all", "required"] = "all"
     """Parameter inclusion mode: 'all' includes all params, 'required' only required ones."""
@@ -791,6 +806,47 @@ class Runnable(ABC, BaseModel):
         except Exception as exc:
             raise ApprovalPolicyError(self._path, exc) from exc
 
+    def _redact_validated_input(self, validated_input: dict[str, Any]) -> dict[str, Any]:
+        """Apply ``approval_redactor`` / ``approval_redact_keys`` to produce
+        the public-facing input snapshot.
+
+        The original ``validated_input`` is never mutated. The returned dict
+        is what flows into :class:`ApprovalEvent`, ``span.input`` (when the
+        gate fires), and ``span.metadata['approval']['input']``. The handler
+        on resume keeps receiving the unredacted validated input.
+
+        Defensive: a redactor that raises or returns a non-dict is treated
+        as a config bug — we log and fall back to a placeholder so the
+        secret never reaches a public surface.
+        """
+        if self.approval_redactor is None and not self.approval_redact_keys:
+            return dict(validated_input)
+
+        if self.approval_redactor is not None:
+            try:
+                redacted = self.approval_redactor(dict(validated_input))
+            except Exception as exc:
+                _get_logger().warning(
+                    "approval_redactor raised; falling back to placeholder so the secret does not leak.",
+                    runnable_path=self._path,
+                    error=repr(exc),
+                )
+                return {"_approval_redaction_error": True}
+            if not isinstance(redacted, dict):
+                _get_logger().warning(
+                    "approval_redactor must return a dict; falling back to placeholder.",
+                    runnable_path=self._path,
+                    returned_type=type(redacted).__name__,
+                )
+                return {"_approval_redaction_error": True}
+            return redacted
+
+        redacted = dict(validated_input)
+        for key in self.approval_redact_keys or ():
+            if key in redacted:
+                redacted[key] = "***"
+        return redacted
+
     async def _resolve_input_params(self, input: dict[str, Any] | None = None) -> dict[str, Any]:
         """Merge fixed defaults, runtime defaults (lambdas), and input. Input takes priority."""
         input = input or {}
@@ -1026,14 +1082,30 @@ class Runnable(ABC, BaseModel):
 
             approval_decision = await self._resolve_approval_decision(validated_input)
             if approval_decision.required:
+                # ``approval_id`` MUST be derived from the unredacted input
+                # so the resume call (which carries the full input) lands
+                # on the same id as the original gate.
                 input_dump = await dump(validated_input)
                 approval_id = _approval_id_for(span.path, input_dump)
+
+                # Compute the redacted view once and use it for every
+                # public surface. The unredacted ``validated_input`` is
+                # still what the handler sees on resume.
+                redacted_input = self._redact_validated_input(validated_input)
+                redaction_active = (
+                    self.approval_redactor is not None or bool(self.approval_redact_keys)
+                )
+                if redaction_active:
+                    span.input = redacted_input
+                    span._input_dump = await dump(redacted_input)
+
                 span.metadata["approval"] = {
                     "id": approval_id,
                     "required": True,
                     "prompt": approval_decision.prompt,
                     "description": approval_decision.description,
                     "metadata": approval_decision.metadata,
+                    "input": redacted_input,
                 }
                 approval_resolution = run_context._approval_decisions.get(approval_id)
                 if approval_resolution is not None:
@@ -1071,7 +1143,7 @@ class Runnable(ABC, BaseModel):
                         runnable_path=span.path,
                         runnable_name=self.name,
                         runnable_type=self.metadata.get("type", self.__class__.__name__),
-                        input=validated_input,
+                        input=redacted_input,
                         prompt=approval_decision.prompt,
                         description=approval_decision.description,
                         metadata=approval_decision.metadata,
