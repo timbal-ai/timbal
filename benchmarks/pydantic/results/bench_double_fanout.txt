@@ -1,0 +1,232 @@
+
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal Workflow vs Pydantic Graph — double fan-out benchmark[0m
+  widths=[16, 32, 64, 128] · 200 iters · 100 burst
+  Pydantic Graph found — will measure bare + Logfire
+  [2mPG manual uses two asyncio.gather fan-outs inside graph nodes.[0m
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+
+  [2m[Phase 1 · N=16][0m
+    Timbal trivial... p50=4.62 ms
+    Timbal async work... p50=6.02 ms
+    Timbal memory... 277.6 KB peak
+    Timbal burst (100 concurrent, async work)... p50=516.5 ms
+    PG bare trivial... p50=203.4 µs
+    PG bare async work... p50=2.71 ms
+    PG bare memory... 113.0 KB peak
+    PG bare burst (100 concurrent, async work)... p50=24.3 ms
+
+  [2m[Phase 1 · N=32][0m
+    Timbal trivial... p50=8.57 ms
+    Timbal async work... p50=9.50 ms
+    Timbal memory... 507.4 KB peak
+    Timbal burst (100 concurrent, async work)... p50=1091.9 ms
+    PG bare trivial... p50=275.8 µs
+    PG bare async work... p50=2.87 ms
+    PG bare memory... 68.9 KB peak
+    PG bare burst (100 concurrent, async work)... p50=44.8 ms
+
+  [2m[Phase 1 · N=64][0m
+    Timbal trivial... p50=16.7 ms
+    Timbal async work... p50=18.0 ms
+    Timbal memory... 962.7 KB peak
+    Timbal burst (100 concurrent, async work)... p50=2532.1 ms
+    PG bare trivial... p50=406.3 µs
+    PG bare async work... p50=3.05 ms
+    PG bare memory... 112.3 KB peak
+    PG bare burst (100 concurrent, async work)... p50=112.8 ms
+
+  [2m[Phase 1 · N=128][0m
+    Timbal trivial... p50=36.8 ms
+    Timbal async work... p50=39.6 ms
+    Timbal memory... 1.8 MB peak
+    Timbal burst (100 concurrent, async work)... p50=5827.5 ms
+    PG bare trivial... p50=798.4 µs
+    PG bare async work... p50=4.05 ms
+    PG bare memory... 204.4 KB peak
+    PG bare burst (100 concurrent, async work)... p50=291.9 ms
+
+  [2mActivating Logfire (send_to_logfire=False)...[0m
+
+  [2m[Phase 2 · N=16][0m
+    PG+Logfire trivial... p50=1.18 ms
+    PG+Logfire async work... p50=3.72 ms
+    PG+Logfire memory... 451.3 KB peak
+    PG+Logfire burst (100 concurrent, async work)... p50=70.9 ms
+
+  [2m[Phase 2 · N=32][0m
+    PG+Logfire trivial... p50=1.06 ms
+    PG+Logfire async work... p50=3.72 ms
+    PG+Logfire memory... 405.5 KB peak
+    PG+Logfire burst (100 concurrent, async work)... p50=90.3 ms
+
+  [2m[Phase 2 · N=64][0m
+    PG+Logfire trivial... p50=1.09 ms
+    PG+Logfire async work... p50=3.82 ms
+    PG+Logfire memory... 449.1 KB peak
+    PG+Logfire burst (100 concurrent, async work)... p50=168.9 ms
+
+  [2m[Phase 2 · N=128][0m
+    PG+Logfire trivial... p50=1.48 ms
+    PG+Logfire async work... p50=4.62 ms
+    PG+Logfire memory... 537.8 KB peak
+    PG+Logfire burst (100 concurrent, async work)... p50=336.7 ms
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Width N=16  (2N+3 target steps; PG manual uses 5 graph nodes)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mTrivial branches  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         4.78 ms        224.8 µs         1.20 ms
+           p50         4.62 ms        203.4 µs         1.18 ms
+           p95         5.14 ms        353.0 µs         1.46 ms
+           p99         6.72 ms        439.0 µs         1.54 ms
+
+  [1mAsync work branches (2× 1 ms fan-outs)  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         6.23 ms         2.84 ms         3.74 ms
+           p50         6.02 ms         2.71 ms         3.72 ms
+           p95         6.73 ms         3.73 ms         4.15 ms
+           p99         7.24 ms         5.42 ms         4.37 ms
+
+  [1mBurst  (100 concurrent, async work)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50        516.5 ms         24.3 ms         70.9 ms
+           p75        517.5 ms         24.8 ms         73.0 ms
+           p95        518.5 ms         25.3 ms         73.8 ms
+           p99        518.6 ms         25.4 ms         74.8 ms
+           max        518.6 ms         25.4 ms         74.8 ms
+
+  [2mwall: Timbal: 518.6 ms | PG bare: 25.4 ms | PG+Logfire: 74.8 ms[0m
+
+  [1mMemory  (trivial, ×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                   277.6 KB        1421  B
+  PG bare                  113.0 KB         579  B
+  PG+Logfire               451.3 KB        2311  B
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Width N=32  (2N+3 target steps; PG manual uses 5 graph nodes)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mTrivial branches  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         9.13 ms        298.2 µs         1.09 ms
+           p50         8.57 ms        275.8 µs         1.06 ms
+           p95         9.45 ms        413.7 µs         1.40 ms
+           p99         43.4 ms        487.0 µs         1.57 ms
+
+  [1mAsync work branches (2× 1 ms fan-outs)  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         10.4 ms         2.91 ms         3.73 ms
+           p50         9.50 ms         2.87 ms         3.72 ms
+           p95         10.8 ms         3.21 ms         3.99 ms
+           p99         46.9 ms         3.41 ms         4.09 ms
+
+  [1mBurst  (100 concurrent, async work)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       1091.9 ms         44.8 ms         90.3 ms
+           p75       1094.0 ms         46.2 ms         93.9 ms
+           p95       1095.8 ms         47.0 ms         95.4 ms
+           p99       1096.3 ms         47.2 ms         96.3 ms
+           max       1096.3 ms         47.2 ms         96.3 ms
+
+  [2mwall: Timbal: 1096.3 ms | PG bare: 47.2 ms | PG+Logfire: 96.3 ms[0m
+
+  [1mMemory  (trivial, ×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                   507.4 KB        2598  B
+  PG bare                   68.9 KB         353  B
+  PG+Logfire               405.5 KB        2076  B
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Width N=64  (2N+3 target steps; PG manual uses 5 graph nodes)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mTrivial branches  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         18.3 ms        429.1 µs         1.12 ms
+           p50         16.7 ms        406.3 µs         1.09 ms
+           p95         17.8 ms        550.7 µs         1.26 ms
+           p99         64.6 ms        656.1 µs         1.47 ms
+
+  [1mAsync work branches (2× 1 ms fan-outs)  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         21.1 ms         3.07 ms         4.29 ms
+           p50         18.0 ms         3.05 ms         3.82 ms
+           p95         57.2 ms         3.26 ms         8.51 ms
+           p99         74.3 ms         3.41 ms         13.3 ms
+
+  [1mBurst  (100 concurrent, async work)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       2532.1 ms        112.8 ms        168.9 ms
+           p75       2536.4 ms        115.1 ms        171.9 ms
+           p95       2539.8 ms        117.1 ms        174.4 ms
+           p99       2540.6 ms        117.5 ms        175.1 ms
+           max       2540.6 ms        117.5 ms        175.1 ms
+
+  [2mwall: Timbal: 2540.6 ms | PG bare: 117.5 ms | PG+Logfire: 175.1 ms[0m
+
+  [1mMemory  (trivial, ×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                   962.7 KB        4929  B
+  PG bare                  112.3 KB         575  B
+  PG+Logfire               449.1 KB        2300  B
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Width N=128  (2N+3 target steps; PG manual uses 5 graph nodes)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mTrivial branches  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         43.4 ms        818.2 µs         1.51 ms
+           p50         36.8 ms        798.4 µs         1.48 ms
+           p95        105.6 ms         1.02 ms         1.76 ms
+           p99        134.8 ms         1.24 ms         2.06 ms
+
+  [1mAsync work branches (2× 1 ms fan-outs)  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         51.3 ms         11.5 ms         4.56 ms
+           p50         39.6 ms         4.05 ms         4.62 ms
+           p95        117.8 ms         20.7 ms         4.86 ms
+           p99        141.4 ms        234.3 ms         4.99 ms
+
+  [1mBurst  (100 concurrent, async work)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       5827.5 ms        291.9 ms        336.7 ms
+           p75       5872.4 ms        296.3 ms        342.8 ms
+           p95       5880.1 ms        300.0 ms        347.6 ms
+           p99       5883.1 ms        300.6 ms        348.7 ms
+           max       5883.1 ms        300.6 ms        348.7 ms
+
+  [2mwall: Timbal: 5883.1 ms | PG bare: 300.6 ms | PG+Logfire: 348.7 ms[0m
+
+  [1mMemory  (trivial, ×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                     1.8 MB        9411  B
+  PG bare                  204.4 KB        1047  B
+  PG+Logfire               537.8 KB        2753  B
+
+[2m────────────────────────────────────────────────────────────────────────────────────────
+  Timbal: 2N+3 first-class workflow steps, one task/span per step.
+  PG manual: 5 graph nodes total, with branch concurrency owned by user code.
+  Async-work latency should be near 2 ms when both fan-out phases are concurrent.
+────────────────────────────────────────────────────────────────────────────────────────[0m
+

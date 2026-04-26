@@ -1,0 +1,209 @@
+
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal Workflow vs Pydantic Graph — workflow benchmark[0m
+  200 iters · 200 burst · 200 mem · 500 throughput ops
+  Pydantic Graph found — will measure bare + Logfire
+  [2mFan-out scenarios use manual branch work inside one Pydantic Graph node.[0m
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+
+  [2mSpot-checking correctness (sequential)...[0m
+  Timbal: ✓  |  PG: ✓
+
+  [2m[Phase 1 · sequential][0m
+    Timbal latency... p50=1.07 ms
+    Timbal memory... 61.3 KB peak
+    Timbal burst (200 concurrent)... p50=121.85 ms
+    Timbal throughput conc=1... 852/s
+    Timbal throughput conc=10... 1436/s
+    Timbal throughput conc=50... 1340/s
+    Timbal throughput conc=200... 1199/s
+    PG bare latency... p50=30.7 µs
+    PG bare memory... 15.7 KB peak
+    PG bare burst (200 concurrent)... p50=31.0 µs
+    PG bare throughput conc=1... 27604/s
+    PG bare throughput conc=10... 27539/s
+    PG bare throughput conc=50... 28391/s
+    PG bare throughput conc=200... 28150/s
+
+  [2m[Phase 1 · fanout][0m
+    Timbal latency... p50=1.18 ms
+    Timbal memory... 83.1 KB peak
+    Timbal burst (200 concurrent)... p50=193.40 ms
+    Timbal throughput conc=1... 734/s
+    Timbal throughput conc=10... 965/s
+    Timbal throughput conc=50... 960/s
+    Timbal throughput conc=200... 882/s
+    PG bare latency... p50=26.0 µs
+    PG bare memory... 16.4 KB peak
+    PG bare burst (200 concurrent)... p50=25.4 µs
+    PG bare throughput conc=1... 32750/s
+    PG bare throughput conc=10... 33350/s
+    PG bare throughput conc=50... 32645/s
+    PG bare throughput conc=200... 33183/s
+
+  [2m[Phase 1 · diamond][0m
+    Timbal latency... p50=1.02 ms
+    Timbal memory... 68.5 KB peak
+    Timbal burst (200 concurrent)... p50=150.50 ms
+    Timbal throughput conc=1... 951/s
+    Timbal throughput conc=10... 1364/s
+    Timbal throughput conc=50... 1261/s
+    Timbal throughput conc=200... 1149/s
+    PG bare latency... p50=25.3 µs
+    PG bare memory... 15.9 KB peak
+    PG bare burst (200 concurrent)... p50=25.2 µs
+    PG bare throughput conc=1... 32749/s
+    PG bare throughput conc=10... 33583/s
+    PG bare throughput conc=50... 33126/s
+    PG bare throughput conc=200... 33532/s
+
+  [2mActivating Logfire (send_to_logfire=False)...[0m
+
+  [2m[Phase 2 · sequential][0m
+    PG+Logfire latency... p50=592.3 µs
+    PG+Logfire memory... 295.3 KB peak
+    PG+Logfire burst (200 concurrent)... p50=587.7 µs
+    PG+Logfire throughput conc=1... 1652/s
+    PG+Logfire throughput conc=10... 1639/s
+    PG+Logfire throughput conc=50... 1626/s
+    PG+Logfire throughput conc=200... 1605/s
+
+  [2m[Phase 2 · fanout][0m
+    PG+Logfire latency... p50=465.2 µs
+    PG+Logfire memory... 241.0 KB peak
+    PG+Logfire burst (200 concurrent)... p50=480.3 µs
+    PG+Logfire throughput conc=1... 1875/s
+    PG+Logfire throughput conc=10... 2005/s
+    PG+Logfire throughput conc=50... 1890/s
+    PG+Logfire throughput conc=200... 1402/s
+
+  [2m[Phase 2 · diamond][0m
+    PG+Logfire latency... p50=484.9 µs
+    PG+Logfire memory... 240.5 KB peak
+    PG+Logfire burst (200 concurrent)... p50=481.0 µs
+    PG+Logfire throughput conc=1... 1872/s
+    PG+Logfire throughput conc=10... 1996/s
+    PG+Logfire throughput conc=50... 2003/s
+    PG+Logfire throughput conc=200... 1888/s
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  sequential: A → B → C → D[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×200 sequential runs)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         1.11 ms         32.8 µs        611.6 µs
+           p50         1.07 ms         30.7 µs        592.3 µs
+           p95         1.31 ms         39.5 µs        746.8 µs
+           p99         1.69 ms        125.0 µs        872.8 µs
+
+  [1mMemory  (×200 runs)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                      61.3 KB         314  B
+  PG bare                     15.7 KB          80  B
+  PG+Logfire                 295.3 KB        1512  B
+
+  [1mBurst  (200 concurrent)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       121.85 ms         31.0 µs        587.7 µs
+           p75       122.69 ms         32.3 µs        623.2 µs
+           p95       123.50 ms         36.6 µs        765.4 µs
+           p99       123.61 ms         80.5 µs        871.1 µs
+           max       123.64 ms        108.0 µs        875.0 µs
+
+  [2mwall: Timbal: 123.6 ms | PG bare: 0.1 ms | PG+Logfire: 0.9 ms[0m
+
+  [1mThroughput  (500 loops)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+             1           852/s         27604/s          1652/s
+            10          1436/s         27539/s          1639/s
+            50          1340/s         28391/s          1626/s
+           200          1199/s         28150/s          1605/s
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  fanout: A → [B, C, D] → E[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×200 sequential runs)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         1.22 ms         27.9 µs        495.1 µs
+           p50         1.18 ms         26.0 µs        465.2 µs
+           p95         1.46 ms         30.7 µs        662.5 µs
+           p99         1.65 ms         92.1 µs        756.1 µs
+
+  [1mMemory  (×200 runs)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                      83.1 KB         425  B
+  PG bare                     16.4 KB          84  B
+  PG+Logfire                 241.0 KB        1234  B
+
+  [1mBurst  (200 concurrent)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       193.40 ms         25.4 µs        480.3 µs
+           p75       193.91 ms         26.5 µs        607.5 µs
+           p95       194.79 ms         30.4 µs         2.97 ms
+           p99       194.96 ms         58.7 µs         5.56 ms
+           max       195.10 ms        117.3 µs         6.47 ms
+
+  [2mwall: Timbal: 195.1 ms | PG bare: 0.1 ms | PG+Logfire: 6.5 ms[0m
+
+  [1mThroughput  (500 loops)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+             1           734/s         32750/s          1875/s
+            10           965/s         33350/s          2005/s
+            50           960/s         32645/s          1890/s
+           200           882/s         33183/s          1402/s
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  diamond: A → [B, C] → D[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×200 sequential runs)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         1.05 ms         26.9 µs        524.3 µs
+           p50         1.02 ms         25.3 µs        484.9 µs
+           p95         1.28 ms         29.5 µs        748.9 µs
+           p99         1.48 ms        118.6 µs        899.5 µs
+
+  [1mMemory  (×200 runs)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                      68.5 KB         351  B
+  PG bare                     15.9 KB          81  B
+  PG+Logfire                 240.5 KB        1231  B
+
+  [1mBurst  (200 concurrent)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       150.50 ms         25.2 µs        481.0 µs
+           p75       156.06 ms         26.1 µs        506.7 µs
+           p95       156.50 ms         32.3 µs        749.6 µs
+           p99       156.61 ms         69.0 µs        984.6 µs
+           max       156.64 ms        107.0 µs        989.4 µs
+
+  [2mwall: Timbal: 156.6 ms | PG bare: 0.1 ms | PG+Logfire: 1.0 ms[0m
+
+  [1mThroughput  (500 loops)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+             1           951/s         32749/s          1872/s
+            10          1364/s         33583/s          1996/s
+            50          1261/s         33126/s          2003/s
+           200          1149/s         33532/s          1888/s
+
+[2m────────────────────────────────────────────────────────────────────────────────────────
+  Timbal: Workflow DAG with one span per step; fan-out branches are scheduled by the framework.
+  PG bare: Pydantic Graph with auto_instrument=False.
+  PG+Logfire: Pydantic Graph with built-in graph/node spans; no network export.
+  Note: Pydantic Graph has no native DAG fan-out; branch work is manual inside one node.
+────────────────────────────────────────────────────────────────────────────────────────[0m
+

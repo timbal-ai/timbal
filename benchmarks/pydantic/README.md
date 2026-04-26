@@ -1,14 +1,38 @@
-# Timbal vs PydanticAI — Benchmarks
+# Timbal vs PydanticAI / Pydantic Graph — Benchmarks
 
-> **⚠ WIP** — Only `bench_agent.py` exists so far. Workflow, parallel, and double
-> fan-out benchmarks are not yet written. Numbers are real but this page is incomplete.
+Pure framework overhead benchmarks. No real LLM API calls — all model responses are
+faked, and all handlers are intentionally tiny so the numbers isolate framework cost.
 
-Pure framework overhead benchmarks. No LLM API calls — all handlers are trivial
-synthetic functions. Results are deterministic and reproducible.
+**Environment:** Apple Silicon M-series, Python 3.12, asyncio event loop.  
+**All numbers below are from full-mode runs.** Raw output is stored in `results/`.
 
-**Environment:** Apple Silicon M-series, Python 3.12, asyncio event loop.
-**All numbers from full-mode runs** (100 iters, 200 throughput ops, 50–burst).
-Raw output stored in `results/`.
+---
+
+## The Short Version
+
+Timbal is very strong where it matters most for this comparison: **full agent loops**.
+Against PydanticAI with Logfire enabled, Timbal is **5.0–8.5× faster at p50** and
+allocates **~6–7× less memory per run**.
+
+Pydantic Graph is a different story. It is a very lean typed state-machine runner, not
+a DAG scheduler. For graph/control-flow microbenchmarks, it is often faster because it
+does less: fewer tasks, fewer events, fewer branch objects, and less per-step machinery.
+That is real signal, not noise. Timbal has optimization work to do on small workflow
+steps, skipped branches, and high-concurrency bursts.
+
+That is the narrative:
+
+- **Agents:** Timbal is already excellent.
+- **DAG workflows:** Timbal gives richer semantics and per-step observability, but pays
+  overhead for tiny synthetic steps.
+- **Fan-out:** Pydantic Graph cannot natively express first-class DAG fan-out, so its
+  fastest implementation uses manual `asyncio.gather` inside one node. That is not the
+  same workload as Timbal's per-branch scheduling/tracing.
+- **Control flow:** when we remove the `gather` escape hatch, Pydantic Graph is still
+  leaner. Timbal's skipped-branch model is the biggest improvement target.
+
+The goal from here is straightforward: keep the agent-loop advantage, then make Workflow
+leaner until it is also best-in-class for branchy, tiny-step workloads.
 
 ---
 
@@ -17,6 +41,11 @@ Raw output stored in `results/`.
 | File | What it measures |
 |------|-----------------|
 | `bench_agent.py` | Full agent loop: fake LLM + tool calls, latency/memory/throughput |
+| `bench_workflow.py` | Small workflow shapes: sequential, fan-out/in, diamond |
+| `bench_parallel.py` | Wide fan-out: root → [N branches] → sink |
+| `bench_double_fanout.py` | Double fan-out: root → [N×p1] → aggregator → [N×p2] → sink |
+| `bench_control_flow.py` | Branch-heavy sequential control flow: repeated decision → branch → join rounds |
+| `bench_linear_loop.py` | Linear sequential loop with no branches/skips/gather |
 
 ## Setup
 
@@ -25,198 +54,204 @@ uv sync --dev
 uv pip install pydantic-ai logfire
 ```
 
-No API keys required — all LLM calls are faked.
+`pydantic-ai` and `logfire` are not in `pyproject.toml`; they conflict with other
+benchmark dependencies and should be installed ad-hoc.
 
-## How to run
+## How To Run
 
 ```bash
-# Quick mode (~2–3 min, fewer iterations)
+# Quick mode
 uv run python benchmarks/pydantic/bench_agent.py --quick
+uv run python benchmarks/pydantic/bench_workflow.py --quick
+uv run python benchmarks/pydantic/bench_parallel.py --quick
+uv run python benchmarks/pydantic/bench_double_fanout.py --quick
+uv run python benchmarks/pydantic/bench_control_flow.py --quick
+uv run python benchmarks/pydantic/bench_linear_loop.py --quick
 
-# Full mode (~15–20 min)
+# Full mode
 uv run python benchmarks/pydantic/bench_agent.py
+uv run python benchmarks/pydantic/bench_workflow.py
+uv run python benchmarks/pydantic/bench_parallel.py
+uv run python benchmarks/pydantic/bench_double_fanout.py
+uv run python benchmarks/pydantic/bench_control_flow.py
+uv run python benchmarks/pydantic/bench_linear_loop.py
 ```
 
-> `pydantic-ai` and `logfire` are not in `pyproject.toml` — they conflict with
-> `crewai`'s `opentelemetry-sdk` pin and can't share the same lockfile. Install
-> them ad-hoc with `uv pip install` as shown above.
+---
+
+## Observability Fairness
+
+Timbal includes tracing by default via `InMemoryTracingProvider`.
+
+For PydanticAI agents, the fair comparison is **Timbal vs PAI+Logfire**:
+
+- `PAI bare`: PydanticAI with no observability, shown only as a lower bound.
+- `PAI+Logfire`: real `logfire.instrument_pydantic_ai()` with `send_to_logfire=False`.
+
+For Pydantic Graph, the fair comparison is **Timbal vs PG+Logfire**:
+
+- `PG bare`: `auto_instrument=False`, shown only as a lower bound.
+- `PG+Logfire`: `auto_instrument=True` with `logfire.configure(send_to_logfire=False, console=False)`.
+
+Network export is disabled on the Pydantic side, so these numbers measure local span
+creation/instrumentation cost without HTTP variance.
+
+Important caveat: **same observability provider does not always mean same observability
+granularity.** In fan-out benchmarks, Timbal records each branch as a workflow step.
+Pydantic Graph has no native DAG fan-out, so its fastest implementation records one
+manual fan-out node and runs the branches inside that node.
 
 ---
 
-## Observability fairness
+## Agent Loop Results
 
-Timbal includes full tracing out of the box — every run records spans in
-`InMemoryTracingProvider`. PydanticAI's standard observability stack is
-**Logfire** (also built by the Pydantic team).
+This is the cleanest apples-to-apples benchmark: both frameworks run full agent loops
+with fake LLMs and tool calls, and both include observability in the fair column.
 
-All "PAI+Logfire" numbers use real `logfire.instrument_pydantic_ai()` with
-`send_to_logfire=False` — measuring span-creation overhead without network variance.
-Logfire patches PydanticAI globally and cannot be uninstrumented, so bare measurements
-run first, then Logfire is activated for Phase 2.
+| Scenario | Timbal p50 | PAI+Logfire p50 | Timbal advantage |
+|----------|-----------:|----------------:|-----------------:|
+| Single tool | 711.5 µs | 3.67 ms | 5.2× faster |
+| 3-step chain | 783.7 µs | 6.70 ms | 8.5× faster |
+| Parallel tools | 773.6 µs | 3.85 ms | 5.0× faster |
 
-**The fair comparison is Timbal vs PAI+Logfire.** PAI bare is shown as a lower
-bound on what the PydanticAI execution model can achieve with zero observability.
+| Scenario | Timbal memory/run | PAI+Logfire memory/run | Timbal advantage |
+|----------|------------------:|-----------------------:|-----------------:|
+| Single tool | 598 B | 5,488 B | 9.2× less |
+| 3-step chain | 1,045 B | 7,307 B | 7.0× less |
+| Parallel tools | 933 B | 6,622 B | 7.1× less |
 
----
+| Scenario | Timbal throughput c=10 | PAI+Logfire throughput c=10 | Timbal advantage |
+|----------|-----------------------:|----------------------------:|-----------------:|
+| Single tool | 1,649/s | 375/s | 4.4× higher |
+| 3-step chain | 740/s | 245/s | 3.0× higher |
+| Parallel tools | 1,108/s | 364/s | 3.0× higher |
 
-## Results
-
-### Agent loop (`bench_agent.py`)
-
-Full agent loop: prompt → LLM (faked via `FunctionModel`) → tool(s) → LLM → answer.
-
-Three scenarios:
-
-1. **Single tool:** `LLM → add(1,2) → LLM → "3"` — 2 LLM calls, 1 tool
-2. **Multi-step:** `LLM → add → LLM → mul → LLM → sub → LLM → "9"` — 4 LLM calls, 3 tools sequential
-3. **Parallel tools:** `LLM → [add, mul, neg] → LLM → "done"` — 2 LLM calls, 3 tools concurrent
-
-Both Timbal and PydanticAI dispatch multiple tool calls from a single LLM response
-concurrently (verified: `asyncio.gather` on `ToolCallPart` list).
-
-**Fake LLM strategy:**
-- Timbal uses `TestModel(handler=fn)` — plain callable, inspects message history
-- PydanticAI uses `FunctionModel(fn)` — same pattern; counts `ToolReturnPart` in history
-- Both are stateless and safe for concurrent async runs on a single agent instance
+This is the headline result. PydanticAI is well designed, but Timbal's agent runtime is
+substantially faster and lighter once both sides have observability enabled.
 
 ---
 
-#### Scenario 1 — Single tool call: `LLM → add(1,2) → LLM → "3"`
+## Small Workflow Results
 
-**Latency** (×100 sequential runs)
+`bench_workflow.py` compares small graph shapes. The sequential case is structurally
+comparable. The fan-out and diamond cases are not: Timbal schedules/traces each branch,
+while Pydantic Graph uses one manual branch node.
 
-| | Timbal | PAI bare | PAI+Logfire |
-|--|--------|----------|-------------|
-| mean | **962 µs** | 1.99 ms | 2.80 ms |
-| p50  | **928 µs** | 1.90 ms | 2.72 ms |
-| p95  | **1.60 ms** | 2.96 ms | 3.45 ms |
-| p99  | **1.99 ms** | 3.72 ms | 4.15 ms |
+| Scenario | Timbal p50 | PG+Logfire p50 | Notes |
+|----------|-----------:|---------------:|-------|
+| Sequential `A → B → C → D` | 1.07 ms | 592.3 µs | Closest structural match |
+| Fan-out/in | 1.18 ms | 465.2 µs | PG traces one manual branch node |
+| Diamond | 1.02 ms | 484.9 µs | PG traces one manual branch node |
 
-Timbal is **2.0× faster** than PAI bare, **2.9× faster** than PAI+Logfire at p50.
-
-**Memory** (×100 runs)
-
-| | Timbal | PAI bare | PAI+Logfire |
-|--|--------|----------|-------------|
-| peak    | **61 KB**  | 502 KB | 523 KB |
-| per run | **627 B**  | 5,138 B | 5,358 B |
-
-Timbal allocates **8× less memory per run** than PAI bare. Logfire adds only ~220 B/run
-on top — the memory gap is the PydanticAI framework itself, not observability.
-
-**Burst** (50 concurrent) and **Throughput** (200 loops)
-
-| | Timbal | PAI bare | PAI+Logfire |
-|--|--------|----------|-------------|
-| burst p50       | **17.2 ms** | 45.5 ms | 72.6 ms |
-| burst wall      | **17.6 ms** | 54.4 ms | 86.3 ms |
-| throughput c=1  | **1,687/s** | 517/s   | 354/s   |
-| throughput c=10 | **1,942/s** | 764/s   | 480/s   |
-| throughput c=50 | **1,929/s** | 858/s   | 470/s   |
+Takeaway: Pydantic Graph is thinner for small state-machine-style work. Timbal is still
+around the low-millisecond range while preserving Workflow semantics and step-level
+events/traces.
 
 ---
 
-#### Scenario 2 — Multi-step: `LLM → add → LLM → mul → LLM → sub → LLM → "9"`
+## Fan-Out Results
 
-**Latency** (×100 sequential runs)
+These benchmarks are useful, but they are not a direct DAG-scheduler comparison.
+Pydantic Graph cannot express `N` first-class parallel graph branches. Its implementation
+is one graph node containing `asyncio.gather(...)`.
 
-| | Timbal | PAI bare | PAI+Logfire |
-|--|--------|----------|-------------|
-| mean | **1.04 ms** | 3.59 ms | 5.22 ms |
-| p50  | **1.02 ms** | 3.46 ms | 5.10 ms |
-| p95  | **1.74 ms** | 4.67 ms | 6.17 ms |
-| p99  | **2.22 ms** | 5.98 ms | 6.83 ms |
+### Wide Fan-Out
 
-Timbal is **3.4× faster** than PAI bare, **5.0× faster** than PAI+Logfire at p50.
+Async-work scenario: root → `N` branches, each sleeping 1 ms → sink.
 
-**Memory** (×100 runs)
+| Width | Timbal p50 | PG+Logfire p50 | Timbal burst p50 | PG+Logfire burst p50 |
+|------:|-----------:|---------------:|-----------------:|---------------------:|
+| 4 | 2.19 ms | 2.01 ms | 166.4 ms | 56.8 ms |
+| 8 | 2.49 ms | 2.11 ms | 245.4 ms | 62.5 ms |
+| 16 | 2.80 ms | 2.13 ms | 517.2 ms | 70.3 ms |
+| 32 | 4.43 ms | 2.05 ms | 1,078.5 ms | 126.8 ms |
+| 64 | 8.09 ms | 2.22 ms | 2,255.7 ms | 328.7 ms |
 
-| | Timbal | PAI bare | PAI+Logfire |
-|--|--------|----------|-------------|
-| peak    | **98 KB**  | 644 KB | 664 KB |
-| per run | **1,004 B** | 6,591 B | 6,795 B |
+### Double Fan-Out
 
-Timbal allocates **6.6× less per run** than PAI bare for a 3-tool chain.
+Async-work scenario: root → `N` phase-1 branches → aggregator → `N` phase-2 branches → sink.
 
-**Burst** (30 concurrent) and **Throughput** (200 loops)
+| Width | Timbal p50 | PG+Logfire p50 | Timbal burst p50 | PG+Logfire burst p50 |
+|------:|-----------:|---------------:|-----------------:|---------------------:|
+| 16 | 6.02 ms | 3.72 ms | 516.5 ms | 70.9 ms |
+| 32 | 9.50 ms | 3.72 ms | 1,091.9 ms | 90.3 ms |
+| 64 | 18.0 ms | 3.82 ms | 2,532.1 ms | 168.9 ms |
+| 128 | 39.6 ms | 4.62 ms | 5,827.5 ms | 336.7 ms |
 
-| | Timbal | PAI bare | PAI+Logfire |
-|--|--------|----------|-------------|
-| burst p50       | **26.2 ms** | 52.3 ms | 98.7 ms  |
-| burst wall      | **26.6 ms** | 57.5 ms | 107.3 ms |
-| throughput c=1  | **726/s**   | 286/s   | 195/s    |
-| throughput c=10 | **832/s**   | 464/s   | 240/s    |
-| throughput c=50 | **804/s**   | 444/s   | 235/s    |
-
----
-
-#### Scenario 3 — Parallel tools: `LLM → [add, mul, neg] concurrent → LLM → "done"`
-
-**Latency** (×100 sequential runs)
-
-| | Timbal | PAI bare | PAI+Logfire |
-|--|--------|----------|-------------|
-| mean | **1.00 ms** | 2.18 ms | 3.41 ms |
-| p50  | **998 µs**  | 2.13 ms | 3.27 ms |
-| p95  | **1.69 ms** | 2.60 ms | 4.12 ms |
-| p99  | **1.90 ms** | 3.99 ms | 4.52 ms |
-
-Timbal is **2.1× faster** than PAI bare, **3.3× faster** than PAI+Logfire at p50.
-
-**Memory** (×100 runs)
-
-| | Timbal | PAI bare | PAI+Logfire |
-|--|--------|----------|-------------|
-| peak    | **91 KB**  | 590 KB | 604 KB |
-| per run | **929 B**  | 6,040 B | 6,184 B |
-
-**Burst** (40 concurrent) and **Throughput** (200 loops)
-
-| | Timbal | PAI bare | PAI+Logfire |
-|--|--------|----------|-------------|
-| burst p50       | **20.3 ms** | 49.1 ms | 79.0 ms |
-| burst wall      | **21.6 ms** | 58.1 ms | 86.9 ms |
-| throughput c=1  | **1,100/s** | 454/s   | 306/s   |
-| throughput c=10 | **1,186/s** | 656/s   | 387/s   |
-| throughput c=50 | **1,205/s** | 616/s   | 371/s   |
+Takeaway: Timbal pays per branch because branches are real workflow steps. Pydantic Graph
+pays for a small fixed number of graph nodes and leaves branch scheduling to user-owned
+Python code. This is a valid implementation comparison, but not equivalent semantics.
 
 ---
 
-#### Agent loop summary
+## Control-Flow Results
 
-The fair runtime comparison is **Timbal vs PAI+Logfire** — both include observability.
+These were added to remove the `asyncio.gather` escape hatch and understand where Timbal
+can improve.
 
-| Metric | Timbal vs PAI+Logfire |
-|--------|----------------------|
-| Latency p50 — single tool  | **2.9× faster** (928 µs vs 2.72 ms) |
-| Latency p50 — 3-step chain | **5.0× faster** (1.02 ms vs 5.10 ms) |
-| Latency p50 — parallel (3) | **3.3× faster** (998 µs vs 3.27 ms) |
-| Memory per run — single tool  | **8.5× less** (627 B vs 5,358 B) |
-| Memory per run — 3-step chain | **6.8× less** (1,004 B vs 6,795 B) |
-| Throughput c=10 — single tool | **4.0× more ops/s** (1,942 vs 480) |
-| Throughput c=10 — multi-step  | **3.5× more ops/s** (832 vs 240) |
-| Burst wall — 50 concurrent    | **4.9× faster** (17.6 ms vs 86.3 ms) |
+### Branchy Control Flow
+
+`decision → left/right → join`, repeated for `N` rounds. No workload-level gather.
+Timbal unrolls the bounded loop into explicit workflow steps; Pydantic Graph uses a
+natural while-style graph loop.
+
+| Rounds | Timbal p50 | PG+Logfire p50 | Timbal throughput c=10 | PG+Logfire throughput c=10 |
+|-------:|-----------:|---------------:|-----------------------:|---------------------------:|
+| 8 | 5.22 ms | 2.19 ms | 284/s | 455/s |
+| 16 | 11.3 ms | 4.24 ms | 127/s | 243/s |
+| 32 | 23.8 ms | 8.03 ms | 57/s | 123/s |
+| 64 | 51.3 ms | 15.6 ms | 26/s | 59/s |
+
+This is the clearest Workflow improvement target. The first branchy version used sync
+handlers and was much worse; converting the Timbal side to async cut latency roughly in
+half. Removing untaken branches cuts it further. That tells us the optimization path is
+concrete: avoid threadpool paths for tiny callables and reduce skipped-step overhead.
+
+### Linear Loop
+
+No branch selection, no skipped steps, no gather. This isolates per-executed-step cost.
+
+| Steps | Timbal p50 | PG+Logfire p50 | Timbal memory/run | PG+Logfire memory/run |
+|------:|-----------:|---------------:|------------------:|----------------------:|
+| 8 | 1.44 ms | 822.0 µs | 385 B | 779 B |
+| 16 | 3.26 ms | 1.43 ms | 590 B | 778 B |
+| 32 | 6.70 ms | 2.78 ms | 1,022 B | 765 B |
+| 64 | 13.7 ms | 5.60 ms | 1,869 B | 761 B |
+
+Once branches/skips are removed, the gap becomes much more reasonable: Timbal is roughly
+2.4× slower than PG+Logfire on p50 latency for many tiny sequential steps, while memory
+is competitive at small sizes and grows with stored per-step trace data.
 
 ---
 
-## Notes on the comparison
+## What We Should Improve
 
-**PydanticAI is a well-designed framework.** It is architecturally cleaner than
-LangChain, takes typing seriously with `Agent[DepsType, OutputType]` generics, and
-its `FunctionModel` API for testing is a good design. The performance gap is not
-a consequence of poor implementation — it reflects genuine architectural differences.
+These benchmarks point to specific engineering work, not vague "performance tuning":
 
-**Where the gap comes from — needs profiling.** We haven't done the profiling work
-to attribute the gap to specific causes, so we won't speculate here. Both frameworks
-use Pydantic for validation. The root causes would need a proper `py-spy` or
-`memray` run to determine precisely — that work is pending.
+- **Fast path for tiny async workflow steps.** Avoid unnecessary event/dump/validation
+  overhead when a step is a simple internal callable and full streaming semantics are not
+  needed.
+- **Skipped-branch overhead.** Current Workflow declares all steps upfront. Untaken
+  branches still wait, evaluate `when`, mark skipped, and signal the queue. Branch-heavy
+  workloads pay heavily for that.
+- **Burst behavior.** High-concurrency fan-out creates many step tasks and queue events.
+  We should profile task creation, queue signaling, context-var restoration, and trace
+  persistence under burst.
+- **Sync callable path.** Tiny sync functions pay threadpool/context-copy overhead. The
+  benchmark now uses async handlers, but production users will write sync functions. We
+  should either optimize this path or document that micro-step workflows should use async.
+- **Graph-style control flow.** Pydantic Graph's while-loop model is genuinely lean. If
+  Timbal wants to be best here too, Workflow needs a leaner control-flow primitive or a
+  compiled execution plan for bounded loops/branches.
 
-**Logfire overhead on PydanticAI is meaningful.** Adding Logfire adds 43–53% to
-latency across all scenarios. On a 3-tool chain burst of 30 concurrent calls, wall
-time nearly doubles (57 ms → 107 ms). Timbal's built-in tracing adds no latency
-compared to its own bare baseline — trace recording is on the critical path but
-designed to be fast.
+## Bottom Line
 
-**Scenario 3 (parallel tools):** both frameworks genuinely dispatch concurrent tool
-calls. PydanticAI's latency for scenario 3 (2.13 ms) is only slightly above scenario 1
-(1.90 ms), confirming real parallel dispatch.
+We are already very good where the product story is strongest: **agents with tools,
+streaming events, structured traces, and observability always on**. Timbal beats
+PydanticAI+Logfire by large margins there.
+
+Pydantic Graph exposes real areas where we can get better. It is leaner for tiny
+state-machine and branch-loop workloads, especially when Timbal pays for skipped
+branches or large numbers of per-branch tasks. That is not a reason to soften the result.
+It is a roadmap: keep the agent advantage, tighten Workflow's hot paths, and make Timbal
+the best runtime across both agent loops and workflow/control-flow execution.

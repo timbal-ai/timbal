@@ -122,7 +122,7 @@ zero provider-specific code in user land.
 | `langchain/` | Timbal vs LangGraph + LangSmith — agents and DAG workflows | stable |
 | `crewai/` | Timbal vs CrewAI + AgentOps — multi-agent pipelines | stable |
 | `agno/` | Timbal vs Agno — agents and multi-agent pipelines | WIP |
-| `pydantic/` | Timbal vs PydanticAI + Logfire — agents | WIP |
+| `pydantic/` | Timbal vs PydanticAI/Pydantic Graph + Logfire — agents, graph-style workflows, control flow | WIP |
 
 **Coming next:** OpenAI Agents SDK and Google Agent Development Kit (ADK).
 
