@@ -995,13 +995,14 @@ class Runnable(ABC, BaseModel):
             approval_decisions.update(_normalize_approval_decisions(kwargs.pop("approvals")))
         if "approval_decisions" in kwargs:
             approval_decisions.update(_normalize_approval_decisions(kwargs.pop("approval_decisions")))
+        explicit_parent_id = kwargs.pop("parent_id", None)
 
         # Generate new context or reset it if appropriate
         _parent_call_id = get_parent_call_id()
         _call_id = get_call_id()
         run_context = get_run_context()
         if run_context is None:
-            run_context = RunContext(tracing_provider=self.tracing_provider)
+            run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
             _parent_call_id = None
             _call_id = None
         elif "." not in self._path and run_context._trace:
@@ -1012,9 +1013,12 @@ class Runnable(ABC, BaseModel):
             # belongs to a concurrent sibling — create a fresh context.
             root = run_context.root_span()
             if root is not None and root.t1 is not None:
-                run_context = RunContext(parent_id=run_context.id, tracing_provider=self.tracing_provider)
+                run_context = RunContext(
+                    parent_id=explicit_parent_id or run_context.id,
+                    tracing_provider=self.tracing_provider,
+                )
             else:
-                run_context = RunContext(tracing_provider=self.tracing_provider)
+                run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
             _parent_call_id = None
             _call_id = None
         await run_context.get_session()
@@ -1117,6 +1121,29 @@ class Runnable(ABC, BaseModel):
                     # then re-emits below, which adds a fresh :required tick.
                     run_context.update_usage("approvals:expired", 1)
                     approval_resolution = None
+
+                if approval_resolution is not None and run_context._tracing_provider is not None:
+                    claimed = await run_context._tracing_provider.claim_approval(
+                        str(run_context.parent_id) if run_context.parent_id else None,
+                        approval_id,
+                        str(run_context.id),
+                    )
+                    if not claimed:
+                        span.metadata["approval"]["claim"] = {
+                            "claimed": False,
+                            "parent_id": str(run_context.parent_id) if run_context.parent_id else None,
+                        }
+                        span.status = RunStatus(
+                            code="cancelled",
+                            reason="approval_already_claimed",
+                            message="Approval was already claimed by another resume run.",
+                        )
+                        span.output = {
+                            "approval_id": approval_id,
+                            "status": "approval_already_claimed",
+                        }
+                        span._output_dump = await dump(span.output)
+                        return
 
                 if approval_resolution is None:
                     # Status/output MUST be set BEFORE the yield. If the
