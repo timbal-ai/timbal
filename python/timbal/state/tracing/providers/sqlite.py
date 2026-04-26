@@ -63,6 +63,27 @@ class SqliteTracingProvider(TracingProvider):
         return conn
 
     @classmethod
+    def _ensure_schema(cls, conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS runs (
+                run_id    TEXT    PRIMARY KEY,
+                parent_id TEXT,
+                spans     TEXT    NOT NULL,
+                stored_at INTEGER NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_parent_id ON runs (parent_id)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS approval_claims (
+                parent_id         TEXT    NOT NULL,
+                approval_id       TEXT    NOT NULL,
+                claimed_by_run_id TEXT    NOT NULL,
+                claimed_at        INTEGER NOT NULL,
+                PRIMARY KEY (parent_id, approval_id)
+            )
+        """)
+
+    @classmethod
     @override
     async def get(cls, run_context: "RunContext") -> Trace | None:
         """Retrieve the parent run's trace from the SQLite database.
@@ -102,6 +123,54 @@ class SqliteTracingProvider(TracingProvider):
 
     @classmethod
     @override
+    async def claim_approval(cls, parent_id: str | None, approval_id: str, run_id: str) -> bool:
+        """Atomically claim ``(parent_id, approval_id)``.
+
+        SQLite enforces the single-consumer invariant with a unique primary
+        key. ``INSERT OR IGNORE`` makes duplicate workers race safely: one row
+        wins, every other worker observes the existing claimant and stops
+        before executing the gated handler.
+        """
+        if parent_id is None:
+            return True
+        if cls._path is None:
+            raise RuntimeError(
+                "SqliteTracingProvider._path is not set. "
+                "Use SqliteTracingProvider.configured(_path=Path(...)) to create a configured provider."
+            )
+
+        def _claim() -> bool:
+            conn = cls._connect()
+            try:
+                cls._ensure_schema(conn)
+                claimed_at = int(time.time() * 1000)
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO approval_claims
+                        (parent_id, approval_id, claimed_by_run_id, claimed_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (str(parent_id), approval_id, run_id, claimed_at),
+                )
+                conn.commit()
+                if cursor.rowcount == 1:
+                    return True
+                row = conn.execute(
+                    """
+                    SELECT claimed_by_run_id FROM approval_claims
+                    WHERE parent_id = ? AND approval_id = ?
+                    """,
+                    (str(parent_id), approval_id),
+                ).fetchone()
+                return bool(row and row[0] == run_id)
+            finally:
+                conn.close()
+
+        async with cls._get_lock():
+            return await asyncio.to_thread(_claim)
+
+    @classmethod
+    @override
     async def _store(cls, run_context: "RunContext") -> None:
         """Upsert the current run's trace into the SQLite database.
 
@@ -122,17 +191,9 @@ class SqliteTracingProvider(TracingProvider):
         def _write() -> None:
             conn = cls._connect()
             try:
-                # CREATE TABLE / INDEX are idempotent — SQLite caches the schema
-                # after the first call so these are effectively free on subsequent writes.
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS runs (
-                        run_id    TEXT    PRIMARY KEY,
-                        parent_id TEXT,
-                        spans     TEXT    NOT NULL,
-                        stored_at INTEGER NOT NULL
-                    )
-                """)
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_parent_id ON runs (parent_id)")
+                # Schema operations are idempotent — SQLite caches the schema
+                # after the first call so this is effectively free later.
+                cls._ensure_schema(conn)
                 conn.execute(
                     "INSERT OR REPLACE INTO runs (run_id, parent_id, spans, stored_at) VALUES (?, ?, ?, ?)",
                     (run_id, parent_id, spans_json, stored_at),

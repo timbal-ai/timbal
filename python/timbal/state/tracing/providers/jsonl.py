@@ -1,5 +1,7 @@
 import asyncio
+import fcntl
 import json
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -74,6 +76,16 @@ class JsonlTracingProvider(TracingProvider):
         return cls._lock
 
     @classmethod
+    def _approval_claims_path(cls) -> Path:
+        assert cls._path is not None
+        return cls._path.with_suffix(cls._path.suffix + ".approval_claims.json")
+
+    @classmethod
+    def _approval_claims_lock_path(cls) -> Path:
+        assert cls._path is not None
+        return cls._path.with_suffix(cls._path.suffix + ".approval_claims.lock")
+
+    @classmethod
     @override
     async def get(cls, run_context: "RunContext") -> Trace | None:
         """Retrieve the parent run's trace from the JSONL file.
@@ -98,6 +110,58 @@ class JsonlTracingProvider(TracingProvider):
         except (OSError, json.JSONDecodeError):
             return None
         return None
+
+    @classmethod
+    @override
+    async def claim_approval(cls, parent_id: str | None, approval_id: str, run_id: str) -> bool:
+        """Claim ``(parent_id, approval_id)`` using a sidecar JSON file.
+
+        JSONL itself stores one record per run, so mutating the parent record
+        for a tiny approval-claim row would be awkward and race-prone. A
+        sidecar file keeps the trace format unchanged while still giving local
+        development and tests a durable cross-process lock via ``fcntl``.
+        """
+        if parent_id is None:
+            return True
+        if cls._path is None:
+            raise RuntimeError(
+                "JsonlTracingProvider._path is not set. "
+                "Use JsonlTracingProvider.configured(_path=Path(...)) to create a configured provider."
+            )
+
+        def _claim() -> bool:
+            claims_path = cls._approval_claims_path()
+            lock_path = cls._approval_claims_lock_path()
+            claims_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with lock_path.open("a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    try:
+                        claims = json.loads(claims_path.read_text(encoding="utf-8")) if claims_path.exists() else {}
+                    except json.JSONDecodeError:
+                        claims = {}
+
+                    key = f"{parent_id}:{approval_id}"
+                    existing = claims.get(key)
+                    if existing is not None:
+                        return existing.get("claimed_by_run_id") == run_id
+
+                    claims[key] = {
+                        "parent_id": parent_id,
+                        "approval_id": approval_id,
+                        "claimed_by_run_id": run_id,
+                        "claimed_at": int(time.time() * 1000),
+                    }
+                    tmp_path = claims_path.with_suffix(claims_path.suffix + ".tmp")
+                    tmp_path.write_text(json.dumps(claims, sort_keys=True), encoding="utf-8")
+                    tmp_path.replace(claims_path)
+                    return True
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+        return await asyncio.to_thread(_claim)
 
     @classmethod
     @override

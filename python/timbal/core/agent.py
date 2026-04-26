@@ -26,7 +26,7 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
-from ..errors import InterruptError, bail
+from ..errors import ApprovalRequired, InterruptError, bail
 from ..state import get_run_context
 from ..types.content import CustomContent, FileContent, TextContent, ToolResultContent, ToolUseContent
 from ..types.events import BaseEvent, OutputEvent
@@ -195,12 +195,14 @@ class Agent(Runnable):
 
         # Build default params for the internal LLM tool from individual fields
         _llm_default_params = {
-            k: v for k, v in [
+            k: v
+            for k, v in [
                 ("max_tokens", self.max_tokens),
                 ("temperature", self.temperature),
                 ("base_url", self.base_url),
                 ("api_key", self.api_key),
-            ] if v is not None
+            ]
+            if v is not None
         }
         if self.model_params:
             _llm_default_params["provider_params"] = self.model_params
@@ -338,6 +340,37 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         return system_prompt
 
+    def _find_pending_tool_uses(self, memory: list[Message]) -> list[ToolUseContent]:
+        """Return any tool_uses in the most recent assistant message that
+        still have no matching tool_result anywhere later in memory.
+
+        Used on approval-resume: the previous turn left tool_uses unresolved
+        because the user hadn't approved yet. Now that we have a decision we
+        re-execute those gated tool_uses directly without re-calling the LLM
+        (which would fail because most providers reject a request whose last
+        assistant message has unresolved tool_uses).
+        """
+        if not memory:
+            return []
+        for i in range(len(memory) - 1, -1, -1):
+            msg = memory[i]
+            if msg.role != "assistant":
+                continue
+            tool_uses = [
+                c for c in msg.content
+                if isinstance(c, ToolUseContent) and not c.is_server_tool_use
+            ]
+            if not tool_uses:
+                # Most recent assistant message has no tool_uses to resume.
+                return []
+            fulfilled: set[str] = set()
+            for later in memory[i + 1:]:
+                for c in later.content:
+                    if isinstance(c, ToolResultContent):
+                        fulfilled.add(c.id)
+            return [tu for tu in tool_uses if tu.id not in fulfilled]
+        return []
+
     def _synthesize_missing_tool_results(self, memory: list[Message]) -> None:
         """Append synthetic error results for any tool_use blocks that were interrupted.
 
@@ -435,13 +468,28 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return
 
         previous_span = self_spans[0]
-
+        prev_status = previous_span.status
+        if isinstance(prev_status, dict):
+            prev_code = prev_status.get("code")
+            prev_reason = prev_status.get("reason")
+        elif prev_status is not None:
+            prev_code = prev_status.code
+            prev_reason = prev_status.reason
+        else:
+            prev_code = None
+            prev_reason = None
         if not isinstance(previous_span.memory, list):
             return
         memory = [Message.validate(m) for m in previous_span.memory]
 
-        # Ensure interrupted tool calls have corresponding results before resuming.
-        self._synthesize_missing_tool_results(memory)
+        # On approval-required resume the gated tool_uses will be re-executed
+        # by the agent loop (see _find_pending_tool_uses), so we must NOT
+        # inject synthetic "tool failed" results for them. Without this guard
+        # the LLM would see fake failures and probably skip retrying the
+        # gated calls, silently dropping the user's approval decisions.
+        is_approval_resume = prev_code == "cancelled" and prev_reason == "approval_required"
+        if not is_approval_resume:
+            self._synthesize_missing_tool_results(memory)
         current_span.memory = memory + current_span.memory
 
         # Cache the already-serialized previous memory so handler() can skip re-dumping.
@@ -472,9 +520,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     )
                     should_compact = True
                 elif previous_span.usage:
-                    prev_input_tokens = sum(
-                        v for k, v in previous_span.usage.items() if ":input" in k and "token" in k
-                    )
+                    prev_input_tokens = sum(v for k, v in previous_span.usage.items() if ":input" in k and "token" in k)
                     prev_output_tokens = sum(
                         v for k, v in previous_span.usage.items() if ":output" in k and "token" in k
                     )
@@ -495,9 +541,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
             if should_compact:
                 compactors = (
-                    [self.memory_compaction]
-                    if not isinstance(self.memory_compaction, list)
-                    else self.memory_compaction
+                    [self.memory_compaction] if not isinstance(self.memory_compaction, list) else self.memory_compaction
                 )
                 compaction_steps = []
                 for compactor in compactors:
@@ -509,11 +553,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         current_span.memory = await compactor(current_span.memory)
                     else:
                         current_span.memory = compactor(current_span.memory)
-                    compaction_steps.append({
-                        "compactor": getattr(compactor, "__name__", repr(compactor)),
-                        "before": before,
-                        "after": len(current_span.memory),
-                    })
+                    compaction_steps.append(
+                        {
+                            "compactor": getattr(compactor, "__name__", repr(compactor)),
+                            "before": before,
+                            "after": len(current_span.memory),
+                        }
+                    )
                 current_span.metadata["compaction"] = {
                     "triggered": True,
                     "utilization": round(utilization, 4) if utilization is not None else None,
@@ -537,6 +583,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             tools_names.add(tool.name)
             if tool.command:
                 commands[tool.command] = tool
+                stripped = tool.command.strip("/")
+                if stripped:
+                    commands[stripped] = tool
 
         for t in self.tools:
             if isinstance(t, ToolSet):
@@ -632,7 +681,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             # Reuse the already-serialized previous messages; only dump new ones
             # (prompt + any synthetic tool results added by _synthesize_missing_tool_results).
             # If compaction ran it rewrites memory, invalidating the cached dump.
-            new_messages = current_span.memory[len(prev_dump):]
+            new_messages = current_span.memory[len(prev_dump) :]
             current_span._memory_dump = prev_dump + await dump(new_messages)
         else:
             current_span._memory_dump = await dump(current_span.memory)
@@ -649,10 +698,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             """Helper to process tool output events and create tool results."""
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
                 return
+            if event.status.code == "cancelled" and event.status.reason == "approval_required":
+                return
             if event.status.code == "cancelled" and event.status.reason == "early_exit":
                 bail(event.status.message)
             content = None
-            if event.status.code == "cancelled" and event.status.reason == "early_exit_local":
+            if event.status.code == "cancelled" and event.status.reason == "approval_denied":
+                msg = event.status.message or "The tool call was denied."
+                content = f"[Approval denied] {msg}"
+            elif event.status.code == "cancelled" and event.status.reason == "early_exit_local":
                 msg = event.status.message or "The tool exited early."
                 content = f"[Cancelled] {msg}"
             elif event.error is not None:
@@ -713,7 +767,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     {
                                         "role": "assistant",
                                         "content": [
-                                            {"type": "tool_use", "id": tool_use_id, "name": tool.name, "input": tool_input}
+                                            {
+                                                "type": "tool_use",
+                                                "id": tool_use_id,
+                                                "name": tool.name,
+                                                "input": tool_input,
+                                            }
                                         ],
                                     }
                                 )
@@ -721,6 +780,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                 async for event in tool(**tool_input):
                                     await _process_tool_event(event, tool_use_id, append_to_messages=False)
                                     if isinstance(event, OutputEvent) and event.output is not None:
+                                        if (
+                                            event.status.code == "cancelled"
+                                            and event.status.reason == "approval_required"
+                                        ):
+                                            yield event
+                                            raise ApprovalRequired(event)
                                         current_span.memory.append(
                                             Message.validate(
                                                 {
@@ -731,6 +796,32 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         )
                                     yield event
                                 return
+
+                # Resume path: if the trailing assistant message has tool_uses
+                # that were left unresolved by an earlier approval gate, run
+                # them directly. Skipping the LLM call here is important —
+                # most providers reject a request whose conversation ends in
+                # an assistant message whose tool_uses have no matching
+                # tool_results.
+                pending_tool_uses = self._find_pending_tool_uses(current_span.memory)
+                if pending_tool_uses:
+                    _llm_memory_saved = True  # nothing to salvage; we never called the LLM
+                    tool_calls = pending_tool_uses
+                    first_pending_approval: OutputEvent | None = None
+                    async for tool_call, event in self._multiplex_tools(tools, tool_calls):
+                        await _process_tool_event(event, tool_call.id, append_to_messages=True)
+                        yield event
+                        if (
+                            isinstance(event, OutputEvent)
+                            and event.status.code == "cancelled"
+                            and event.status.reason == "approval_required"
+                            and first_pending_approval is None
+                        ):
+                            first_pending_approval = event
+                    if first_pending_approval is not None:
+                        raise ApprovalRequired(first_pending_approval)
+                    i += 1
+                    continue
 
                 async for event in self._llm(
                     model=model,
@@ -819,9 +910,19 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if not tool_calls:
                     break
 
+                first_pending_approval: OutputEvent | None = None
                 async for tool_call, event in self._multiplex_tools(tools, tool_calls):
                     await _process_tool_event(event, tool_call.id, append_to_messages=True)
                     yield event
+                    if (
+                        isinstance(event, OutputEvent)
+                        and event.status.code == "cancelled"
+                        and event.status.reason == "approval_required"
+                        and first_pending_approval is None
+                    ):
+                        first_pending_approval = event
+                if first_pending_approval is not None:
+                    raise ApprovalRequired(first_pending_approval)
                 i += 1
         finally:
             if not _llm_memory_saved:

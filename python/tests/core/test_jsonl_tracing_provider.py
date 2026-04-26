@@ -337,6 +337,27 @@ class TestMemoryDumpJsonlIntegration:
         assert stored_memory == expected, "_memory_dump stored on disk does not match full re-dump"
 
     @pytest.mark.asyncio
+    async def test_jsonl_reloaded_root_span_uses_dict_status_for_memory_chain(self, tmp_path):
+        """Regression: JSONL get() builds Span with status as a dict, not RunStatus;
+        parent_id + turn 2 must not raise (AttributeError) and must succeed.
+
+        (Previously resolve_memory read previous_span.status.code and crashed.)"""
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+
+        traces_path = tmp_path / "traces.jsonl"
+        provider = JsonlTracingProvider.configured(_path=traces_path)
+        agent = Agent(
+            name="chain_agent",
+            model=TestModel(responses=["r1", "r2"]),
+            tracing_provider=provider,
+        )
+        out1 = await agent(prompt="m0").collect()
+        out2 = await agent(prompt="m1", parent_id=out1.run_id).collect()
+        assert out2.status.code == "success", out2.error
+        assert out2.error is None
+
+    @pytest.mark.asyncio
     async def test_memory_grows_correctly_across_turns(self, tmp_path):
         """Each turn adds exactly 2 messages (user + assistant) to the stored memory."""
         from timbal import Agent

@@ -192,6 +192,22 @@ class TracingProvider(ABC):
                 pass
 
     @classmethod
+    async def claim_approval(cls, parent_id: str | None, approval_id: str, run_id: str) -> bool:
+        """Atomically claim an approval resolution before executing it.
+
+        Durable providers override this to prevent two workers from resuming
+        the same pending approval and executing the gated handler twice. The
+        claim key is ``(parent_id, approval_id)`` because duplicate-resume
+        races are about multiple child runs consuming the same parent gate.
+
+        The default is permissive so existing custom tracing providers keep
+        working, but they do not get duplicate-resume protection until they
+        implement this method.
+        """
+        _ = (parent_id, approval_id, run_id)
+        return True
+
+    @classmethod
     @abstractmethod
     async def _store(cls, run_context: "RunContext") -> None:
         """Persist the completed run's trace (provider-specific storage).

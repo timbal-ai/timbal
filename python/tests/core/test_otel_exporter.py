@@ -15,6 +15,7 @@ from timbal.state.tracing.span import Span
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_span(
     call_id: str = "c1",
     path: str = "agent.step",
@@ -25,6 +26,8 @@ def _make_span(
     usage: dict | None = None,
     input_dump=None,
     output_dump=None,
+    metadata: dict | None = None,
+    status=None,
 ) -> Span:
     span = Span(
         path=path,
@@ -34,7 +37,10 @@ def _make_span(
         t1=t1,
         error=error,
         usage=usage or {},
+        metadata=metadata or {},
     )
+    if status is not None:
+        span.status = status
     span._input_dump = input_dump
     span._output_dump = output_dump
     span._memory_dump = None
@@ -74,6 +80,7 @@ async def _drain(exporter: OTelExporter) -> None:
 # ID helpers
 # ---------------------------------------------------------------------------
 
+
 class TestIds:
     def test_trace_id_is_32_hex_chars(self):
         tid = OTelExporter._trace_id("run-abc")
@@ -102,6 +109,7 @@ class TestIds:
 # Time conversion
 # ---------------------------------------------------------------------------
 
+
 class TestTimeConversion:
     def test_ms_to_ns(self):
         assert OTelExporter._ms_to_ns(1_000) == "1000000000"
@@ -116,6 +124,7 @@ class TestTimeConversion:
 # ---------------------------------------------------------------------------
 # Payload construction
 # ---------------------------------------------------------------------------
+
 
 class TestBuildPayload:
     def _exporter(self, service_name="my-svc") -> OTelExporter:
@@ -242,6 +251,74 @@ class TestBuildPayload:
         parsed = json.loads(attr["value"]["stringValue"])
         assert parsed == {"nested": [1, 2]}
 
+    def test_metadata_attribute_present_when_non_empty(self):
+        ctx = _make_run_context(spans=[_make_span(metadata={"type": "Tool"})])
+        payload = self._exporter()._build_payload(ctx)
+        otel_span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        attr = {a["key"]: a["value"] for a in otel_span["attributes"]}
+        assert "timbal.metadata" in attr
+        parsed = json.loads(attr["timbal.metadata"]["stringValue"])
+        assert parsed["type"] == "Tool"
+
+    def test_metadata_attribute_absent_when_empty(self):
+        ctx = _make_run_context(spans=[_make_span(metadata={})])
+        payload = self._exporter()._build_payload(ctx)
+        otel_span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        keys = {a["key"] for a in otel_span["attributes"]}
+        assert "timbal.metadata" not in keys
+
+    def test_approval_metadata_lifts_to_dedicated_attributes(self):
+        approval_meta = {"approval": {"id": "abc123", "required": True}}
+        ctx = _make_run_context(spans=[_make_span(metadata=approval_meta)])
+        payload = self._exporter()._build_payload(ctx)
+        otel_span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        attr = {a["key"]: a["value"]["stringValue"] for a in otel_span["attributes"]}
+        assert attr.get("timbal.approval.id") == "abc123"
+
+    def test_approval_expired_flag_lifts_to_dedicated_attribute(self):
+        approval_meta = {"approval": {"id": "abc123", "expired": True, "expired_at": 12345}}
+        ctx = _make_run_context(spans=[_make_span(metadata=approval_meta)])
+        payload = self._exporter()._build_payload(ctx)
+        otel_span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        bool_attr = next(a for a in otel_span["attributes"] if a["key"] == "timbal.approval.expired")
+        assert bool_attr["value"]["boolValue"] is True
+
+    def test_status_code_and_reason_exposed_as_attributes(self):
+        from timbal.types.run_status import RunStatus
+
+        status = RunStatus(code="cancelled", reason="approval_required", message=None)
+        ctx = _make_run_context(spans=[_make_span(status=status)])
+        payload = self._exporter()._build_payload(ctx)
+        otel_span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        attr = {a["key"]: a["value"]["stringValue"] for a in otel_span["attributes"]}
+        assert attr["timbal.status.code"] == "cancelled"
+        assert attr["timbal.status.reason"] == "approval_required"
+        # cancelled spans must NOT pollute error dashboards
+        assert otel_span["status"]["code"] == 0
+
+    def test_status_handles_dict_after_reload(self):
+        ctx = _make_run_context(spans=[_make_span(status={"code": "cancelled", "reason": "approval_denied"})])
+        payload = self._exporter()._build_payload(ctx)
+        otel_span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        attr = {a["key"]: a["value"]["stringValue"] for a in otel_span["attributes"]}
+        assert attr["timbal.status.reason"] == "approval_denied"
+
+    def test_approval_policy_error_status_is_error(self):
+        from timbal.types.run_status import RunStatus
+
+        ctx = _make_run_context(
+            spans=[
+                _make_span(
+                    status=RunStatus(code="error", reason="approval_policy_error", message="boom"),
+                )
+            ]
+        )
+        payload = self._exporter()._build_payload(ctx)
+        otel_span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+        attr = {a["key"]: a["value"]["stringValue"] for a in otel_span["attributes"]}
+        assert attr["timbal.status.reason"] == "approval_policy_error"
+        assert otel_span["status"]["code"] == 2  # ERROR
+
     def test_t1_none_falls_back_to_t0(self):
         span = Span(path="p", call_id="c", t0=5_000, t1=None)
         span._input_dump = None
@@ -257,6 +334,7 @@ class TestBuildPayload:
 # ---------------------------------------------------------------------------
 # Resource attributes
 # ---------------------------------------------------------------------------
+
 
 class TestResourceAttributes:
     def test_includes_service_name(self):
@@ -286,6 +364,7 @@ class TestResourceAttributes:
 # Fire-and-forget + client lifecycle
 # ---------------------------------------------------------------------------
 
+
 class TestFireAndForget:
     @pytest.mark.asyncio
     async def test_export_returns_before_post_completes(self):
@@ -293,6 +372,7 @@ class TestFireAndForget:
 
         async def slow_post(*args, **kwargs):
             import asyncio as _asyncio
+
             await _asyncio.sleep(0.05)
             posted.append(True)
             r = MagicMock()
@@ -390,6 +470,7 @@ class TestFireAndForget:
 # Retry logic
 # ---------------------------------------------------------------------------
 
+
 class TestRetry:
     @pytest.mark.asyncio
     async def test_succeeds_on_first_attempt(self):
@@ -450,6 +531,7 @@ class TestRetry:
 # ---------------------------------------------------------------------------
 # HTTP export
 # ---------------------------------------------------------------------------
+
 
 class TestExport:
     @pytest.mark.asyncio

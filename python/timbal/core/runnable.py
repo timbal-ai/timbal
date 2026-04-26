@@ -1,7 +1,9 @@
 import ast
 import asyncio
 import contextvars
+import hashlib
 import inspect
+import json
 import os
 import secrets
 import time
@@ -25,7 +27,7 @@ from pydantic import (
 from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
-from ..errors import EarlyExit, InterruptError
+from ..errors import ApprovalPolicyError, ApprovalRequired, EarlyExit, InterruptError
 from ..state import (
     get_call_id,
     get_parent_call_id,
@@ -38,7 +40,9 @@ from ..state.context import RunContext
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
 from ..state.tracing.providers import TRACING_UNSET
 from ..state.tracing.span import Span
+from ..types.approval import ApprovalPolicyDecision, ApprovalResolution
 from ..types.events import (
+    ApprovalEvent,
     BaseEvent,
     Event,
     OutputEvent,
@@ -116,7 +120,43 @@ def _timbal_collector_wrap(fn):
 ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 
-# TODO Add timeout
+ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
+ApprovalPrompt = str | Callable[..., str | None] | None
+
+
+def _normalize_approval_decisions(raw: Any) -> dict[str, ApprovalResolution]:
+    """Normalize caller-provided approval decisions keyed by approval_id."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("approval_decisions must be a mapping of approval_id to approval result.")
+
+    decisions: dict[str, ApprovalResolution] = {}
+    for approval_id, value in raw.items():
+        if isinstance(value, ApprovalResolution):
+            resolution = value
+        elif isinstance(value, bool):
+            resolution = ApprovalResolution(approved=value)
+        elif isinstance(value, dict):
+            resolution = ApprovalResolution.model_validate(value)
+        else:
+            raise ValueError("approval_decisions values must be booleans, dicts, or ApprovalResolution instances.")
+        decisions[str(approval_id)] = resolution
+    return decisions
+
+
+def _approval_id_for(path: str, input_dump: Any) -> str:
+    """Compute a stable approval_id for an invocation.
+
+    Hashes ``(path, validated_input)`` so the same decision resumes any retry
+    of the same call. Treat the returned id as opaque: the derivation is an
+    internal contract and may change across SDK versions, so do not persist
+    ids beyond the lifetime of a single pending run.
+    """
+    payload = {"path": path, "input": input_dump}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:32]
+
+
 class Runnable(ABC, BaseModel):
     """Abstract base class for all runnable components in the Timbal framework.
 
@@ -148,6 +188,31 @@ class Runnable(ABC, BaseModel):
     """Optional description of what this runnable does, used in LLM tool schemas."""
     metadata: dict[str, Any] = {}
     """Optional metadata for this runnable."""
+    requires_approval: ApprovalPolicy = False
+    """Whether this runnable invocation requires approval before handler execution.
+
+    A callable receives the validated runnable input and may return a bool, dict,
+    or ApprovalPolicyDecision.
+    """
+    approval_prompt: ApprovalPrompt = None
+    """Optional approval prompt, or a callable that receives the validated runnable input."""
+    approval_description: str | None = None
+    """Optional approval description shown in ApprovalEvent."""
+    approval_redactor: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    """Optional callable to redact sensitive fields before they reach any
+    public approval surface (``ApprovalEvent.input``, persisted ``span.input``,
+    ``span.metadata['approval']['input']``, exporters).
+
+    Receives a copy of the validated input dict and must return a dict.
+    The handler still runs with the unredacted validated input on resume.
+    Takes precedence over ``approval_redact_keys`` when both are set.
+    A redactor that raises or returns a non-dict falls back to a placeholder
+    so the secret never leaks — see :meth:`_redact_validated_input`.
+    """
+    approval_redact_keys: list[str] | None = None
+    """Ergonomic shortcut for ``approval_redactor``: each listed key in the
+    validated input is replaced with ``"***"`` on the public approval
+    surfaces. The handler still receives the unredacted input."""
 
     schema_params_mode: Literal["all", "required"] = "all"
     """Parameter inclusion mode: 'all' includes all params, 'required' only required ones."""
@@ -161,8 +226,14 @@ class Runnable(ABC, BaseModel):
     These parameters are added to the handler's parameters when the handler is called."""
 
     pre_hook: Callable[[], Any] | None = None
-    """Pre-execution hook for runtime processing. Must be a parameterless callable.
-    Use get_run_context() to access execution state and data.
+    """Pre-execution hook: parameterless callable; use get_run_context() for state.
+
+    Runs after input resolution and before Pydantic validation, so the params
+    model can see in-place changes to ``span.input`` (e.g. STT, middleware). A
+    callable ``requires_approval`` policy is evaluated *after* validation, but
+    this hook still runs on the first attempt, including when the run later cancels
+    for ``approval_required``. Defer expensive work until after approval by using
+    the handler or a nested Runnable.
     """
     post_hook: Callable[[], Any] | None = None
     """Post-execution hook for runtime processing. Must be a parameterless callable.
@@ -669,6 +740,113 @@ class Runnable(ABC, BaseModel):
 
             return await loop.run_in_executor(None, fn_with_ctx)
 
+    async def _execute_approval_callable(self, fn: Callable[..., Any], validated_input: dict[str, Any]) -> Any:
+        """Execute an approval policy callable with matching validated input parameters."""
+        sig = inspect.signature(fn)
+        if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()):
+            kwargs = validated_input
+        else:
+            kwargs = {name: validated_input[name] for name in sig.parameters if name in validated_input}
+
+        if inspect.iscoroutinefunction(fn):
+            return await fn(**kwargs)
+
+        loop = asyncio.get_running_loop()
+        ctx = contextvars.copy_context()
+
+        def fn_with_ctx():
+            return ctx.run(fn, **kwargs)
+
+        return await loop.run_in_executor(None, fn_with_ctx)
+
+    async def _resolve_approval_decision(self, validated_input: dict[str, Any]) -> ApprovalPolicyDecision:
+        """Normalize approval configuration for this invocation.
+
+        Wraps **all** policy resolution errors — callable exceptions, invalid
+        return types, malformed dicts that fail pydantic validation, prompt
+        callable exceptions — in :class:`ApprovalPolicyError` so the gate
+        surfaces a dedicated ``approval_policy_error`` reason rather than a
+        generic handler error. The wrapping spans the whole function so any
+        future code added here inherits the same contract.
+        """
+        try:
+            raw_policy = self.requires_approval
+            if callable(raw_policy):
+                raw_decision = await self._execute_approval_callable(raw_policy, validated_input)
+            else:
+                raw_decision = raw_policy
+
+            if isinstance(raw_decision, ApprovalPolicyDecision):
+                decision = raw_decision
+            elif isinstance(raw_decision, bool):
+                decision = ApprovalPolicyDecision(required=raw_decision)
+            elif isinstance(raw_decision, dict):
+                decision = ApprovalPolicyDecision.model_validate(raw_decision)
+            else:
+                raise TypeError(
+                    "requires_approval must be a bool or callable returning bool, dict, or ApprovalPolicyDecision; "
+                    f"got {type(raw_decision).__name__}."
+                )
+
+            prompt = decision.prompt
+            if decision.required and prompt is None and self.approval_prompt is not None:
+                if callable(self.approval_prompt):
+                    prompt = await self._execute_approval_callable(self.approval_prompt, validated_input)
+                else:
+                    prompt = self.approval_prompt
+
+            return ApprovalPolicyDecision(
+                required=decision.required,
+                prompt=prompt,
+                description=decision.description or self.approval_description,
+                metadata=decision.metadata,
+            )
+        except ApprovalPolicyError:
+            raise
+        except Exception as exc:
+            raise ApprovalPolicyError(self._path, exc) from exc
+
+    def _redact_validated_input(self, validated_input: dict[str, Any]) -> dict[str, Any]:
+        """Apply ``approval_redactor`` / ``approval_redact_keys`` to produce
+        the public-facing input snapshot.
+
+        The original ``validated_input`` is never mutated. The returned dict
+        is what flows into :class:`ApprovalEvent`, ``span.input`` (when the
+        gate fires), and ``span.metadata['approval']['input']``. The handler
+        on resume keeps receiving the unredacted validated input.
+
+        Defensive: a redactor that raises or returns a non-dict is treated
+        as a config bug — we log and fall back to a placeholder so the
+        secret never reaches a public surface.
+        """
+        if self.approval_redactor is None and not self.approval_redact_keys:
+            return dict(validated_input)
+
+        if self.approval_redactor is not None:
+            try:
+                redacted = self.approval_redactor(dict(validated_input))
+            except Exception as exc:
+                _get_logger().warning(
+                    "approval_redactor raised; falling back to placeholder so the secret does not leak.",
+                    runnable_path=self._path,
+                    error=repr(exc),
+                )
+                return {"_approval_redaction_error": True}
+            if not isinstance(redacted, dict):
+                _get_logger().warning(
+                    "approval_redactor must return a dict; falling back to placeholder.",
+                    runnable_path=self._path,
+                    returned_type=type(redacted).__name__,
+                )
+                return {"_approval_redaction_error": True}
+            return redacted
+
+        redacted = dict(validated_input)
+        for key in self.approval_redact_keys or ():
+            if key in redacted:
+                redacted[key] = "***"
+        return redacted
+
     async def _resolve_input_params(self, input: dict[str, Any] | None = None) -> dict[str, Any]:
         """Merge fixed defaults, runtime defaults (lambdas), and input. Input takes priority."""
         input = input or {}
@@ -802,12 +980,29 @@ class Runnable(ABC, BaseModel):
         else:
             run_in_background = False
 
+        approval_decisions: dict[str, ApprovalResolution] = {}
+        # Process the deprecated alias FIRST so that the canonical
+        # ``approval_decisions=`` always wins on overlapping keys.
+        if "approvals" in kwargs:
+            import warnings
+
+            warnings.warn(
+                "`approvals=` is deprecated; use `approval_decisions=` instead. "
+                "Both work for now but `approvals` will be removed in a future release.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            approval_decisions.update(_normalize_approval_decisions(kwargs.pop("approvals")))
+        if "approval_decisions" in kwargs:
+            approval_decisions.update(_normalize_approval_decisions(kwargs.pop("approval_decisions")))
+        explicit_parent_id = kwargs.pop("parent_id", None)
+
         # Generate new context or reset it if appropriate
         _parent_call_id = get_parent_call_id()
         _call_id = get_call_id()
         run_context = get_run_context()
         if run_context is None:
-            run_context = RunContext(tracing_provider=self.tracing_provider)
+            run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
             _parent_call_id = None
             _call_id = None
         elif "." not in self._path and run_context._trace:
@@ -818,12 +1013,17 @@ class Runnable(ABC, BaseModel):
             # belongs to a concurrent sibling — create a fresh context.
             root = run_context.root_span()
             if root is not None and root.t1 is not None:
-                run_context = RunContext(parent_id=run_context.id, tracing_provider=self.tracing_provider)
+                run_context = RunContext(
+                    parent_id=explicit_parent_id or run_context.id,
+                    tracing_provider=self.tracing_provider,
+                )
             else:
-                run_context = RunContext(tracing_provider=self.tracing_provider)
+                run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
             _parent_call_id = None
             _call_id = None
         await run_context.get_session()
+        previous_approval_decisions = dict(run_context._approval_decisions)
+        run_context._approval_decisions.update(approval_decisions)
         set_run_context(run_context)
 
         _new_parent_call_id = _call_id
@@ -881,13 +1081,147 @@ class Runnable(ABC, BaseModel):
             span.input = input
             span._input_dump = await dump(input)
 
+            # Pydantic model_validate() does not mutate the input dict
+            validated_input = dict(self.params_model.model_validate(input))
+
+            approval_decision = await self._resolve_approval_decision(validated_input)
+            if approval_decision.required:
+                # ``approval_id`` MUST be derived from the unredacted input
+                # so the resume call (which carries the full input) lands
+                # on the same id as the original gate.
+                input_dump = await dump(validated_input)
+                approval_id = _approval_id_for(span.path, input_dump)
+
+                # Compute the redacted view once and use it for every
+                # public surface. The unredacted ``validated_input`` is
+                # still what the handler sees on resume.
+                redacted_input = self._redact_validated_input(validated_input)
+                redaction_active = (
+                    self.approval_redactor is not None or bool(self.approval_redact_keys)
+                )
+                if redaction_active:
+                    span.input = redacted_input
+                    span._input_dump = await dump(redacted_input)
+
+                span.metadata["approval"] = {
+                    "id": approval_id,
+                    "required": True,
+                    "prompt": approval_decision.prompt,
+                    "description": approval_decision.description,
+                    "metadata": approval_decision.metadata,
+                    "input": redacted_input,
+                }
+                approval_resolution = run_context._approval_decisions.get(approval_id)
+                if approval_resolution is not None:
+                    run_context._used_approval_ids.add(approval_id)
+                if approval_resolution is not None and approval_resolution.is_expired():
+                    span.metadata["approval"]["expired"] = True
+                    span.metadata["approval"]["expired_at"] = approval_resolution.expires_at
+                    # Counter fires for the *expired* resolution. The gate
+                    # then re-emits below, which adds a fresh :required tick.
+                    run_context.update_usage("approvals:expired", 1)
+                    approval_resolution = None
+
+                if approval_resolution is not None and run_context._tracing_provider is not None:
+                    claimed = await run_context._tracing_provider.claim_approval(
+                        str(run_context.parent_id) if run_context.parent_id else None,
+                        approval_id,
+                        str(run_context.id),
+                    )
+                    if not claimed:
+                        span.metadata["approval"]["claim"] = {
+                            "claimed": False,
+                            "parent_id": str(run_context.parent_id) if run_context.parent_id else None,
+                        }
+                        span.status = RunStatus(
+                            code="cancelled",
+                            reason="approval_already_claimed",
+                            message="Approval was already claimed by another resume run.",
+                        )
+                        span.output = {
+                            "approval_id": approval_id,
+                            "status": "approval_already_claimed",
+                        }
+                        span._output_dump = await dump(span.output)
+                        return
+
+                if approval_resolution is None:
+                    # Status/output MUST be set BEFORE the yield. If the
+                    # consumer breaks the stream right after seeing the
+                    # ApprovalEvent, GeneratorExit fires at the yield and
+                    # we'd otherwise persist this span as 'interrupted'.
+                    span.status = RunStatus(
+                        code="cancelled",
+                        reason="approval_required",
+                        message="Approval required before runnable execution.",
+                    )
+                    span.output = {
+                        "approval_id": approval_id,
+                        "status": "approval_required",
+                        "prompt": approval_decision.prompt,
+                    }
+                    span._output_dump = await dump(span.output)
+
+                    approval_event = ApprovalEvent(
+                        run_id=run_context.id,
+                        parent_run_id=run_context.parent_id,
+                        path=span.path,
+                        call_id=span.call_id,
+                        parent_call_id=span.parent_call_id,
+                        t0=int(time.time() * 1000),
+                        approval_id=approval_id,
+                        runnable_path=span.path,
+                        runnable_name=self.name,
+                        runnable_type=self.metadata.get("type", self.__class__.__name__),
+                        input=redacted_input,
+                        prompt=approval_decision.prompt,
+                        description=approval_decision.description,
+                        metadata=approval_decision.metadata,
+                    )
+                    run_context.update_usage("approvals:required", 1)
+                    if approval_event.type in self._log_events:
+                        _get_logger().info(approval_event.type, **approval_event.model_dump())
+                    yield approval_event
+                    _restore_context()
+                    return
+
+                # Resolution found and not expired — capture the audit
+                # snapshot before deciding the gate's outcome. Typed fields
+                # are surfaced under ``resolution`` so trace consumers can
+                # query e.g. ``approval.resolution.approver_id`` directly.
+                span.metadata["approval"]["resolution"] = {
+                    "approved": approval_resolution.approved,
+                    "reason": approval_resolution.reason,
+                    "approver_id": approval_resolution.approver_id,
+                    "comment": approval_resolution.comment,
+                    "decided_at": approval_resolution.decided_at,
+                    "expires_at": approval_resolution.expires_at,
+                    "metadata": approval_resolution.metadata,
+                }
+                if not approval_resolution.approved:
+                    run_context.update_usage("approvals:denied", 1)
+                    span.status = RunStatus(
+                        code="cancelled",
+                        reason="approval_denied",
+                        message=approval_resolution.reason or "Approval denied.",
+                    )
+                    span.output = {
+                        "approval_id": approval_id,
+                        "status": "approval_denied",
+                        "reason": approval_resolution.reason,
+                    }
+                    span._output_dump = await dump(span.output)
+                    return
+
+                run_context.update_usage("approvals:approved", 1)
+
+            # pre_hook runs only when we're actually going to execute the
+            # handler. We deliberately defer it past the approval gate so
+            # external side-effects don't fire on gated/denied attempts.
             if self.pre_hook is not None:
                 await self._execute_runtime_callable(self.pre_hook, self._pre_hook_is_coroutine)
                 set_parent_call_id(_new_parent_call_id)
                 set_call_id(_new_call_id)
-
-            # Pydantic model_validate() does not mutate the input dict
-            validated_input = dict(self.params_model.model_validate(input))
 
             # Background task
             if run_in_background:
@@ -942,6 +1276,17 @@ class Runnable(ABC, BaseModel):
                     if handler_collector is not None:
                         collector = handler_collector
                     if event is not None:
+                        # If a child gates, set our own status BEFORE the yield
+                        # so that a consumer breaking the stream right after
+                        # the ApprovalEvent doesn't end up with our span
+                        # recorded as 'interrupted' (GeneratorExit clobbers
+                        # late-set status). See test_agent_break_on_approval_event.
+                        if isinstance(event, ApprovalEvent) and span.status is None:
+                            span.status = RunStatus(
+                                code="cancelled",
+                                reason="approval_required",
+                                message="Approval required before runnable execution.",
+                            )
                         yield event
                         _restore_context()
                     if final_output is not None:
@@ -976,9 +1321,13 @@ class Runnable(ABC, BaseModel):
 
         except GeneratorExit:
             _generator_closed = True
-            span.status = RunStatus(code="cancelled", reason="interrupted", message="")
-            if collector is not None:
-                span.output = _collector_output_on_interrupt(collector)
+            # Only overwrite status if no earlier branch (e.g. approval gate)
+            # already set it. This keeps approval_required, early_exit etc.
+            # intact when a consumer breaks the stream right after their event.
+            if span.status is None:
+                span.status = RunStatus(code="cancelled", reason="interrupted", message="")
+                if collector is not None:
+                    span.output = _collector_output_on_interrupt(collector)
             raise
 
         except EarlyExit as early_exit:
@@ -986,6 +1335,28 @@ class Runnable(ABC, BaseModel):
             span.status = RunStatus(code="cancelled", reason=reason, message=early_exit.message)
             span.output = None
             span._output_dump = None
+
+        except ApprovalRequired as approval_required:
+            output_event = approval_required.output_event
+            span.status = output_event.status
+            span.output = output_event.output
+            span._output_dump = (
+                output_event._output_dump if hasattr(output_event, "_output_dump") else await dump(span.output)
+            )
+
+        except ApprovalPolicyError as policy_err:
+            original = policy_err.original
+            span.status = RunStatus(
+                code="error",
+                reason="approval_policy_error",
+                message=str(original),
+            )
+            span.error = {
+                "type": type(original).__name__,
+                "message": str(original),
+                "traceback": "".join(traceback.format_exception(type(original), original, original.__traceback__)),
+                "runnable_path": policy_err.runnable_path,
+            }
 
         except (asyncio.CancelledError, InterruptError) as e:
             # Set status FIRST before any awaits. A second CancelledError can arrive
@@ -1066,6 +1437,23 @@ class Runnable(ABC, BaseModel):
             output_event._input_dump = span._input_dump
             output_event._output_dump = span._output_dump
             await run_context._save_trace()
+            # Warn about decisions that didn't match any gate so callers find
+            # typos / stale IDs instead of silently dropping their decisions.
+            # Only check the IDs introduced by THIS call; nested children
+            # don't re-introduce them.
+            if approval_decisions:
+                unused = [
+                    aid for aid in approval_decisions
+                    if aid not in run_context._used_approval_ids
+                ]
+                if unused:
+                    _get_logger().warning(
+                        "Unrecognized approval_decisions ignored — these IDs "
+                        "did not match any gate during this run.",
+                        unused_approval_ids=unused,
+                        runnable_path=self._path,
+                    )
+            run_context._approval_decisions = previous_approval_decisions
             set_parent_call_id(_parent_call_id)
             set_call_id(_call_id)
             if output_event.type in self._log_events:

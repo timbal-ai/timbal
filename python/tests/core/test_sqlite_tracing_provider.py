@@ -462,3 +462,84 @@ class TestSqliteMemoryIntegration:
         assert trace is not None
         agent_span = next(s for s in trace.as_records() if s.path == "chain_agent")
         assert len(agent_span.memory) == 4
+
+    @pytest.mark.asyncio
+    async def test_sqlite_reloaded_root_span_uses_dict_status_for_memory_chain(self, tmp_path):
+        """Regression: SQLite get() builds Span with status as a dict, not RunStatus;
+        parent_id + turn 2 must not raise (AttributeError) and must succeed.
+
+        Mirrors the JSONL regression (resolve_memory previously read
+        previous_span.status.code and crashed when status was a dict).
+        Same risk applies to SQLite: spans are stored as JSON in the spans
+        column, so the reload path also produces dict-shaped status."""
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+
+        provider = SqliteTracingProvider.configured(_path=tmp_path / "traces.db")
+        agent = Agent(
+            name="chain_agent",
+            model=TestModel(responses=["r1", "r2"]),
+            tracing_provider=provider,
+        )
+        out1 = await agent(prompt="m0").collect()
+        out2 = await agent(prompt="m1", parent_id=out1.run_id).collect()
+        assert out2.status.code == "success", out2.error
+        assert out2.error is None
+
+    @pytest.mark.asyncio
+    async def test_memory_dump_correct_after_sqlite_reload(self, tmp_path):
+        """_memory_dump on turn 2 must equal a fresh dump of the full memory.
+
+        Mirrors the JSONL ``test_memory_dump_correct_after_jsonl_reload``:
+        proves the incremental ``_prev_memory_dump`` optimisation in
+        ``Agent.resolve_memory`` is transparent when spans are reconstructed
+        from the SQLite ``spans`` JSON column rather than carried in memory.
+        """
+        import sqlite3 as _sqlite3
+
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.types.message import Message
+        from timbal.utils import dump
+
+        db_path = tmp_path / "traces.db"
+        provider = SqliteTracingProvider.configured(_path=db_path)
+
+        turn_count = 0
+
+        def counting_handler(messages):  # noqa: ARG001 — TestModel handler signature
+            nonlocal turn_count
+            turn_count += 1
+            return f"response {turn_count}"
+
+        agent = Agent(
+            name="sqlite_memdump",
+            model=TestModel(handler=counting_handler),
+            tracing_provider=provider,
+        )
+
+        out1 = await agent(prompt="message 0").collect()
+        assert db_path.exists(), "SQLite db should be created after turn 1"
+
+        out2 = await agent(prompt="message 1", parent_id=out1.run_id).collect()
+
+        conn = _sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT spans FROM runs WHERE run_id = ?",
+                (out2.run_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, "turn 2 row should exist in SQLite"
+        spans = json.loads(row[0])
+        agent_span = next(s for s in spans if s["path"] == "sqlite_memdump")
+        stored_memory = agent_span.get("memory")
+
+        assert stored_memory is not None, "memory should be persisted in turn 2 span"
+        assert len(stored_memory) == 4, (
+            f"Expected 4 messages (user0, assistant0, user1, assistant1), got {len(stored_memory)}"
+        )
+
+        expected = await dump([Message.validate(m) for m in stored_memory])
+        assert stored_memory == expected, "_memory_dump stored in SQLite does not match full re-dump"

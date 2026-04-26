@@ -7,12 +7,20 @@ from uuid_extensions import uuid7
 
 from ..errors import SpanNotFound
 from .config import PlatformConfig
-from .tracing.providers import TRACING_UNSET, InMemoryTracingProvider, PlatformTracingProvider, TracingProvider, _TracingProviderUnset
+from .tracing.providers import (
+    TRACING_UNSET,
+    InMemoryTracingProvider,
+    PlatformTracingProvider,
+    TracingProvider,
+    _TracingProviderUnset,
+)
 from .tracing.span import Span
 from .tracing.trace import Trace
 
+
 def _get_logger():
     import structlog
+
     return structlog.get_logger("timbal.state.context")
 
 
@@ -85,6 +93,48 @@ class RunContext(BaseModel):
     _trace: Trace = PrivateAttr()
     _tracing_provider: type[TracingProvider] = PrivateAttr()
     _session_data: dict[str, Any] | None = PrivateAttr(default=None)
+    _approval_decisions: dict[str, Any] = PrivateAttr(default_factory=dict)
+    """Active approval resolutions keyed by approval_id (values: ApprovalResolution).
+    Typed as ``Any`` to avoid an import cycle with ``..types.approval`` — the
+    invariant is enforced at write time by ``_normalize_approval_decisions``."""
+    _used_approval_ids: set[str] = PrivateAttr(default_factory=set)
+    """Approval IDs that matched a gate during this run. Used to warn about
+    unrecognized decisions (typos, stale IDs) at run completion."""
+
+    def pending_approvals(self) -> list[dict[str, Any]]:
+        """Return metadata for every span currently waiting on approval.
+
+        Useful when an OutputEvent's status is cancelled/approval_required and
+        the caller wants to enumerate every approval that needs a decision
+        before retrying the run with ``approval_decisions={...}``. Includes
+        ``expired``/``expired_at`` when the previous decision was rejected for
+        TTL reasons so a UI can flag stale approvals to the operator.
+
+        Tolerates both ``RunStatus`` instances and dicts, since traces loaded
+        from JSONL/SQLite providers carry status as a dict.
+        """
+        pending: list[dict[str, Any]] = []
+        for span in self._trace.values():
+            status = span.status
+            code = status.get("code") if isinstance(status, dict) else getattr(status, "code", None)
+            reason = status.get("reason") if isinstance(status, dict) else getattr(status, "reason", None)
+            if code == "cancelled" and reason == "approval_required":
+                approval = (span.metadata or {}).get("approval")
+                if approval and approval.get("id"):
+                    entry = {
+                        "approval_id": approval["id"],
+                        "path": span.path,
+                        "call_id": span.call_id,
+                        "prompt": approval.get("prompt"),
+                        "description": approval.get("description"),
+                        "metadata": approval.get("metadata", {}),
+                        "input": approval.get("input"),
+                    }
+                    if approval.get("expired"):
+                        entry["expired"] = True
+                        entry["expired_at"] = approval.get("expired_at")
+                    pending.append(entry)
+        return pending
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize the RunContext after Pydantic model creation.
@@ -103,8 +153,7 @@ class RunContext(BaseModel):
         # None means tracing is disabled; a class means use that provider.
         if not isinstance(self.tracing_provider, _TracingProviderUnset):
             if self.tracing_provider is not None and (
-                not isinstance(self.tracing_provider, type)
-                or not issubclass(self.tracing_provider, TracingProvider)
+                not isinstance(self.tracing_provider, type) or not issubclass(self.tracing_provider, TracingProvider)
             ):
                 raise TypeError(
                     f"tracing_provider must be a TracingProvider subclass, None, or TRACING_UNSET — "
@@ -119,11 +168,7 @@ class RunContext(BaseModel):
 
         if self.platform_config:
             use_platform_traces = self.platform_config.sync_traces_enabled is not False
-            if (
-                use_platform_traces
-                and self.platform_config.subject
-                and self.platform_config.subject.app_id
-            ):
+            if use_platform_traces and self.platform_config.subject and self.platform_config.subject.app_id:
                 _get_logger().info(
                     f"Platform configuration found (subject: {self.platform_config.subject}). "
                     "Using platform tracing provider.",

@@ -56,6 +56,26 @@ class InterruptError(TimbalError):
         self.message = message
 
 
+class ApprovalRequired(TimbalError):
+    """Internal signal used to propagate approval-required child runs."""
+
+    def __init__(self, output_event: Any) -> None:
+        super().__init__("Approval required")
+        self.output_event = output_event
+
+
+class ApprovalPolicyError(TimbalError):
+    """Error raised when an approval policy callable (requires_approval or
+    approval_prompt) raises an exception. Surfaces as a span with status
+    ``error`` and reason ``approval_policy_error`` so operators can distinguish
+    policy bugs from runnable handler errors."""
+
+    def __init__(self, runnable_path: str, original: BaseException) -> None:
+        super().__init__(f"Approval policy raised in {runnable_path}: {original!r}")
+        self.runnable_path = runnable_path
+        self.original = original
+
+
 class ImageProcessingError(TimbalError):
     """Error raised when an image file cannot be processed."""
 
