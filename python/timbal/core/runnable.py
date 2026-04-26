@@ -1113,6 +1113,9 @@ class Runnable(ABC, BaseModel):
                 if approval_resolution is not None and approval_resolution.is_expired():
                     span.metadata["approval"]["expired"] = True
                     span.metadata["approval"]["expired_at"] = approval_resolution.expires_at
+                    # Counter fires for the *expired* resolution. The gate
+                    # then re-emits below, which adds a fresh :required tick.
+                    run_context.update_usage("approvals:expired", 1)
                     approval_resolution = None
 
                 if approval_resolution is None:
@@ -1148,16 +1151,28 @@ class Runnable(ABC, BaseModel):
                         description=approval_decision.description,
                         metadata=approval_decision.metadata,
                     )
+                    run_context.update_usage("approvals:required", 1)
                     if approval_event.type in self._log_events:
                         _get_logger().info(approval_event.type, **approval_event.model_dump())
                     yield approval_event
                     _restore_context()
                     return
 
-                span.metadata["approval"]["approved"] = approval_resolution.approved
-                span.metadata["approval"]["reason"] = approval_resolution.reason
-                span.metadata["approval"]["resolution_metadata"] = approval_resolution.metadata
+                # Resolution found and not expired — capture the audit
+                # snapshot before deciding the gate's outcome. Typed fields
+                # are surfaced under ``resolution`` so trace consumers can
+                # query e.g. ``approval.resolution.approver_id`` directly.
+                span.metadata["approval"]["resolution"] = {
+                    "approved": approval_resolution.approved,
+                    "reason": approval_resolution.reason,
+                    "approver_id": approval_resolution.approver_id,
+                    "comment": approval_resolution.comment,
+                    "decided_at": approval_resolution.decided_at,
+                    "expires_at": approval_resolution.expires_at,
+                    "metadata": approval_resolution.metadata,
+                }
                 if not approval_resolution.approved:
+                    run_context.update_usage("approvals:denied", 1)
                     span.status = RunStatus(
                         code="cancelled",
                         reason="approval_denied",
@@ -1170,6 +1185,8 @@ class Runnable(ABC, BaseModel):
                     }
                     span._output_dump = await dump(span.output)
                     return
+
+                run_context.update_usage("approvals:approved", 1)
 
             # pre_hook runs only when we're actually going to execute the
             # handler. We deliberately defer it past the approval gate so
