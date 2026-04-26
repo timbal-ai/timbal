@@ -1,14 +1,16 @@
 """Tests for timbal.platform.utils — _resolve_url_and_headers, _request, _stream."""
 
-import pytest
+from __future__ import annotations
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import pytest
 from timbal.errors import PlatformError
 from timbal.platform.utils import _request, _resolve_url_and_headers, _stream
 from timbal.state import set_run_context
 from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
 from timbal.state.context import RunContext
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -182,11 +184,14 @@ def _mock_httpx_client(mock_http):
     return mock_client_cm
 
 
-def _make_http_status_error(status_code: int, reason: str = "Error") -> "httpx.HTTPStatusError":
-    import httpx
-
+def _make_http_status_error(
+    status_code: int,
+    reason: str = "Error",
+    *,
+    headers: dict[str, str] | None = None,
+) -> httpx.HTTPStatusError:
     request = httpx.Request("GET", "https://api.timbal.ai/test")
-    response = httpx.Response(status_code, request=request)
+    response = httpx.Response(status_code, request=request, headers=headers or {})
     # Provide a text attribute so error_body extraction doesn't blow up
     return httpx.HTTPStatusError(reason, request=request, response=response)
 
@@ -222,8 +227,6 @@ class TestRequest:
 
     @pytest.mark.asyncio
     async def test_4xx_non_429_raises_immediately_without_retry(self):
-        import httpx
-
         mock_http = AsyncMock()
         mock_client_cm = _mock_httpx_client(mock_http)
         exc = _make_http_status_error(404)
@@ -238,8 +241,6 @@ class TestRequest:
 
     @pytest.mark.asyncio
     async def test_429_retries_then_succeeds(self):
-        import httpx
-
         mock_http = AsyncMock()
         mock_client_cm = _mock_httpx_client(mock_http)
         exc_429 = _make_http_status_error(429, "Too Many Requests")
@@ -251,6 +252,51 @@ class TestRequest:
             with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()):
                 result = await _request("GET", "health", service="api", max_retries=3)
         assert result is ok_response
+
+    @pytest.mark.asyncio
+    async def test_429_retry_after_header_sets_sleep(self):
+        mock_http = AsyncMock()
+        mock_client_cm = _mock_httpx_client(mock_http)
+        exc_429 = _make_http_status_error(429, "Too Many Requests", headers={"Retry-After": "2.5"})
+        ok_response = MagicMock()
+        ok_response.raise_for_status = MagicMock()
+        mock_http.request = AsyncMock(side_effect=[exc_429, ok_response])
+
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
+            with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+                await _request("GET", "health", service="api", max_retries=3)
+        mock_sleep.assert_called_once()
+        assert mock_sleep.call_args[0][0] == pytest.approx(2.5)
+
+    @pytest.mark.asyncio
+    async def test_429_invalid_retry_after_uses_exponential_backoff(self):
+        mock_http = AsyncMock()
+        mock_client_cm = _mock_httpx_client(mock_http)
+        exc_429 = _make_http_status_error(429, "Too Many Requests", headers={"Retry-After": "not-a-number"})
+        ok_response = MagicMock()
+        ok_response.raise_for_status = MagicMock()
+        mock_http.request = AsyncMock(side_effect=[exc_429, ok_response])
+
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
+            with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+                await _request("GET", "health", service="api", max_retries=3)
+        mock_sleep.assert_called_once()
+        # attempt 0 → 0.1 * 2**0
+        assert mock_sleep.call_args[0][0] == pytest.approx(0.1)
+
+    @pytest.mark.asyncio
+    async def test_429_exhausts_retries_raises_platform_error(self):
+        mock_http = AsyncMock()
+        mock_client_cm = _mock_httpx_client(mock_http)
+        exc_429 = _make_http_status_error(429, "Too Many Requests")
+        mock_http.request = AsyncMock(side_effect=[exc_429, exc_429, exc_429])
+
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
+            with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()):
+                with pytest.raises(PlatformError) as ei:
+                    await _request("GET", "health", service="api", max_retries=2)
+        assert "429" in str(ei.value)
+        assert mock_http.request.call_count == 3
 
     @pytest.mark.asyncio
     async def test_5xx_retries_then_raises_platform_error(self):
@@ -459,7 +505,10 @@ class TestStream:
             calls.append(mock_stream_cm)
             return mock_stream_cm
 
-        mock_http.stream = MagicMock(side_effect=lambda *a, **kw: _make_stream_cm())
+        def stream_side_effect(*_args, **_kwargs):
+            return _make_stream_cm()
+
+        mock_http.stream = MagicMock(side_effect=stream_side_effect)
         mock_client_cm = _mock_httpx_client(mock_http)
 
         with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
@@ -469,6 +518,125 @@ class TestStream:
                         pass
 
         assert mock_http.stream.call_count == 3  # initial + 2 retries
+
+    @pytest.mark.asyncio
+    async def test_429_retries_then_stream_succeeds(self):
+        import json
+
+        mock_http = AsyncMock()
+        exc_429 = _make_http_status_error(429, "Too Many Requests")
+
+        def _ok_stream_cm():
+            mock_response = AsyncMock()
+            mock_response.raise_for_status = MagicMock()
+            payload = {"ok": True}
+
+            async def _lines():
+                yield f"data: {json.dumps(payload)}"
+
+            mock_response.aiter_lines = _lines
+            mock_stream_cm = MagicMock()
+            mock_stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_stream_cm.__aexit__ = AsyncMock(return_value=False)
+            return mock_stream_cm
+
+        attempt = {"n": 0}
+
+        def stream_side_effect(*_args, **_kwargs):
+            if attempt["n"] == 0:
+                attempt["n"] += 1
+                bad_cm = MagicMock()
+                bad_response = AsyncMock()
+                bad_response.raise_for_status = MagicMock(side_effect=exc_429)
+                bad_cm.__aenter__ = AsyncMock(return_value=bad_response)
+                bad_cm.__aexit__ = AsyncMock(return_value=False)
+                return bad_cm
+            return _ok_stream_cm()
+
+        mock_http.stream = MagicMock(side_effect=stream_side_effect)
+        mock_client_cm = _mock_httpx_client(mock_http)
+
+        results = []
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
+            with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()):
+                async for item in _stream("POST", "stream", service="api", max_retries=3):
+                    results.append(item)
+
+        assert results == [{"ok": True}]
+        assert mock_http.stream.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_429_stream_retry_after_header_sets_sleep(self):
+        import json
+
+        mock_http = AsyncMock()
+        exc_429 = _make_http_status_error(
+            429,
+            "Too Many Requests",
+            headers={"Retry-After": "1.25"},
+        )
+
+        async def _lines_ok():
+            yield f"data: {json.dumps({'x': 1})}"
+
+        def _ok_stream_cm():
+            mock_response = AsyncMock()
+            mock_response.raise_for_status = MagicMock()
+            mock_response.aiter_lines = _lines_ok
+            mock_stream_cm = MagicMock()
+            mock_stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_stream_cm.__aexit__ = AsyncMock(return_value=False)
+            return mock_stream_cm
+
+        n = {"c": 0}
+
+        def stream_side_effect(*_args, **_kwargs):
+            if n["c"] == 0:
+                n["c"] += 1
+                bad_cm = MagicMock()
+                bad_response = AsyncMock()
+                bad_response.raise_for_status = MagicMock(side_effect=exc_429)
+                bad_cm.__aenter__ = AsyncMock(return_value=bad_response)
+                bad_cm.__aexit__ = AsyncMock(return_value=False)
+                return bad_cm
+            return _ok_stream_cm()
+
+        mock_http.stream = MagicMock(side_effect=stream_side_effect)
+        mock_client_cm = _mock_httpx_client(mock_http)
+
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
+            with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+                async for _ in _stream("POST", "stream", service="api", max_retries=3):
+                    pass
+        mock_sleep.assert_called_once()
+        assert mock_sleep.call_args[0][0] == pytest.approx(1.25)
+
+    @pytest.mark.asyncio
+    async def test_429_stream_exhausts_retries_raises_platform_error(self):
+        mock_http = AsyncMock()
+        exc_429 = _make_http_status_error(429, "Too Many Requests")
+
+        def _make_stream_cm():
+            mock_response = AsyncMock()
+            mock_response.raise_for_status = MagicMock(side_effect=exc_429)
+            mock_stream_cm = MagicMock()
+            mock_stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_stream_cm.__aexit__ = AsyncMock(return_value=False)
+            return mock_stream_cm
+
+        def stream_side_effect(*_args, **_kwargs):
+            return _make_stream_cm()
+
+        mock_http.stream = MagicMock(side_effect=stream_side_effect)
+        mock_client_cm = _mock_httpx_client(mock_http)
+
+        with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):
+            with patch("timbal.platform.utils.asyncio.sleep", new=AsyncMock()):
+                with pytest.raises(PlatformError) as ei:
+                    async for _ in _stream("POST", "stream", service="api", max_retries=2):
+                        pass
+        assert "429" in str(ei.value)
+        assert mock_http.stream.call_count == 3
 
     @pytest.mark.asyncio
     async def test_stream_json_payload_forwarded(self):
@@ -504,8 +672,6 @@ class TestStream:
     @pytest.mark.asyncio
     async def test_stream_error_body_read_failure_sets_none(self):
         """Cover lines 224-225: error_body=None when aread() itself raises."""
-        import httpx
-
         request = httpx.Request("GET", "https://api.timbal.ai/test")
         mock_response = MagicMock()
         mock_response.status_code = 500
@@ -539,7 +705,10 @@ class TestStream:
             cm.__aexit__ = AsyncMock(return_value=False)
             return cm
 
-        mock_http.stream = MagicMock(side_effect=lambda *a, **kw: _make_failing_stream_cm())
+        def stream_side_effect(*_args, **_kwargs):
+            return _make_failing_stream_cm()
+
+        mock_http.stream = MagicMock(side_effect=stream_side_effect)
         mock_client_cm = _mock_httpx_client(mock_http)
 
         with patch("timbal.platform.utils.httpx.AsyncClient", return_value=mock_client_cm):

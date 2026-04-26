@@ -387,15 +387,11 @@ class File(io.IOBase):
             object.__setattr__(self, "__persisted__", temp_path)
             return temp_path
 
-        subject = run_context.platform_config.subject
-        org_id = org_id or subject.org_id
-        # ? We could add more subject info here
-
         self.seek(0)
         content = self.read()
         self.seek(0)  # Return the pointer to the beginning of the file
 
-        path = f"orgs/{org_id}/files"
+        path = "files"
         files = {"file": (self.name, content, self.__content_type__)}
 
         from ..platform.utils import _request

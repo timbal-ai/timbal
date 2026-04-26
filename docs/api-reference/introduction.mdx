@@ -21,7 +21,7 @@ Most resources in Timbal are scoped to an **organization**, meaning their API pa
 ```
 
 <Info>
-Not all endpoints are org-scoped. Some are user-scoped and live under `/me` (e.g. managing your API keys).
+Not all endpoints are org-scoped. Some are user-scoped and live under `/me` (e.g. listing organizations or managing API keys). **`POST /files`** uploads a short-lived binary to object storage (Bearer auth, same as the rest of the API); it does **not** include `org_id` in the path—org context comes from the authenticated key.
 </Info>
 
 HTTP verbs follow REST conventions:

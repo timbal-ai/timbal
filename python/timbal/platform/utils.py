@@ -145,6 +145,13 @@ async def _request(
                     f"  Response body: {error_body or None}"
                 ) from exc
             wait_time = 0.1 * (2**attempt)  # Exponential backoff: 100ms, 200ms, 400ms
+            if exc.response.status_code == 429:
+                retry_after = exc.response.headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        wait_time = max(wait_time, float(retry_after))
+                    except ValueError:
+                        pass
             logger.warning(
                 f"Request failed, retrying in {wait_time:.1f}s",
                 attempt=attempt + 1,
@@ -240,6 +247,13 @@ async def _stream(
                     f"  Response body: {error_body or None}"
                 ) from exc
             wait_time = 0.1 * (2**attempt)
+            if exc.response.status_code == 429:
+                retry_after = exc.response.headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        wait_time = max(wait_time, float(retry_after))
+                    except ValueError:
+                        pass
             logger.warning(
                 f"Stream request failed, retrying in {wait_time:.1f}s",
                 attempt=attempt + 1,
