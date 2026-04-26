@@ -16,7 +16,7 @@ import warnings
 import pytest
 from timbal import Agent, Tool, Workflow
 from timbal.core.test_model import TestModel
-from timbal.types.approval import ApprovalDecision, ApprovalResolution
+from timbal.types.approval import ApprovalPolicyDecision, ApprovalResolution
 from timbal.types.content import ToolUseContent
 from timbal.types.events import ApprovalEvent, OutputEvent
 from timbal.types.message import Message
@@ -701,7 +701,7 @@ class TestApprovalPolicyErrors:
 
     @pytest.mark.asyncio
     async def test_decision_object_with_invalid_metadata_type_also_wrapped(self):
-        """ApprovalDecision currently has metadata: dict; passing a non-dict
+        """ApprovalPolicyDecision currently has metadata: dict; passing a non-dict
         should be a policy error, not a handler error."""
 
         def bad(x: int):  # noqa: ARG001
@@ -715,8 +715,8 @@ class TestApprovalPolicyErrors:
 
     @pytest.mark.asyncio
     async def test_valid_decision_object_works(self):
-        def policy(x: int) -> ApprovalDecision:  # noqa: ARG001
-            return ApprovalDecision(required=True, prompt="approve?")
+        def policy(x: int) -> ApprovalPolicyDecision:  # noqa: ARG001
+            return ApprovalPolicyDecision(required=True, prompt="approve?")
 
         tool = self._tool(policy)
         events = [e async for e in tool(x=1)]

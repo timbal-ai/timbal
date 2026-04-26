@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-class ApprovalDecision(BaseModel):
+class ApprovalPolicyDecision(BaseModel):
     """Normalized approval policy decision for a runnable invocation.
 
     The ``approval_id`` is derived from ``(runnable_path, validated_input)``: a

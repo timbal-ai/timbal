@@ -40,7 +40,7 @@ from ..state.context import RunContext
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
 from ..state.tracing.providers import TRACING_UNSET
 from ..state.tracing.span import Span
-from ..types.approval import ApprovalDecision, ApprovalResolution
+from ..types.approval import ApprovalPolicyDecision, ApprovalResolution
 from ..types.events import (
     ApprovalEvent,
     BaseEvent,
@@ -120,7 +120,7 @@ def _timbal_collector_wrap(fn):
 ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 
-ApprovalPolicy = bool | Callable[..., bool | ApprovalDecision | dict[str, Any]]
+ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
 ApprovalPrompt = str | Callable[..., str | None] | None
 
 
@@ -192,7 +192,7 @@ class Runnable(ABC, BaseModel):
     """Whether this runnable invocation requires approval before handler execution.
 
     A callable receives the validated runnable input and may return a bool, dict,
-    or ApprovalDecision.
+    or ApprovalPolicyDecision.
     """
     approval_prompt: ApprovalPrompt = None
     """Optional approval prompt, or a callable that receives the validated runnable input."""
@@ -744,7 +744,7 @@ class Runnable(ABC, BaseModel):
 
         return await loop.run_in_executor(None, fn_with_ctx)
 
-    async def _resolve_approval_decision(self, validated_input: dict[str, Any]) -> ApprovalDecision:
+    async def _resolve_approval_decision(self, validated_input: dict[str, Any]) -> ApprovalPolicyDecision:
         """Normalize approval configuration for this invocation.
 
         Wraps **all** policy resolution errors — callable exceptions, invalid
@@ -761,15 +761,15 @@ class Runnable(ABC, BaseModel):
             else:
                 raw_decision = raw_policy
 
-            if isinstance(raw_decision, ApprovalDecision):
+            if isinstance(raw_decision, ApprovalPolicyDecision):
                 decision = raw_decision
             elif isinstance(raw_decision, bool):
-                decision = ApprovalDecision(required=raw_decision)
+                decision = ApprovalPolicyDecision(required=raw_decision)
             elif isinstance(raw_decision, dict):
-                decision = ApprovalDecision.model_validate(raw_decision)
+                decision = ApprovalPolicyDecision.model_validate(raw_decision)
             else:
                 raise TypeError(
-                    "requires_approval must be a bool or callable returning bool, dict, or ApprovalDecision; "
+                    "requires_approval must be a bool or callable returning bool, dict, or ApprovalPolicyDecision; "
                     f"got {type(raw_decision).__name__}."
                 )
 
@@ -780,7 +780,7 @@ class Runnable(ABC, BaseModel):
                 else:
                     prompt = self.approval_prompt
 
-            return ApprovalDecision(
+            return ApprovalPolicyDecision(
                 required=decision.required,
                 prompt=prompt,
                 description=decision.description or self.approval_description,
