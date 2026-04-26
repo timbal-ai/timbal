@@ -13,7 +13,7 @@ except ImportError:
 import structlog
 from pydantic import BaseModel, ConfigDict, PrivateAttr, computed_field, create_model
 
-from ..errors import InterruptError, SpanNotFound
+from ..errors import ApprovalRequired, InterruptError, SpanNotFound
 from ..state import get_call_id, get_parent_call_id, set_parent_call_id
 from ..types.events.output import OutputEvent
 from .runnable import Runnable, RunnableLike
@@ -229,6 +229,15 @@ class Workflow(Runnable):
         try:
             async for event in step(**resolved_input):
                 await queue.put(event)
+                if (
+                    isinstance(event, OutputEvent)
+                    and event.status.code == "cancelled"
+                    and event.status.reason in {"approval_required", "approval_denied"}
+                ):
+                    logger.info(f"Step {step.name} cancelled because approval is required or denied.")
+                    status.state = StepState.FAILED
+                    await queue.put(ApprovalRequired(event))
+                    return
                 if isinstance(event, OutputEvent) and event.error is not None:
                     logger.info(f"Step {step.name} completed with error.")
                     status.state = StepState.FAILED
@@ -246,7 +255,15 @@ class Workflow(Runnable):
         await queue.put(None)
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
-        """Execute all steps concurrently, respecting dependencies."""
+        """Execute all steps concurrently, respecting dependencies.
+
+        When multiple parallel steps require approval, every gate is drained
+        (so each step emits its OutputEvent + ApprovalEvent) before the
+        workflow itself raises ``ApprovalRequired``. This lets a caller
+        collect every pending ``approval_id`` from a single run and resume
+        with all decisions at once. Mirrors the agent's tool-multiplexing
+        behaviour and prevents the first gate from cancelling later gates.
+        """
         queue = asyncio.Queue()
         statuses = {step_name: StepStatus() for step_name in self._steps.keys()}
         tasks = [
@@ -254,27 +271,38 @@ class Workflow(Runnable):
             for step in self._steps.values()
         ]
 
+        first_pending_approval: ApprovalRequired | None = None
+        first_pending_exception: Exception | None = None
+
         try:
             remaining = len(tasks)
             while remaining > 0:
                 event = await queue.get()
                 if isinstance(event, InterruptError):
-                    # Propagate interrupt error - will be handled by finally block
                     raise event
+                if isinstance(event, ApprovalRequired):
+                    if first_pending_approval is None:
+                        first_pending_approval = event
+                    remaining -= 1
+                    continue
                 if isinstance(event, Exception):
-                    raise event
-                elif event is None:
+                    if first_pending_exception is None:
+                        first_pending_exception = event
+                    remaining -= 1
+                    continue
+                if event is None:
                     remaining -= 1
                 else:
                     yield event
+            if first_pending_approval is not None:
+                raise first_pending_approval
+            if first_pending_exception is not None:
+                raise first_pending_exception
         except (asyncio.CancelledError, InterruptError):
-            # Cancellation or interrupt - clean up gracefully
             raise
         finally:
-            # Cancel all pending step tasks
             for task in tasks:
                 if not task.done():
                     task.cancel()
-            # Wait for all cancellations to complete, suppressing errors
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)

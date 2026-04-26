@@ -110,6 +110,95 @@ async for event in agent(prompt="Hello"):
     print(event)
 ```
 
+### Approval-Required Tools
+
+Any runnable can require approval before it executes. This is most useful for tools that send emails, charge cards, deploy code, delete data, or call external systems with side effects.
+
+```python
+from timbal import Agent, Tool
+from timbal.types.events import ApprovalEvent
+
+
+def refund_customer(amount: int) -> str:
+    return f"refunded ${amount}"
+
+
+refund = Tool(
+    handler=refund_customer,
+    requires_approval=lambda amount: amount > 100,
+    approval_prompt=lambda amount: f"Approve refunding ${amount}?",
+)
+
+agent = Agent(
+    name="support_agent",
+    model="openai/gpt-5",
+    tools=[refund],
+)
+
+events = []
+async for event in agent(prompt="Refund $250"):
+    events.append(event)
+    if isinstance(event, ApprovalEvent):
+        approval_id = event.approval_id
+```
+
+If approval is required, Timbal emits an `ApprovalEvent` and the run ends with `status.code == "cancelled"` and `status.reason == "approval_required"`. Resume by calling the runnable again with `approval_decisions`:
+
+```python
+result = await agent(
+    prompt="Refund $250",
+    approval_decisions={approval_id: True},
+).collect()
+```
+
+Use a structured decision to deny with a reason:
+
+```python
+result = await agent(
+    prompt="Refund $250",
+    approval_decisions={
+        approval_id: {
+            "approved": False,
+            "reason": "Refund exceeds policy limit.",
+        }
+    },
+).collect()
+```
+
+For direct tool calls, denial returns `status.reason == "approval_denied"` and the handler does not run. For agent tool calls, denial is converted into a tool result so the model can explain what happened or choose another path.
+
+#### `approval_id` semantics
+
+The `approval_id` is derived from `(runnable_path, validated_input)`: the same path + input shares one decision, so a decision survives retries of the same call. Treat the id as **opaque** — the derivation is an internal contract and may change across SDK versions, so don't persist it across deploys.
+
+For irreversible operations (money movement, destructive deletes) where every call must require a fresh decision, include a unique value in the input (e.g. an `idempotency_key=uuid4()` arg) so each call derives a distinct `approval_id`.
+
+#### Time-limited decisions
+
+Pass an `expires_at` (Unix-ms) on a resolution to bound how long it stays valid. When the gate sees an expired decision it ignores it, emits a fresh `ApprovalEvent`, and surfaces `metadata["approval"]["expired"] == True`:
+
+```python
+from timbal.types.approval import ApprovalResolution
+import time
+
+decision = ApprovalResolution(
+    approved=True,
+    expires_at=int(time.time() * 1000) + 60_000,  # valid for 60s
+)
+result = await agent(
+    prompt="Refund $250",
+    approval_decisions={approval_id: decision},
+).collect()
+```
+
+#### Enumerating pending approvals
+
+When a run cancels with `approval_required` and you have multiple concurrent tool calls, every pending gate emits its own `ApprovalEvent`. To enumerate them server-side, walk the trace via `RunContext.pending_approvals()` (works against in-memory, JSONL, and SQLite traces — `span.status` may be a dict after reload, the helper handles both shapes).
+
+#### Policy errors
+
+If your callable `requires_approval` or `approval_prompt` raises, the runnable does **not** silently approve nor execute. Instead it ends with `status.code == "error"` and a dedicated `status.reason == "approval_policy_error"` so dashboards can distinguish policy bugs from handler bugs.
+
 ## Input
 
 Agents communicate through `Message` objects - Timbal's data structure that standardizes both input and output.

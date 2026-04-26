@@ -159,37 +159,105 @@ class OTelExporter(Exporter):
         return str(ms * 1_000_000)
 
     @staticmethod
-    def _build_attributes(span: Span) -> list[dict[str, Any]]:
-        attrs = []
+    def _status_parts(span: Span) -> tuple[str | None, str | None]:
+        """Return (code, reason) for span.status, tolerating dict shape after reload."""
+        status = getattr(span, "status", None)
+        if status is None:
+            return None, None
+        if isinstance(status, dict):
+            return status.get("code"), status.get("reason")
+        return getattr(status, "code", None), getattr(status, "reason", None)
+
+    @classmethod
+    def _build_attributes(cls, span: Span) -> list[dict[str, Any]]:
+        attrs: list[dict[str, Any]] = []
         input_dump = getattr(span, "_input_dump", None)
         if input_dump is not None:
-            attrs.append({
-                "key": "timbal.input",
-                "value": {"stringValue": json.dumps(input_dump, default=str)},
-            })
+            attrs.append(
+                {
+                    "key": "timbal.input",
+                    "value": {"stringValue": json.dumps(input_dump, default=str)},
+                }
+            )
         output_dump = getattr(span, "_output_dump", None)
         if output_dump is not None:
-            attrs.append({
-                "key": "timbal.output",
-                "value": {"stringValue": json.dumps(output_dump, default=str)},
-            })
+            attrs.append(
+                {
+                    "key": "timbal.output",
+                    "value": {"stringValue": json.dumps(output_dump, default=str)},
+                }
+            )
         if span.error is not None:
-            attrs.append({
-                "key": "timbal.error",
-                "value": {"stringValue": str(span.error)},
-            })
+            attrs.append(
+                {
+                    "key": "timbal.error",
+                    "value": {"stringValue": str(span.error)},
+                }
+            )
         if span.usage:
-            attrs.append({
-                "key": "timbal.usage",
-                "value": {"stringValue": json.dumps(span.usage)},
-            })
+            attrs.append(
+                {
+                    "key": "timbal.usage",
+                    "value": {"stringValue": json.dumps(span.usage)},
+                }
+            )
+        code, reason = cls._status_parts(span)
+        if code:
+            attrs.append(
+                {
+                    "key": "timbal.status.code",
+                    "value": {"stringValue": str(code)},
+                }
+            )
+        if reason:
+            attrs.append(
+                {
+                    "key": "timbal.status.reason",
+                    "value": {"stringValue": str(reason)},
+                }
+            )
+        metadata = getattr(span, "metadata", None)
+        if metadata:
+            attrs.append(
+                {
+                    "key": "timbal.metadata",
+                    "value": {"stringValue": json.dumps(metadata, default=str)},
+                }
+            )
+            approval = metadata.get("approval") if isinstance(metadata, dict) else None
+            if approval:
+                approval_id = approval.get("id") if isinstance(approval, dict) else None
+                if approval_id:
+                    attrs.append(
+                        {
+                            "key": "timbal.approval.id",
+                            "value": {"stringValue": str(approval_id)},
+                        }
+                    )
+                if approval.get("expired"):
+                    attrs.append(
+                        {
+                            "key": "timbal.approval.expired",
+                            "value": {"boolValue": True},
+                        }
+                    )
         return attrs
 
-    @staticmethod
-    def _span_status(span: Span) -> dict[str, Any]:
-        # OTel StatusCode: 0=UNSET, 1=OK, 2=ERROR
+    @classmethod
+    def _span_status(cls, span: Span) -> dict[str, Any]:
+        """Map Timbal status to OTel StatusCode (0=UNSET, 1=OK, 2=ERROR).
+
+        ``approval_required``, ``approval_denied`` are surfaced as UNSET (so they
+        don't pollute error dashboards) but the Timbal reason is exposed via
+        the ``timbal.status.reason`` attribute set in :meth:`_build_attributes`.
+        """
         if span.error is not None:
             return {"code": 2, "message": str(span.error)}
+        code, reason = cls._status_parts(span)
+        if code == "error":
+            return {"code": 2, "message": str(reason) if reason else ""}
+        if code == "cancelled":
+            return {"code": 0, "message": str(reason) if reason else "cancelled"}
         return {"code": 1}
 
     def _resource_attributes(self) -> list[dict[str, Any]]:
@@ -233,13 +301,17 @@ class OTelExporter(Exporter):
             otel_spans.append(otel_span)
 
         return {
-            "resourceSpans": [{
-                "resource": {"attributes": self._resource_attributes()},
-                "scopeSpans": [{
-                    "scope": {"name": "timbal"},
-                    "spans": otel_spans,
-                }],
-            }]
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": self._resource_attributes()},
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "timbal"},
+                            "spans": otel_spans,
+                        }
+                    ],
+                }
+            ]
         }
 
     # ------------------------------------------------------------------
