@@ -16,6 +16,7 @@ import warnings
 import pytest
 from timbal import Agent, Tool, Workflow
 from timbal.core.test_model import TestModel
+from timbal.state import get_run_context
 from timbal.types.approval import ApprovalPolicyDecision, ApprovalResolution
 from timbal.types.content import ToolUseContent
 from timbal.types.events import ApprovalEvent, OutputEvent
@@ -861,18 +862,15 @@ class TestPendingApprovalsSurface:
             .step(Tool(name="step_a", handler=step_a, requires_approval=True))
             .step(Tool(name="step_b", handler=step_b, requires_approval=True))
         )
-        seen_ctx = {}
 
-        # Capture the run_context via post_hook would not run on cancel; instead
-        # we collect approval_ids from emitted events and compare them against
-        # what a downstream consumer would discover by reading the trace.
         events = [e async for e in wf(x=1, y=2)]
         emitted_ids = {a.approval_id for a in _approval_events(events)}
         assert len(emitted_ids) == 2
 
-        # A consumer would inspect the cancelled OutputEvent's path/metadata —
-        # we additionally verify the consumer-visible approval_ids match the
-        # set surfaced by emitted events, which is the actual contract.
         cancelled = _final_output(events)
         assert cancelled.status.reason == "approval_required"
-        assert seen_ctx == {}  # marker: nothing leaked through hooks
+
+        ctx = get_run_context()
+        assert ctx is not None
+        pending_ids = {entry["approval_id"] for entry in ctx.pending_approvals()}
+        assert pending_ids == emitted_ids
