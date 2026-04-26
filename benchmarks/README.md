@@ -35,9 +35,17 @@ uv pip install crewai agentops
 
 # Agno benchmarks
 uv pip install agno
+
+# OpenAI Agents SDK benchmarks
+uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_agent.py --quick
+uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_handoff.py --quick
+uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_agent_as_tool.py --quick
 ```
 
 No API keys required. All LLM calls are faked by inspecting message history.
+OpenAI Agents SDK is the one exception to the simple `uv run python ...` command shape:
+its current release requires `openai>=2.26,<3`, so use the `uv run --with ...` command
+shown above instead of relying on the repo's locked `openai` version.
 
 ## Running benchmarks
 
@@ -47,6 +55,20 @@ uv run python benchmarks/<dir>/bench_<name>.py --quick
 
 # Full mode — more iterations, stable percentiles, results worth keeping
 uv run python benchmarks/<dir>/bench_<name>.py
+```
+
+For OpenAI Agents SDK specifically:
+
+```bash
+# Quick mode
+uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_agent.py --quick
+uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_handoff.py --quick
+uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_agent_as_tool.py --quick
+
+# Full mode
+uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_agent.py
+uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_handoff.py
+uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_agent_as_tool.py
 ```
 
 ## What to look at
@@ -126,8 +148,9 @@ zero provider-specific code in user land.
 | `crewai/` | Timbal vs CrewAI + AgentOps — multi-agent pipelines | stable |
 | `agno/` | Timbal vs Agno — agents, workflows, fan-out | WIP |
 | `pydantic/` | Timbal vs PydanticAI/Pydantic Graph + Logfire — agents, graph-style workflows, control flow | WIP |
+| `openai_agents/` | Timbal vs OpenAI Agents SDK - agents, handoffs, agent-as-tool | WIP |
 
-**Coming next:** OpenAI Agents SDK and Google Agent Development Kit (ADK).
+**Coming next:** Google Agent Development Kit (ADK).
 
 Have a framework you'd like to see benchmarked? Open an issue or send a PR — we're happy to add more.
 
