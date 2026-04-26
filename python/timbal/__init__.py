@@ -5,17 +5,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .core import Agent, Tool, Workflow
+    from .core import Agent, FallbackModel, ModelEntry, Tool, Workflow
 
 try:
     from ._version import __version__  # type: ignore
 except ImportError:
     __version__ = "0.0.0.dev0"
 
-__all__ = ["Agent", "Tool", "Workflow"]
+__all__ = ["Agent", "FallbackModel", "ModelEntry", "Tool", "Workflow"]
 
 _LAZY_IMPORTS = {
     "Agent": ".core",
+    "FallbackModel": ".core",
+    "ModelEntry": ".core",
     "Tool": ".core",
     "Workflow": ".core",
 }

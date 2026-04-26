@@ -11,6 +11,7 @@ Do not rely on this module's interface in external code.
 
 import asyncio
 import os
+import random
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -34,6 +35,7 @@ from ..utils import transform_schema
 from .runnable import Runnable
 
 logger = structlog.get_logger("timbal.core.llm_router")
+MAX_RETRY_DELAY = 30.0
 
 # Module-level client cache keyed by (client_class, api_key, base_url, provider).
 # Reusing clients preserves the underlying httpx connection pool, avoiding a
@@ -62,6 +64,7 @@ def _get_file_client() -> Any:
         _FILE_CLIENT = None
     if _FILE_CLIENT is None:
         import httpx
+
         _FILE_CLIENT = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
         _FILE_CLIENT_LOOP = loop
     return _FILE_CLIENT
@@ -88,6 +91,7 @@ if TIMBAL_OPENAI_API != "responses":
 # ---------------------------------------------------------------------------
 # Provider configuration
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class _ProviderConfig:
@@ -203,6 +207,7 @@ def _resolve_client(
 # Retry helper
 # ---------------------------------------------------------------------------
 
+
 async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, context: str):
     """Helper to retry an async generator function on transient failures.
 
@@ -275,9 +280,11 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
             elif isinstance(e, (OpenAIAPIStatusError, AnthropicAPIStatusError)):
                 # Check status code for retryable HTTP errors
                 status_code = getattr(e, "status_code", None)
-                if status_code in [500, 502, 503, 504]:
+                if status_code in [429, 500, 502, 503, 504]:
                     is_retryable = True
-                    if status_code == 503:
+                    if status_code == 429:
+                        error_type = "rate_limit"
+                    elif status_code == 503:
                         error_type = "service_unavailable"
                     else:
                         error_type = f"server_error_{status_code}"
@@ -292,7 +299,11 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
 
         # Retry logic for retryable errors
         if attempt < max_retries:
-            delay = retry_delay * (2**attempt)
+            cap = min(retry_delay * (2**attempt), MAX_RETRY_DELAY)
+            delay = random.uniform(0, cap)
+            retry_after = _retry_after_seconds(last_error)
+            if retry_after is not None:
+                delay = max(delay, retry_after)
             logger.warning(
                 "Retryable error from LLM provider, retrying...",
                 context=context,
@@ -312,9 +323,26 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
             raise last_error
 
 
+def _retry_after_seconds(exc: BaseException | None) -> float | None:
+    if exc is None:
+        return None
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    retry_after = headers.get("Retry-After")
+    if retry_after is None:
+        return None
+    try:
+        return float(retry_after)
+    except (TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Main router
 # ---------------------------------------------------------------------------
+
 
 async def _llm_router(
     model: Any,  # Model | str | TestModel — typed as Any so Pydantic doesn't reject TestModel instances
@@ -338,6 +366,24 @@ async def _llm_router(
     """
     messages = messages or []
     provider_params = provider_params or {}
+
+    if getattr(model, "__timbal_fallback_model__", False):
+        async for chunk in model.route(
+            _llm_router,
+            system_prompt=system_prompt,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            output_model=output_model,
+            base_url=base_url,
+            api_key=api_key,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            provider_params=provider_params,
+        ):
+            yield chunk  # type: ignore[return-type]
+        return
 
     # Convert SecretStr to str if needed
     if isinstance(base_url, SecretStr):
@@ -388,8 +434,11 @@ async def _llm_router(
     # content arrays are small (1-5 items) and the cost is negligible vs the
     # network calls that follow.
     from ..types.content import FileContent
+
     _unloaded_files = [
-        c.file for m in messages for c in m.content
+        c.file
+        for m in messages
+        for c in m.content
         if isinstance(c, FileContent) and object.__getattribute__(c.file, "__fileobj__") is None
     ]
     if _unloaded_files:

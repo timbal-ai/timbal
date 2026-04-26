@@ -68,6 +68,15 @@ class PlatformError(TimbalError):
     """Error raised when a platform API call fails."""
 
 
+class FallbackExhausted(TimbalError):
+    """Error raised when all models in a fallback chain fail."""
+
+    def __init__(self, errors: list[tuple[str, BaseException]]) -> None:
+        self.errors = errors
+        models = ", ".join(model for model, _ in errors)
+        super().__init__(f"All {len(errors)} fallback models failed: {models}")
+
+
 class SpanNotFound(TimbalError):
     """Error raised when trying to access a span that doesn't exist in the trace.
 

@@ -45,6 +45,50 @@ OPENAI_API_KEY=your_openai_api_key
 ANTHROPIC_API_KEY=your_claude_api_key
 ```
 
+### Fallback Models
+
+Use `FallbackModel` when you want an agent to try another model if the primary provider is rate limited, temporarily unavailable, times out, or returns a retryable server error.
+
+```python
+from timbal import Agent, FallbackModel
+
+agent = Agent(
+    name="support_agent",
+    model=FallbackModel(
+        "anthropic/claude-sonnet-4-6",
+        "openai/gpt-5.5",
+        "google/gemini-2.5-pro",
+    ),
+    max_tokens=1024,  # Required for Anthropic models
+)
+```
+
+Models are tried in order. By default, each model gets two retries before Timbal moves to the next model in the chain. If every model fails with a retryable provider error, Timbal raises `FallbackExhausted` with the per-model errors.
+
+For per-model settings, use `ModelEntry`:
+
+```python
+from timbal import Agent, FallbackModel, ModelEntry
+
+agent = Agent(
+    name="support_agent",
+    model=FallbackModel(
+        ModelEntry(
+            "anthropic/claude-sonnet-4-6",
+            max_retries=3,
+            retry_delay=0.5,
+        ),
+        ModelEntry(
+            "openai/gpt-5.5",
+            max_retries=1,
+        ),
+    ),
+    max_tokens=1024,
+)
+```
+
+Fallback only switches models before the first streamed chunk is emitted. If a stream fails after output has started, Timbal raises the error instead of silently switching models and risking duplicated or inconsistent output.
+
 Define tools as Python functions - the framework handles schema generation, parameter validation, and execution orchestration.
 
 ## Running Agents
