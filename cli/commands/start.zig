@@ -51,17 +51,16 @@ fn restoreTermios() void {
     }
 }
 
-var g_interrupted: bool = false;
+var g_interrupted = std.atomic.Value(bool).init(false);
 
 fn sigintHandler(_: c_int) callconv(.C) void {
-    if (g_interrupted) {
+    if (g_interrupted.swap(true, .seq_cst)) {
         // Second Ctrl+C: force exit after restoring terminal.
         restoreTermios();
         std.process.exit(130);
     }
-    g_interrupted = true;
-    // First Ctrl+C: let children die from their own SIGINT naturally.
-    // The normal exit path in run() restores termios after they've exited.
+    // First Ctrl+C: let the supervisor loop stop child process groups and
+    // restore the terminal through the normal cleanup path.
 }
 
 fn getHomePath(allocator: std.mem.Allocator) ![]u8 {
@@ -149,7 +148,9 @@ fn printUsage() !void {
         "    \x1b[1;36mo\x1b[0m, \x1b[1;36mopen     \x1b[0mOpen the app in your browser\n" ++
         "    \x1b[1;36mu\x1b[0m, \x1b[1;36mui       \x1b[0mPrint the UI URL\n" ++
         "    \x1b[1;36ma\x1b[0m, \x1b[1;36mapi      \x1b[0mPrint the API URL\n" ++
-        "    \x1b[1;36mw\x1b[0m, \x1b[1;36mworkforce\x1b[0mPrint workforce service URLs\n" ++
+        "    \x1b[1;36mw\x1b[0m, \x1b[1;36mworkforce\x1b[0m Print workforce service URLs\n" ++
+        "    \x1b[1;36mf <target>\x1b[0m        Focus logs: all, ui, api, workforce, or member name\n" ++
+        "    \x1b[1;36mm <target>\x1b[0m        Toggle mute for logs: all, ui, api, workforce, or member name\n" ++
         "    \x1b[1;36mh\x1b[0m, \x1b[1;36mhelp     \x1b[0mShow commands while services are running\n" ++
         "    \x1b[1;36mq\x1b[0m, \x1b[1;36mquit     \x1b[0mStop services and quit\n" ++
         "\n" ++
@@ -226,10 +227,118 @@ const prefix_colors = [_][]const u8{
 /// Context passed to each pipe reader thread.
 const PipeReaderCtx = struct {
     pipe: std.fs.File,
+    service_name: []const u8,
+    service_kind: ServiceKind,
     prefix: []const u8,
     color: []const u8,
     mutex: *std.Thread.Mutex,
     allocator: std.mem.Allocator,
+    log_filter: *LogFilterState,
+};
+
+const ServiceKind = enum {
+    ui,
+    api,
+    workforce,
+};
+
+const LogFocus = enum {
+    all,
+    name,
+    workforce,
+};
+
+const LogFilterState = struct {
+    mutex: std.Thread.Mutex = .{},
+    focus: LogFocus = .all,
+    focus_name: [128]u8 = undefined,
+    focus_name_len: usize = 0,
+    mute_all: bool = false,
+    mute_ui: bool = false,
+    mute_api: bool = false,
+    mute_workforce: bool = false,
+    muted_names: std.StringHashMap(void),
+
+    fn init(allocator: std.mem.Allocator) LogFilterState {
+        return .{
+            .muted_names = std.StringHashMap(void).init(allocator),
+        };
+    }
+
+    fn deinit(self: *LogFilterState) void {
+        var iter = self.muted_names.keyIterator();
+        while (iter.next()) |key| {
+            self.muted_names.allocator.free(key.*);
+        }
+        self.muted_names.deinit();
+    }
+
+    fn shouldPrint(self: *LogFilterState, service_name: []const u8, service_kind: ServiceKind) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.focus == .workforce and service_kind != .workforce) return false;
+        if (self.focus == .name and !std.mem.eql(u8, service_name, self.focus_name[0..self.focus_name_len])) return false;
+
+        if (self.mute_all) return false;
+        if (service_kind == .ui and self.mute_ui) return false;
+        if (service_kind == .api and self.mute_api) return false;
+        if (service_kind == .workforce and self.mute_workforce) return false;
+        if (self.muted_names.contains(service_name)) return false;
+
+        return true;
+    }
+
+    fn setFocus(self: *LogFilterState, target: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (std.mem.eql(u8, target, "all")) {
+            self.focus = .all;
+            self.focus_name_len = 0;
+        } else if (std.mem.eql(u8, target, "workforce")) {
+            self.focus = .workforce;
+            self.focus_name_len = 0;
+        } else {
+            self.focus = .name;
+            self.focus_name_len = @min(target.len, self.focus_name.len);
+            @memcpy(self.focus_name[0..self.focus_name_len], target[0..self.focus_name_len]);
+        }
+    }
+
+    fn toggleMute(self: *LogFilterState, target: []const u8) !bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (std.mem.eql(u8, target, "all")) {
+            self.mute_all = !self.mute_all;
+            return self.mute_all;
+        }
+        if (std.mem.eql(u8, target, "ui")) {
+            self.mute_ui = !self.mute_ui;
+            return self.mute_ui;
+        }
+        if (std.mem.eql(u8, target, "api")) {
+            self.mute_api = !self.mute_api;
+            return self.mute_api;
+        }
+        if (std.mem.eql(u8, target, "workforce")) {
+            self.mute_workforce = !self.mute_workforce;
+            return self.mute_workforce;
+        }
+
+        if (self.muted_names.contains(target)) {
+            if (self.muted_names.fetchRemove(target)) |entry| {
+                self.muted_names.allocator.free(entry.key);
+            }
+            return false;
+        }
+
+        const owned_target = try self.muted_names.allocator.dupe(u8, target);
+        errdefer self.muted_names.allocator.free(owned_target);
+        try self.muted_names.put(owned_target, {});
+        return true;
+    }
 };
 
 /// Thread function that reads from a pipe line by line, printing each with a colored prefix.
@@ -260,6 +369,7 @@ fn pipeReaderFn(ctx: PipeReaderCtx) void {
         };
         defer ctx.allocator.free(line);
         if (line.len == 0) continue;
+        if (!ctx.log_filter.shouldPrint(ctx.service_name, ctx.service_kind)) continue;
 
         ctx.mutex.lock();
         stdout.print("{s}{s}{s} {s}\n", .{ ctx.color, ctx.prefix, Color.reset, line }) catch {};
@@ -276,13 +386,58 @@ const CommandAction = enum(u8) {
     ui_url,
     api_url,
     workforce_urls,
+    focus_logs,
+    toggle_mute,
     restart,
     quit,
 };
 
-const CommandInputCtx = struct {
-    action: *std.atomic.Value(CommandAction),
+const Command = struct {
+    action: CommandAction = .none,
+    target: [128]u8 = undefined,
+    target_len: usize = 0,
 };
+
+const CommandState = struct {
+    mutex: std.Thread.Mutex = .{},
+    command: Command = .{},
+
+    fn set(self: *CommandState, action: CommandAction, target: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.command.action = action;
+        self.command.target_len = @min(target.len, self.command.target.len);
+        if (self.command.target_len > 0) {
+            @memcpy(self.command.target[0..self.command.target_len], target[0..self.command.target_len]);
+        }
+    }
+
+    fn take(self: *CommandState) Command {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const command = self.command;
+        self.command = .{};
+        return command;
+    }
+};
+
+const CommandInputCtx = struct {
+    state: *CommandState,
+};
+
+fn targetAfterCommand(command: []const u8, verb: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, command, verb)) return null;
+    if (command.len == verb.len) return "";
+    if (command[verb.len] != ' ') return null;
+    return std.mem.trim(u8, command[verb.len + 1 ..], " \t\r\n");
+}
+
+fn targetAfterEitherCommand(command: []const u8, short_verb: []const u8, long_verb: []const u8) ?[]const u8 {
+    if (targetAfterCommand(command, short_verb)) |target| return target;
+    return targetAfterCommand(command, long_verb);
+}
 
 fn commandInputFn(ctx: CommandInputCtx) void {
     const stdin = std.io.getStdIn().reader();
@@ -300,23 +455,27 @@ fn commandInputFn(ctx: CommandInputCtx) void {
 
         const command = std.mem.trim(u8, line, " \t\r\n");
         if (std.mem.eql(u8, command, "r") or std.mem.eql(u8, command, "restart")) {
-            ctx.action.store(.restart, .release);
+            ctx.state.set(.restart, "");
         } else if (std.mem.eql(u8, command, "h") or std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "?")) {
-            ctx.action.store(.help, .release);
+            ctx.state.set(.help, "");
         } else if (std.mem.eql(u8, command, "s") or std.mem.eql(u8, command, "status")) {
-            ctx.action.store(.status, .release);
+            ctx.state.set(.status, "");
         } else if (std.mem.eql(u8, command, "o") or std.mem.eql(u8, command, "open")) {
-            ctx.action.store(.open, .release);
+            ctx.state.set(.open, "");
         } else if (std.mem.eql(u8, command, "url") or std.mem.eql(u8, command, "urls")) {
-            ctx.action.store(.urls, .release);
+            ctx.state.set(.urls, "");
         } else if (std.mem.eql(u8, command, "u") or std.mem.eql(u8, command, "ui")) {
-            ctx.action.store(.ui_url, .release);
+            ctx.state.set(.ui_url, "");
         } else if (std.mem.eql(u8, command, "a") or std.mem.eql(u8, command, "api")) {
-            ctx.action.store(.api_url, .release);
+            ctx.state.set(.api_url, "");
         } else if (std.mem.eql(u8, command, "w") or std.mem.eql(u8, command, "workforce")) {
-            ctx.action.store(.workforce_urls, .release);
+            ctx.state.set(.workforce_urls, "");
+        } else if (targetAfterEitherCommand(command, "f", "focus")) |target| {
+            ctx.state.set(.focus_logs, target);
+        } else if (targetAfterEitherCommand(command, "m", "mute")) |target| {
+            ctx.state.set(.toggle_mute, target);
         } else if (std.mem.eql(u8, command, "q") or std.mem.eql(u8, command, "quit")) {
-            ctx.action.store(.quit, .release);
+            ctx.state.set(.quit, "");
             break;
         }
     }
@@ -329,10 +488,12 @@ fn spawnService(
     argv: []const []const u8,
     cwd: []const u8,
     prefix: []const u8,
+    service_kind: ServiceKind,
     color: []const u8,
     mutex: *std.Thread.Mutex,
     threads: *std.ArrayList(std.Thread),
     env_map: *const std.process.EnvMap,
+    log_filter: *LogFilterState,
 ) !std.process.Child {
     var child = std.process.Child.init(argv, allocator);
     child.cwd = cwd;
@@ -352,20 +513,26 @@ fn spawnService(
     if (child.stdout) |pipe| {
         const thread = try std.Thread.spawn(.{}, pipeReaderFn, .{PipeReaderCtx{
             .pipe = pipe,
+            .service_name = prefix,
+            .service_kind = service_kind,
             .prefix = prefix,
             .color = color,
             .mutex = mutex,
             .allocator = allocator,
+            .log_filter = log_filter,
         }});
         try threads.append(thread);
     }
     if (child.stderr) |pipe| {
         const thread = try std.Thread.spawn(.{}, pipeReaderFn, .{PipeReaderCtx{
             .pipe = pipe,
+            .service_name = prefix,
+            .service_kind = service_kind,
             .prefix = prefix,
             .color = color,
             .mutex = mutex,
             .allocator = allocator,
+            .log_filter = log_filter,
         }});
         try threads.append(thread);
     }
@@ -444,6 +611,7 @@ fn startServices(
     api_port: ?u16,
     service_env: *std.process.EnvMap,
     output_mutex: *std.Thread.Mutex,
+    log_filter: *LogFilterState,
 ) !RunningServices {
     const stdout = std.io.getStdOut().writer();
     try stdout.print("\n{s}Starting services...{s}\n\n", .{ Color.bold, Color.reset });
@@ -466,7 +634,7 @@ fn startServices(
         const color = prefix_colors[color_idx % prefix_colors.len];
         color_idx += 1;
 
-        var child = spawnService(allocator, &.{ "uv", "run", "-m", "timbal.server.http", "--port", port_str, "--import_spec", member.config.fqn }, member_dir, member.name, color, output_mutex, &services.reader_threads, service_env) catch {
+        var child = spawnService(allocator, &.{ "uv", "run", "-m", "timbal.server.http", "--port", port_str, "--import_spec", member.config.fqn }, member_dir, member.name, .workforce, color, output_mutex, &services.reader_threads, service_env, log_filter) catch {
             std.debug.print("Error: failed to start {s}\n", .{member.name});
             continue;
         };
@@ -487,7 +655,7 @@ fn startServices(
         defer allocator.free(ui_port_str);
 
         service_env.put("PORT", ui_port_str) catch return error.OutOfMemory;
-        var child = spawnService(allocator, &.{ "bun", "run", "dev", "--port", ui_port_str }, ui_dir, "ui", "\x1b[1;36m", output_mutex, &services.reader_threads, service_env) catch {
+        var child = spawnService(allocator, &.{ "bun", "run", "dev", "--port", ui_port_str }, ui_dir, "ui", .ui, "\x1b[1;36m", output_mutex, &services.reader_threads, service_env, log_filter) catch {
             std.debug.print("Error: failed to start UI\n", .{});
             return error.ServiceStartFailed;
         };
@@ -508,7 +676,7 @@ fn startServices(
         defer allocator.free(api_port_str);
 
         service_env.put("PORT", api_port_str) catch return error.OutOfMemory;
-        var child = spawnService(allocator, &.{ "bun", "run", "dev" }, api_dir, "api", "\x1b[1;32m", output_mutex, &services.reader_threads, service_env) catch {
+        var child = spawnService(allocator, &.{ "bun", "run", "dev" }, api_dir, "api", .api, "\x1b[1;32m", output_mutex, &services.reader_threads, service_env, log_filter) catch {
             std.debug.print("Error: failed to start API\n", .{});
             return error.ServiceStartFailed;
         };
@@ -596,7 +764,91 @@ fn printCommandHelp(mutex: *std.Thread.Mutex) void {
     stdout.print("  {s}u{s}  print the UI URL\n", .{ Color.bold_cyan, Color.reset }) catch {};
     stdout.print("  {s}a{s}  print the API URL\n", .{ Color.bold_cyan, Color.reset }) catch {};
     stdout.print("  {s}w{s}  print workforce service URLs\n", .{ Color.bold_cyan, Color.reset }) catch {};
+    stdout.print("  {s}f <target>{s}  focus logs: all, ui, api, workforce, or member name\n", .{ Color.bold_cyan, Color.reset }) catch {};
+    stdout.print("  {s}m <target>{s}  toggle mute for logs: all, ui, api, workforce, or member name\n", .{ Color.bold_cyan, Color.reset }) catch {};
     stdout.print("  {s}q{s}  stop services and quit\n", .{ Color.bold_cyan, Color.reset }) catch {};
+}
+
+fn isKnownLogTarget(target: []const u8, members: []const WorkforceMember, has_ui: bool, has_api: bool) bool {
+    if (std.mem.eql(u8, target, "all")) return true;
+    if (std.mem.eql(u8, target, "ui")) return has_ui;
+    if (std.mem.eql(u8, target, "api")) return has_api;
+    if (std.mem.eql(u8, target, "workforce")) return members.len > 0;
+    for (members) |member| {
+        if (std.mem.eql(u8, target, member.name)) return true;
+    }
+    return false;
+}
+
+fn printUnknownLogTarget(target: []const u8, mutex: *std.Thread.Mutex) void {
+    const stdout = std.io.getStdOut().writer();
+    mutex.lock();
+    defer mutex.unlock();
+
+    stdout.print("\n{s}Unknown log target `{s}`. Use all, ui, api, workforce, or a workforce member name.{s}\n", .{ Color.dim, target, Color.reset }) catch {};
+}
+
+fn handleFocusCommand(
+    target: []const u8,
+    members: []const WorkforceMember,
+    has_ui: bool,
+    has_api: bool,
+    log_filter: *LogFilterState,
+    mutex: *std.Thread.Mutex,
+) void {
+    const stdout = std.io.getStdOut().writer();
+    if (target.len == 0) {
+        printUnknownLogTarget(target, mutex);
+        return;
+    }
+    if (!isKnownLogTarget(target, members, has_ui, has_api)) {
+        printUnknownLogTarget(target, mutex);
+        return;
+    }
+
+    log_filter.setFocus(target);
+
+    mutex.lock();
+    defer mutex.unlock();
+    if (std.mem.eql(u8, target, "all")) {
+        stdout.print("\n{s}Showing all non-muted logs.{s}\n", .{ Color.dim, Color.reset }) catch {};
+    } else {
+        stdout.print("\n{s}Showing only {s} logs. Type `f all` to restore all logs.{s}\n", .{ Color.dim, target, Color.reset }) catch {};
+    }
+}
+
+fn handleMuteCommand(
+    target: []const u8,
+    members: []const WorkforceMember,
+    has_ui: bool,
+    has_api: bool,
+    log_filter: *LogFilterState,
+    mutex: *std.Thread.Mutex,
+) void {
+    const stdout = std.io.getStdOut().writer();
+    if (target.len == 0) {
+        printUnknownLogTarget(target, mutex);
+        return;
+    }
+    if (!isKnownLogTarget(target, members, has_ui, has_api)) {
+        printUnknownLogTarget(target, mutex);
+        return;
+    }
+
+    const muted = log_filter.toggleMute(target) catch {
+        mutex.lock();
+        stdout.print("\n{s}Could not update log mute state for `{s}`.{s}\n", .{ Color.dim, target, Color.reset }) catch {};
+        mutex.unlock();
+        return;
+    };
+
+    mutex.lock();
+    defer mutex.unlock();
+    if (muted) {
+        stdout.print("\n{s}Muted {s} logs. Type `m {s}` again to unmute.{s}\n", .{ Color.dim, target, target, Color.reset }) catch {};
+    } else {
+        stdout.print("\n{s}Unmuted {s} logs.{s}\n", .{ Color.dim, target, Color.reset }) catch {};
+    }
 }
 
 fn printServiceStatus(services: ?*RunningServices, mutex: *std.Thread.Mutex) void {
@@ -674,6 +926,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer restoreWindowsConsole(orig_cp);
 
     const stdout = std.io.getStdOut().writer();
+    g_interrupted.store(false, .seq_cst);
 
     const base_port: u16 = 4455;
     var project_path: ?[]const u8 = null;
@@ -923,8 +1176,12 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         };
         std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     }
+    defer restoreTermios();
 
     var output_mutex = std.Thread.Mutex{};
+    var command_state = CommandState{};
+    var log_filter = LogFilterState.init(allocator);
+    defer log_filter.deinit();
 
     // Shared env map with FORCE_COLOR for all services.
     var service_env = std.process.getEnvMap(allocator) catch return;
@@ -966,11 +1223,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         service_env.put("TIMBAL_START_UI_PORT", ui_port_env) catch {};
     }
 
-    var requested_action = std.atomic.Value(CommandAction).init(.none);
     const command_input_enabled = std.io.getStdIn().isTty();
     if (command_input_enabled) {
         const command_thread = std.Thread.spawn(.{}, commandInputFn, .{CommandInputCtx{
-            .action = &requested_action,
+            .state = &command_state,
         }}) catch null;
         if (command_thread) |thread| thread.detach();
     }
@@ -985,6 +1241,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         api_port,
         &service_env,
         &output_mutex,
+        &log_filter,
     );
     defer if (services) |*running| stopServices(running);
 
@@ -1010,8 +1267,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    while (!g_interrupted) {
-        switch (requested_action.swap(.none, .acq_rel)) {
+    while (!g_interrupted.load(.seq_cst)) {
+        const command = command_state.take();
+        const target = command.target[0..command.target_len];
+        switch (command.action) {
             .none => {},
             .help => printCommandHelp(&output_mutex),
             .status => {
@@ -1037,6 +1296,12 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             .urls, .ui_url, .api_url, .workforce_urls => |action| {
                 printProjectUrls(members.items, has_ui, ui_port, has_api, api_port, action, &output_mutex);
             },
+            .focus_logs => {
+                handleFocusCommand(target, members.items, has_ui, has_api, &log_filter, &output_mutex);
+            },
+            .toggle_mute => {
+                handleMuteCommand(target, members.items, has_ui, has_api, &log_filter, &output_mutex);
+            },
             .restart => {
                 output_mutex.lock();
                 stdout.print("\n{s}Restarting services...{s}\n", .{ Color.bold, Color.reset }) catch {};
@@ -1056,6 +1321,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                     api_port,
                     &service_env,
                     &output_mutex,
+                    &log_filter,
                 );
             },
             .quit => break,
@@ -1068,8 +1334,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         stopServices(running);
         services = null;
     }
-
-    restoreTermios();
 
     // Free member data.
     for (members.items) |*member| {
