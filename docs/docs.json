@@ -33,6 +33,7 @@
               "agents/memory",
               "agents/memory-compaction",
               "agents/tools",
+              "agents/approvals",
               "agents/thinking",
               "agents/background-tasks",
               "agents/skills",
@@ -111,6 +112,7 @@
                 "group": "Tools",
                 "pages": [
                   "examples/agents/search",
+                  "examples/agents/approval-required-tools",
                   "examples/agents/tts",
                   "examples/agents/image-generation"
                 ]
