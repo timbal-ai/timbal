@@ -431,6 +431,7 @@ const CommandState = struct {
 
 const CommandInputCtx = struct {
     state: *CommandState,
+    stop: *std.atomic.Value(bool),
 };
 
 fn targetAfterCommand(command: []const u8, verb: []const u8) ?[]const u8 {
@@ -446,9 +447,22 @@ fn targetAfterEitherCommand(command: []const u8, short_verb: []const u8, long_ve
 }
 
 fn commandInputFn(ctx: CommandInputCtx) void {
-    const stdin = std.io.getStdIn().reader();
+    const stdin_file = std.io.getStdIn();
+    const stdin = stdin_file.reader();
 
-    while (true) {
+    while (!ctx.stop.load(.seq_cst)) {
+        if (comptime !is_windows) {
+            var poll_fds = [_]std.posix.pollfd{.{
+                .fd = stdin_file.handle,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            const ready = std.posix.poll(&poll_fds, 150) catch continue;
+            if (ready == 0) continue;
+            if ((poll_fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) break;
+            if ((poll_fds[0].revents & std.posix.POLL.IN) == 0) continue;
+        }
+
         const line = stdin.readUntilDelimiterAlloc(std.heap.page_allocator, '\n', 1024) catch |err| switch (err) {
             error.EndOfStream => break,
             error.StreamTooLong => {
@@ -458,6 +472,7 @@ fn commandInputFn(ctx: CommandInputCtx) void {
             else => continue,
         };
         defer std.heap.page_allocator.free(line);
+        if (ctx.stop.load(.seq_cst)) break;
 
         const command = std.mem.trim(u8, line, " \t\r\n");
         if (std.mem.eql(u8, command, "r") or std.mem.eql(u8, command, "restart")) {
@@ -487,6 +502,19 @@ fn commandInputFn(ctx: CommandInputCtx) void {
     }
 }
 
+fn forceStopSpawnedChild(child: *std.process.Child) void {
+    if (comptime !is_windows) {
+        std.posix.kill(-child.id, std.posix.SIG.KILL) catch |err| switch (err) {
+            error.ProcessNotFound => {},
+            error.PermissionDenied => {},
+            else => {},
+        };
+    } else {
+        _ = child.kill() catch {};
+    }
+    _ = child.wait() catch {};
+}
+
 /// Spawn a long-running process and start threads to stream its stdout/stderr with a prefix.
 /// Returns the child process. Caller is responsible for waiting/killing it.
 fn spawnService(
@@ -514,6 +542,7 @@ fn spawnService(
     }
 
     try child.spawn();
+    errdefer forceStopSpawnedChild(&child);
 
     // Spawn threads to read stdout and stderr.
     if (child.stdout) |pipe| {
@@ -527,7 +556,7 @@ fn spawnService(
             .allocator = allocator,
             .log_filter = log_filter,
         }});
-        try threads.append(thread);
+        threads.appendAssumeCapacity(thread);
     }
     if (child.stderr) |pipe| {
         const thread = try std.Thread.spawn(.{}, pipeReaderFn, .{PipeReaderCtx{
@@ -540,7 +569,7 @@ fn spawnService(
             .allocator = allocator,
             .log_filter = log_filter,
         }});
-        try threads.append(thread);
+        threads.appendAssumeCapacity(thread);
     }
 
     return child;
@@ -577,27 +606,24 @@ fn signalServiceGroup(child: *std.process.Child, sig: u8) void {
 }
 
 fn stopServices(services: *RunningServices) void {
-    if (services.children.items.len == 0) {
-        services.deinit();
-        return;
-    }
+    if (services.children.items.len > 0) {
+        if (comptime !is_windows) {
+            for (services.children.items) |*child| signalServiceGroup(child, std.posix.SIG.INT);
+            std.time.sleep(1200 * std.time.ns_per_ms);
 
-    if (comptime !is_windows) {
-        for (services.children.items) |*child| signalServiceGroup(child, std.posix.SIG.INT);
-        std.time.sleep(1200 * std.time.ns_per_ms);
+            for (services.children.items) |*child| signalServiceGroup(child, std.posix.SIG.TERM);
+            std.time.sleep(800 * std.time.ns_per_ms);
 
-        for (services.children.items) |*child| signalServiceGroup(child, std.posix.SIG.TERM);
-        std.time.sleep(800 * std.time.ns_per_ms);
-
-        for (services.children.items) |*child| signalServiceGroup(child, std.posix.SIG.KILL);
-    } else {
-        for (services.children.items) |*child| {
-            _ = child.kill() catch {};
+            for (services.children.items) |*child| signalServiceGroup(child, std.posix.SIG.KILL);
+        } else {
+            for (services.children.items) |*child| {
+                _ = child.kill() catch {};
+            }
         }
-    }
 
-    for (services.children.items) |*child| {
-        _ = child.wait() catch {};
+        for (services.children.items) |*child| {
+            _ = child.wait() catch {};
+        }
     }
 
     for (services.reader_threads.items) |thread| {
@@ -629,6 +655,11 @@ fn startServices(
     };
     errdefer stopServices(&services);
 
+    const service_count = members.len + @as(usize, @intFromBool(has_ui)) + @as(usize, @intFromBool(has_api));
+    try services.children.ensureTotalCapacity(service_count);
+    try services.statuses.ensureTotalCapacity(service_count);
+    try services.reader_threads.ensureTotalCapacity(service_count * 2);
+
     var color_idx: usize = 0;
 
     // Start workforce members first.
@@ -640,18 +671,18 @@ fn startServices(
         const color = prefix_colors[color_idx % prefix_colors.len];
         color_idx += 1;
 
-        var child = spawnService(allocator, &.{ "uv", "run", "-m", "timbal.server.http", "--port", port_str, "--import_spec", member.config.fqn }, member_dir, member.name, .workforce, color, output_mutex, &services.reader_threads, service_env, log_filter) catch {
+        const child = spawnService(allocator, &.{ "uv", "run", "-m", "timbal.server.http", "--port", port_str, "--import_spec", member.config.fqn }, member_dir, member.name, .workforce, color, output_mutex, &services.reader_threads, service_env, log_filter) catch {
             std.debug.print("Error: failed to start {s}\n", .{member.name});
             continue;
         };
-        try services.statuses.append(.{
+        const status = ServiceStatus{
             .name = member.name,
             .port = member.port,
             .pid = if (is_windows) {} else child.id,
             .started_at_ms = std.time.milliTimestamp(),
-        });
-        try services.children.append(child);
-        _ = &child;
+        };
+        services.children.appendAssumeCapacity(child);
+        services.statuses.appendAssumeCapacity(status);
     }
 
     if (has_ui) {
@@ -661,18 +692,18 @@ fn startServices(
         defer allocator.free(ui_port_str);
 
         service_env.put("PORT", ui_port_str) catch return error.OutOfMemory;
-        var child = spawnService(allocator, &.{ "bun", "run", "dev", "--port", ui_port_str }, ui_dir, "ui", .ui, "\x1b[1;36m", output_mutex, &services.reader_threads, service_env, log_filter) catch {
+        const child = spawnService(allocator, &.{ "bun", "run", "dev", "--port", ui_port_str }, ui_dir, "ui", .ui, "\x1b[1;36m", output_mutex, &services.reader_threads, service_env, log_filter) catch {
             std.debug.print("Error: failed to start UI\n", .{});
             return error.ServiceStartFailed;
         };
-        try services.statuses.append(.{
+        const status = ServiceStatus{
             .name = "ui",
             .port = ui_port.?,
             .pid = if (is_windows) {} else child.id,
             .started_at_ms = std.time.milliTimestamp(),
-        });
-        try services.children.append(child);
-        _ = &child;
+        };
+        services.children.appendAssumeCapacity(child);
+        services.statuses.appendAssumeCapacity(status);
     }
 
     if (has_api) {
@@ -682,18 +713,18 @@ fn startServices(
         defer allocator.free(api_port_str);
 
         service_env.put("PORT", api_port_str) catch return error.OutOfMemory;
-        var child = spawnService(allocator, &.{ "bun", "run", "dev" }, api_dir, "api", .api, "\x1b[1;32m", output_mutex, &services.reader_threads, service_env, log_filter) catch {
+        const child = spawnService(allocator, &.{ "bun", "run", "dev" }, api_dir, "api", .api, "\x1b[1;32m", output_mutex, &services.reader_threads, service_env, log_filter) catch {
             std.debug.print("Error: failed to start API\n", .{});
             return error.ServiceStartFailed;
         };
-        try services.statuses.append(.{
+        const status = ServiceStatus{
             .name = "api",
             .port = api_port.?,
             .pid = if (is_windows) {} else child.id,
             .started_at_ms = std.time.milliTimestamp(),
-        });
-        try services.children.append(child);
-        _ = &child;
+        };
+        services.children.appendAssumeCapacity(child);
+        services.statuses.appendAssumeCapacity(status);
     }
 
     return services;
@@ -1190,7 +1221,25 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer restoreTermios();
 
     var output_mutex = std.Thread.Mutex{};
-    var command_state = CommandState{};
+    const command_state = try std.heap.page_allocator.create(CommandState);
+    command_state.* = .{};
+    var command_input_stop = std.atomic.Value(bool).init(false);
+    var command_thread: ?std.Thread = null;
+    var command_state_owned = true;
+    defer {
+        command_input_stop.store(true, .seq_cst);
+        if (command_thread) |thread| {
+            if (comptime !is_windows) {
+                thread.join();
+            } else {
+                // Windows console reads cannot be interrupted here. Keep the
+                // state process-lived if the detached reader wakes after run().
+                thread.detach();
+                command_state_owned = false;
+            }
+        }
+        if (command_state_owned) std.heap.page_allocator.destroy(command_state);
+    }
     var log_filter = LogFilterState.init(allocator);
     defer log_filter.deinit();
 
@@ -1236,10 +1285,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const command_input_enabled = std.io.getStdIn().isTty();
     if (command_input_enabled) {
-        const command_thread = std.Thread.spawn(.{}, commandInputFn, .{CommandInputCtx{
-            .state = &command_state,
+        command_thread = std.Thread.spawn(.{}, commandInputFn, .{CommandInputCtx{
+            .state = command_state,
+            .stop = &command_input_stop,
         }}) catch null;
-        if (command_thread) |thread| thread.detach();
     }
 
     var services: ?RunningServices = try startServices(
