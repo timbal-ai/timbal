@@ -306,27 +306,7 @@ const LogFilterState = struct {
         }
     }
 
-    fn toggleMute(self: *LogFilterState, target: []const u8) !bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (std.mem.eql(u8, target, "all")) {
-            self.mute_all = !self.mute_all;
-            return self.mute_all;
-        }
-        if (std.mem.eql(u8, target, "ui")) {
-            self.mute_ui = !self.mute_ui;
-            return self.mute_ui;
-        }
-        if (std.mem.eql(u8, target, "api")) {
-            self.mute_api = !self.mute_api;
-            return self.mute_api;
-        }
-        if (std.mem.eql(u8, target, "workforce")) {
-            self.mute_workforce = !self.mute_workforce;
-            return self.mute_workforce;
-        }
-
+    fn toggleMuteName(self: *LogFilterState, target: []const u8) !bool {
         if (self.muted_names.contains(target)) {
             if (self.muted_names.fetchRemove(target)) |entry| {
                 self.muted_names.allocator.free(entry.key);
@@ -338,6 +318,32 @@ const LogFilterState = struct {
         errdefer self.muted_names.allocator.free(owned_target);
         try self.muted_names.put(owned_target, {});
         return true;
+    }
+
+    fn toggleMute(self: *LogFilterState, target: []const u8, target_is_member_name: bool) !bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (std.mem.eql(u8, target, "all")) {
+            self.mute_all = !self.mute_all;
+            return self.mute_all;
+        }
+        if (std.mem.eql(u8, target, "workforce")) {
+            self.mute_workforce = !self.mute_workforce;
+            return self.mute_workforce;
+        }
+        if (target_is_member_name) {
+            return self.toggleMuteName(target);
+        }
+        if (std.mem.eql(u8, target, "ui")) {
+            self.mute_ui = !self.mute_ui;
+            return self.mute_ui;
+        }
+        if (std.mem.eql(u8, target, "api")) {
+            self.mute_api = !self.mute_api;
+            return self.mute_api;
+        }
+        return self.toggleMuteName(target);
     }
 };
 
@@ -769,14 +775,19 @@ fn printCommandHelp(mutex: *std.Thread.Mutex) void {
     stdout.print("  {s}q{s}  stop services and quit\n", .{ Color.bold_cyan, Color.reset }) catch {};
 }
 
-fn isKnownLogTarget(target: []const u8, members: []const WorkforceMember, has_ui: bool, has_api: bool) bool {
-    if (std.mem.eql(u8, target, "all")) return true;
-    if (std.mem.eql(u8, target, "ui")) return has_ui;
-    if (std.mem.eql(u8, target, "api")) return has_api;
-    if (std.mem.eql(u8, target, "workforce")) return members.len > 0;
+fn isWorkforceMemberName(target: []const u8, members: []const WorkforceMember) bool {
     for (members) |member| {
         if (std.mem.eql(u8, target, member.name)) return true;
     }
+    return false;
+}
+
+fn isKnownLogTarget(target: []const u8, members: []const WorkforceMember, has_ui: bool, has_api: bool) bool {
+    if (std.mem.eql(u8, target, "all")) return true;
+    if (std.mem.eql(u8, target, "workforce")) return members.len > 0;
+    if (isWorkforceMemberName(target, members)) return true;
+    if (std.mem.eql(u8, target, "ui")) return has_ui;
+    if (std.mem.eql(u8, target, "api")) return has_api;
     return false;
 }
 
@@ -835,7 +846,7 @@ fn handleMuteCommand(
         return;
     }
 
-    const muted = log_filter.toggleMute(target) catch {
+    const muted = log_filter.toggleMute(target, isWorkforceMemberName(target, members)) catch {
         mutex.lock();
         stdout.print("\n{s}Could not update log mute state for `{s}`.{s}\n", .{ Color.dim, target, Color.reset }) catch {};
         mutex.unlock();
@@ -1340,4 +1351,37 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         allocator.free(member.name);
         member.config.deinit(allocator);
     }
+}
+
+test "log targets include workforce members named like reserved services" {
+    const members = [_]WorkforceMember{
+        .{ .name = "ui", .config = undefined, .port = 8001 },
+        .{ .name = "api", .config = undefined, .port = 8002 },
+    };
+
+    try std.testing.expect(isKnownLogTarget("ui", &members, false, false));
+    try std.testing.expect(isKnownLogTarget("api", &members, false, false));
+    try std.testing.expect(isKnownLogTarget("ui", &members, true, false));
+    try std.testing.expect(isKnownLogTarget("api", &members, false, true));
+}
+
+test "mute can target workforce member named ui" {
+    var log_filter = LogFilterState.init(std.testing.allocator);
+    defer log_filter.deinit();
+
+    try std.testing.expect(try log_filter.toggleMute("ui", true));
+    try std.testing.expect(!log_filter.shouldPrint("ui", .workforce));
+    try std.testing.expect(log_filter.shouldPrint("other", .ui));
+
+    try std.testing.expect(!try log_filter.toggleMute("ui", true));
+    try std.testing.expect(log_filter.shouldPrint("ui", .workforce));
+}
+
+test "mute still targets ui service when no member has that name" {
+    var log_filter = LogFilterState.init(std.testing.allocator);
+    defer log_filter.deinit();
+
+    try std.testing.expect(try log_filter.toggleMute("ui", false));
+    try std.testing.expect(!log_filter.shouldPrint("ui", .ui));
+    try std.testing.expect(log_filter.shouldPrint("ui", .workforce));
 }
