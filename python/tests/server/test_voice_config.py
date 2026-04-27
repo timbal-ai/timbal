@@ -207,9 +207,19 @@ class TestVoiceServerScript:
     def test_main_sets_timbal_runnable_and_calls_cli(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
-        repo_root = Path(__file__).resolve().parents[3]
-        script = repo_root / "scripts" / "voice_server.py"
+        script = tmp_path / "voice_server.py"
+        script.write_text(
+            "import os\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from timbal.server.http import run_server_cli\n"
+            "agent = object()\n"
+            "def main():\n"
+            '    os.environ["TIMBAL_RUNNABLE"] = f"{Path(__file__).resolve()}::agent"\n'
+            "    run_server_cli(sys.argv[1:])\n"
+        )
         argv_captured: list[list[str]] = []
 
         def fake_run_server_cli(argv: list[str] | None = None) -> None:
