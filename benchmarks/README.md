@@ -40,6 +40,11 @@ uv pip install agno
 uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_agent.py --quick
 uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_handoff.py --quick
 uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_agent_as_tool.py --quick
+
+# Google ADK benchmarks
+uv run --with google-adk python benchmarks/google_adk/bench_agent.py --quick
+uv run --with google-adk python benchmarks/google_adk/bench_transfer.py --quick
+uv run --with google-adk python benchmarks/google_adk/bench_callbacks.py --quick
 ```
 
 No API keys required. All LLM calls are faked by inspecting message history.
@@ -69,6 +74,20 @@ uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_ag
 uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_agent.py
 uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_handoff.py
 uv run --with openai-agents --with 'openai>=2.26,<3' python benchmarks/openai_agents/bench_agent_as_tool.py
+```
+
+For Google ADK specifically:
+
+```bash
+# Quick mode
+uv run --with google-adk python benchmarks/google_adk/bench_agent.py --quick
+uv run --with google-adk python benchmarks/google_adk/bench_transfer.py --quick
+uv run --with google-adk python benchmarks/google_adk/bench_callbacks.py --quick
+
+# Full mode
+uv run --with google-adk python benchmarks/google_adk/bench_agent.py
+uv run --with google-adk python benchmarks/google_adk/bench_transfer.py
+uv run --with google-adk python benchmarks/google_adk/bench_callbacks.py
 ```
 
 ## What to look at
@@ -149,8 +168,9 @@ zero provider-specific code in user land.
 | `agno/` | Timbal vs Agno — agents, workflows, fan-out | WIP |
 | `pydantic/` | Timbal vs PydanticAI/Pydantic Graph + Logfire — agents, graph-style workflows, control flow | WIP |
 | `openai_agents/` | Timbal vs OpenAI Agents SDK - agents, handoffs, agent-as-tool | WIP |
+| `google_adk/` | Timbal vs Google ADK - agents, sub-agent transfer, callbacks | WIP |
 
-**Coming next:** Google Agent Development Kit (ADK).
+**Coming next:** deeper Google ADK orchestration benchmarks.
 
 Have a framework you'd like to see benchmarked? Open an issue or send a PR — we're happy to add more.
 

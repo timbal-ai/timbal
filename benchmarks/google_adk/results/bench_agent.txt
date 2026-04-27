@@ -1,0 +1,65 @@
+[1mTimbal vs Google ADK - Agent Loop Benchmark[0m
+[2mmode=full; no API calls; sessions pre-created outside timing[0m
+
+[1m[36m------------------------------------------------------------------------------------------------[0m
+[1m[36m  Scenario 1: single tool[0m
+[1m[36m------------------------------------------------------------------------------------------------[0m
+
+  [1mLatency[0m
+    Timbal     mean    589.7 us  p50    571.9 us  p95    764.5 us
+    ADK        mean     1.51 ms  p50     1.02 ms  p95     1.34 ms
+
+  [1mMemory[0m
+    Timbal          393 B/run
+    ADK          17,681 B/run
+
+  [1mBurst[0m
+    Timbal     p50    16.63 ms  wall    27.59 ms
+    ADK        p50    25.88 ms  wall    46.21 ms
+
+  [1mThroughput[0m
+    c=1   Timbal     1626/s   ADK      949/s
+    c=10  Timbal     1245/s   ADK     1052/s
+    c=50  Timbal     1229/s   ADK     1086/s
+
+[1m[36m------------------------------------------------------------------------------------------------[0m
+[1m[36m  Scenario 2: 3-step chain[0m
+[1m[36m------------------------------------------------------------------------------------------------[0m
+
+  [1mLatency[0m
+    Timbal     mean     1.30 ms  p50     1.27 ms  p95     1.54 ms
+    ADK        mean     3.50 ms  p50     2.98 ms  p95     3.48 ms
+
+  [1mMemory[0m
+    Timbal          812 B/run
+    ADK          37,253 B/run
+
+  [1mBurst[0m
+    Timbal     p50    27.76 ms  wall    36.30 ms
+    ADK        p50    67.93 ms  wall    87.30 ms
+
+  [1mThroughput[0m
+    c=1   Timbal      597/s   ADK      320/s
+    c=10  Timbal      667/s   ADK      317/s
+    c=50  Timbal      638/s   ADK      309/s
+
+[1m[36m------------------------------------------------------------------------------------------------[0m
+[1m[36m  Scenario 3: parallel tools[0m
+[1m[36m------------------------------------------------------------------------------------------------[0m
+
+  [1mLatency[0m
+    Timbal     mean    825.0 us  p50    806.4 us  p95    925.9 us
+    ADK        mean     1.63 ms  p50     1.60 ms  p95     1.80 ms
+
+  [1mMemory[0m
+    Timbal          632 B/run
+    ADK          23,814 B/run
+
+  [1mBurst[0m
+    Timbal     p50    21.59 ms  wall    33.90 ms
+    ADK        p50    38.17 ms  wall    62.65 ms
+
+  [1mThroughput[0m
+    c=1   Timbal      753/s   ADK      521/s
+    c=10  Timbal     1190/s   ADK      529/s
+    c=50  Timbal      871/s   ADK      528/s
