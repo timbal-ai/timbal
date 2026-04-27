@@ -143,6 +143,16 @@ fn printUsage() !void {
         "\x1b[1;32mArguments:\n" ++
         "    \x1b[1;36m[PATH] \x1b[0mPath to the project directory (default: current directory)\n" ++
         "\n" ++
+        "\x1b[1;32mInteractive commands:\n" ++
+        "    \x1b[1;36mr\x1b[0m, \x1b[1;36mrestart  \x1b[0mRestart all services\n" ++
+        "    \x1b[1;36ms\x1b[0m, \x1b[1;36mstatus   \x1b[0mShow service status, ports, PIDs, and uptime\n" ++
+        "    \x1b[1;36mo\x1b[0m, \x1b[1;36mopen     \x1b[0mOpen the app in your browser\n" ++
+        "    \x1b[1;36mu\x1b[0m, \x1b[1;36mui       \x1b[0mPrint the UI URL\n" ++
+        "    \x1b[1;36ma\x1b[0m, \x1b[1;36mapi      \x1b[0mPrint the API URL\n" ++
+        "    \x1b[1;36mw\x1b[0m, \x1b[1;36mworkforce\x1b[0mPrint workforce service URLs\n" ++
+        "    \x1b[1;36mh\x1b[0m, \x1b[1;36mhelp     \x1b[0mShow commands while services are running\n" ++
+        "    \x1b[1;36mq\x1b[0m, \x1b[1;36mquit     \x1b[0mStop services and quit\n" ++
+        "\n" ++
         utils.global_options_help ++
         "\n");
 }
@@ -257,6 +267,61 @@ fn pipeReaderFn(ctx: PipeReaderCtx) void {
     }
 }
 
+const CommandAction = enum(u8) {
+    none,
+    help,
+    status,
+    open,
+    urls,
+    ui_url,
+    api_url,
+    workforce_urls,
+    restart,
+    quit,
+};
+
+const CommandInputCtx = struct {
+    action: *std.atomic.Value(CommandAction),
+};
+
+fn commandInputFn(ctx: CommandInputCtx) void {
+    const stdin = std.io.getStdIn().reader();
+
+    while (true) {
+        const line = stdin.readUntilDelimiterAlloc(std.heap.page_allocator, '\n', 1024) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.StreamTooLong => {
+                stdin.skipUntilDelimiterOrEof('\n') catch break;
+                continue;
+            },
+            else => continue,
+        };
+        defer std.heap.page_allocator.free(line);
+
+        const command = std.mem.trim(u8, line, " \t\r\n");
+        if (std.mem.eql(u8, command, "r") or std.mem.eql(u8, command, "restart")) {
+            ctx.action.store(.restart, .release);
+        } else if (std.mem.eql(u8, command, "h") or std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "?")) {
+            ctx.action.store(.help, .release);
+        } else if (std.mem.eql(u8, command, "s") or std.mem.eql(u8, command, "status")) {
+            ctx.action.store(.status, .release);
+        } else if (std.mem.eql(u8, command, "o") or std.mem.eql(u8, command, "open")) {
+            ctx.action.store(.open, .release);
+        } else if (std.mem.eql(u8, command, "url") or std.mem.eql(u8, command, "urls")) {
+            ctx.action.store(.urls, .release);
+        } else if (std.mem.eql(u8, command, "u") or std.mem.eql(u8, command, "ui")) {
+            ctx.action.store(.ui_url, .release);
+        } else if (std.mem.eql(u8, command, "a") or std.mem.eql(u8, command, "api")) {
+            ctx.action.store(.api_url, .release);
+        } else if (std.mem.eql(u8, command, "w") or std.mem.eql(u8, command, "workforce")) {
+            ctx.action.store(.workforce_urls, .release);
+        } else if (std.mem.eql(u8, command, "q") or std.mem.eql(u8, command, "quit")) {
+            ctx.action.store(.quit, .release);
+            break;
+        }
+    }
+}
+
 /// Spawn a long-running process and start threads to stream its stdout/stderr with a prefix.
 /// Returns the child process. Caller is responsible for waiting/killing it.
 fn spawnService(
@@ -271,9 +336,15 @@ fn spawnService(
 ) !std.process.Child {
     var child = std.process.Child.init(argv, allocator);
     child.cwd = cwd;
+    child.stdin_behavior = .Ignore;
     child.stderr_behavior = .Pipe;
     child.stdout_behavior = .Pipe;
     child.env_map = env_map;
+    if (comptime !is_windows) {
+        // Put every service in its own process group so restarts also stop grandchildren
+        // spawned by wrappers like `bun run` or `uv run`.
+        child.pgid = 0;
+    }
 
     try child.spawn();
 
@@ -300,6 +371,158 @@ fn spawnService(
     }
 
     return child;
+}
+
+const ServiceStatus = struct {
+    name: []const u8,
+    port: ?u16,
+    pid: if (is_windows) void else std.posix.pid_t,
+    started_at_ms: i64,
+};
+
+const RunningServices = struct {
+    children: std.ArrayList(std.process.Child),
+    reader_threads: std.ArrayList(std.Thread),
+    statuses: std.ArrayList(ServiceStatus),
+
+    fn deinit(self: *RunningServices) void {
+        self.children.deinit();
+        self.reader_threads.deinit();
+        self.statuses.deinit();
+    }
+};
+
+fn signalServiceGroup(child: *std.process.Child, sig: u8) void {
+    if (comptime !is_windows) {
+        if (child.term != null) return;
+        std.posix.kill(-child.id, sig) catch |err| switch (err) {
+            error.ProcessNotFound => {},
+            error.PermissionDenied => {},
+            else => {},
+        };
+    }
+}
+
+fn stopServices(services: *RunningServices) void {
+    if (services.children.items.len == 0) {
+        services.deinit();
+        return;
+    }
+
+    if (comptime !is_windows) {
+        for (services.children.items) |*child| signalServiceGroup(child, std.posix.SIG.INT);
+        std.time.sleep(1200 * std.time.ns_per_ms);
+
+        for (services.children.items) |*child| signalServiceGroup(child, std.posix.SIG.TERM);
+        std.time.sleep(800 * std.time.ns_per_ms);
+
+        for (services.children.items) |*child| signalServiceGroup(child, std.posix.SIG.KILL);
+    } else {
+        for (services.children.items) |*child| {
+            _ = child.kill() catch {};
+        }
+    }
+
+    for (services.children.items) |*child| {
+        _ = child.wait() catch {};
+    }
+
+    for (services.reader_threads.items) |thread| {
+        thread.join();
+    }
+
+    services.deinit();
+}
+
+fn startServices(
+    allocator: std.mem.Allocator,
+    abs_project_path: []const u8,
+    members: []const WorkforceMember,
+    has_ui: bool,
+    ui_port: ?u16,
+    has_api: bool,
+    api_port: ?u16,
+    service_env: *std.process.EnvMap,
+    output_mutex: *std.Thread.Mutex,
+) !RunningServices {
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print("\n{s}Starting services...{s}\n\n", .{ Color.bold, Color.reset });
+
+    var services = RunningServices{
+        .children = std.ArrayList(std.process.Child).init(allocator),
+        .reader_threads = std.ArrayList(std.Thread).init(allocator),
+        .statuses = std.ArrayList(ServiceStatus).init(allocator),
+    };
+    errdefer stopServices(&services);
+
+    var color_idx: usize = 0;
+
+    // Start workforce members first.
+    for (members) |member| {
+        const member_dir = try std.fmt.allocPrint(allocator, "{s}/workforce/{s}", .{ abs_project_path, member.name });
+        defer allocator.free(member_dir);
+        const port_str = try std.fmt.allocPrint(allocator, "{d}", .{member.port});
+        defer allocator.free(port_str);
+        const color = prefix_colors[color_idx % prefix_colors.len];
+        color_idx += 1;
+
+        var child = spawnService(allocator, &.{ "uv", "run", "-m", "timbal.server.http", "--port", port_str, "--import_spec", member.config.fqn }, member_dir, member.name, color, output_mutex, &services.reader_threads, service_env) catch {
+            std.debug.print("Error: failed to start {s}\n", .{member.name});
+            continue;
+        };
+        try services.statuses.append(.{
+            .name = member.name,
+            .port = member.port,
+            .pid = if (is_windows) {} else child.id,
+            .started_at_ms = std.time.milliTimestamp(),
+        });
+        try services.children.append(child);
+        _ = &child;
+    }
+
+    if (has_ui) {
+        const ui_dir = try std.fmt.allocPrint(allocator, "{s}/ui", .{abs_project_path});
+        defer allocator.free(ui_dir);
+        const ui_port_str = try std.fmt.allocPrint(allocator, "{d}", .{ui_port.?});
+        defer allocator.free(ui_port_str);
+
+        service_env.put("PORT", ui_port_str) catch return error.OutOfMemory;
+        var child = spawnService(allocator, &.{ "bun", "run", "dev", "--port", ui_port_str }, ui_dir, "ui", "\x1b[1;36m", output_mutex, &services.reader_threads, service_env) catch {
+            std.debug.print("Error: failed to start UI\n", .{});
+            return error.ServiceStartFailed;
+        };
+        try services.statuses.append(.{
+            .name = "ui",
+            .port = ui_port.?,
+            .pid = if (is_windows) {} else child.id,
+            .started_at_ms = std.time.milliTimestamp(),
+        });
+        try services.children.append(child);
+        _ = &child;
+    }
+
+    if (has_api) {
+        const api_dir = try std.fmt.allocPrint(allocator, "{s}/api", .{abs_project_path});
+        defer allocator.free(api_dir);
+        const api_port_str = try std.fmt.allocPrint(allocator, "{d}", .{api_port.?});
+        defer allocator.free(api_port_str);
+
+        service_env.put("PORT", api_port_str) catch return error.OutOfMemory;
+        var child = spawnService(allocator, &.{ "bun", "run", "dev" }, api_dir, "api", "\x1b[1;32m", output_mutex, &services.reader_threads, service_env) catch {
+            std.debug.print("Error: failed to start API\n", .{});
+            return error.ServiceStartFailed;
+        };
+        try services.statuses.append(.{
+            .name = "api",
+            .port = api_port.?,
+            .pid = if (is_windows) {} else child.id,
+            .started_at_ms = std.time.milliTimestamp(),
+        });
+        try services.children.append(child);
+        _ = &child;
+    }
+
+    return services;
 }
 
 /// Find the next available port starting from the given one.
@@ -349,6 +572,101 @@ fn openBrowserThread(ctx: BrowserContext) void {
     defer ctx.allocator.free(ctx.url);
     std.time.sleep(2 * std.time.ns_per_s);
     openBrowserUrl(ctx.allocator, ctx.url);
+}
+
+fn preferredBrowserUrl(allocator: std.mem.Allocator, has_ui: bool, ui_port: ?u16, has_api: bool, api_port: ?u16) ?[]u8 {
+    return if (has_ui)
+        std.fmt.allocPrint(allocator, "http://localhost:{d}", .{ui_port.?}) catch null
+    else if (has_api)
+        std.fmt.allocPrint(allocator, "http://localhost:{d}", .{api_port.?}) catch null
+    else
+        null;
+}
+
+fn printCommandHelp(mutex: *std.Thread.Mutex) void {
+    const stdout = std.io.getStdOut().writer();
+    mutex.lock();
+    defer mutex.unlock();
+
+    stdout.writeAll("\n") catch {};
+    stdout.print("{s}Available commands:{s}\n", .{ Color.bold, Color.reset }) catch {};
+    stdout.print("  {s}r{s}  restart all services\n", .{ Color.bold_cyan, Color.reset }) catch {};
+    stdout.print("  {s}s{s}  show service status\n", .{ Color.bold_cyan, Color.reset }) catch {};
+    stdout.print("  {s}o{s}  open the app in your browser\n", .{ Color.bold_cyan, Color.reset }) catch {};
+    stdout.print("  {s}u{s}  print the UI URL\n", .{ Color.bold_cyan, Color.reset }) catch {};
+    stdout.print("  {s}a{s}  print the API URL\n", .{ Color.bold_cyan, Color.reset }) catch {};
+    stdout.print("  {s}w{s}  print workforce service URLs\n", .{ Color.bold_cyan, Color.reset }) catch {};
+    stdout.print("  {s}q{s}  stop services and quit\n", .{ Color.bold_cyan, Color.reset }) catch {};
+}
+
+fn printServiceStatus(services: ?*RunningServices, mutex: *std.Thread.Mutex) void {
+    const stdout = std.io.getStdOut().writer();
+    mutex.lock();
+    defer mutex.unlock();
+
+    stdout.writeAll("\n") catch {};
+    stdout.print("{s}Service status:{s}\n", .{ Color.bold, Color.reset }) catch {};
+
+    const running = services orelse {
+        stdout.print("  {s}No services running{s}\n", .{ Color.dim, Color.reset }) catch {};
+        return;
+    };
+
+    const now_ms = std.time.milliTimestamp();
+    for (running.statuses.items) |status| {
+        const uptime_s: i64 = @divTrunc(now_ms - status.started_at_ms, 1000);
+        if (comptime is_windows) {
+            if (status.port) |p| {
+                stdout.print("  {s}✓{s} {s}  port={d} uptime={d}s\n", .{ Color.bold_green, Color.reset, status.name, p, uptime_s }) catch {};
+            } else {
+                stdout.print("  {s}✓{s} {s}  uptime={d}s\n", .{ Color.bold_green, Color.reset, status.name, uptime_s }) catch {};
+            }
+        } else {
+            if (status.port) |p| {
+                stdout.print("  {s}✓{s} {s}  pid={d} port={d} uptime={d}s\n", .{ Color.bold_green, Color.reset, status.name, status.pid, p, uptime_s }) catch {};
+            } else {
+                stdout.print("  {s}✓{s} {s}  pid={d} uptime={d}s\n", .{ Color.bold_green, Color.reset, status.name, status.pid, uptime_s }) catch {};
+            }
+        }
+    }
+}
+
+fn printProjectUrls(
+    members: []const WorkforceMember,
+    has_ui: bool,
+    ui_port: ?u16,
+    has_api: bool,
+    api_port: ?u16,
+    action: CommandAction,
+    mutex: *std.Thread.Mutex,
+) void {
+    const stdout = std.io.getStdOut().writer();
+    mutex.lock();
+    defer mutex.unlock();
+
+    stdout.writeAll("\n") catch {};
+
+    if ((action == .urls or action == .ui_url) and has_ui) {
+        stdout.print("  UI   {s}http://localhost:{d}{s}\n", .{ Color.bold_cyan, ui_port.?, Color.reset }) catch {};
+    } else if (action == .ui_url) {
+        stdout.print("  {s}UI not found{s}\n", .{ Color.dim, Color.reset }) catch {};
+    }
+
+    if ((action == .urls or action == .api_url) and has_api) {
+        stdout.print("  API  {s}http://localhost:{d}{s}\n", .{ Color.bold_cyan, api_port.?, Color.reset }) catch {};
+    } else if (action == .api_url) {
+        stdout.print("  {s}API not found{s}\n", .{ Color.dim, Color.reset }) catch {};
+    }
+
+    if (action == .urls or action == .workforce_urls) {
+        if (members.len == 0) {
+            stdout.print("  {s}No workforce found{s}\n", .{ Color.dim, Color.reset }) catch {};
+        } else {
+            for (members) |member| {
+                stdout.print("  {s}  {s}http://localhost:{d}{s}\n", .{ member.name, Color.bold_cyan, member.port, Color.reset }) catch {};
+            }
+        }
+    }
 }
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -606,15 +924,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     }
 
-    // Start services.
-    try stdout.print("\n{s}Starting services...{s}\n\n", .{ Color.bold, Color.reset });
-
     var output_mutex = std.Thread.Mutex{};
-    var reader_threads = std.ArrayList(std.Thread).init(allocator);
-    defer reader_threads.deinit();
-
-    var children = std.ArrayList(std.process.Child).init(allocator);
-    defer children.deinit();
 
     // Shared env map with FORCE_COLOR for all services.
     var service_env = std.process.getEnvMap(allocator) catch return;
@@ -626,25 +936,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     service_env.put("TIMBAL_API_KEY", api_key) catch return;
     service_env.put("TIMBAL_ORG_ID", org_id) catch return;
     service_env.put("TIMBAL_API_HOST", api_host) catch return;
-
-    var color_idx: usize = 0;
-
-    // Start workforce members first.
-    for (members.items) |member| {
-        const member_dir = try std.fmt.allocPrint(allocator, "{s}/workforce/{s}", .{ abs_project_path, member.name });
-        defer allocator.free(member_dir);
-        const port_str = try std.fmt.allocPrint(allocator, "{d}", .{member.port});
-        defer allocator.free(port_str);
-        const color = prefix_colors[color_idx % prefix_colors.len];
-        color_idx += 1;
-
-        var child = spawnService(allocator, &.{ "uv", "run", "-m", "timbal.server.http", "--port", port_str, "--import_spec", member.config.fqn }, member_dir, member.name, color, &output_mutex, &reader_threads, &service_env) catch {
-            std.debug.print("Error: failed to start {s}\n", .{member.name});
-            continue;
-        };
-        try children.append(child);
-        _ = &child;
-    }
 
     // Build workforce env vars: id:port,id:port,...
     {
@@ -675,44 +966,42 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         service_env.put("TIMBAL_START_UI_PORT", ui_port_env) catch {};
     }
 
-    if (has_ui) {
-        const ui_dir = try std.fmt.allocPrint(allocator, "{s}/ui", .{abs_project_path});
-        defer allocator.free(ui_dir);
-        const ui_port_str = try std.fmt.allocPrint(allocator, "{d}", .{ui_port.?});
-        defer allocator.free(ui_port_str);
-
-        service_env.put("PORT", ui_port_str) catch return;
-        var child = spawnService(allocator, &.{ "bun", "run", "dev", "--port", ui_port_str }, ui_dir, "ui", "\x1b[1;36m", &output_mutex, &reader_threads, &service_env) catch {
-            std.debug.print("Error: failed to start UI\n", .{});
-            return;
-        };
-        try children.append(child);
-        _ = &child;
+    var requested_action = std.atomic.Value(CommandAction).init(.none);
+    const command_input_enabled = std.io.getStdIn().isTty();
+    if (command_input_enabled) {
+        const command_thread = std.Thread.spawn(.{}, commandInputFn, .{CommandInputCtx{
+            .action = &requested_action,
+        }}) catch null;
+        if (command_thread) |thread| thread.detach();
     }
 
-    if (has_api) {
-        const api_dir = try std.fmt.allocPrint(allocator, "{s}/api", .{abs_project_path});
-        defer allocator.free(api_dir);
-        const api_port_str = try std.fmt.allocPrint(allocator, "{d}", .{api_port.?});
-        defer allocator.free(api_port_str);
+    var services: ?RunningServices = try startServices(
+        allocator,
+        abs_project_path,
+        members.items,
+        has_ui,
+        ui_port,
+        has_api,
+        api_port,
+        &service_env,
+        &output_mutex,
+    );
+    defer if (services) |*running| stopServices(running);
 
-        service_env.put("PORT", api_port_str) catch return;
-        var child = spawnService(allocator, &.{ "bun", "run", "dev" }, api_dir, "api", "\x1b[1;32m", &output_mutex, &reader_threads, &service_env) catch {
-            std.debug.print("Error: failed to start API\n", .{});
-            return;
-        };
-        try children.append(child);
-        _ = &child;
+    if (command_input_enabled) {
+        try stdout.print("\n{s}Press {s}h + enter{s} for commands, {s}r + enter{s} to restart, or Ctrl+C to stop.{s}\n", .{
+            Color.dim,
+            Color.bold_cyan,
+            Color.dim,
+            Color.bold_cyan,
+            Color.dim,
+            Color.reset,
+        });
     }
 
     // Open browser after a short delay (UI takes priority over API).
     {
-        const browser_url: ?[]u8 = if (has_ui)
-            std.fmt.allocPrint(allocator, "http://localhost:{d}", .{ui_port.?}) catch null
-        else if (has_api)
-            std.fmt.allocPrint(allocator, "http://localhost:{d}", .{api_port.?}) catch null
-        else
-            null;
+        const browser_url = preferredBrowserUrl(allocator, has_ui, ui_port, has_api, api_port);
 
         if (browser_url) |url| {
             const ctx = BrowserContext{ .allocator = allocator, .url = url };
@@ -721,14 +1010,63 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    // Wait for all reader threads (blocks until all services exit).
-    for (reader_threads.items) |thread| {
-        thread.join();
+    while (!g_interrupted) {
+        switch (requested_action.swap(.none, .acq_rel)) {
+            .none => {},
+            .help => printCommandHelp(&output_mutex),
+            .status => {
+                if (services) |*running| {
+                    printServiceStatus(running, &output_mutex);
+                } else {
+                    printServiceStatus(null, &output_mutex);
+                }
+            },
+            .open => {
+                if (preferredBrowserUrl(allocator, has_ui, ui_port, has_api, api_port)) |url| {
+                    defer allocator.free(url);
+                    output_mutex.lock();
+                    stdout.print("\n{s}Opening {s}{s}\n", .{ Color.dim, url, Color.reset }) catch {};
+                    output_mutex.unlock();
+                    openBrowserUrl(allocator, url);
+                } else {
+                    output_mutex.lock();
+                    stdout.print("\n{s}No UI or API URL to open{s}\n", .{ Color.dim, Color.reset }) catch {};
+                    output_mutex.unlock();
+                }
+            },
+            .urls, .ui_url, .api_url, .workforce_urls => |action| {
+                printProjectUrls(members.items, has_ui, ui_port, has_api, api_port, action, &output_mutex);
+            },
+            .restart => {
+                output_mutex.lock();
+                stdout.print("\n{s}Restarting services...{s}\n", .{ Color.bold, Color.reset }) catch {};
+                output_mutex.unlock();
+
+                if (services) |*running| {
+                    stopServices(running);
+                    services = null;
+                }
+                services = try startServices(
+                    allocator,
+                    abs_project_path,
+                    members.items,
+                    has_ui,
+                    ui_port,
+                    has_api,
+                    api_port,
+                    &service_env,
+                    &output_mutex,
+                );
+            },
+            .quit => break,
+        }
+
+        std.time.sleep(150 * std.time.ns_per_ms);
     }
 
-    // Wait for all child processes to finish.
-    for (children.items) |*child| {
-        _ = child.wait() catch {};
+    if (services) |*running| {
+        stopServices(running);
+        services = null;
     }
 
     restoreTermios();
