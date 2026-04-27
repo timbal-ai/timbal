@@ -1,6 +1,7 @@
 import asyncio
+import json
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from pydantic import BaseModel
@@ -223,6 +224,58 @@ class TestToolExecution:
         output = await result.collect()
         assert isinstance(output, OutputEvent)
         assert output.error is not None  # Should have validation error
+
+    @pytest.mark.asyncio
+    async def test_literal_list_none_parameter_serializes_and_executes(self):
+        """Test Literal[...] | None params don't break schema or call serialization."""
+        def handler(
+            mode: Literal["auto", "manual"] | None = None,
+            modes: list[Literal["fast", "slow"]] | None = None,
+        ) -> str:
+            return f"{mode or ''}:{','.join(modes or [])}"
+
+        tool = Tool(handler=handler)
+
+        # Tool schemas are passed through provider clients, so they must remain JSON-serializable.
+        json.dumps(tool.openai_chat_completions_schema)
+        json.dumps(tool.anthropic_schema)
+
+        output = await tool(mode="auto", modes=["fast"]).collect()
+        assert_no_errors(output)
+        assert output.output == "auto:fast"
+        json.dumps(output.model_dump(mode="json"))
+
+        none_output = await tool(mode=None, modes=None).collect()
+        assert_no_errors(none_output)
+        assert none_output.output == ":"
+        json.dumps(none_output.model_dump(mode="json"))
+
+    @pytest.mark.asyncio
+    async def test_postponed_literal_parameter_annotations_serialize_and_execute(self):
+        """Test stringified Literal annotations resolve in generated params models."""
+        def search_catalogue(mode=None, fields=None) -> str:
+            return f"{mode or ''}:{','.join(fields or [])}"
+
+        search_catalogue.__annotations__ = {
+            "mode": 'Literal["auto", "manual"] | None',
+            "fields": 'list[Literal["brand", "color"]] | None',
+            "return": "str",
+        }
+
+        literal = globals().pop("Literal")
+        try:
+            tool = Tool(handler=search_catalogue)
+
+            json.dumps(tool.openai_chat_completions_schema)
+            json.dumps(tool.anthropic_schema)
+            json.dumps(tool.model_dump())
+
+            output = await tool(mode="manual", fields=["brand"]).collect()
+            assert_no_errors(output)
+            assert output.output == "manual:brand"
+            json.dumps(output.model_dump(mode="json"))
+        finally:
+            globals()["Literal"] = literal
 
 
 class TestToolSchemas:
