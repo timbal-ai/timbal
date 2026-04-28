@@ -122,12 +122,15 @@ Any provider, one interface. Model strings follow `provider/model-name`:
 ```
 anthropic/claude-sonnet-4-6       openai/gpt-4o
 anthropic/claude-opus-4-7         openai/gpt-5.5
-anthropic/claude-opus-4-6         openai/gpt-4o-mini
+anthropic/claude-opus-4-6         openai/gpt-5.5-2026-04-23
 anthropic/claude-haiku-4-5        openai/o3
-google/gemini-2.5-flash           groq/llama-3.3-70b-versatile
-google/gemini-2.5-pro-preview     xai/grok-3
-cerebras/llama-3.3-70b            sambanova/Meta-Llama-3.3-70B-Instruct
+google/gemini-2.5-flash           togetherai/deepseek-ai/DeepSeek-V4-Pro
+google/gemini-2.5-pro-preview     togetherai/moonshotai/Kimi-K2.6
+groq/llama-3.3-70b-versatile      xai/grok-4
+cerebras/llama-3.1-8b             sambanova/Meta-Llama-3.3-70B-Instruct
 ```
+
+Recent additions (see `python/timbal/models.yaml`): DeepSeek V4 via Together/Fireworks, GLM-5.1, MiniMax M2.7, Kimi K2.6, Qwen 3.6 Plus (Fireworks), and the `gpt-5.5-2026-04-23` snapshot.
 
 Full list and context window sizes in `python/timbal/core/models.py`.
 

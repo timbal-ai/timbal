@@ -246,8 +246,9 @@ Provider-prefixed strings. Examples:
 anthropic/claude-opus-4-7
 anthropic/claude-opus-4-6
 anthropic/claude-sonnet-4-6
-anthropic/claude-haiku-4-5-20251001
+anthropic/claude-haiku-4-5
 openai/gpt-5.5
+openai/gpt-5.5-2026-04-23
 openai/gpt-4o
 openai/gpt-4o-mini
 openai/o3
@@ -255,8 +256,8 @@ openai/o1-mini
 google/gemini-2.5-flash
 google/gemini-2.5-pro-preview
 groq/llama-3.3-70b-versatile
-xai/grok-3
-cerebras/llama-3.3-70b
+xai/grok-4
+cerebras/llama-3.1-8b
 sambanova/Meta-Llama-3.3-70B-Instruct
 ```
 

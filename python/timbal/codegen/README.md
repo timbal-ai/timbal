@@ -526,7 +526,7 @@ When filtering, response includes pagination metadata and full model objects:
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string | Full routing ID passed to `model=` (e.g. `"anthropic/claude-opus-4-6"`) |
-| `provider` | string | Provider key (`anthropic`, `openai`, `google`, `togetherai`, `xai`, `groq`, `fireworks`) |
+| `provider` | string | Provider key (`anthropic`, `openai`, `google`, `togetherai`, `xai`, `groq`, `fireworks`, `byteplus`, `xiaomi`, `cerebras`, `sambanova`) |
 | `display_name` | string | Human-readable name for UI |
 | `description` | string | One-sentence description from provider docs |
 | `input_price` | float \| null | USD per 1M input tokens (`null` if not publicly listed) |

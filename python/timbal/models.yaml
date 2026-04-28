@@ -351,6 +351,15 @@ models:
     context_window: 128000
     capabilities: [tools, reasoning]
 
+  - id: "openai/gpt-5.5-2026-04-23"
+    provider: openai
+    display_name: "GPT-5.5 (2026-04-23)"
+    description: "Dated snapshot of GPT-5.5 for reproducible runs; same capabilities as gpt-5.5 per OpenAI API docs."
+    input_price: 5.00
+    output_price: 30.00
+    context_window: 1000000
+    capabilities: [vision, tools, reasoning]
+
   # ── TogetherAI ───────────────────────────────────────────────────────────────
 
   - id: "togetherai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
@@ -452,6 +461,15 @@ models:
     context_window: 128000
     capabilities: [tools, reasoning]
 
+  - id: "togetherai/deepseek-ai/DeepSeek-V4-Pro"
+    provider: togetherai
+    display_name: "DeepSeek V4 Pro (Together)"
+    description: "DeepSeek V4 Pro hosted on Together: hybrid CSA+HCA attention, up to 1M context, three reasoning modes, strong coding and agent benchmarks."
+    input_price: 2.10
+    output_price: 4.40
+    context_window: 512000
+    capabilities: [tools, reasoning]
+
   - id: "togetherai/deepseek-ai/DeepSeek-R1"
     provider: togetherai
     display_name: "DeepSeek R1"
@@ -468,6 +486,15 @@ models:
     input_price: 0.50
     output_price: 2.80
     context_window: 256000
+    capabilities: [vision, tools, reasoning]
+
+  - id: "togetherai/moonshotai/Kimi-K2.6"
+    provider: togetherai
+    display_name: "Kimi K2.6"
+    description: "Moonshot Kimi K2 successor on Together: 1T-scale MoE with tool calling and JSON mode for agentic and multimodal workloads."
+    input_price: 1.20
+    output_price: 4.50
+    context_window: 262000
     capabilities: [vision, tools, reasoning]
 
   - id: "togetherai/moonshotai/Kimi-K2-Instruct-0905"
@@ -497,12 +524,30 @@ models:
     context_window: 200000
     capabilities: [tools]
 
+  - id: "togetherai/MiniMaxAI/MiniMax-M2.7"
+    provider: togetherai
+    display_name: "MiniMax M2.7"
+    description: "MiniMax successor MoE (~229B) with improved coding and agentic tool use, JSON mode, and prompt caching on Together."
+    input_price: 0.30
+    output_price: 1.20
+    context_window: 202752
+    capabilities: [tools]
+
   - id: "togetherai/zai-org/GLM-5"
     provider: togetherai
     display_name: "GLM-5"
     description: "Zhipu AI's fifth-generation ~745B MoE model designed for complex system engineering and long-range agent tasks."
     input_price: 1.00
     output_price: 3.20
+    context_window: 200000
+    capabilities: [tools, reasoning]
+
+  - id: "togetherai/zai-org/GLM-5.1"
+    provider: togetherai
+    display_name: "GLM-5.1"
+    description: "Z.ai post-training upgrade to GLM-5: 754B MoE (40B active), 200K context, thinking mode, tool calling, and stronger coding via RL."
+    input_price: 1.40
+    output_price: 4.40
     context_window: 200000
     capabilities: [tools, reasoning]
 
@@ -873,6 +918,33 @@ models:
     output_price: 1.68
     context_window: 163000
     capabilities: [tools]
+
+  - id: "fireworks/accounts/fireworks/models/deepseek-v4-pro"
+    provider: fireworks
+    display_name: "DeepSeek V4 Pro (Fireworks)"
+    description: "DeepSeek V4 Pro on Fireworks serverless: frontier open MoE for coding, reasoning, and up to ~1M token context with function calling."
+    input_price: 1.74
+    output_price: 3.48
+    context_window: 1048576
+    capabilities: [tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/qwen3p6-plus"
+    provider: fireworks
+    display_name: "Qwen 3.6 Plus (Fireworks)"
+    description: "Qwen 3.6 multimodal plus tier on Fireworks for vision-language and general agent tasks."
+    input_price: 0.50
+    output_price: 3.00
+    context_window: 262144
+    capabilities: [vision, tools, reasoning]
+
+  - id: "fireworks/accounts/fireworks/models/kimi-k2p6"
+    provider: fireworks
+    display_name: "Kimi K2.6 (Fireworks)"
+    description: "Moonshot Kimi K2.6 on Fireworks: multimodal MoE for high-quality tool use and long-context workloads."
+    input_price: 0.95
+    output_price: 4.00
+    context_window: 262144
+    capabilities: [vision, tools, reasoning]
 
   - id: "fireworks/accounts/fireworks/models/deepseek-v3p1"
     provider: fireworks
