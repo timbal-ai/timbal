@@ -260,6 +260,67 @@ class TestChatCompletionCollectorToolCalls:
         assert tc.name == "get_weather"
         assert tc.input == {"city": "NYC"}
 
+    def test_tool_call_name_arrives_in_chunk_after_id(self):
+        """Fireworks / Kimi can stream tool_call.id before function.name is set."""
+        _make_context()
+        collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
+
+        tc_id_only = ChoiceDeltaToolCall(
+            index=0,
+            id="call_fw_1",
+            type="function",
+            function=ChoiceDeltaToolCallFunction(name=None, arguments=""),
+        )
+        assert collector.process(_make_cc_chunk(tool_calls=[tc_id_only])) is None
+
+        tc_name_args = ChoiceDeltaToolCall(
+            index=0,
+            id=None,
+            type=None,
+            function=ChoiceDeltaToolCallFunction(name="get_user", arguments='{"id": 5}'),
+        )
+        item = collector.process(_make_cc_chunk(tool_calls=[tc_name_args]))
+        assert isinstance(item, ToolUse)
+        assert item.name == "get_user"
+        assert item.id == "call_fw_1"
+
+        collector.process(_make_cc_chunk(finish_reason="tool_calls"))
+        msg = collector.result()
+        assert len(msg.content) == 1
+        tc = msg.content[0]
+        assert isinstance(tc, ToolUseContent)
+        assert tc.name == "get_user"
+        assert tc.input == {"id": 5}
+
+    def test_tool_call_same_id_then_arguments(self):
+        """Fireworks/Kimi may resend the same tool_call id with arguments after name+empty args."""
+        _make_context()
+        collector = ChatCompletionCollector(async_gen=_empty_gen(), start=time.perf_counter())
+
+        tc1 = ChoiceDeltaToolCall(
+            index=0,
+            id="call_fw_repeat",
+            type="function",
+            function=ChoiceDeltaToolCallFunction(name="get_user", arguments=""),
+        )
+        first = collector.process(_make_cc_chunk(tool_calls=[tc1]))
+        assert isinstance(first, ToolUse)
+
+        tc2 = ChoiceDeltaToolCall(
+            index=0,
+            id="call_fw_repeat",
+            type="function",
+            function=ChoiceDeltaToolCallFunction(name=None, arguments='{"id": 5}'),
+        )
+        second = collector.process(_make_cc_chunk(tool_calls=[tc2]))
+        assert isinstance(second, ToolUseDelta)
+
+        collector.process(_make_cc_chunk(finish_reason="tool_calls"))
+        msg = collector.result()
+        tc = msg.content[0]
+        assert isinstance(tc, ToolUseContent)
+        assert tc.input == {"id": 5}
+
 
 class TestResponseCollectorCanHandle:
     def test_handles_response_in_progress_event(self):
