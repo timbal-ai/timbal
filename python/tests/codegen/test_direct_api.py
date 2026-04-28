@@ -5,6 +5,7 @@ so that pytest-cov can measure coverage of the transformer code.
 """
 
 import io
+import json
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -94,8 +95,36 @@ class TestRunTest:
         spec = ImportSpec(path=fixture, target="tool_fixture")
         await run_test(spec, params={"x": "world"}, stream=True)
         captured = capsys.readouterr()
-        # With stream=True, each event is printed
-        assert captured.out != ""
+        events = [json.loads(line) for line in captured.out.splitlines() if line.strip()]
+        assert events
+        assert any(event["type"] == "OUTPUT" for event in events)
+
+    async def test_run_test_stream_keeps_user_prints_off_stdout(self, tmp_path, capsys):
+        from timbal.codegen.test import run_test
+        from timbal.utils import ImportSpec
+
+        fixture = tmp_path / "printing_tool.py"
+        fixture.write_text(
+            textwrap.dedent(
+                """
+                from timbal import Tool
+
+                def handler(x: str) -> str:
+                    print(f"user print: {x}")
+                    return f"result: {x}"
+
+                flow = Tool(name="printing_tool", handler=handler)
+                """
+            )
+        )
+        spec = ImportSpec(path=fixture, target="flow")
+
+        await run_test(spec, params={"x": "world"}, stream=True)
+        captured = capsys.readouterr()
+
+        events = [json.loads(line) for line in captured.out.splitlines() if line.strip()]
+        assert events
+        assert "user print: world" in captured.err
 
     async def test_run_test_with_run_context(self, capsys):
         from timbal.codegen.test import run_test

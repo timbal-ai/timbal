@@ -1,4 +1,6 @@
+import contextlib
 import json
+import sys
 
 from ..state import RunContext, set_run_context
 from ..utils import ImportSpec
@@ -22,12 +24,15 @@ async def run_test(
         set_run_context(run_context)
 
     output_event = None
-    runnable = import_spec.load()
-    async for event in runnable(**params):
-        if stream:
-            print(event.model_dump(), flush=True)
-        elif event.type == "OUTPUT":
-            output_event = event
+    protocol_stdout = sys.stdout
+
+    with contextlib.redirect_stdout(sys.stderr):
+        runnable = import_spec.load()
+        async for event in runnable(**params):
+            if stream:
+                print(json.dumps(event.model_dump()), file=protocol_stdout, flush=True)
+            elif event.type == "OUTPUT":
+                output_event = event
 
     if not stream and output_event is not None:
-        print(json.dumps(output_event.model_dump()))
+        print(json.dumps(output_event.model_dump()), file=protocol_stdout)
