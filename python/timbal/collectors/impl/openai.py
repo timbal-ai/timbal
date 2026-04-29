@@ -109,8 +109,12 @@ class ChatCompletionCollector(BaseCollector):
         super().__init__(**kwargs)
         self._start = start
         self._content: str = ""
+        # `_current_tool_call` is appended to `_tool_calls` by reference (same dict).
+        # Subsequent mutations of `_current_tool_call` propagate to the entry in
+        # `_tool_calls` without needing to re-append.
         self._tool_calls: list[dict[str, Any]] = []
         self._current_tool_call: dict[str, Any] | None = None
+        self._tool_use_header_emitted: bool = False
         self._first_token: float | None = None
         self._output_tokens: int = 0
         self._text_block_started: bool = False
@@ -184,14 +188,50 @@ class ChatCompletionCollector(BaseCollector):
     def _handle_tool_calls(self, event: ChatCompletionEvent) -> TimbalToolUse | TimbalToolUseDelta | None:
         """Handle tool call events from OpenAI."""
         tool_call = event.choices[0].delta.tool_calls[0]
+        fn = tool_call.function
+        fn_name = fn.name if fn is not None else None
+        fn_args_part = fn.arguments if fn is not None else None
+
+        def _merge_same_id_stream() -> TimbalToolUse | TimbalToolUseDelta | None:
+            """Continue the same tool_call when the provider resends the same id (e.g. Fireworks/Kimi)."""
+            assert self._current_tool_call is not None
+            if fn_name:
+                self._current_tool_call["name"] = fn_name
+            if fn_args_part is not None:
+                self._current_tool_call["input"] += fn_args_part
+            if not self._tool_use_header_emitted and self._current_tool_call["name"]:
+                self._tool_calls.append(self._current_tool_call)
+                self._tool_use_header_emitted = True
+                return TimbalToolUse(
+                    id=self._current_tool_call["id"],
+                    name=self._current_tool_call["name"],
+                    input=self._current_tool_call["input"],
+                    is_server_tool_use=False,
+                )
+            if self._tool_use_header_emitted and fn_args_part is not None:
+                return TimbalToolUseDelta(
+                    id=self._current_tool_call["id"],
+                    input_delta=fn_args_part,
+                )
+            return None
+
         # TODO Review this for parallel tool calls
         if tool_call.id:
-            # Start new tool call
+            same_stream = (
+                self._current_tool_call is not None
+                and self._current_tool_call.get("id") == tool_call.id
+            )
+            if same_stream:
+                return _merge_same_id_stream()
+
+            # New tool call stream. Some providers (e.g. Fireworks / Kimi) send tool_call.id before
+            # function.name is set; defer emitting TimbalToolUse until we have a name.
+            self._tool_use_header_emitted = bool(fn_name)
             self._current_tool_call = {
                 "type": "tool_use",
                 "id": tool_call.id,
-                "name": tool_call.function.name,
-                "input": tool_call.function.arguments,
+                "name": fn_name or "",
+                "input": fn_args_part if fn_args_part is not None else "",
             }
 
             # Check for extra_content (Google Gemini thought signature)
@@ -201,20 +241,40 @@ class ChatCompletionCollector(BaseCollector):
                 if google_extra:
                     self._current_tool_call["thought_signature"] = google_extra.get("thought_signature")
 
-            self._tool_calls.append(self._current_tool_call)
             self._content_blocks.add(tool_call.id)
+            if fn_name:
+                self._tool_calls.append(self._current_tool_call)
+                return TimbalToolUse(
+                    id=tool_call.id,
+                    name=fn_name,
+                    input=self._current_tool_call["input"],
+                    is_server_tool_use=False,
+                )
+            return None
+
+        if self._current_tool_call is None:
+            return None
+
+        if fn_name:
+            self._current_tool_call["name"] = fn_name
+        if fn_args_part is not None:
+            self._current_tool_call["input"] += fn_args_part
+
+        if not self._tool_use_header_emitted and self._current_tool_call["name"]:
+            self._tool_calls.append(self._current_tool_call)
+            self._tool_use_header_emitted = True
             return TimbalToolUse(
-                id=tool_call.id,
-                name=tool_call.function.name,
-                input=tool_call.function.arguments,
+                id=self._current_tool_call["id"],
+                name=self._current_tool_call["name"],
+                input=self._current_tool_call["input"],
                 is_server_tool_use=False,
             )
-        else:
-            self._current_tool_call["input"] += tool_call.function.arguments
+        if self._tool_use_header_emitted and fn_args_part is not None:
             return TimbalToolUseDelta(
                 id=self._current_tool_call["id"],
-                input_delta=tool_call.function.arguments,
+                input_delta=fn_args_part,
             )
+        return None
 
     def _handle_text_content(self, event: ChatCompletionEvent) -> TimbalText | TimbalTextDelta:
         """Handle text content from OpenAI events."""
