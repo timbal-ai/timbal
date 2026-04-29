@@ -1,4 +1,3 @@
-import os
 import time
 from typing import Any
 
@@ -110,6 +109,9 @@ class ChatCompletionCollector(BaseCollector):
         super().__init__(**kwargs)
         self._start = start
         self._content: str = ""
+        # `_current_tool_call` is appended to `_tool_calls` by reference (same dict).
+        # Subsequent mutations of `_current_tool_call` propagate to the entry in
+        # `_tool_calls` without needing to re-append.
         self._tool_calls: list[dict[str, Any]] = []
         self._current_tool_call: dict[str, Any] | None = None
         self._tool_use_header_emitted: bool = False
@@ -189,20 +191,6 @@ class ChatCompletionCollector(BaseCollector):
         fn = tool_call.function
         fn_name = fn.name if fn is not None else None
         fn_args_part = fn.arguments if fn is not None else None
-
-        if os.environ.get("TIMBAL_DEBUG_CHAT_STREAM") == "1":
-            cur = self._current_tool_call
-            preview = fn_args_part[:120] if isinstance(fn_args_part, str) else fn_args_part
-            dbg = {
-                "delta_id": tool_call.id,
-                "fn_name": fn_name,
-                "fn_args_preview": preview,
-                "header_emitted": self._tool_use_header_emitted,
-                "current_id": cur.get("id") if cur else None,
-                "current_name": cur.get("name") if cur else None,
-                "current_input_len": len(cur.get("input", "") or "") if cur else 0,
-            }
-            print("[TIMBAL_DEBUG_CHAT_STREAM] tool_delta", dbg, flush=True)  # noqa: T201
 
         def _merge_same_id_stream() -> TimbalToolUse | TimbalToolUseDelta | None:
             """Continue the same tool_call when the provider resends the same id (e.g. Fireworks/Kimi)."""
