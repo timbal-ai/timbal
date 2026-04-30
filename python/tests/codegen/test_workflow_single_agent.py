@@ -6,6 +6,7 @@ These tests ensure the two execution paths produce equivalent results.
 
 import pytest
 from timbal import Agent, Workflow
+from timbal.core.test_model import TestModel
 from timbal.state import get_run_context
 from timbal.types.events import OutputEvent
 from timbal.types.events.start import StartEvent
@@ -36,7 +37,7 @@ def multiply(a: int, b: int) -> int:
 def agent():
     return Agent(
         name="test_agent",
-        model="openai/gpt-4o-mini",
+        model=TestModel(),
         tools=[add, multiply],
         system_prompt="You are a helpful calculator. Use your tools for any math.",
     )
@@ -62,18 +63,27 @@ class TestOutputEquivalence:
         prompt = Message.validate({"role": "user", "content": "What is 3 + 4?"})
 
         agent_output = await agent(prompt=prompt).collect()
-        skip_if_agent_error(agent_output, "standalone_agent")
+        assert_no_errors(agent_output)
         assert isinstance(agent_output.output, Message)
         assert agent_output.output.role == "assistant"
 
         workflow_output = await workflow_with_agent(prompt=prompt).collect()
-        skip_if_agent_error(workflow_output, "workflow_agent")
+        assert_no_errors(workflow_output)
         assert isinstance(workflow_output.output, Message)
         assert workflow_output.output.role == "assistant"
 
     @pytest.mark.asyncio
-    async def test_tool_calling_works_in_both(self, agent, workflow_with_agent):
+    @pytest.mark.integration
+    async def test_tool_calling_works_in_both(self):
         """Both should be able to call tools and use the results."""
+        agent = Agent(
+            name="test_agent",
+            model="openai/gpt-4o-mini",
+            tools=[add, multiply],
+            system_prompt="You are a helpful calculator. Use your tools for any math.",
+        )
+        wf = Workflow(name="test_workflow").step(agent)
+
         prompt = Message.validate({"role": "user", "content": "What is 6 multiplied by 7? Use the multiply tool."})
 
         agent_output = await agent(prompt=prompt).collect()
@@ -81,7 +91,7 @@ class TestOutputEquivalence:
         content = str(agent_output.output.content).lower()
         assert "42" in content
 
-        workflow_output = await workflow_with_agent(prompt=prompt).collect()
+        workflow_output = await wf(prompt=prompt).collect()
         skip_if_agent_error(workflow_output, "workflow_agent_tool")
         content = str(workflow_output.output.content).lower()
         assert "42" in content
@@ -105,9 +115,9 @@ class TestOutputEquivalence:
         prompt = Message.validate({"role": "user", "content": "Say hello."})
 
         agent_output = await agent(prompt=prompt).collect()
-        skip_if_agent_error(agent_output, "agent_status")
+        assert_no_errors(agent_output)
         workflow_output = await workflow_with_agent(prompt=prompt).collect()
-        skip_if_agent_error(workflow_output, "workflow_status")
+        assert_no_errors(workflow_output)
 
         assert agent_output.status.code == workflow_output.status.code
 
@@ -148,7 +158,7 @@ class TestEventStreaming:
         # Standalone agent: paths start with agent name
         standalone = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
         )
         agent_events = []
         async for event in standalone(prompt=prompt):
@@ -160,7 +170,7 @@ class TestEventStreaming:
         # Workflow-wrapped agent: paths start with workflow name
         wrapped = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
         )
         wf = Workflow(name="test_workflow")
         wf.step(wrapped)
@@ -209,18 +219,18 @@ class TestParameterPassing:
         """Workflow should pass the prompt parameter to the agent step."""
         agent = Agent(
             name="param_agent",
-            model="openai/gpt-4o-mini",
-            system_prompt="You must respond with exactly: RECEIVED",
+            model=TestModel(),
         )
         wf = Workflow(name="param_wf").step(agent)
 
         prompt = Message.validate({"role": "user", "content": "Test"})
         output = await wf(prompt=prompt).collect()
-        skip_if_agent_error(output, "param_passing")
+        assert_no_errors(output)
 
         assert isinstance(output.output, Message)
 
     @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_system_prompt_preserved_in_workflow(self):
         """The agent's system_prompt should be preserved when run inside a workflow."""
         agent = Agent(
@@ -244,6 +254,7 @@ class TestParameterPassing:
         assert "pineapple" in str(wf_output.output.content).lower()
 
     @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_workflow_can_override_agent_params(self):
         """Workflow kwargs should override agent step defaults."""
         agent = Agent(
@@ -271,11 +282,11 @@ class TestTracing:
         """Standalone agent should have a flat trace: agent -> llm."""
         agent = Agent(
             name="trace_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
         )
         prompt = Message.validate({"role": "user", "content": "Hello!"})
         output = await agent(prompt=prompt).collect()
-        skip_if_agent_error(output, "agent_trace")
+        assert_no_errors(output)
 
         records = get_run_context()._trace.as_records()
         paths = [r.path for r in records]
@@ -287,13 +298,13 @@ class TestTracing:
         """Workflow with single agent should have: workflow -> agent -> llm."""
         agent = Agent(
             name="trace_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
         )
         wf = Workflow(name="trace_wf").step(agent)
 
         prompt = Message.validate({"role": "user", "content": "Hello!"})
         output = await wf(prompt=prompt).collect()
-        skip_if_agent_error(output, "workflow_trace")
+        assert_no_errors(output)
 
         records = get_run_context()._trace.as_records()
         paths = [r.path for r in records]
@@ -306,15 +317,14 @@ class TestTracing:
         """Tool calls in both modes should have correct nested paths in the trace."""
         agent = Agent(
             name="tool_trace_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[add],
-            system_prompt="Always use the add tool for any question. Call add(1, 2).",
         )
 
         # Standalone
         prompt = Message.validate({"role": "user", "content": "Add 1 and 2."})
         output = await agent(prompt=prompt).collect()
-        skip_if_agent_error(output, "tool_trace_standalone")
+        assert_no_errors(output)
 
         records = get_run_context()._trace.as_records()
         tool_paths = [r.path for r in records if "add" in r.path]
@@ -324,7 +334,7 @@ class TestTracing:
         # Workflow
         wf = Workflow(name="tool_trace_wf").step(agent)
         output = await wf(prompt=prompt).collect()
-        skip_if_agent_error(output, "tool_trace_workflow")
+        assert_no_errors(output)
 
         records = get_run_context()._trace.as_records()
         tool_paths = [r.path for r in records if "add" in r.path]
@@ -333,6 +343,7 @@ class TestTracing:
 
 
     @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_skill_tool_trace_paths_in_workflow(self, tmp_path):
         """Skill tools inside a workflow-wrapped agent should have correct nested trace paths."""
         # Create a skill directory structure following the docs pattern:
@@ -439,7 +450,7 @@ class TestEdgeCases:
         """Both modes should work with an agent that has no tools."""
         agent = Agent(
             name="no_tools_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
         )
         wf = Workflow(name="no_tools_wf").step(agent)
 
@@ -458,7 +469,7 @@ class TestEdgeCases:
         """Both modes should accept the messages parameter instead of prompt."""
         agent = Agent(
             name="messages_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
         )
         wf = Workflow(name="messages_wf").step(agent)
 
@@ -475,6 +486,7 @@ class TestEdgeCases:
         assert_no_errors(wf_output)
 
     @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_multi_tool_agent_in_workflow(self):
         """An agent with multiple tools should work the same in both modes."""
         def greet(name: str) -> str:
@@ -506,7 +518,7 @@ class TestEdgeCases:
 
         agent = Agent(
             name="iter_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[loop_tool],
             max_iter=2,
         )

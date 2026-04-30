@@ -86,7 +86,7 @@ class BaseValidator(ABC, BaseModel):
 
         value = data.get("value")
 
-        # Check if value is a dict with 'value' and optionally 'transform'/'negate'
+        # Check if value is a dict with 'value' and optionally 'transform'/'negate' and validator-specific options (e.g. model)
         if isinstance(value, dict) and "value" in value:
             actual_value = value.get("value")
             transform = value.get("transform")
@@ -104,11 +104,16 @@ class BaseValidator(ABC, BaseModel):
                 if t not in TRANSFORMS:
                     raise ValueError(f"unknown transform: {t}. Supported: {sorted(TRANSFORMS)}")
 
+            # Pass through any extra keys (e.g. model, system_prompt for LLM validators) so subclasses receive them
+            reserved = ("value", "transform", "negate")
+            extra = {k: v for k, v in value.items() if k not in reserved}
+
             return {
                 **data,
                 "value": actual_value,
                 "transform": transform,
                 "negate": negate,
+                **extra,
             }
 
         return data

@@ -72,14 +72,14 @@ def resolve_target(trace: Trace, target: str, path_key: str = "") -> tuple[Span 
         - "agent.llm.output" -> (Span, output_value)
         - "agent.search.input.query.text" -> (Span, nested text value)
         - "agent.llm.usage.input_tokens" -> (Span, sum of input_tokens across all models)
-        - "agent.llm.usage.claude-haiku-4-5-20251001:input_tokens" -> (Span, specific model's input_tokens)
+        - "agent.llm.usage.anthropic/claude-haiku-4-5:input_tokens" -> (Span, that model's input_tokens)
 
     Smart usage resolution:
         When accessing span.usage with a key like "input_tokens", the resolver will:
         1. First try exact match in usage dict (e.g., if there's a "input_tokens" key)
         2. If not found and there's only one model in usage, return that model's metric
         3. If multiple models exist, sum the metric across all models
-        4. You can still use full keys like "claude-haiku-4-5-20251001:input_tokens" for specific models
+        4. You can still use full keys like "anthropic/claude-haiku-4-5:input_tokens" for specific models
 
     Args:
         trace: The trace to search in.
@@ -164,21 +164,22 @@ def _resolve_usage_key(usage: dict[str, int], key: str) -> int | None:
     """Resolve a usage key smartly.
 
     Examples:
-        usage = {"claude-haiku-4-5-20251001:input_tokens": 100, "claude-haiku-4-5-20251001:output_tokens": 50}
+        usage = {"anthropic/claude-haiku-4-5:input_tokens": 100, "anthropic/claude-haiku-4-5:output_tokens": 50}
         _resolve_usage_key(usage, "input_tokens") -> 100 (single model, returns its value)
 
-        usage = {"model1:input_tokens": 100, "model2:input_tokens": 200}
-        _resolve_usage_key(usage, "input_tokens") -> 300 (multiple models, returns sum)
+        usage = {"openai/gpt-4o:input_text_tokens": 100, "anthropic/claude-3-5-haiku-latest:input_tokens": 200}
+        _resolve_usage_key(usage, "input_text_tokens") -> 100
+        _resolve_usage_key(usage, "input_tokens") -> 200
 
-        usage = {"claude-haiku-4-5-20251001:input_tokens": 100, "claude-haiku-4-5-20241120:input_tokens": 50}
-        _resolve_usage_key(usage, "claude-haiku-4-5:input_tokens") -> 150 (partial model match, returns sum)
+        usage = {"anthropic/claude-haiku-4-5-20251001:input_tokens": 100, "anthropic/claude-haiku-4-5-20241120:input_tokens": 50}
+        _resolve_usage_key(usage, "anthropic/claude-haiku-4-5:input_tokens") -> 150 (partial model match, returns sum)
 
     Args:
-        usage: The usage dictionary with model:metric keys
+        usage: The usage dictionary with `provider/model:metric` keys (split on the last ":").
         key: The metric key to resolve. Can be:
              - Just metric: "input_tokens" (matches all models)
-             - Partial model: "claude-haiku-4-5:input_tokens" (matches all claude-haiku-4-5* models)
-             - Full model: "claude-haiku-4-5-20251001:input_tokens" (exact match)
+             - Partial model: "anthropic/claude-haiku-4-5:input_tokens" (matches usage models starting with prefix)
+             - Full model: "anthropic/claude-haiku-4-5-20251001:input_tokens" (exact match)
 
     Returns:
         The resolved value, or None if not found
@@ -189,22 +190,21 @@ def _resolve_usage_key(usage: dict[str, int], key: str) -> int | None:
 
     # Check if the key contains a model prefix (model:metric or just metric)
     if ":" in key:
-        # User specified a model prefix (e.g., "claude-haiku-4-5:input_tokens")
-        model_prefix, metric = key.split(":", 1)
+        # User specified a model prefix (e.g. "anthropic/claude-haiku-4-5:input_tokens").
+        # Billing keys use "provider/model:metric" — split on the last ":" only.
+        model_prefix, metric = key.rsplit(":", 1)
         matching_values = []
         for usage_key, usage_value in usage.items():
             if ":" in usage_key:
-                usage_model, usage_metric = usage_key.split(":", 1)
-                # Match if model starts with prefix and metric matches
+                usage_model, usage_metric = usage_key.rsplit(":", 1)
                 if usage_model.startswith(model_prefix) and usage_metric == metric:
                     matching_values.append(usage_value)
     else:
         # No model specified, just a metric (e.g., "input_tokens")
-        # Find all matching model:metric keys
         matching_values = []
         for usage_key, usage_value in usage.items():
             if ":" in usage_key:
-                _, metric = usage_key.split(":", 1)
+                _, metric = usage_key.rsplit(":", 1)
                 if metric == key:
                     matching_values.append(usage_value)
 

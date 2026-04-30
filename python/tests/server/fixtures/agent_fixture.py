@@ -1,4 +1,5 @@
 from timbal import Agent
+from timbal.core.test_model import TestModel
 
 
 def get_greeting(name: str) -> str:
@@ -11,6 +12,6 @@ def add_numbers(a: int, b: int) -> int:
 
 agent_fixture = Agent(
     name="test_agent",
-    model="openai/gpt-4o-mini",
+    model=TestModel(),
     tools=[get_greeting, add_numbers]
 )

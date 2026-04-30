@@ -5,6 +5,8 @@ import pytest
 from timbal import Agent
 from timbal.types import File
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(
     params=[

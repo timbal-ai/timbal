@@ -1,0 +1,57 @@
+
+[1m================================================================================================[0m
+[1m  Timbal delegation vs OpenAI Agents SDK agent-as-tool benchmark[0m
+[1m================================================================================================[0m
+  Timbal: OK  |  OAI: OK
+    Timbal delegation latency... p50=726.3 us
+    Timbal delegation memory... 73 KB peak
+    Timbal delegation burst (40 concurrent)... p50=20.40 ms
+    Timbal delegation throughput conc=1... 1210/s
+    Timbal delegation throughput conc=10... 1314/s
+    Timbal delegation throughput conc=50... 844/s
+    OAI agent tool latency... p50=2.35 ms
+    OAI agent tool memory... 166 KB peak
+    OAI agent tool burst (40 concurrent)... p50=32.85 ms
+    OAI agent tool throughput conc=1... 440/s
+    OAI agent tool throughput conc=10... 964/s
+    OAI agent tool throughput conc=50... 870/s
+
+[1m[36m------------------------------------------------------------------------------------------------[0m
+[1m[36m  Delegation / handoff[0m
+[1m[36m------------------------------------------------------------------------------------------------[0m
+
+  [1mLatency  (x100 sequential runs)[0m
+                Timbal delegation    OAI agent tool
+  ------------  ----------------  ----------------
+          mean          749.2 us           2.42 ms
+           p50          726.3 us           2.35 ms
+           p95           1.35 ms           2.90 ms
+           p99           1.48 ms           3.35 ms
+
+  [1mMemory  (x100 runs)[0m
+  framework                         peak       per run
+  ------------------------  ------------  ------------
+  Timbal delegation               73.2 KB         749  B
+  OAI agent tool                 166.2 KB        1702  B
+
+  [1mBurst  (40 concurrent)[0m
+                Timbal delegation    OAI agent tool
+  ------------  ----------------  ----------------
+           p50          20.40 ms          32.85 ms
+           p75          20.52 ms          33.13 ms
+           p95          20.64 ms          33.38 ms
+           p99          20.74 ms          33.56 ms
+           max          20.74 ms          33.56 ms
+
+  [1mThroughput  (200 loops)[0m
+                Timbal delegation    OAI agent tool
+  ------------  ----------------  ----------------
+             1            1210/s             440/s
+            10            1314/s             964/s
+            50             844/s             870/s
+
+[2m------------------------------------------------------------------------------------------------
+  Both columns use supervisor -> worker-as-tool -> supervisor final answer.
+  OpenAI Agents SDK uses Agent.as_tool(); Timbal uses an async worker-agent tool.
+------------------------------------------------------------------------------------------------[0m
+

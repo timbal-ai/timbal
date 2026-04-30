@@ -30,7 +30,7 @@ def content_factory(value: Any) -> BaseContent:
                 signature=value.get("signature"),
             )
         elif content_type == "file":
-            return FileContent(file=File.validate(value.get("file")))
+            return FileContent(file=File(value.get("file")))
         elif content_type == "tool_use":
             return ToolUseContent(
                 id=value.get("id"), 

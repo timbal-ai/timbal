@@ -2,15 +2,19 @@ import argparse
 import os
 import sys
 
-# Set env vars before any timbal imports to silence deprecation warnings
-os.environ.setdefault("TIMBAL_DELTA_EVENTS", "true")
 os.environ.setdefault("TIMBAL_SUPPRESS_EVENTS", "tracing_setup")
 
 import asyncio
 from pathlib import Path
 
 from dotenv import load_dotenv
-from rich.console import Console
+try:
+    from rich.console import Console
+except ImportError as e:
+    raise ImportError(
+        "rich is required to run the timbal evals CLI. "
+        "Install it with: pip install 'timbal[evals]'"
+    ) from e
 
 from .. import __version__
 from ..logs import setup_logging

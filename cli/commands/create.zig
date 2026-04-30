@@ -8,8 +8,8 @@ const Color = utils.Color;
 const ProjectType = utils.ProjectType;
 
 const UIType = enum {
-    chat,
-    blank,
+    /// blueprint-ui-simple-chat
+    simple_chat,
     none,
 };
 
@@ -21,7 +21,7 @@ fn printUsageWithError(err: []const u8) !void {
 
 fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
-    try stderr.writeAll("Create a new timbal project with interactive setup.\n" ++
+    try stderr.writeAll("Create a new timbal project (interactive by default, or pass flags for scripts).\n" ++
         "\n" ++
         "\x1b[1;32mUsage: \x1b[1;36mtimbal create \x1b[0;36m[OPTIONS] [PATH]\n" ++
         "\n" ++
@@ -29,10 +29,28 @@ fn printUsage() !void {
         "    \x1b[0;36m[PATH]\x1b[0m The path where the project will be created (default: current directory)\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
+        "    \x1b[1;36m--type <KIND>\x1b[0m   \x1b[0;36magent\x1b[0m or \x1b[0;36mworkflow\x1b[0m (with \x1b[0;36m--ui\x1b[0m, skips prompts)\n" ++
+        "    \x1b[1;36m--ui <yes|no>\x1b[0m Include the default web UI or API-only (with \x1b[0;36m--type\x1b[0m, skips prompts)\n" ++
+        "    \x1b[1;36m--no-ui\x1b[0m         Same as \x1b[0;36m--ui no\x1b[0m\n" ++
         "    \x1b[1;36m--template <URL>\x1b[0m Use a template from a URL\n" ++
         "\n" ++
         utils.global_options_help ++
+        "\n" ++
+        "\x1b[1;32mNon-interactive:\x1b[0m Pass \x1b[0;36m--type\x1b[0m and \x1b[0;36m--ui\x1b[0m together (no prompts, no editor).\n" ++
+        "    \x1b[0;36m-q\x1b[0m / \x1b[0;36m--quiet\x1b[0m only works with non-interactive create (prints the project path only).\n" ++
         "\n");
+}
+
+fn parseUiFlag(value: []const u8) ?UIType {
+    if (std.ascii.eqlIgnoreCase(value, "yes") or
+        std.ascii.eqlIgnoreCase(value, "y") or
+        std.ascii.eqlIgnoreCase(value, "true") or
+        std.mem.eql(u8, value, "1")) return .simple_chat;
+    if (std.ascii.eqlIgnoreCase(value, "no") or
+        std.ascii.eqlIgnoreCase(value, "n") or
+        std.ascii.eqlIgnoreCase(value, "false") or
+        std.mem.eql(u8, value, "0")) return .none;
+    return null;
 }
 
 const Editor = enum {
@@ -96,25 +114,44 @@ fn printBanner() !void {
     try stdout.print("  {s}───────────────────────────{s}\n\n", .{ Color.dim, Color.reset });
 }
 
+fn optionColumnWidth(comptime opts: []const []const u8) usize {
+    var w: usize = 0;
+    for (opts) |o| w = @max(w, o.len);
+    return w;
+}
+
+fn writeSpaces(stdout: anytype, n: usize) !void {
+    var i: usize = 0;
+    while (i < n) : (i += 1) try stdout.writeAll(" ");
+}
+
 fn printSelector(comptime options: []const []const u8, comptime descriptions: []const []const u8, selected: usize) !void {
     const stdout = std.io.getStdOut().writer();
+    const col_w = optionColumnWidth(options);
 
     for (options, 0..) |option, i| {
+        const pad = col_w - option.len;
         if (i == selected) {
-            try stdout.print("  {s}❯ {s}{s}{s}  {s}{s}{s}\n", .{
+            try stdout.print("  {s}❯ {s}{s}{s}", .{
                 Color.bold_cyan,
                 Color.bold,
                 option,
                 Color.reset,
+            });
+            try writeSpaces(stdout, pad);
+            try stdout.print("  {s}{s}{s}\n", .{
                 Color.dim,
                 descriptions[i],
                 Color.reset,
             });
         } else {
-            try stdout.print("  {s}  {s}{s}  {s}{s}{s}\n", .{
+            try stdout.print("  {s}  {s}{s}", .{
                 Color.dim,
                 option,
                 Color.reset,
+            });
+            try writeSpaces(stdout, pad);
+            try stdout.print("  {s}{s}{s}\n", .{
                 Color.dim,
                 descriptions[i],
                 Color.reset,
@@ -233,20 +270,18 @@ fn selectProjectType() !ProjectType {
     };
 }
 
-fn selectUI() !UIType {
-    const options = [_][]const u8{ "Chat", "Blank", "None" };
+fn selectWantUI() !UIType {
+    const options = [_][]const u8{ "Yes", "No" };
     const descriptions = [_][]const u8{
-        "Simple chat interface for your agent",
-        "Blank canvas to build your own UI",
-        "API only, no user interface",
+        "Our default web UI—sensible defaults and config so you can customize and ship faster",
+        "Skip the web UI for now (API only)",
     };
 
-    const selected = try selectOption("What UI do you want for your project?", &options, &descriptions);
+    const selected = try selectOption("Do you want a UI?", &options, &descriptions);
 
     return switch (selected) {
-        0 => .chat,
-        1 => .blank,
-        2 => .none,
+        0 => .simple_chat,
+        1 => .none,
         else => unreachable,
     };
 }
@@ -454,9 +489,8 @@ fn printSummary(config: ProjectConfig) !void {
     };
 
     const ui_str = switch (config.ui_type) {
-        .chat => "Chat",
-        .blank => "Blank",
-        .none => "None",
+        .simple_chat => "Yes (default web UI)",
+        .none => "No",
     };
 
     try stdout.writeAll("\n");
@@ -511,8 +545,7 @@ fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config:
     // Download blueprints
     if (config.ui_type != .none) {
         const ui_url = switch (config.ui_type) {
-            .chat => utils.blueprint_ui_simple_chat_url,
-            .blank => utils.blueprint_ui_url,
+            .simple_chat => utils.blueprint_ui_simple_chat_url,
             .none => unreachable,
         };
         try utils.fetchBlueprint(allocator, config.path, "ui", ui_url);
@@ -521,7 +554,7 @@ fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config:
     try utils.fetchBlueprint(allocator, config.path, "api", utils.blueprint_api_url);
 
     // Create workforce member
-    const funny_name = try utils.addWorkforceMember(allocator, app_dir, project_name, config.project_type);
+    const funny_name = try utils.addWorkforceMember(allocator, app_dir, project_name, config.project_type, null);
     defer allocator.free(funny_name);
 
     // Create .gitignore in the project root
@@ -737,6 +770,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var template: ?[]const u8 = null;
     var verbose: bool = false;
     var quiet: bool = false;
+    var project_type_opt: ?ProjectType = null;
+    var ui_type_opt: ?UIType = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -748,6 +783,35 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "--no-ui")) {
+            ui_type_opt = .none;
+        } else if (std.mem.eql(u8, arg, "--type")) {
+            i += 1;
+            if (i >= args.len) {
+                try printUsageWithError("Error: --type requires agent or workflow");
+                return;
+            }
+            const v = args[i];
+            if (std.ascii.eqlIgnoreCase(v, "agent")) {
+                project_type_opt = .agent;
+            } else if (std.ascii.eqlIgnoreCase(v, "workflow")) {
+                project_type_opt = .workflow;
+            } else {
+                try printUsageWithError("Error: --type must be agent or workflow");
+                return;
+            }
+        } else if (std.mem.eql(u8, arg, "--ui")) {
+            i += 1;
+            if (i >= args.len) {
+                try printUsageWithError("Error: --ui requires yes or no");
+                return;
+            }
+            if (parseUiFlag(args[i])) |u| {
+                ui_type_opt = u;
+            } else {
+                try printUsageWithError("Error: --ui must be yes or no");
+                return;
+            }
         } else if (std.mem.eql(u8, arg, "--template")) {
             i += 1;
             if (i >= args.len) {
@@ -767,6 +831,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
+    const non_interactive = (project_type_opt != null and ui_type_opt != null);
+
+    if (quiet and !non_interactive) {
+        try printUsageWithError("Error: -q/--quiet only works with non-interactive create (pass both --type and --ui)");
+        return;
+    }
+
     // TODO: use verbose for detailed output
     // TODO: implement template support
     if (verbose) {
@@ -778,12 +849,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const target_path = arg_path orelse ".";
 
-    // Get absolute path for display
     const cwd = fs.cwd();
     const use_current_dir = std.mem.eql(u8, target_path, ".");
 
-    if (quiet) {
-        // In quiet mode, create dir and use defaults
+    if (non_interactive) {
+        const project_type = project_type_opt.?;
+        const ui_type = ui_type_opt.?;
+
         var app_dir: fs.Dir = undefined;
         if (use_current_dir) {
             app_dir = cwd;
@@ -794,9 +866,27 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             };
             app_dir = try cwd.openDir(target_path, .{});
         }
+
         const path = try app_dir.realpathAlloc(allocator, ".");
         defer allocator.free(path);
-        std.debug.print("Creating project in {s}...\n", .{path});
+
+        const config = ProjectConfig{
+            .project_type = project_type,
+            .ui_type = ui_type,
+            .path = path,
+            .relative_path = target_path,
+        };
+
+        try createProjectStructure(allocator, app_dir, config);
+
+        if (quiet) {
+            // Machine-friendly: absolute path only
+            const stdout = std.io.getStdOut().writer();
+            try stdout.print("{s}\n", .{path});
+        } else {
+            try printSuccess();
+            try printSummary(config);
+        }
         return;
     }
 
@@ -807,11 +897,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer terminal.disableRawMode(original_termios);
 
-    // Show banner
     try printBanner();
 
-    // Interactive prompts (before creating any directories)
-    const project_type = selectProjectType() catch |err| {
+    const project_type = if (project_type_opt) |p| p else selectProjectType() catch |err| {
         if (err == error.UserCancelled) {
             showCursor();
             std.debug.print("\n{s}Cancelled.{s}\n", .{ Color.dim, Color.reset });
@@ -820,7 +908,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
-    const ui_type = selectUI() catch |err| {
+    const ui_type = if (ui_type_opt) |u| u else selectWantUI() catch |err| {
         if (err == error.UserCancelled) {
             showCursor();
             std.debug.print("\n{s}Cancelled.{s}\n", .{ Color.dim, Color.reset });
@@ -829,7 +917,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
-    // All prompts completed — now create the directory
     var app_dir: fs.Dir = undefined;
     if (use_current_dir) {
         app_dir = cwd;
@@ -851,18 +938,14 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .relative_path = target_path,
     };
 
-    // Create the project structure
     try createProjectStructure(allocator, app_dir, config);
 
-    // Show success message and summary
     try printSuccess();
     try printSummary(config);
 
-    // Detect available editors
     const available_editors = detectAvailableEditors(allocator);
     defer allocator.free(available_editors);
 
-    // Ask if user wants to open the project
     const selected_editor = selectOpenProject(available_editors) catch |err| {
         if (err == error.UserCancelled) {
             showCursor();
@@ -872,7 +955,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
-    // Open editor if selected
     if (selected_editor) |editor| {
         try openEditor(allocator, editor, target_path);
     }

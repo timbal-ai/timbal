@@ -2,10 +2,16 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from typing import Any
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.text import Text
-from rich.tree import Tree
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.tree import Tree
+except ImportError as e:
+    raise ImportError(
+        "rich is required to display eval results. "
+        "Install it with: pip install 'timbal[evals]'"
+    ) from e
 
 from .models import Eval, EvalResult, EvalSummary, ValidatorResult
 from .validators.base import BaseValidator
@@ -149,18 +155,13 @@ def print_eval_result(result: EvalResult) -> None:
     console.print()
 
 
-def print_eval_line(result: EvalResult) -> None:
-    """Print a single eval result line (pytest-style). Deprecated - use print_eval_result."""
-    print_eval_result(result)
-
-
 def print_failure_details(result: EvalResult) -> None:
     """Print detailed failure information."""
     path = result.eval.path
     name = result.eval.name
 
     console.print()
-    console.rule(f"[red]FAILED[/red] {path}::{name}", style="red")
+    console.print(f"[red]FAILED[/red] {path}::{name}", style="red")
 
     if result.captured_stdout:
         console.print(
@@ -198,8 +199,8 @@ def print_failure_details(result: EvalResult) -> None:
             else:
                 content = "Validation failed"
             
-            # For semantic validators, show the full output at the beginning
-            if vr.name == "semantic!" and vr.actual_value is not None:
+            # For semantic and prompt validators, show the full output at the beginning
+            if vr.name in ("semantic!", "prompt!") and vr.actual_value is not None:
                 content = f"[dim]Output:[/dim]\n{vr.actual_value}\n\n{content}"
             
             console.print(

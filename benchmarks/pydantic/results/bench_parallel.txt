@@ -1,0 +1,286 @@
+
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal Workflow vs Pydantic Graph — wide fan-out benchmark[0m
+  widths=[4, 8, 16, 32, 64] · 200 iters · 200 burst
+  Pydantic Graph found — will measure bare + Logfire
+  [2mPG manual uses asyncio.gather inside one graph node; not framework-scheduled fan-out.[0m
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+
+  [2m[Phase 1 · N=4][0m
+    Timbal trivial... p50=1.05 ms
+    Timbal async work... p50=2.19 ms
+    Timbal memory... 74.8 KB peak
+    Timbal burst (200 concurrent, async work)... p50=166.4 ms
+    PG bare trivial... p50=82.2 µs
+    PG bare async work... p50=1.29 ms
+    PG bare memory... 44.7 KB peak
+    PG bare burst (200 concurrent, async work)... p50=8.35 ms
+
+  [2m[Phase 1 · N=8][0m
+    Timbal trivial... p50=1.46 ms
+    Timbal async work... p50=2.49 ms
+    Timbal memory... 113.0 KB peak
+    Timbal burst (200 concurrent, async work)... p50=245.4 ms
+    PG bare trivial... p50=88.6 µs
+    PG bare async work... p50=1.28 ms
+    PG bare memory... 60.6 KB peak
+    PG bare burst (200 concurrent, async work)... p50=12.4 ms
+
+  [2m[Phase 1 · N=16][0m
+    Timbal trivial... p50=2.05 ms
+    Timbal async work... p50=2.80 ms
+    Timbal memory... 186.0 KB peak
+    Timbal burst (200 concurrent, async work)... p50=517.2 ms
+    PG bare trivial... p50=123.4 µs
+    PG bare async work... p50=1.32 ms
+    PG bare memory... 86.6 KB peak
+    PG bare burst (200 concurrent, async work)... p50=21.7 ms
+
+  [2m[Phase 1 · N=32][0m
+    Timbal trivial... p50=4.12 ms
+    Timbal async work... p50=4.43 ms
+    Timbal memory... 334.4 KB peak
+    Timbal burst (200 concurrent, async work)... p50=1078.5 ms
+    PG bare trivial... p50=145.4 µs
+    PG bare async work... p50=1.43 ms
+    PG bare memory... 69.5 KB peak
+    PG bare burst (200 concurrent, async work)... p50=72.6 ms
+
+  [2m[Phase 1 · N=64][0m
+    Timbal trivial... p50=7.56 ms
+    Timbal async work... p50=8.09 ms
+    Timbal memory... 619.6 KB peak
+    Timbal burst (200 concurrent, async work)... p50=2255.7 ms
+    PG bare trivial... p50=221.0 µs
+    PG bare async work... p50=1.54 ms
+    PG bare memory... 112.7 KB peak
+    PG bare burst (200 concurrent, async work)... p50=166.7 ms
+
+  [2mActivating Logfire (send_to_logfire=False)...[0m
+
+  [2m[Phase 2 · N=4][0m
+    PG+Logfire trivial... p50=766.4 µs
+    PG+Logfire async work... p50=2.01 ms
+    PG+Logfire memory... 270.8 KB peak
+    PG+Logfire burst (200 concurrent, async work)... p50=56.8 ms
+
+  [2m[Phase 2 · N=8][0m
+    PG+Logfire trivial... p50=619.1 µs
+    PG+Logfire async work... p50=2.11 ms
+    PG+Logfire memory... 279.0 KB peak
+    PG+Logfire burst (200 concurrent, async work)... p50=62.5 ms
+
+  [2m[Phase 2 · N=16][0m
+    PG+Logfire trivial... p50=650.0 µs
+    PG+Logfire async work... p50=2.13 ms
+    PG+Logfire memory... 308.7 KB peak
+    PG+Logfire burst (200 concurrent, async work)... p50=70.3 ms
+
+  [2m[Phase 2 · N=32][0m
+    PG+Logfire trivial... p50=669.4 µs
+    PG+Logfire async work... p50=2.05 ms
+    PG+Logfire memory... 295.7 KB peak
+    PG+Logfire burst (200 concurrent, async work)... p50=126.8 ms
+
+  [2m[Phase 2 · N=64][0m
+    PG+Logfire trivial... p50=724.3 µs
+    PG+Logfire async work... p50=2.22 ms
+    PG+Logfire memory... 336.2 KB peak
+    PG+Logfire burst (200 concurrent, async work)... p50=328.7 ms
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Width N=4[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mTrivial branches  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         1.11 ms         92.7 µs        783.2 µs
+           p50         1.05 ms         82.2 µs        766.4 µs
+           p95         1.46 ms        150.4 µs         1.12 ms
+           p99         1.71 ms        206.9 µs         1.53 ms
+
+  [1mAsync work branches (1 ms sleep)  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         2.24 ms         1.30 ms         2.07 ms
+           p50         2.19 ms         1.29 ms         2.01 ms
+           p95         2.54 ms         1.40 ms         2.49 ms
+           p99         3.04 ms         1.48 ms         3.58 ms
+
+  [1mBurst  (200 concurrent, async work)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50        166.4 ms         8.35 ms         56.8 ms
+           p75        170.6 ms         8.60 ms         60.6 ms
+           p95        171.8 ms         8.95 ms         63.5 ms
+           p99        171.9 ms         9.05 ms         63.9 ms
+           max        171.9 ms         9.11 ms         64.3 ms
+
+  [2mwall: Timbal: 171.9 ms | PG bare: 9.1 ms | PG+Logfire: 64.3 ms[0m
+
+  [1mMemory  (trivial, ×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                      74.8 KB         383  B
+  PG bare                     44.7 KB         229  B
+  PG+Logfire                 270.8 KB        1387  B
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Width N=8[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mTrivial branches  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         1.53 ms         97.1 µs        649.7 µs
+           p50         1.46 ms         88.6 µs        619.1 µs
+           p95         1.97 ms        134.8 µs        871.8 µs
+           p99         2.25 ms        217.2 µs         1.08 ms
+
+  [1mAsync work branches (1 ms sleep)  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         2.94 ms         1.29 ms         2.11 ms
+           p50         2.49 ms         1.28 ms         2.11 ms
+           p95         5.98 ms         1.38 ms         2.37 ms
+           p99         13.5 ms         1.41 ms         2.51 ms
+
+  [1mBurst  (200 concurrent, async work)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50        245.4 ms         12.4 ms         62.5 ms
+           p75        246.9 ms         13.4 ms         65.8 ms
+           p95        248.0 ms         14.1 ms         68.8 ms
+           p99        248.2 ms         14.2 ms         69.6 ms
+           max        248.3 ms         14.2 ms         70.0 ms
+
+  [2mwall: Timbal: 248.3 ms | PG bare: 14.2 ms | PG+Logfire: 70.0 ms[0m
+
+  [1mMemory  (trivial, ×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                     113.0 KB         579  B
+  PG bare                     60.6 KB         310  B
+  PG+Logfire                 279.0 KB        1428  B
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Width N=16[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mTrivial branches  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         2.09 ms        135.7 µs        681.9 µs
+           p50         2.05 ms        123.4 µs        650.0 µs
+           p95         2.47 ms        206.0 µs        873.3 µs
+           p99         2.64 ms        237.0 µs         1.44 ms
+
+  [1mAsync work branches (1 ms sleep)  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         2.95 ms         1.33 ms         2.10 ms
+           p50         2.80 ms         1.32 ms         2.13 ms
+           p95         3.08 ms         1.44 ms         2.30 ms
+           p99         3.31 ms         1.53 ms         2.45 ms
+
+  [1mBurst  (200 concurrent, async work)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50        517.2 ms         21.7 ms         70.3 ms
+           p75        519.2 ms         22.6 ms         75.1 ms
+           p95        520.6 ms         23.9 ms         77.8 ms
+           p99        520.8 ms         24.1 ms         78.7 ms
+           max        520.9 ms         24.2 ms         79.0 ms
+
+  [2mwall: Timbal: 520.9 ms | PG bare: 24.2 ms | PG+Logfire: 79.0 ms[0m
+
+  [1mMemory  (trivial, ×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                     186.0 KB         952  B
+  PG bare                     86.6 KB         444  B
+  PG+Logfire                 308.7 KB        1581  B
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Width N=32[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mTrivial branches  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         4.27 ms        161.1 µs        696.1 µs
+           p50         4.12 ms        145.4 µs        669.4 µs
+           p95         4.68 ms        242.0 µs        882.9 µs
+           p99         5.46 ms        320.1 µs         1.03 ms
+
+  [1mAsync work branches (1 ms sleep)  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         4.74 ms         1.45 ms         2.08 ms
+           p50         4.43 ms         1.43 ms         2.05 ms
+           p95         4.94 ms         1.57 ms         2.32 ms
+           p99         33.6 ms         1.70 ms         2.73 ms
+
+  [1mBurst  (200 concurrent, async work)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       1078.5 ms         72.6 ms        126.8 ms
+           p75       1080.5 ms         74.8 ms        133.0 ms
+           p95       1082.6 ms         77.0 ms        138.7 ms
+           p99       1083.1 ms         77.3 ms        139.7 ms
+           max       1083.2 ms         77.5 ms        140.0 ms
+
+  [2mwall: Timbal: 1083.2 ms | PG bare: 77.5 ms | PG+Logfire: 140.0 ms[0m
+
+  [1mMemory  (trivial, ×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                     334.4 KB        1712  B
+  PG bare                     69.5 KB         356  B
+  PG+Logfire                 295.7 KB        1514  B
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Width N=64[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mTrivial branches  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         8.03 ms        237.0 µs        748.1 µs
+           p50         7.56 ms        221.0 µs        724.3 µs
+           p95         8.03 ms        337.4 µs        921.9 µs
+           p99         37.1 ms        411.9 µs         1.07 ms
+
+  [1mAsync work branches (1 ms sleep)  (×200)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         8.90 ms         1.56 ms         2.23 ms
+           p50         8.09 ms         1.54 ms         2.22 ms
+           p95         8.71 ms         1.72 ms         2.48 ms
+           p99         45.0 ms         1.81 ms         2.67 ms
+
+  [1mBurst  (200 concurrent, async work)[0m
+                        Timbal         PG bare      PG+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       2255.7 ms        166.7 ms        328.7 ms
+           p75       2261.9 ms        170.9 ms        337.9 ms
+           p95       2265.6 ms        180.4 ms        346.4 ms
+           p99       2266.0 ms        181.0 ms        347.4 ms
+           max       2266.4 ms        181.2 ms        347.8 ms
+
+  [2mwall: Timbal: 2266.4 ms | PG bare: 181.2 ms | PG+Logfire: 347.8 ms[0m
+
+  [1mMemory  (trivial, ×200)[0m
+  framework                     peak       per run
+  ────────────────────  ────────────  ────────────
+  Timbal                     619.6 KB        3173  B
+  PG bare                    112.7 KB         577  B
+  PG+Logfire                 336.2 KB        1722  B
+
+[2m────────────────────────────────────────────────────────────────────────────────────────
+  Timbal: N first-class workflow branches, one task/span per branch.
+  PG manual: one graph fanout node containing user-managed asyncio.gather.
+  Scenario B should stay near 1 ms when branch work is actually concurrent.
+────────────────────────────────────────────────────────────────────────────────────────[0m
+

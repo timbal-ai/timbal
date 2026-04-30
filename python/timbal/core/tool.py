@@ -9,7 +9,7 @@ try:
 except ImportError:
     from typing_extensions import override
 
-from pydantic import BaseModel, SkipValidation, computed_field, model_validator
+from pydantic import BaseModel, Field, SkipValidation, computed_field, model_validator
 
 from ..utils import create_model_from_handler
 from .runnable import Runnable
@@ -30,6 +30,14 @@ class Tool(Runnable):
 
     handler: SkipValidation[Callable[..., Any]]
     """The callable function or method that this tool wraps."""
+
+    record_default_request_usage: bool = Field(
+        default=True,
+        description=(
+            "If True, a successful run increments ``{name}:requests`` on the trace (framework billing default). "
+            "Set False for internal tools (e.g. the Agent's LLM wrapper)."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod

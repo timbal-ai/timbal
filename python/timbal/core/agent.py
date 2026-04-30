@@ -1,9 +1,6 @@
 import asyncio
-import importlib
-import inspect
+import contextvars
 import json
-import re
-import sys
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
 from pathlib import Path
@@ -29,13 +26,15 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
-from ..errors import InterruptError, bail
+from ..errors import ApprovalRequired, InterruptError, bail
 from ..state import get_run_context
-from ..types.content import CustomContent, FileContent, TextContent, ToolUseContent
+from ..types.content import CustomContent, FileContent, TextContent, ToolResultContent, ToolUseContent
 from ..types.events import BaseEvent, OutputEvent
 from ..types.message import Message
 from ..utils import coerce_to_dict, dump
-from .llm_router import Model, _llm_router
+from .llm_router import _llm_router
+from .memory_compaction import MemoryCompactor
+from .models import Model, get_context_window
 from .runnable import Runnable, RunnableLike
 from .skill import ReadSkill, Skill
 from .tool import Tool
@@ -44,7 +43,19 @@ from .tool_set import ToolSet
 logger = structlog.get_logger("timbal.core.agent")
 
 
-SYSTEM_PROMPT_FN_PATTERN = re.compile(r"\{[a-zA-Z0-9_]*::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)*\}")
+def _content_chars(c: TextContent | ToolUseContent | ToolResultContent) -> int:
+    if isinstance(c, TextContent):
+        return len(c.text)
+    if isinstance(c, ToolUseContent):
+        return len(c.name) + len(str(c.input))
+    if isinstance(c, ToolResultContent):
+        return sum(len(item.text) for item in c.content if isinstance(item, TextContent))
+    return 0
+
+
+def _estimate_tokens_from_memory(memory: list[Message]) -> int:
+    """Rough token estimate from message content. 1 token ≈ 4 chars (standard approximation)."""
+    return max(1, sum(_content_chars(c) for msg in memory for c in msg.content) // 4)
 
 
 class AgentParams(BaseModel):
@@ -71,7 +82,7 @@ class AgentParams(BaseModel):
         return self
 
     @classmethod
-    def model_json_schema(cls, **kwargs: Any) -> dict[str, Any]:
+    def model_json_schema(cls, **_kwargs: Any) -> dict[str, Any]:
         """Custom schema for using agents as tools."""
         return {
             "type": "object",
@@ -98,8 +109,8 @@ class AgentParams(BaseModel):
 class Agent(Runnable):
     """Orchestrates LLM interactions with autonomous tool calling."""
 
-    model: Model | str
-    """LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5')."""
+    model: SkipValidation[Model | str]
+    """LLM model identifier (e.g., 'openai/gpt-4o-mini', 'anthropic/claude-haiku-4-5') or a TestModel for offline testing."""
     system_prompt: str | Callable[[], str] | Callable[[], Coroutine[Any, Any, str]] | None = None
     """System prompt. Can be a string, sync callable, or async callable returning a string."""
     tools: list[SkipValidation[RunnableLike]] = []
@@ -110,6 +121,18 @@ class Agent(Runnable):
     """Maximum number of LLM->tool call iterations before stopping."""
     max_tokens: int | None = None
     """Maximum tokens for the LLM response. Required for Anthropic models."""
+    memory_compaction: list[SkipValidation[MemoryCompactor]] | SkipValidation[MemoryCompactor] | None = None
+    """Memory compaction strategies applied after resolve_memory. Reduces context window usage.
+    Can be a single compactor or list (applied in order). Built-in strategies:
+    compact_tool_results(keep_last_n=None, threshold=0, replacement=None),
+    keep_last_n_messages(n), keep_last_n_turns(n),
+    summarize(threshold, model=None, keep_last_n=4, max_summary_tokens=500).
+    summarize uses the agent's model by default; override with a cheaper model if needed.
+    Compaction is triggered automatically when context window utilization exceeds memory_compaction_ratio."""
+    memory_compaction_ratio: float = 0.75
+    """Context window utilization ratio that triggers compaction. Uses previous run's token
+    usage from span data and the model's context window from models.yaml. Set to 0.0 to
+    always compact, or 1.0 to effectively disable auto-triggering. Default: 0.75 (75%)."""
     temperature: float | None = None
     """Sampling temperature for the LLM response."""
     output_model: type[BaseModel] | None = None
@@ -124,7 +147,6 @@ class Agent(Runnable):
     """Custom API key for the LLM API."""
 
     _llm: Tool = PrivateAttr()
-    _system_prompt_templates: dict[str, Any] = PrivateAttr(default_factory=dict)
     _system_prompt_fn: Callable | None = PrivateAttr(default=None)
     _system_prompt_fn_is_async: bool = PrivateAttr(default=False)
     _system_prompt_skills: str | None = PrivateAttr(default=None)
@@ -140,133 +162,30 @@ class Agent(Runnable):
             self._system_prompt_fn_is_async = self._inspect_callable(self.system_prompt)["is_coroutine"]
             self.system_prompt = None
 
-        if self.system_prompt:
-            for match in SYSTEM_PROMPT_FN_PATTERN.finditer(self.system_prompt):
-                text = match.group()
-                path = text[1:-1]  # Remove { and }
-                path_parts = path.split("::")
-                assert len(path_parts) >= 2, (
-                    f"Invalid path format for system prompt: {path}. Review the SYSTEM_PROMPT_FN_PATTERN regex."
-                )
-                module, fn_i = None, None
-                if path_parts[0] == "":
-                    # File-relative import: look in caller's globals first
-                    frame = inspect.currentframe()
-                    caller_globals = None
-                    while frame:
-                        frame = frame.f_back
-                        if frame is None:
-                            break
-                        frame_self = frame.f_locals.get("self")
-                        if not isinstance(frame_self, Agent):
-                            caller_globals = frame.f_globals
-                            break
-                    assert caller_globals is not None, "Could not determine caller globals for Agent constructor."
-
-                    # Try to resolve from caller's globals directly (handles same-file definitions)
-                    fn = caller_globals
-                    try:
-                        for attr_name in path_parts[1:]:
-                            fn = fn[attr_name] if isinstance(fn, dict) else getattr(fn, attr_name)
-                        logger.info(f"Resolved callable '{text}' from caller's globals")
-                    except (KeyError, AttributeError):
-                        # If not in globals, try loading the module
-                        caller_file = Path(caller_globals.get("__file__", "")).expanduser().resolve()
-                        agent_path = caller_file
-                        for fn_i in range(1, len(path_parts)):
-                            module_path = agent_path / "/".join(path_parts[:-fn_i])
-                            try:
-                                # Use absolute path as module identifier
-                                module_path_str = str(module_path.resolve())
-                                # Check if module is already loaded in sys.modules by absolute path
-                                if module_path_str in sys.modules:
-                                    module = sys.modules[module_path_str]
-                                    logger.info(
-                                        f"Using already loaded module '{module_path}' for system prompt callable '{text}'"
-                                    )
-                                    break
-                                # Load the module if not already loaded
-                                module_spec = importlib.util.spec_from_file_location(
-                                    module_path_str, module_path.as_posix()
-                                )
-                                if not module_spec or not module_spec.loader:
-                                    raise ValueError(f"Failed to load module {module_path}")
-                                module = importlib.util.module_from_spec(module_spec)
-                                # Register in sys.modules BEFORE executing to prevent re-entry
-                                sys.modules[module_path_str] = module
-                                module_spec.loader.exec_module(module)
-                                logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
-                                break
-                            except Exception:
-                                pass
-                        else:
-                            for fn_i in range(1, len(path_parts)):
-                                module_path = ".".join(path_parts[:-fn_i])
-                                try:
-                                    module = importlib.import_module(module_path)
-                                    logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
-                                    break
-                                except Exception:
-                                    pass
-                        fn = module
-                        for j in path_parts[-fn_i:]:
-                            fn = getattr(fn, j)
-
-                    inspect_result = self._inspect_callable(fn)
-                    self._system_prompt_templates[text] = {
-                        "start": match.start(),
-                        "end": match.end(),
-                        "callable": fn,
-                        "is_coroutine": inspect_result["is_coroutine"],
-                    }
-                else:
-                    # Package import (e.g., {os::getcwd})
-                    for fn_i in range(1, len(path_parts)):
-                        module_path = ".".join(path_parts[:-fn_i])
-                        try:
-                            module = importlib.import_module(module_path)
-                            logger.info(f"Loaded module '{module_path}' for system prompt callable '{text}'")
-                            break
-                        except Exception:
-                            pass
-                    fn = module
-                    for j in path_parts[-fn_i:]:
-                        fn = getattr(fn, j)
-                    inspect_result = self._inspect_callable(fn)
-                    self._system_prompt_templates[text] = {
-                        "start": match.start(),
-                        "end": match.end(),
-                        "callable": fn,
-                        "is_coroutine": inspect_result["is_coroutine"],
-                    }
-
         # Backward compat: silently promote known keys from model_params to individual fields
         if self.model_params:
-            _promoted = {"max_tokens", "temperature", "base_url", "api_key"}
-            _renamed = {"validation_context": "output_model_context"}
-            for old_key, new_key in _renamed.items():
+            _promote = {
+                "max_tokens": "max_tokens",
+                "temperature": "temperature",
+                "base_url": "base_url",
+                "api_key": "api_key",
+                "validation_context": "output_model_context",
+            }
+            for old_key, new_key in _promote.items():
                 if old_key in self.model_params:
                     if getattr(self, new_key) is None:
                         setattr(self, new_key, self.model_params.pop(old_key))
                     else:
                         self.model_params.pop(old_key)
-            for key in list(self.model_params.keys()):
-                if key in _promoted:
-                    if getattr(self, key) is None:
-                        setattr(self, key, self.model_params.pop(key))
-                    else:
-                        self.model_params.pop(key)
 
-        model_provider, model_name = self.model.split("/", 1)
-        if model_provider == "anthropic":
-            if not self.max_tokens:
-                raise ValueError("'max_tokens' is required for claude models.")
-            if self.output_model is not None:
-                logger.warning(
-                    "Anthropic's structured output (output_model) is currently in beta. "
-                    "The API may change in future releases. "
-                    "See: https://docs.anthropic.com/en/docs/build-with-claude/structured-output"
-                )
+        if not isinstance(self.model, str):
+            model_provider = getattr(self.model, "provider", "test")
+            model_name = getattr(self.model, "model_name", "model")
+        else:
+            model_provider, model_name = self.model.split("/", 1)
+            if model_provider == "anthropic":
+                if not self.max_tokens:
+                    raise ValueError("'max_tokens' is required for claude models.")
 
         if self.tools and self.output_model is not None:
             logger.warning(
@@ -275,16 +194,16 @@ class Agent(Runnable):
             )
 
         # Build default params for the internal LLM tool from individual fields
-        _llm_default_params = {}
-        if self.max_tokens is not None:
-            _llm_default_params["max_tokens"] = self.max_tokens
-        if self.temperature is not None:
-            _llm_default_params["temperature"] = self.temperature
-        if self.base_url is not None:
-            _llm_default_params["base_url"] = self.base_url
-        if self.api_key is not None:
-            _llm_default_params["api_key"] = self.api_key
-        # Forward provider-specific params (e.g. thinking, cache_control, top_p, stop_sequences)
+        _llm_default_params = {
+            k: v
+            for k, v in [
+                ("max_tokens", self.max_tokens),
+                ("temperature", self.temperature),
+                ("base_url", self.base_url),
+                ("api_key", self.api_key),
+            ]
+            if v is not None
+        }
         if self.model_params:
             _llm_default_params["provider_params"] = self.model_params
 
@@ -292,6 +211,7 @@ class Agent(Runnable):
             name="llm",
             handler=_llm_router,
             default_params=_llm_default_params,
+            record_default_request_usage=False,
             metadata={
                 "type": "LLM",
                 "model_provider": model_provider,
@@ -312,23 +232,20 @@ class Agent(Runnable):
                 self.tools.append(skill)
 
         # Normalize tools and prevent duplicate names
-        names = set()
+        names: set[str] = set()
         skills = []
         for i, tool in enumerate(self.tools):
-            # ToolSet resolved later in _resolve_tools()
+            if isinstance(tool, Skill):
+                if tool.name in names:
+                    raise ValueError(f"Skill '{tool.name}' already exists. You can only add a skill once.")
+                names.add(tool.name)
+                skills.append(tool)
+                continue
             if isinstance(tool, ToolSet):
-                if isinstance(tool, Skill):
-                    if tool.name in names:
-                        raise ValueError(f"Skill '{tool.name}' already exists. You can only add a skill once.")
-                    names.add(tool.name)
-                    skills.append(tool)
-                    # skills_metadata.append(f"- **{tool.name}**: {tool.description}")
+                # Non-Skill ToolSets are resolved later in _resolve_tools()
                 continue
             if not isinstance(tool, Runnable):
-                if isinstance(tool, dict):
-                    tool = Tool(**tool)
-                else:
-                    tool = Tool(handler=tool)
+                tool = Tool(**tool) if isinstance(tool, dict) else Tool(handler=tool)
             if tool.name in names:
                 raise ValueError(f"Tool {tool.name} already exists. You can only add a tool once.")
             names.add(tool.name)
@@ -356,8 +273,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         """See base class."""
         if self._system_prompt_fn is not None:
             system_prompt = f"<{self._system_prompt_fn.__name__}>"
-        elif self._system_prompt_templates:
-            system_prompt = self.system_prompt
         else:
             system_prompt = self.system_prompt
 
@@ -408,17 +323,6 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = await self._execute_runtime_callable(
                 self._system_prompt_fn, self._system_prompt_fn_is_async
             )
-        elif self._system_prompt_templates:
-            assert isinstance(system_prompt, str)
-            # Execute template functions in parallel
-            system_prompt_tasks = []
-            for _, v in self._system_prompt_templates.items():
-                callable_fn = v["callable"]
-                system_prompt_tasks.append(self._execute_runtime_callable(callable_fn, v["is_coroutine"]))
-            results = await asyncio.gather(*system_prompt_tasks)
-            # Substitute results into template
-            for (k, _), result in zip(self._system_prompt_templates.items(), results, strict=False):
-                system_prompt = system_prompt.replace(k, str(result) if result is not None else "")
 
         if self._system_prompt_skills:
             if not isinstance(system_prompt, str):
@@ -436,6 +340,88 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         return system_prompt
 
+    def _find_pending_tool_uses(self, memory: list[Message]) -> list[ToolUseContent]:
+        """Return any tool_uses in the most recent assistant message that
+        still have no matching tool_result anywhere later in memory.
+
+        Used on approval-resume: the previous turn left tool_uses unresolved
+        because the user hadn't approved yet. Now that we have a decision we
+        re-execute those gated tool_uses directly without re-calling the LLM
+        (which would fail because most providers reject a request whose last
+        assistant message has unresolved tool_uses).
+        """
+        if not memory:
+            return []
+        for i in range(len(memory) - 1, -1, -1):
+            msg = memory[i]
+            if msg.role != "assistant":
+                continue
+            tool_uses = [
+                c for c in msg.content
+                if isinstance(c, ToolUseContent) and not c.is_server_tool_use
+            ]
+            if not tool_uses:
+                # Most recent assistant message has no tool_uses to resume.
+                return []
+            fulfilled: set[str] = set()
+            for later in memory[i + 1:]:
+                for c in later.content:
+                    if isinstance(c, ToolResultContent):
+                        fulfilled.add(c.id)
+            return [tu for tu in tool_uses if tu.id not in fulfilled]
+        return []
+
+    def _synthesize_missing_tool_results(self, memory: list[Message]) -> None:
+        """Append synthetic error results for any tool_use blocks that were interrupted.
+
+        Mutates memory in-place. Every tool_use the LLM emitted must have a corresponding
+        tool_result before the next LLM call, otherwise the API rejects the request.
+        Server tool_use (e.g. web_search) gets an inline error block; regular tool_use
+        gets a new tool-role message appended.
+        """
+        model_provider = str(self.model).split("/", 1)[0]
+        # Iterate in reverse: if any non-tool_use content follows a server_tool_use,
+        # the LLM already continued past it — no synthetic result needed.
+        has_followup_after_server_tool_use = False
+        for content in memory[-1].content[::-1]:
+            if content.type != "tool_use":
+                has_followup_after_server_tool_use = True
+                continue
+            if content.is_server_tool_use:
+                if has_followup_after_server_tool_use:
+                    continue
+                if model_provider == "anthropic":
+                    memory[-1].content.append(
+                        CustomContent(
+                            value={
+                                "type": "web_search_tool_result",
+                                "tool_use_id": content.id,
+                                "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
+                            },
+                        )
+                    )
+                else:
+                    logger.warning(
+                        "Interrupted server tool use on unsupported provider; skipping synthetic error result.",
+                        provider=model_provider,
+                        tool_use_id=content.id,
+                    )
+            else:
+                memory.append(
+                    Message.validate(
+                        {
+                            "role": "tool",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "id": content.id,
+                                    "content": "ERROR: There was an unexpected error executing the tool.",
+                                }
+                            ],
+                        }
+                    )
+                )
+
     async def resolve_memory(self) -> None:
         """Resolve conversation memory from previous agent trace."""
         run_context = get_run_context()
@@ -444,7 +430,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         current_span = run_context.current_span()
         if current_span.memory:
             return
-        current_span.memory = [Message.validate(current_span.input.get("prompt", ""))]
+        prompt = Message.validate(current_span.input.get("prompt", ""))
+        if prompt.role != "user":
+            prompt = Message(role="user", content=prompt.content)
+        current_span.memory = [prompt]
 
         # Subagents have isolated context
         if current_span.parent_call_id is not None:
@@ -468,115 +457,152 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             return
 
         self_spans = parent_trace.get_path(self._path)
-        if not len(self_spans):
+        if not self_spans:
             return
         if len(self_spans) > 1:
-            # TODO Handle multiple call_ids for this agent (we could access step spans)
-            raise NotImplementedError("Multiple spans for the same agent are not supported yet.")
+            logger.warning(
+                "Multiple spans found for agent path in parent trace; skipping memory resolution.",
+                path=self._path,
+                span_count=len(self_spans),
+            )
+            return
 
         previous_span = self_spans[0]
-        # >= 1.1.0: memory stored in agent span
-        if isinstance(previous_span.memory, list):
-            memory = [Message.validate(m) for m in previous_span.memory]
+        prev_status = previous_span.status
+        if isinstance(prev_status, dict):
+            prev_code = prev_status.get("code")
+            prev_reason = prev_status.get("reason")
+        elif prev_status is not None:
+            prev_code = prev_status.code
+            prev_reason = prev_status.reason
         else:
-            # < 1.1.0: extract from LLM calls
-            llm_spans = parent_trace.get_path(self._llm._path)
-            if not len(llm_spans):
-                return
-            llm_input_messages = llm_spans[-1].input.get("messages", [])
-            llm_output_message = llm_spans[-1].output
-            memory = [*[Message.validate(m) for m in llm_input_messages], Message.validate(llm_output_message)]
+            prev_code = None
+            prev_reason = None
+        if not isinstance(previous_span.memory, list):
+            return
+        memory = [Message.validate(m) for m in previous_span.memory]
 
-        # Ensure interrupted tool calls have corresponding results.
-        # When resuming from memory, the last assistant message may contain tool_use blocks
-        # that were interrupted before their results could be recorded. The LLM expects every
-        # tool_use to have a corresponding tool_result, so we need to synthesize error results
-        # for any missing ones.
-        #
-        # We iterate in reverse to detect if there's any non-tool_use content (text, etc.)
-        # after a server_tool_use block. If there is, the server tool completed and the LLM
-        # already continued, so no synthetic result is needed.
-        #
-        # For regular tool_use: append a tool_result message with an error.
-        # For server_tool_use (e.g., web_search): append an inline error result in the same
-        # message, using the provider's expected error format (currently Anthropic only).
-        # TODO OpenAI & other server tool use providers
-        has_followup_after_server_tool_use = False
-        for content in memory[-1].content[::-1]:
-            if content.type != "tool_use":
-                has_followup_after_server_tool_use = True
-                continue
-            if content.is_server_tool_use:
-                if has_followup_after_server_tool_use:
-                    continue
-                # Server tool use was interrupted before completion. Synthesize an error result.
-                memory[-1].content.append(
-                    CustomContent(
-                        value={
-                            "type": "web_search_tool_result",
-                            "tool_use_id": content.id,
-                            "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"},
-                        },
+        # On approval-required resume the gated tool_uses will be re-executed
+        # by the agent loop (see _find_pending_tool_uses), so we must NOT
+        # inject synthetic "tool failed" results for them. Without this guard
+        # the LLM would see fake failures and probably skip retrying the
+        # gated calls, silently dropping the user's approval decisions.
+        is_approval_resume = prev_code == "cancelled" and prev_reason == "approval_required"
+        if not is_approval_resume:
+            self._synthesize_missing_tool_results(memory)
+        current_span.memory = memory + current_span.memory
+
+        # Cache the already-serialized previous memory so handler() can skip re-dumping.
+        # Two cases:
+        #   InMemory provider  — previous_span is the live Span object; _memory_dump
+        #                        is set and contains dicts (serialized in prior handler()).
+        #   JSONL/disk reload  — previous_span was reconstructed from JSON; _memory_dump
+        #                        is not set, but span.memory holds the dicts from the file.
+        if hasattr(previous_span, "_memory_dump"):
+            current_span._prev_memory_dump = list(previous_span._memory_dump)
+        else:
+            current_span._prev_memory_dump = list(previous_span.memory)
+
+        # Apply memory compaction if configured and context window utilization warrants it
+        if self.memory_compaction is not None:
+            should_compact = self.memory_compaction_ratio <= 0.0
+            utilization = None
+            if not should_compact:
+                context_window = get_context_window(str(self.model))
+                if context_window is None:
+                    # Unknown model — context window not in models.yaml.
+                    # Estimate token count from message content as a best effort.
+                    estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
+                    logger.warning(
+                        "Context window unknown for model; token usage estimated from message content (1 token ≈ 4 chars). Compacting as safe fallback.",
+                        model=str(self.model),
+                        estimated_tokens=estimated_tokens,
                     )
+                    should_compact = True
+                elif previous_span.usage:
+                    prev_input_tokens = sum(v for k, v in previous_span.usage.items() if ":input" in k and "token" in k)
+                    prev_output_tokens = sum(
+                        v for k, v in previous_span.usage.items() if ":output" in k and "token" in k
+                    )
+                    utilization = (prev_input_tokens + prev_output_tokens) / context_window
+                    should_compact = utilization >= self.memory_compaction_ratio
+                else:
+                    # Known model but no usage data from previous run.
+                    # Estimate utilization from message content.
+                    estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
+                    utilization = estimated_tokens / context_window
+                    logger.warning(
+                        "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
+                        model=str(self.model),
+                        estimated_tokens=estimated_tokens,
+                        estimated_utilization=round(utilization, 4),
+                    )
+                    should_compact = utilization >= self.memory_compaction_ratio
+
+            if should_compact:
+                compactors = (
+                    [self.memory_compaction] if not isinstance(self.memory_compaction, list) else self.memory_compaction
                 )
-            else:
-                # Regular tool use was interrupted. Append a tool_result message with error.
-                memory.append(
-                    Message.validate(
+                compaction_steps = []
+                for compactor in compactors:
+                    # Set the agent's model on compactors that support it (e.g. summarize)
+                    if hasattr(compactor, "_state"):
+                        compactor._state["agent_model"] = str(self.model)
+                    before = len(current_span.memory)
+                    if asyncio.iscoroutinefunction(compactor):
+                        current_span.memory = await compactor(current_span.memory)
+                    else:
+                        current_span.memory = compactor(current_span.memory)
+                    compaction_steps.append(
                         {
-                            "role": "tool",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "id": content.id,
-                                    "content": "ERROR: There was an unexpected error executing the tool.",
-                                }
-                            ],
+                            "compactor": getattr(compactor, "__name__", repr(compactor)),
+                            "before": before,
+                            "after": len(current_span.memory),
                         }
                     )
-                )
-        current_span.memory = memory + current_span.memory
+                current_span.metadata["compaction"] = {
+                    "triggered": True,
+                    "utilization": round(utilization, 4) if utilization is not None else None,
+                    "steps": compaction_steps,
+                }
 
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
         if i >= self.max_iter:
             return [], {}
+
         tools = []
-        tools_names = set()
-        commands = {}
+        tools_names: set[str] = set()
+        commands: dict[str, Tool] = {}
+
+        def _register(tool: Tool) -> None:
+            if tool.name in tools_names:
+                logger.warning(f"Tool with name '{tool.name}' already exists. You can only add a tool once.")
+                return
+            tools.append(tool)
+            tools_names.add(tool.name)
+            if tool.command:
+                commands[tool.command] = tool
+                stripped = tool.command.strip("/")
+                if stripped:
+                    commands[stripped] = tool
+
         for t in self.tools:
             if isinstance(t, ToolSet):
-                resolved_toolset = await t.resolve()
-                for tool in resolved_toolset:
-                    if tool.name in tools_names:
-                        logger.warning(f"Tool with name '{tool.name}' already exists. You can only add a tool once.")
-                    else:
-                        tool.nest(self._path)
-                        tools.append(tool)
-                        tools_names.add(tool.name)
-                        if tool.command:
-                            commands[tool.command] = tool
+                for tool in await t.resolve():
+                    tool.nest(self._path)
+                    _register(tool)
             else:
-                if t.name in tools_names:
-                    logger.warning(f"Tool with name '{t.name}' already exists. You can only add a tool once.")
-                else:
-                    tools.append(t)
-                    tools_names.add(t.name)
-                    if t.command:
-                        commands[t.command] = t
+                _register(t)
 
         if self._bg_tasks:
-            get_background_task_tool = Tool(
+            bg_tool = Tool(
                 name="get_background_task",
                 description="Get the status and events of a background task.",
                 handler=self.get_background_task,
             )
-            get_background_task_tool.nest(self._path)
-            tools.append(get_background_task_tool)
-            tools_names.add("get_background_task")
-            # Add to commands dict if the tool has a command attribute
-            # if get_background_task_tool.command:
-            #     commands[get_background_task_tool.command] = get_background_task_tool
+            bg_tool.nest(self._path)
+            _register(bg_tool)
 
         return tools, commands
 
@@ -601,7 +627,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         try:
             for tc in tool_calls:
-                task = asyncio.create_task(consume_tool(tc))
+                task = asyncio.create_task(consume_tool(tc), context=contextvars.copy_context())
                 tasks.append(task)
 
             remaining = len(tool_calls)
@@ -620,6 +646,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+    def _salvage_interrupted_llm_output(self, run_context: Any, current_span: Any) -> None:
+        """Append any partial LLM output to memory when the agent loop is interrupted.
+
+        Called from the handler's finally block when _append_memory never ran
+        (GeneratorExit / CancelledError killed the generator before the LLM
+        OutputEvent was processed).  The inner LLM span may still have captured
+        a partial result via the collector snapshot in Runnable.__call__, so we
+        look it up in the trace and synchronously append it to memory.
+        """
+        llm_path = f"{self._path}.llm"
+        for span in reversed(run_context._trace.as_records()):
+            if span.path == llm_path and isinstance(span.output, Message):
+                current_span.memory.append(span.output)
+                break
+
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """Execute the autonomous agent loop."""
         run_context = get_run_context()
@@ -634,23 +675,38 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             system_prompt = await self._resolve_system_prompt()
 
         await self.resolve_memory()
-        # Span memory will also be modified with messages array modification (it's the same object)
-        # current_span.memory = messages
-        current_span._memory_dump = await dump(
-            current_span.memory
-        )  # ? Can we optimize the dumping the llm already does next
+
+        prev_dump = getattr(current_span, "_prev_memory_dump", None)
+        if prev_dump is not None and "compaction" not in current_span.metadata:
+            # Reuse the already-serialized previous messages; only dump new ones
+            # (prompt + any synthetic tool results added by _synthesize_missing_tool_results).
+            # If compaction ran it rewrites memory, invalidating the cached dump.
+            new_messages = current_span.memory[len(prev_dump) :]
+            current_span._memory_dump = prev_dump + await dump(new_messages)
+        else:
+            current_span._memory_dump = await dump(current_span.memory)
         # Remove these so the llm runnable doesn't try to use/validate them again
         kwargs.pop("prompt", None)
         kwargs.pop("messages", None)
+
+        async def _append_memory(message: Message, dump_value: Any = None) -> None:
+            """Append a message to both memory and its serialized dump in lockstep."""
+            current_span.memory.append(message)
+            current_span._memory_dump.append(dump_value if dump_value is not None else await dump(message))
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
                 return
+            if event.status.code == "cancelled" and event.status.reason == "approval_required":
+                return
             if event.status.code == "cancelled" and event.status.reason == "early_exit":
                 bail(event.status.message)
             content = None
-            if event.status.code == "cancelled" and event.status.reason == "early_exit_local":
+            if event.status.code == "cancelled" and event.status.reason == "approval_denied":
+                msg = event.status.message or "The tool call was denied."
+                content = f"[Approval denied] {msg}"
+            elif event.status.code == "cancelled" and event.status.reason == "early_exit_local":
                 msg = event.status.message or "The tool exited early."
                 content = f"[Cancelled] {msg}"
             elif event.error is not None:
@@ -677,137 +733,197 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span._memory_dump.append(tool_result_dump)
 
         i = 0
-        while True:
-            # ? We could resolve the system prompt at each iteration
-            tools, commands = await self._resolve_tools(i)
-            if commands:
-                # Commands will only be user messages with a single text content
-                if len(current_span.memory[-1].content) == 1:
-                    content = current_span.memory[-1].content[0]
-                    if isinstance(content, TextContent) and content.text.startswith("/"):
-                        import shlex
+        need_retry = False
+        _llm_memory_saved = False
+        try:
+            while True:
+                need_retry = False
+                _llm_memory_saved = False
+                # ? We could resolve the system prompt at each iteration
+                tools, commands = await self._resolve_tools(i)
+                if commands:
+                    # Commands will only be user messages with a single text content
+                    if len(current_span.memory[-1].content) == 1:
+                        content = current_span.memory[-1].content[0]
+                        if isinstance(content, TextContent) and content.text.startswith("/"):
+                            import shlex
 
-                        args = shlex.split(content.text)
-                        command = args[0].strip("/")
-                        args = args[1:]
-                        # If no command is found, we'll simply let the message pass through the LLM
-                        if command in commands:
-                            tool = commands[command]
-                            tool_input = {}
-                            for i, field_name in enumerate(tool.params_model.model_fields.keys()):
-                                # Params model preserves the ordering of the fields as they appear in the signature
-                                # We grab as many arguments as we can. If there are too few arguments, we'll let the tool params model validator give a better error
-                                if i >= len(args):
-                                    break
-                                tool_input[field_name] = args[i]
-                            # Craft a fake tool_use so we can keep this interaction in the agent memory
-                            tool_use_id = uuid7(as_type="str").replace("-", "")
-                            current_span._memory_dump.append(
-                                {
-                                    "role": "assistant",
-                                    "content": [
-                                        {"type": "tool_use", "id": tool_use_id, "name": tool.name, "input": tool_input}
-                                    ],
-                                }
-                            )
-                            # Run the tool
-                            async for event in tool(**tool_input):
-                                await _process_tool_event(event, tool_use_id, append_to_messages=False)
-                                if isinstance(event, OutputEvent) and event.output is not None:
-                                    current_span.memory.append(
-                                        Message.validate(
+                            args = shlex.split(content.text)
+                            command = args[0].strip("/")
+                            args = args[1:]
+                            # If no command is found, we'll simply let the message pass through the LLM
+                            if command in commands:
+                                tool = commands[command]
+                                tool_input = {}
+                                for i, field_name in enumerate(tool.params_model.model_fields.keys()):
+                                    # Params model preserves the ordering of the fields as they appear in the signature
+                                    # We grab as many arguments as we can. If there are too few arguments, we'll let the tool params model validator give a better error
+                                    if i >= len(args):
+                                        break
+                                    tool_input[field_name] = args[i]
+                                # Craft a fake tool_use so we can keep this interaction in the agent memory
+                                tool_use_id = uuid7(as_type="str").replace("-", "")
+                                current_span._memory_dump.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": [
                                             {
-                                                "role": "assistant",
-                                                "content": [TextContent(text=str(event.output))],
+                                                "type": "tool_use",
+                                                "id": tool_use_id,
+                                                "name": tool.name,
+                                                "input": tool_input,
                                             }
+                                        ],
+                                    }
+                                )
+                                # Run the tool
+                                async for event in tool(**tool_input):
+                                    await _process_tool_event(event, tool_use_id, append_to_messages=False)
+                                    if isinstance(event, OutputEvent) and event.output is not None:
+                                        if (
+                                            event.status.code == "cancelled"
+                                            and event.status.reason == "approval_required"
+                                        ):
+                                            yield event
+                                            raise ApprovalRequired(event)
+                                        current_span.memory.append(
+                                            Message.validate(
+                                                {
+                                                    "role": "assistant",
+                                                    "content": [TextContent(text=str(event.output))],
+                                                }
+                                            )
                                         )
-                                    )
-                                yield event
-                            return
+                                    yield event
+                                return
 
-            async for event in self._llm(
-                model=model,
-                messages=current_span.memory,
-                system_prompt=system_prompt,
-                tools=tools,
-                output_model=self.output_model,
-                **kwargs,
-            ):
-                if isinstance(event, OutputEvent):
-                    # If the LLM call fails, we want to propagate the error upwards
-                    if event.error is not None:
-                        raise RuntimeError(event.error)
+                # Resume path: if the trailing assistant message has tool_uses
+                # that were left unresolved by an earlier approval gate, run
+                # them directly. Skipping the LLM call here is important —
+                # most providers reject a request whose conversation ends in
+                # an assistant message whose tool_uses have no matching
+                # tool_results.
+                pending_tool_uses = self._find_pending_tool_uses(current_span.memory)
+                if pending_tool_uses:
+                    _llm_memory_saved = True  # nothing to salvage; we never called the LLM
+                    tool_calls = pending_tool_uses
+                    first_pending_approval: OutputEvent | None = None
+                    async for tool_call, event in self._multiplex_tools(tools, tool_calls):
+                        await _process_tool_event(event, tool_call.id, append_to_messages=True)
+                        yield event
+                        if (
+                            isinstance(event, OutputEvent)
+                            and event.status.code == "cancelled"
+                            and event.status.reason == "approval_required"
+                            and first_pending_approval is None
+                        ):
+                            first_pending_approval = event
+                    if first_pending_approval is not None:
+                        raise ApprovalRequired(first_pending_approval)
+                    i += 1
+                    continue
 
-                    interrupted = event.status.code == "cancelled" and event.status.reason == "interrupted"
+                async for event in self._llm(
+                    model=model,
+                    messages=current_span.memory,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    output_model=self.output_model,
+                    **kwargs,
+                ):
+                    if isinstance(event, OutputEvent):
+                        # If the LLM call fails, we want to propagate the error upwards
+                        if event.error is not None:
+                            raise RuntimeError(event.error)
 
-                    # Handle case where LLM was interrupted before any output was received
-                    if event.output is None and interrupted:
-                        raise InterruptError(event.call_id, output=None)
+                        interrupted = event.status.code == "cancelled" and event.status.reason == "interrupted"
 
-                    assert isinstance(event.output, Message), (
-                        f"Expected event.output to be a Message, got {type(event.output)}"
-                    )
+                        # Handle case where LLM was interrupted before any output was received
+                        if event.output is None and interrupted:
+                            raise InterruptError(event.call_id, output=None)
 
-                    # Add LLM response to conversation for next iteration
-                    current_span.memory.append(event.output)
-                    current_span._memory_dump.append(event._output_dump)
+                        assert isinstance(event.output, Message), (
+                            f"Expected event.output to be a Message, got {type(event.output)}"
+                        )
 
-                    if self.output_model is not None:
-                        validation_error_msg = None
-                        validation_context = self.output_model_context
-                        for content in event.output.content:
-                            # TODO Refactor this. If the llm should return a fixed output model, we should error if it doesn't return it
-                            if isinstance(content, TextContent):
-                                try:
-                                    output = coerce_to_dict(content.text)
-                                    validated_output = self.output_model.model_validate(
-                                        output, context=validation_context
-                                    )
-                                    event.output = validated_output
-                                    break
-                                except (json.JSONDecodeError, ValueError, ValidationError) as e:
-                                    validation_error_msg = str(e)
-                                    logger.warning(f"Output validation failed: {validation_error_msg}")
-                                    continue
+                        # Add LLM response to conversation for next iteration
+                        await _append_memory(event.output, dump_value=event._output_dump)
+                        _llm_memory_saved = True
 
-                        if validation_error_msg and i < self.max_iter - 1:
-                            # Feed the error back to the LLM so it can correct itself
-                            error_feedback = Message.validate(
-                                {
-                                    "role": "user",
-                                    "content": [
+                        if self.output_model is not None:
+                            validation_error_msg = None
+                            validation_context = self.output_model_context
+                            for content in event.output.content:
+                                # TODO Refactor this. If the llm should return a fixed output model, we should error if it doesn't return it
+                                if isinstance(content, TextContent):
+                                    try:
+                                        output = coerce_to_dict(content.text)
+                                        validated_output = self.output_model.model_validate(
+                                            output, context=validation_context
+                                        )
+                                        event.output = validated_output
+                                        break
+                                    except (json.JSONDecodeError, ValueError, ValidationError) as e:
+                                        validation_error_msg = str(e)
+                                        logger.warning(f"Output validation failed: {validation_error_msg}")
+                                        continue
+
+                            if validation_error_msg:
+                                if i < self.max_iter - 1:
+                                    # Feed the error back to the LLM so it can correct itself
+                                    error_feedback = Message.validate(
                                         {
-                                            "type": "text",
-                                            "text": (
-                                                f"Your output failed validation:\n{validation_error_msg}\n\nTry again."
-                                            ),
+                                            "role": "user",
+                                            "content": [
+                                                {
+                                                    "type": "text",
+                                                    "text": (
+                                                        f"Your output failed validation:\n{validation_error_msg}\n\nTry again."
+                                                    ),
+                                                }
+                                            ],
                                         }
-                                    ],
-                                }
-                            )
-                            current_span.memory.append(error_feedback)
-                            current_span._memory_dump.append(await dump(error_feedback))
-                            i += 1
-                            break  # Break out of async for to retry in while loop
+                                    )
+                                    await _append_memory(error_feedback)
+                                    i += 1
+                                    need_retry = True
+                                    break  # Break out of async for to retry in while loop
+                                else:
+                                    raise RuntimeError(
+                                        f"Output model validation failed after {self.max_iter} attempts: {validation_error_msg}"
+                                    )
 
-                    # Propagate the interruption with the processed output
-                    if interrupted:
-                        raise InterruptError(event.call_id, output=event.output)
-                yield event
+                        # Propagate the interruption with the processed output
+                        if interrupted:
+                            raise InterruptError(event.call_id, output=event.output)
+                    yield event
 
-            if self.output_model is not None:
-                break
+                if self.output_model is not None and not need_retry:
+                    break
 
-            tool_calls = [
-                content
-                for content in current_span.memory[-1].content
-                if isinstance(content, ToolUseContent) and not content.is_server_tool_use
-            ]
+                tool_calls = [
+                    content
+                    for content in current_span.memory[-1].content
+                    if isinstance(content, ToolUseContent) and not content.is_server_tool_use
+                ]
 
-            if not tool_calls:
-                break
+                if not tool_calls:
+                    break
 
-            async for tool_call, event in self._multiplex_tools(tools, tool_calls):
-                await _process_tool_event(event, tool_call.id, append_to_messages=True)
-                yield event
-            i += 1
+                first_pending_approval: OutputEvent | None = None
+                async for tool_call, event in self._multiplex_tools(tools, tool_calls):
+                    await _process_tool_event(event, tool_call.id, append_to_messages=True)
+                    yield event
+                    if (
+                        isinstance(event, OutputEvent)
+                        and event.status.code == "cancelled"
+                        and event.status.reason == "approval_required"
+                        and first_pending_approval is None
+                    ):
+                        first_pending_approval = event
+                if first_pending_approval is not None:
+                    raise ApprovalRequired(first_pending_approval)
+                i += 1
+        finally:
+            if not _llm_memory_saved:
+                self._salvage_interrupted_llm_output(run_context, current_span)

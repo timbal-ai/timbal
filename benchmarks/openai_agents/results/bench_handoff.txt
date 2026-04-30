@@ -1,0 +1,58 @@
+
+[1m================================================================================================[0m
+[1m  Timbal delegation vs OpenAI Agents SDK handoff benchmark[0m
+  100 iters | 40 burst | 100 mem | 200 throughput ops
+[1m================================================================================================[0m
+  Timbal: OK  |  OAI: OK
+    Timbal delegation latency... p50=730.6 us
+    Timbal delegation memory... 73 KB peak
+    Timbal delegation burst (40 concurrent)... p50=20.62 ms
+    Timbal delegation throughput conc=1... 1240/s
+    Timbal delegation throughput conc=10... 1388/s
+    Timbal delegation throughput conc=50... 1314/s
+    OAI handoff latency... p50=1.42 ms
+    OAI handoff memory... 120 KB peak
+    OAI handoff burst (40 concurrent)... p50=18.66 ms
+    OAI handoff throughput conc=1... 741/s
+    OAI handoff throughput conc=10... 1340/s
+    OAI handoff throughput conc=50... 1596/s
+
+[1m[36m------------------------------------------------------------------------------------------------[0m
+[1m[36m  Delegation / handoff[0m
+[1m[36m------------------------------------------------------------------------------------------------[0m
+
+  [1mLatency  (x100 sequential runs)[0m
+                Timbal delegation       OAI handoff
+  ------------  ----------------  ----------------
+          mean          727.6 us           1.47 ms
+           p50          730.6 us           1.42 ms
+           p95           1.24 ms           1.95 ms
+           p99           1.42 ms           2.08 ms
+
+  [1mMemory  (x100 runs)[0m
+  framework                         peak       per run
+  ------------------------  ------------  ------------
+  Timbal delegation               73.2 KB         749  B
+  OAI handoff                    120.4 KB        1233  B
+
+  [1mBurst  (40 concurrent)[0m
+                Timbal delegation       OAI handoff
+  ------------  ----------------  ----------------
+           p50          20.62 ms          18.66 ms
+           p75          21.09 ms          19.18 ms
+           p95          21.18 ms          19.58 ms
+           p99          21.36 ms          19.81 ms
+           max          21.36 ms          19.81 ms
+
+  [1mThroughput  (200 loops)[0m
+                Timbal delegation       OAI handoff
+  ------------  ----------------  ----------------
+             1            1240/s             741/s
+            10            1388/s            1340/s
+            50            1314/s            1596/s
+
+[2m------------------------------------------------------------------------------------------------
+  OpenAI Agents SDK has a true handoff primitive.
+  Timbal column is the closest agent-composition equivalent: supervisor -> worker tool -> final.
+------------------------------------------------------------------------------------------------[0m
+

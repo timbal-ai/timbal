@@ -1,0 +1,12 @@
+---
+title: "List Projects"
+openapi: "GET /orgs/{org_id}/projects"
+---
+
+<Info>
+    Organization admins will retrieve a list of all projects in the organization. Other users will retrieve a list of projects they have access to.
+</Info>
+
+<Info>
+    Use the `view` query parameter to control the response detail level. The default `list` view returns a lightweight `ProjectPreview` per project. Pass `view=full` to get the same rich `ProjectDetail` shape returned by the [Get Project](/api-reference/projects/get) endpoint — including environments, knowledge bases, integrations, and workforce.
+</Info>

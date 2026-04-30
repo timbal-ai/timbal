@@ -7,17 +7,24 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import structlog
-import uvicorn
+
+try:
+    import uvicorn
+    from fastapi import FastAPI, Request, Response
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse, StreamingResponse
+except ImportError as e:
+    raise ImportError(
+        "fastapi and uvicorn are required to run the timbal server. Install them with: pip install 'timbal[server]'"
+    ) from e
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import __version__
 from ..logs import setup_logging
 from ..state import RunContext, set_run_context
 from ..utils import ImportSpec, is_port_in_use
 from .jobs import JOB_DONE_SENTINEL, JobStore
+from .voice import merge_voice_config
 
 logger = structlog.get_logger("timbal.server.http")
 
@@ -28,8 +35,10 @@ async def lifespan(
     import_spec: ImportSpec,
 ) -> AsyncGenerator[None, None]:
     logger.info("loading_runnable", import_spec=import_spec)
-    app.state.runnable = import_spec.load()
+    runnable = import_spec.load()
+    app.state.runnable = runnable
     app.state.job_store = JobStore()
+    app.state.voice_config = merge_voice_config(runnable)
     yield
 
 
@@ -56,6 +65,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    from .voice import router as voice_router
+
+    app.include_router(voice_router)
 
     @app.get("/healthcheck")
     async def healthcheck() -> Response:
@@ -141,7 +154,8 @@ def create_app() -> FastAPI:
     return app
 
 
-if __name__ == "__main__":
+def run_server_cli(argv: list[str] | None = None) -> None:
+    """CLI for the full HTTP server (also used by ``python -m timbal.server``)."""
     parser = argparse.ArgumentParser(description="Timbal HTTP server.")
     parser.add_argument("-v", "--version", action="store_true", help="Show version and exit.")
     parser.add_argument(
@@ -171,7 +185,7 @@ if __name__ == "__main__":
         default=1,
         help="Number of worker processes. Defaults to number of CPUs, or 1 if using a GPU.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.version:
         print(f"timbal.server.http {__version__}")  # noqa: T201
@@ -183,13 +197,6 @@ if __name__ == "__main__":
     import_spec = args.import_spec
     if not import_spec:
         import_spec = os.getenv("TIMBAL_RUNNABLE")
-        if not import_spec:
-            import_spec = os.getenv("TIMBAL_FLOW")  # Legacy
-            if import_spec:
-                print(  # noqa: T201
-                    "TIMBAL_FLOW environment variable is deprecated. Please use TIMBAL_RUNNABLE instead.",
-                    file=sys.stderr,
-                )
 
     if not import_spec:
         print(  # noqa: T201
@@ -220,3 +227,7 @@ if __name__ == "__main__":
         workers=args.workers,
         log_config=None,
     )
+
+
+if __name__ == "__main__":
+    run_server_cli()

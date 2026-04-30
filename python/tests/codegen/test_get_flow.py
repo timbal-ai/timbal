@@ -2,7 +2,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from timbal.codegen.flow import get_flow
+from timbal.codegen.flow import format_compact, get_flow
 
 TIMBAL_YAML = 'fqn: "agent.py::agent"\n'
 
@@ -459,10 +459,11 @@ class TestConfigSchema:
         agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
         """)
         config = _single_node(_flow(ws))["data"]["config"]
-        # model is Model | str — should have anyOf with an enum variant
-        assert "anyOf" in config["model"]
-        has_enum = any("enum" in v for v in config["model"]["anyOf"])
-        assert has_enum
+        # model enum is compacted — full Literal list is stripped, replaced with a ref marker
+        assert config["model"]["x-timbal-ref"] == "models"
+        assert config["model"]["type"] == "string"
+        assert "enum" not in config["model"]
+        assert "anyOf" not in config["model"]
 
     def test_callable_type_in_schema(self, workspace):
         ws = workspace("""\
@@ -473,6 +474,375 @@ class TestConfigSchema:
         config = _single_node(_flow(ws))["data"]["config"]
         any_of_types = [v.get("type") for v in config["system_prompt"]["anyOf"]]
         assert "callable" in any_of_types
+
+
+# ---------------------------------------------------------------------------
+# Param defaults in schema
+# ---------------------------------------------------------------------------
+
+
+class TestParamDefaults:
+    def test_map_param_in_schema(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        agent.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        # Find agent_b node
+        agent_b_node = [n for n in flow["nodes"] if n["id"] == "wf.agent_b"][0]
+        prompt_prop = agent_b_node["data"]["params"]["properties"]["prompt"]
+        assert prompt_prop["value"] == {"type": "map", "source": "agent_a"}
+
+    def test_map_param_with_bracket_key_in_schema(self, workspace):
+        """Backward compat: bracket notation output["cleaned"] should round-trip."""
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        agent.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output["cleaned"])
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        agent_b_node = [n for n in flow["nodes"] if n["id"] == "wf.agent_b"][0]
+        prompt_prop = agent_b_node["data"]["params"]["properties"]["prompt"]
+        assert prompt_prop["value"] == {"type": "map", "source": "agent_a", "key": "output.cleaned"}
+
+    def test_map_param_with_dot_key_in_schema(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        agent.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output.cleaned)
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        agent_b_node = [n for n in flow["nodes"] if n["id"] == "wf.agent_b"][0]
+        prompt_prop = agent_b_node["data"]["params"]["properties"]["prompt"]
+        assert prompt_prop["value"] == {"type": "map", "source": "agent_a", "key": "output.cleaned"}
+
+    def test_map_param_with_nested_key_in_schema(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        agent.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output[0].items.name)
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        agent_b_node = [n for n in flow["nodes"] if n["id"] == "wf.agent_b"][0]
+        prompt_prop = agent_b_node["data"]["params"]["properties"]["prompt"]
+        assert prompt_prop["value"] == {"type": "map", "source": "agent_a", "key": "output.0.items.name"}
+
+    def test_value_param_in_schema(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a, prompt="Hello world")
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        node = flow["nodes"][0]
+        prompt_prop = node["data"]["params"]["properties"]["prompt"]
+        assert prompt_prop["value"] == {"type": "value", "value": "Hello world"}
+
+    def test_no_default_param(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        node = flow["nodes"][0]
+        prompt_prop = node["data"]["params"]["properties"]["prompt"]
+        # No value set — should not have our custom value field
+        assert "value" not in prompt_prop
+
+
+# ---------------------------------------------------------------------------
+# format_compact
+# ---------------------------------------------------------------------------
+
+
+def _compact(workspace_path: Path) -> str:
+    return format_compact(get_flow(workspace_path))
+
+
+class TestFormatCompact:
+    def test_empty_flow(self):
+        assert format_compact({"nodes": [], "edges": []}) == "(empty flow)"
+
+    def test_standalone_agent_header(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="my_agent", model="openai/gpt-4o-mini", max_tokens=128)
+        """)
+        out = _compact(ws)
+        assert out.startswith("AGENT my_agent")
+        assert "openai/gpt-4o-mini" in out
+
+    def test_standalone_agent_max_iter(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=256, max_iter=3)
+        """)
+        out = _compact(ws)
+        assert "max_iter=3" in out
+        assert "max_tokens=256" in out
+
+    def test_standalone_agent_system_prompt(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128, system_prompt="Be helpful.")
+        """)
+        out = _compact(ws)
+        assert 'system_prompt: "Be helpful."' in out
+
+    def test_standalone_agent_system_prompt_truncated(self, workspace):
+        long_prompt = "x" * 200
+        ws = workspace(f"""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128, system_prompt="{long_prompt}")
+        """)
+        out = _compact(ws)
+        assert "…" in out
+        # Should not include the full prompt
+        assert "x" * 121 not in out
+
+    def test_standalone_agent_no_system_prompt(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
+        """)
+        out = _compact(ws)
+        assert "system_prompt" not in out
+
+    def test_standalone_agent_tools_listed(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128, tools=[WebSearch()])
+        """)
+        out = _compact(ws)
+        assert "web_search" in out
+
+    def test_standalone_agent_no_tools(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
+        """)
+        out = _compact(ws)
+        assert "tools: none" in out
+
+    def test_workflow_header(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Workflow, Tool
+
+        def step_a() -> str:
+            return "a"
+
+        agent = Workflow(name="my_wf")
+        agent.step(Tool(handler=step_a))
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        assert out.startswith("WORKFLOW my_wf")
+        assert "STEPS" in out
+
+    def test_workflow_tool_step_signature(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Workflow, Tool
+
+        def greet(name: str, loud: bool = False) -> str:
+            return f"Hello {name}"
+
+        agent = Workflow(name="wf")
+        agent.step(Tool(handler=greet))
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        assert "tool   greet(name:string, loud?:boolean)" in out
+
+    def test_workflow_tool_return_type(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Workflow, Tool
+
+        def produce() -> dict:
+            return {}
+
+        agent = Workflow(name="wf")
+        agent.step(Tool(handler=produce))
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        assert "→ dict" in out
+
+    def test_workflow_agent_step(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+
+        inner = Agent(name="summarizer", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(inner)
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        assert "agent  summarizer" in out
+        assert "openai/gpt-4o-mini" in out
+
+    def test_workflow_map_param_shown(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        agent.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        assert "prompt ← agent_a" in out
+
+    def test_workflow_map_param_with_key(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        agent.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output[0].text)
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        assert "prompt ← agent_a.output.0.text" in out
+
+    def test_workflow_edges_section(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Workflow, Tool
+
+        def step_a() -> str:
+            return "a"
+
+        def step_b(x: str) -> str:
+            return x
+
+        agent = Workflow(name="wf")
+        agent.step(Tool(handler=step_a))
+        agent.step(Tool(handler=step_b), depends_on=["step_a"])
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        assert "EDGES" in out
+        assert "step_a → step_b" in out
+
+    def test_workflow_no_edges_section_when_empty(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Workflow, Tool
+
+        def step_a() -> str:
+            return "a"
+
+        agent = Workflow(name="wf")
+        agent.step(Tool(handler=step_a))
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        assert "EDGES" not in out
+
+    def test_workflow_fan_out_edges(self, workspace):
+        ws = workspace(
+            """\
+        from timbal.core import Workflow, Tool
+
+        def root() -> str:
+            return "r"
+
+        def branch_a() -> str:
+            return "a"
+
+        def branch_b() -> str:
+            return "b"
+
+        agent = Workflow(name="wf")
+        agent.step(Tool(handler=root))
+        agent.step(Tool(handler=branch_a), depends_on=["root"])
+        agent.step(Tool(handler=branch_b), depends_on=["root"])
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        assert "root → branch_a, branch_b" in out
 
 
 # ---------------------------------------------------------------------------

@@ -5,10 +5,11 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 from timbal import Agent, Tool
+from timbal.core.test_model import TestModel
 from timbal.core.tool_set import ToolSet
 from timbal.types.message import Message
 
-from ..conftest import assert_has_output_event, skip_if_agent_error
+from ..conftest import assert_has_output_event, assert_no_errors
 
 # ==============================================================================
 # Test ToolSet Implementations
@@ -269,7 +270,7 @@ class TestToolSetAgentIntegration:
         """Test agent using a static ToolSet."""
         agent = Agent(
             name="test_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[StaticToolSet()],
             max_iter=2,
         )
@@ -278,15 +279,15 @@ class TestToolSetAgentIntegration:
         result = agent(prompt=prompt)
         output = await result.collect()
         
-        skip_if_agent_error(output, "agent_with_static_toolset")
         assert_has_output_event(output)
+        assert_no_errors(output)
     
     @pytest.mark.asyncio
     async def test_agent_with_conditional_toolset(self):
         """Test agent with conditional ToolSet based on role."""
         admin_agent = Agent(
             name="admin_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[ConditionalToolSet(role="admin")],
             max_iter=2,
         )
@@ -295,8 +296,8 @@ class TestToolSetAgentIntegration:
         result = admin_agent(prompt=prompt)
         output = await result.collect()
         
-        skip_if_agent_error(output, "agent_with_conditional_toolset_admin")
         assert_has_output_event(output)
+        assert_no_errors(output)
     
     @pytest.mark.asyncio
     async def test_agent_with_mixed_tools_and_toolsets(self):
@@ -306,7 +307,7 @@ class TestToolSetAgentIntegration:
         
         agent = Agent(
             name="mixed_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[
                 standalone_tool,
                 StaticToolSet(),
@@ -318,15 +319,15 @@ class TestToolSetAgentIntegration:
         result = agent(prompt=prompt)
         output = await result.collect()
         
-        skip_if_agent_error(output, "agent_with_mixed_tools")
         assert_has_output_event(output)
+        assert_no_errors(output)
     
     @pytest.mark.asyncio
     async def test_agent_with_empty_toolset(self):
         """Test agent with ToolSet that returns no tools."""
         agent = Agent(
             name="empty_toolset_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[EmptyToolSet()],
             max_iter=1,
         )
@@ -345,7 +346,7 @@ class TestToolSetAgentIntegration:
         
         agent = Agent(
             name="counter_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[counter_toolset],
             max_iter=3,
         )
@@ -354,7 +355,7 @@ class TestToolSetAgentIntegration:
         result = agent(prompt=prompt)
         output = await result.collect()
         
-        skip_if_agent_error(output, "agent_resolves_toolset_per_iteration")
+        assert_no_errors(output)
         # The toolset should have been resolved at least once
         assert counter_toolset._resolve_count >= 1
     
@@ -365,7 +366,7 @@ class TestToolSetAgentIntegration:
         
         agent = Agent(
             name="lazy_agent",
-            model="openai/gpt-4o-mini",
+            model=TestModel(),
             tools=[lazy_toolset],
             max_iter=2,
         )
@@ -376,7 +377,7 @@ class TestToolSetAgentIntegration:
         result = agent(prompt=prompt)
         output = await result.collect()
         
-        skip_if_agent_error(output, "agent_with_lazy_toolset")
+        assert_no_errors(output)
         # Lazy initialization should have happened
         assert lazy_toolset._initialized
 

@@ -34,7 +34,13 @@ def validate_pdf(pdf: File) -> None:
     Raises:
         PDFProcessingError: If the PDF file is corrupted or cannot be opened.
     """
-    import fitz
+    try:
+        import fitz
+    except ImportError as e:
+        raise ImportError(
+            "pymupdf is required to read PDF files. "
+            "Install it with: pip install 'timbal[documents]'"
+        ) from e
     pdf.seek(0)
     try:
         doc = fitz.Document(stream=pdf.read())
@@ -45,23 +51,49 @@ def validate_pdf(pdf: File) -> None:
         pdf.seek(0)  # Reset pointer for subsequent reads
 
 
+_IMAGE_MAGIC: list[bytes] = [
+    b"\xff\xd8\xff",        # JPEG
+    b"\x89PNG\r\n\x1a\n",  # PNG
+    b"GIF87a",              # GIF87a
+    b"GIF89a",              # GIF89a
+    b"BM",                  # BMP
+    b"II\x2a\x00",         # TIFF (little-endian)
+    b"MM\x00\x2a",         # TIFF (big-endian)
+]
+
+
 def validate_image(image: File) -> None:
-    """Validate that an image file can be opened and is not corrupted.
+    """Validate that an image file has a recognised header.
+
+    Checks the file's magic bytes against known image format signatures.
+    Catches empty files, wrong-extension files, and completely unrecognisable
+    data before making an API call. Mid-file corruption is left to the LLM
+    API to report.
 
     Raises:
-        ImageProcessingError: If the image file is corrupted or cannot be opened.
+        ImageProcessingError: If the file is empty or has an unrecognised header.
     """
-    from PIL import Image
-
     image.seek(0)
     try:
-        image_bytes = image.read()
-        with Image.open(io.BytesIO(image_bytes)) as img:
-            img.verify()
-    except Exception as e:
-        raise ImageProcessingError(f"Invalid or corrupted image file: {e}") from e
+        header = image.read(16)
     finally:
         image.seek(0)
+
+    if not header:
+        raise ImageProcessingError("Image file is empty.")
+
+    for magic in _IMAGE_MAGIC:
+        if header.startswith(magic):
+            return
+
+    # WebP: "RIFF" at 0..4 and "WEBP" at 8..12
+    if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return
+
+    raise ImageProcessingError(
+        "Unrecognised image format. "
+        "Supported formats: JPEG, PNG, GIF, WebP, BMP, TIFF."
+    )
 
 
 def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
@@ -73,8 +105,14 @@ def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
     import tempfile
     from pathlib import Path
 
-    import fitz
-    pdf.seek(0) # Ensure the pointer is at the start of the file
+    try:
+        import fitz
+    except ImportError as e:
+        raise ImportError(
+            "pymupdf is required to read PDF files. "
+            "Install it with: pip install 'timbal[documents]'"
+        ) from e
+    pdf.seek(0)  # Ensure the pointer is at the start of the file
     try:
         doc = fitz.Document(stream=pdf.read())
     except Exception as e:
@@ -84,17 +122,42 @@ def pdf_to_images(pdf: File, dpi: int = 200) -> list[File]:
     for page_num in range(len(doc)):
         page = doc[page_num]
         pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72))
-        # TODO Use File.validate(bytes, {"extension": ".png"})
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp_path = Path(f.name)
         pix.save(tmp_path)
-        pix_file = File.validate(tmp_path)
+        pix_file = File(tmp_path)
         pages.append(pix_file)
     return pages
 
 
+def _extract_xlsx_content(xlsx: File) -> str:
+    import csv
+
+    try:
+        from openpyxl import load_workbook
+    except ImportError as e:
+        raise ImportError(
+            "openpyxl is required to read Excel files. "
+            "Install it with: pip install 'timbal[documents]'"
+        ) from e
+
+    wb = load_workbook(io.BytesIO(xlsx.read()), read_only=True, data_only=True)
+    ws = wb.active or wb.worksheets[0]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    for row in ws.iter_rows(values_only=True):
+        writer.writerow(["" if v is None else str(v) for v in row])
+    return output.getvalue()
+
+
 def _extract_docx_content(docx: File) -> str:
-    from docx import Document
+    try:
+        from docx import Document
+    except ImportError as e:
+        raise ImportError(
+            "python-docx is required to read Word documents. "
+            "Install it with: pip install 'timbal[documents]'"
+        ) from e
 
     doc = Document(io.BytesIO(docx.read()))
     text_content = []
@@ -227,11 +290,9 @@ class FileContent(BaseContent):
             self.file.seek(0)
 
         if self.file.__source_extension__ == ".xlsx":
-            import pandas as pd
-            df = pd.read_excel(io.BytesIO(self.file.read()))
             openai_responses_input = {
                 "type": "input_text",
-                "text": df.to_csv(index=False, header=True, sep=","),
+                "text": _extract_xlsx_content(self.file),
             }
             self._cached_openai_responses_input = openai_responses_input
             return openai_responses_input
@@ -348,11 +409,9 @@ class FileContent(BaseContent):
             self.file.seek(0)
 
         if self.file.__source_extension__ == ".xlsx":
-            import pandas as pd
-            df = pd.read_excel(io.BytesIO(self.file.read()))
             openai_input = {
                 "type": "text",
-                "text": df.to_csv(index=False, header=True, sep=","),
+                "text": _extract_xlsx_content(self.file),
             }
             self._cached_openai_chat_completions_input = openai_input
             return openai_input
@@ -462,7 +521,7 @@ class FileContent(BaseContent):
                                 attachment_file = io.BytesIO(attachment['data'])
                                 attachment_file.name = attachment['filename']
                                 extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
-                                file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                                file_obj = File(attachment_file, extension=extension)
                                 converted = FileContent(file=file_obj).to_openai_chat_completions_input()
                                 if isinstance(converted, list):
                                     openai_input.extend(converted)
@@ -482,7 +541,7 @@ class FileContent(BaseContent):
                     attachment_file = io.BytesIO(attachment['data'])
                     attachment_file.name = attachment['filename']
                     extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
-                    file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                    file_obj = File(attachment_file, extension=extension)
                     converted = FileContent(file=file_obj).to_openai_chat_completions_input()
                     if isinstance(converted, list):
                         openai_input.extend(converted)
@@ -543,11 +602,9 @@ class FileContent(BaseContent):
             self.file.seek(0)
 
         if self.file.__source_extension__ == ".xlsx":
-            import pandas as pd
-            df = pd.read_excel(io.BytesIO(self.file.read()))
             anthropic_input = {
                 "type": "text",
-                "text": df.to_csv(index=False, header=True, sep=","),
+                "text": _extract_xlsx_content(self.file),
             }
             self._cached_anthropic_input = anthropic_input
             return anthropic_input
@@ -661,7 +718,7 @@ class FileContent(BaseContent):
                                 # Ensure the filename has the correct extension for MIME type detection
                                 if extension and not attachment['filename'].endswith(extension):
                                     attachment_file.name = attachment['filename'] + extension
-                                file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                                file_obj = File(attachment_file, extension=extension)
                                 converted = FileContent(file=file_obj).to_anthropic_input()
                                 if isinstance(converted, list):
                                     anthropic_input.extend(converted)
@@ -685,7 +742,7 @@ class FileContent(BaseContent):
                     # Ensure the filename has the correct extension for MIME type detection
                     if extension and not attachment['filename'].endswith(extension):
                         attachment_file.name = attachment['filename'] + extension
-                    file_obj = File.validate(attachment_file, info={"extension": extension, "content_type": attachment['content_type']})
+                    file_obj = File(attachment_file, extension=extension)
                     converted = FileContent(file=file_obj).to_anthropic_input()
                     if isinstance(converted, list):
                         anthropic_input.extend(converted)

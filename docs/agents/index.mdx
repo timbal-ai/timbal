@@ -28,15 +28,13 @@ You can specify any model using the "provider/model" format. See all supported m
 
 Some models support advanced capabilities like [thinking/reasoning](/agents/thinking), which enables extended reasoning processes for complex problem-solving.
 
-Some models require specific parameters (like `max_tokens` for Claude). Use `model_params` to pass any additional model configuration: 
+Some models require specific parameters (like `max_tokens` for Claude). Pass it as a top-level field:
 
 ```python highlight={4}
 agent = Agent(
     name="claude_agent",
     model="anthropic/claude-sonnet-4-latest",
-    model_params={
-        "max_tokens": 1024
-    }
+    max_tokens=1024
 )
 ```
 
@@ -46,6 +44,50 @@ agent = Agent(
 OPENAI_API_KEY=your_openai_api_key
 ANTHROPIC_API_KEY=your_claude_api_key
 ```
+
+### Fallback Models
+
+Use `FallbackModel` when you want an agent to try another model if the primary provider is rate limited, temporarily unavailable, times out, or returns a retryable server error.
+
+```python
+from timbal import Agent, FallbackModel
+
+agent = Agent(
+    name="support_agent",
+    model=FallbackModel(
+        "anthropic/claude-sonnet-4-6",
+        "openai/gpt-5.5",
+        "google/gemini-2.5-pro",
+    ),
+    max_tokens=1024,  # Required for Anthropic models
+)
+```
+
+Models are tried in order. By default, each model gets two retries before Timbal moves to the next model in the chain. If every model fails with a retryable provider error, Timbal raises `FallbackExhausted` with the per-model errors.
+
+For per-model settings, use `ModelEntry`:
+
+```python
+from timbal import Agent, FallbackModel, ModelEntry
+
+agent = Agent(
+    name="support_agent",
+    model=FallbackModel(
+        ModelEntry(
+            "anthropic/claude-sonnet-4-6",
+            max_retries=3,
+            retry_delay=0.5,
+        ),
+        ModelEntry(
+            "openai/gpt-5.5",
+            max_retries=1,
+        ),
+    ),
+    max_tokens=1024,
+)
+```
+
+Fallback only switches models before the first streamed chunk is emitted. If a stream fails after output has started, Timbal raises the error instead of silently switching models and risking duplicated or inconsistent output.
 
 Define tools as Python functions - the framework handles schema generation, parameter validation, and execution orchestration.
 
@@ -67,6 +109,36 @@ For real-time processing, you can stream events as they happen:
 async for event in agent(prompt="Hello"):
     print(event)
 ```
+
+### Approval-Required Tools
+
+Any runnable — Tool, Agent, or Workflow step — can pause for human approval before it runs. Mark it with `requires_approval`, listen for `ApprovalEvent`, and resume by calling the runnable again with `approval_decisions`:
+
+```python
+from timbal import Agent, Tool
+from timbal.types.events import ApprovalEvent
+
+
+refund = Tool(
+    handler=lambda amount: f"refunded ${amount}",
+    requires_approval=lambda amount: amount > 100,
+    approval_prompt=lambda amount: f"Approve refunding ${amount}?",
+)
+
+agent = Agent(name="support_agent", model="openai/gpt-5", tools=[refund])
+
+approval_id = None
+async for event in agent(prompt="Refund $250"):
+    if isinstance(event, ApprovalEvent):
+        approval_id = event.approval_id
+
+result = await agent(
+    prompt="Refund $250",
+    approval_decisions={approval_id: True},
+).collect()
+```
+
+The full reference — durable cross-process resume, audit fields, redaction, parallel gates, `pending_approvals()`, status reasons, usage counters — lives on the dedicated [Human-in-the-Loop Approvals](/agents/approvals) page.
 
 ## Input
 
@@ -135,14 +207,14 @@ For more information about accessing input parameters and using the run context,
 
 ### Overriding Model Configuration
 
-What if you want to change the model, `max_tokens`, or `thinking` for each run? Instead of creating multiple agents, you can pass these as input parameters. This is useful for A/B testing different models, adjusting token limits per request, or dynamically selecting models based on task complexity.
+What if you want to change the model, `max_tokens`, or thinking config for each run? Instead of creating multiple agents, you can pass these as input parameters. This is useful for A/B testing different models, adjusting token limits per request, or dynamically selecting models based on task complexity.
 
 ```python
 # Agent with default values
 agent = Agent(
     name="my_agent",
     model="openai/gpt-4o-mini",  # Default model
-    model_params={"max_tokens": 1024}  # Default max_tokens
+    max_tokens=1024  # Default max_tokens
 )
 
 # Override model: was "openai/gpt-4o-mini", now "anthropic/claude-sonnet-4-latest"
@@ -158,26 +230,24 @@ async for event in agent(
 ):
     print(event)
 
-# Override thinking (provider-specific format)
-# For OpenAI: {"effort": "high", "summary": true}
+# Override thinking via provider_params (provider-specific format)
+# For OpenAI: pass "reasoning" key
 response = await agent(
     prompt="Solve this complex problem",
-    model="openai/gpt-4o",
-    thinking={"effort": "high", "summary": True}
+    model="openai/gpt-5.5",
+    provider_params={"reasoning": {"effort": "high", "summary": "auto"}}
 ).collect()
 
-# For Anthropic: {"budget_tokens": 10000}
+# For Anthropic: pass "thinking" key
 response = await agent(
     prompt="Solve this complex problem",
     model="anthropic/claude-sonnet-4-latest",
-    thinking={
-        "type": "enabled",
-        "budget_tokens": 10000}
+    provider_params={"thinking": {"type": "enabled", "budget_tokens": 10000}}
 ).collect()
 ```
 
 <Warning>
-The parameter names `model`, `max_tokens`, and `thinking` are reserved and will affect model configuration when passed as input. These parameters will not be available as regular input to your agent. If you need to pass custom data without changing the actual model configuration, use different parameter names (e.g., `data_model` instead of `model` if you want to pass a data model name).
+The parameter names `model`, `max_tokens`, and `provider_params` are reserved and will affect model configuration when passed as input. These parameters will not be available as regular input to your agent. If you need to pass custom data without changing the actual model configuration, use different parameter names (e.g., `data_model` instead of `model` if you want to pass a data model name).
 </Warning>
 
 ## Output

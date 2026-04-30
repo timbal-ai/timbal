@@ -15,11 +15,7 @@
         "groups": [
           {
             "group": "Getting started",
-            "pages": [
-              "index",
-              "installation",
-              "quickstart"
-            ]
+            "pages": ["index", "installation", "quickstart"]
           },
           {
             "group": "Core Concepts",
@@ -35,7 +31,9 @@
             "pages": [
               "agents/index",
               "agents/memory",
+              "agents/memory-compaction",
               "agents/tools",
+              "agents/approvals",
               "agents/thinking",
               "agents/background-tasks",
               "agents/skills",
@@ -72,15 +70,6 @@
             ]
           },
           {
-            "group": "Knowledge Bases",
-            "pages": [
-              "knowledge-bases/index",
-              "knowledge-bases/tables",
-              "knowledge-bases/embeddings",
-              "knowledge-bases/indexes"
-            ]
-          },
-          {
             "group": "Deployment",
             "pages": [
               "deployment/index",
@@ -95,9 +84,7 @@
         "pages": [
           {
             "group": "Examples",
-            "pages": [
-              "examples/index"
-            ]
+            "pages": ["examples/index"]
           },
           {
             "group": "Guides",
@@ -125,6 +112,7 @@
                 "group": "Tools",
                 "pages": [
                   "examples/agents/search",
+                  "examples/agents/approval-required-tools",
                   "examples/agents/tts",
                   "examples/agents/image-generation"
                 ]
@@ -175,43 +163,233 @@
               "api-reference/introduction",
               "api-reference/authentication",
               "api-reference/errors",
-              "api-reference/pagination"
+              "api-reference/pagination",
+              "api-reference/files/upload"
             ]
           },
           {
-            "group": "Runs",
-            "pages": ["api-reference/runs/list", "api-reference/runs/upsert"]
+            "group": "Organizations",
+            "pages": [
+              "api-reference/me/list-orgs",
+              "api-reference/orgs/create",
+              "api-reference/orgs/get",
+              "api-reference/orgs/update",
+              {
+                "group": "Billing",
+                "pages": ["api-reference/orgs/billing/overage"]
+              },
+              {
+                "group": "Domains",
+                "pages": [
+                  "api-reference/orgs/domains/list",
+                  "api-reference/orgs/domains/create",
+                  "api-reference/orgs/domains/get",
+                  "api-reference/orgs/domains/delete"
+                ]
+              },
+              {
+                "group": "Notifications",
+                "pages": [
+                  "api-reference/orgs/notifications/list-rules",
+                  "api-reference/orgs/notifications/create-rule",
+                  "api-reference/orgs/notifications/delete-rule",
+                  "api-reference/orgs/notifications/list-channels",
+                  "api-reference/orgs/notifications/create-channel",
+                  "api-reference/orgs/notifications/delete-channel"
+                ]
+              },
+              {
+                "group": "Users",
+                "pages": [
+                  "api-reference/orgs/users/list",
+                  "api-reference/orgs/users/add",
+                  "api-reference/orgs/users/delete",
+                  "api-reference/orgs/users/update"
+                ]
+              }              
+            ]
           },
           {
-            "group": "Files",
-            "pages": ["api-reference/files/upload"]
+            "group": "Projects",
+            "pages": [
+              "api-reference/projects/list",
+              "api-reference/projects/create",
+              "api-reference/projects/get",
+              "api-reference/projects/update",
+              "api-reference/projects/delete",
+              "api-reference/projects/link-knowledge-base",
+              "api-reference/projects/unlink-knowledge-base",
+              {
+                "group": "Analytics",
+                "pages": [
+                  "api-reference/projects/analytics/credits",
+                  "api-reference/projects/analytics/usage",
+                  "api-reference/projects/analytics/users"
+                ]
+              },
+              {
+                "group": "Composer",
+                "tag": "Beta",
+                "pages": [
+                  "api-reference/projects/composer/prompt",
+                  "api-reference/projects/composer/plans-list",
+                  "api-reference/projects/composer/plans-single",
+                  "api-reference/projects/composer/list",
+                  "api-reference/projects/composer/single",
+                  "api-reference/projects/composer/stop"
+                ]
+              },
+              {
+                "group": "Connections",
+                "pages": [
+                  "api-reference/projects/connections/list",
+                  "api-reference/projects/connections/create",
+                  "api-reference/projects/connections/delete"
+                ]
+              },
+              {
+                "group": "Deployments",
+                "pages": [
+                  "api-reference/projects/deployments/list",
+                  "api-reference/projects/deployments/get"
+                ]
+              },
+              {
+                "group": "Environments",
+                "pages": [
+                  "api-reference/projects/environments/list",
+                  "api-reference/projects/environments/create",
+                  "api-reference/projects/environments/delete",
+                  "api-reference/projects/environments/update-branch",
+                  "api-reference/projects/environments/update-config",
+                  "api-reference/projects/environments/deploy",
+                  "api-reference/projects/environments/update-domain",
+                  "api-reference/projects/environments/get-metrics",
+                  "api-reference/projects/environments/stop"
+                ]
+              },
+              {
+                "group": "Previews",
+                "tag": "Beta",
+                "pages": [
+                  "api-reference/projects/previews/list",
+                  "api-reference/projects/previews/get",
+                  "api-reference/projects/previews/logs",
+                  "api-reference/projects/previews/start",
+                  "api-reference/projects/previews/stop"
+                ]
+              },
+              {
+                "group": "Runs",
+                "pages": [
+                  "api-reference/projects/runs/list",
+                  "api-reference/projects/runs/get",
+                  "api-reference/projects/runs/reactions-list",
+                  "api-reference/projects/runs/reactions-add"
+                ]
+              },
+              {
+                "group": "Notifications",
+                "pages": [
+                  "api-reference/projects/notifications/list-rules",
+                  "api-reference/projects/notifications/create-rule",
+                  "api-reference/projects/notifications/delete-rule"
+                ]
+              },
+              {
+                "group": "Users",
+                "pages": [
+                  "api-reference/projects/users/list",
+                  "api-reference/projects/users/add",
+                  "api-reference/projects/users/delete",
+                  "api-reference/projects/users/update"
+                ]
+              },
+              {
+                "group": "Variables",
+                "pages": [
+                  "api-reference/projects/vars/list",
+                  "api-reference/projects/vars/create",
+                  "api-reference/projects/vars/batch-create",
+                  "api-reference/projects/vars/get",
+                  "api-reference/projects/vars/delete",
+                  "api-reference/projects/vars/update"
+                ]
+              },
+              {
+                "group": "Workforce",
+                "pages": [
+                  "api-reference/projects/workforce/list",
+                  "api-reference/projects/workforce/create",
+                  "api-reference/projects/workforce/delete",
+                  "api-reference/projects/workforce/call"
+                ]
+              }
+            ]
           },
           {
             "group": "Knowledge Bases",
             "pages": [
+              "api-reference/knowledge-bases/list",
+              "api-reference/knowledge-bases/create",
+              "api-reference/knowledge-bases/get",
+              "api-reference/knowledge-bases/update",
+              "api-reference/knowledge-bases/delete",
+              "api-reference/knowledge-bases/query",
+              "api-reference/knowledge-bases/schema",
+              "api-reference/knowledge-bases/upload",
               {
-                "group": "Tables",
+                "group": "Backups",
                 "pages": [
-                  "api-reference/knowledge-bases/tables/upsert-records",
-                  "api-reference/knowledge-bases/tables/upsert-csv",
-                  "api-reference/knowledge-bases/tables/search"
+                  "api-reference/knowledge-bases/backups/list",
+                  "api-reference/knowledge-bases/backups/create",
+                  "api-reference/knowledge-bases/backups/get",
+                  "api-reference/knowledge-bases/restores/list",
+                  "api-reference/knowledge-bases/restores/create",
+                  "api-reference/knowledge-bases/restores/get"
                 ]
               },
               {
-                "group": "Embeddings",
+                "group": "Files",
                 "pages": [
-                  "api-reference/knowledge-bases/embeddings/list-models",
-                  "api-reference/knowledge-bases/embeddings/list",
-                  "api-reference/knowledge-bases/embeddings/create",
-                  "api-reference/knowledge-bases/embeddings/delete"
+                  "api-reference/knowledge-bases/files/list",
+                  "api-reference/knowledge-bases/files/add",
+                  "api-reference/knowledge-bases/files/create-dir",
+                  "api-reference/knowledge-bases/files/get",
+                  "api-reference/knowledge-bases/files/delete",
+                  {
+                    "group": "Chunks",
+                    "pages": [
+                      "api-reference/knowledge-bases/files/chunks/list",
+                      "api-reference/knowledge-bases/files/chunks/insert",
+                      "api-reference/knowledge-bases/files/chunks/get",
+                      "api-reference/knowledge-bases/files/chunks/update",
+                      "api-reference/knowledge-bases/files/chunks/delete"
+                    ]
+                  }
                 ]
-              },
+              }
+            ]
+          },
+          {
+            "group": "ACE",
+            "tag": "Pro",
+            "pages": [
+              "api-reference/ace/create-from-workforce",
+              "api-reference/ace/link",
+              "api-reference/ace/unlink",
+              "api-reference/ace/list-policies",
+              "api-reference/ace/list-context-vars",
+              "api-reference/ace/chat-completions",
+              "api-reference/ace/responses",
+              "api-reference/ace/messages",
               {
-                "group": "Indexes",
+                "group": "Jobs",
                 "pages": [
-                  "api-reference/knowledge-bases/indexes/list",
-                  "api-reference/knowledge-bases/indexes/create",
-                  "api-reference/knowledge-bases/indexes/delete"
+                  "api-reference/ace/jobs/list",
+                  "api-reference/ace/jobs/get",
+                  "api-reference/ace/jobs/cancel",
+                  "api-reference/ace/jobs/retry"
                 ]
               }
             ]
@@ -231,7 +409,11 @@
               "models/xai",
               "models/togetherai",
               "models/groq",
-              "models/fireworks"
+              "models/fireworks",
+              "models/xiaomi",
+              "models/byteplus",
+              "models/cerebras",
+              "models/sambanova"
             ]
           }
         ]
@@ -241,13 +423,12 @@
         "pages": [
           {
             "group": "MCP Integration",
-            "pages": [
-              "mcp-integration/index"
-            ]
+            "pages": ["mcp-integration/index"]
           },
           {
             "group": "Connecting Timbal",
             "pages": [
+              "mcp-integration/claude",
               "mcp-integration/cursor",
               "mcp-integration/vscode",
               "mcp-integration/windsurf",

@@ -152,6 +152,7 @@ class TestBashCommandExecution:
         assert output.error is None
         assert isinstance(output.output['stdout'], str)
 
+    @pytest.mark.integration
     @pytest.mark.asyncio
     async def test_tool_with_agent_not_matching_pattern(self):
         """Test agent with Bash tool when the command doesn't match allowed patterns."""

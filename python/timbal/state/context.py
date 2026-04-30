@@ -7,12 +7,20 @@ from uuid_extensions import uuid7
 
 from ..errors import SpanNotFound
 from .config import PlatformConfig
-from .tracing.providers import InMemoryTracingProvider, PlatformTracingProvider, TracingProvider
+from .tracing.providers import (
+    TRACING_UNSET,
+    InMemoryTracingProvider,
+    PlatformTracingProvider,
+    TracingProvider,
+    _TracingProviderUnset,
+)
 from .tracing.span import Span
 from .tracing.trace import Trace
 
+
 def _get_logger():
     import structlog
+
     return structlog.get_logger("timbal.state.context")
 
 
@@ -58,6 +66,17 @@ class RunContext(BaseModel):
         description="Platform configuration for the run.",
     )
 
+    tracing_provider: Any = Field(
+        default=TRACING_UNSET,
+        description=(
+            "Tracing provider to use for this run. "
+            "TRACING_UNSET (default) → auto-detect from env/config. "
+            "None → disable tracing entirely. "
+            "A TracingProvider subclass → use that provider."
+        ),
+        exclude=True,
+    )
+
     @model_validator(mode="before")
     @classmethod
     def normalize_platform_config(cls, data: Any) -> Any:
@@ -74,6 +93,48 @@ class RunContext(BaseModel):
     _trace: Trace = PrivateAttr()
     _tracing_provider: type[TracingProvider] = PrivateAttr()
     _session_data: dict[str, Any] | None = PrivateAttr(default=None)
+    _approval_decisions: dict[str, Any] = PrivateAttr(default_factory=dict)
+    """Active approval resolutions keyed by approval_id (values: ApprovalResolution).
+    Typed as ``Any`` to avoid an import cycle with ``..types.approval`` — the
+    invariant is enforced at write time by ``_normalize_approval_decisions``."""
+    _used_approval_ids: set[str] = PrivateAttr(default_factory=set)
+    """Approval IDs that matched a gate during this run. Used to warn about
+    unrecognized decisions (typos, stale IDs) at run completion."""
+
+    def pending_approvals(self) -> list[dict[str, Any]]:
+        """Return metadata for every span currently waiting on approval.
+
+        Useful when an OutputEvent's status is cancelled/approval_required and
+        the caller wants to enumerate every approval that needs a decision
+        before retrying the run with ``approval_decisions={...}``. Includes
+        ``expired``/``expired_at`` when the previous decision was rejected for
+        TTL reasons so a UI can flag stale approvals to the operator.
+
+        Tolerates both ``RunStatus`` instances and dicts, since traces loaded
+        from JSONL/SQLite providers carry status as a dict.
+        """
+        pending: list[dict[str, Any]] = []
+        for span in self._trace.values():
+            status = span.status
+            code = status.get("code") if isinstance(status, dict) else getattr(status, "code", None)
+            reason = status.get("reason") if isinstance(status, dict) else getattr(status, "reason", None)
+            if code == "cancelled" and reason == "approval_required":
+                approval = (span.metadata or {}).get("approval")
+                if approval and approval.get("id"):
+                    entry = {
+                        "approval_id": approval["id"],
+                        "path": span.path,
+                        "call_id": span.call_id,
+                        "prompt": approval.get("prompt"),
+                        "description": approval.get("description"),
+                        "metadata": approval.get("metadata", {}),
+                        "input": approval.get("input"),
+                    }
+                    if approval.get("expired"):
+                        entry["expired"] = True
+                        entry["expired_at"] = approval.get("expired_at")
+                    pending.append(entry)
+        return pending
 
     def model_post_init(self, __context: Any) -> None:
         """Initialize the RunContext after Pydantic model creation.
@@ -86,11 +147,28 @@ class RunContext(BaseModel):
         """
         from .config_loader import resolve_platform_config
 
+        self._trace = Trace()
+
+        # Explicit provider set on the runnable — skip auto-detection entirely.
+        # None means tracing is disabled; a class means use that provider.
+        if not isinstance(self.tracing_provider, _TracingProviderUnset):
+            if self.tracing_provider is not None and (
+                not isinstance(self.tracing_provider, type) or not issubclass(self.tracing_provider, TracingProvider)
+            ):
+                raise TypeError(
+                    f"tracing_provider must be a TracingProvider subclass, None, or TRACING_UNSET — "
+                    f"got {self.tracing_provider!r}. "
+                    f"Pass the class itself (e.g. MyProvider), not an instance. "
+                    f"Use MyProvider.configured(...) to set provider-specific options."
+                )
+            self._tracing_provider = self.tracing_provider
+            return
+
         self.platform_config = resolve_platform_config(self.platform_config)
 
-        self._trace = Trace()
         if self.platform_config:
-            if self.platform_config.subject and self.platform_config.subject.app_id:
+            use_platform_traces = self.platform_config.sync_traces_enabled is not False
+            if use_platform_traces and self.platform_config.subject and self.platform_config.subject.app_id:
                 _get_logger().info(
                     f"Platform configuration found (subject: {self.platform_config.subject}). "
                     "Using platform tracing provider.",
@@ -99,12 +177,19 @@ class RunContext(BaseModel):
                 )
                 self._tracing_provider = PlatformTracingProvider
                 return
-            _get_logger().warning(
-                "Platform configuration found but no valid subject. "
-                "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID environment variables to enable platform tracing.",
-                event_name="tracing_setup",
-                run_id=self.id,
-            )
+            if self.platform_config.sync_traces_enabled is False:
+                _get_logger().info(
+                    "Sync traces disabled (sync_traces_enabled=False). Using in-memory tracing provider.",
+                    event_name="tracing_setup",
+                    run_id=self.id,
+                )
+            else:
+                _get_logger().warning(
+                    "Platform configuration found but no valid subject. "
+                    "Please set TIMBAL_ORG_ID and TIMBAL_APP_ID environment variables to enable platform tracing.",
+                    event_name="tracing_setup",
+                    run_id=self.id,
+                )
         _get_logger().info(
             "Using in-memory tracing provider.",
             event_name="tracing_setup",
@@ -122,7 +207,7 @@ class RunContext(BaseModel):
         Returns:
             The parent run's tracing data, or None if this is a root run.
         """
-        if self.parent_id:
+        if self.parent_id and self._tracing_provider is not None:
             return await self._tracing_provider.get(self)
         return None
 
@@ -141,13 +226,14 @@ class RunContext(BaseModel):
 
             root.session = self._session_data
             root._session_dump = await dump(self._session_data)
-        await self._tracing_provider.put(self)
+        if self._tracing_provider is not None:
+            await self._tracing_provider.put(self)
 
     async def get_session(self) -> dict[str, Any]:
         """Get session data that persists across runs."""
         if self._session_data is None:
             self._session_data = {}
-            if self.parent_id:
+            if self.parent_id and self._tracing_provider is not None:
                 trace = await self._tracing_provider.get(self)
                 if trace is None or trace._root_call_id is None:
                     _get_logger().error(
@@ -229,6 +315,10 @@ class RunContext(BaseModel):
         that parent components can track cumulative usage from their children.
         Commonly used for tracking token usage, API calls, or other metrics.
 
+        Note: This method is safe under asyncio concurrency because it contains
+        no await points — the entire read-modify-write is atomic with respect
+        to the event loop. Do not add await points inside this method.
+
         Args:
             key: The usage metric key (e.g., 'tokens', 'api_calls')
             value: The value to add to the current usage for this key
@@ -240,8 +330,7 @@ class RunContext(BaseModel):
         while call_id:
             assert call_id in self._trace, f"RunContext.update_usage: Call ID {call_id} not found in trace."
             span = self._trace[call_id]
-            current_value = span.usage.get(key, 0)
-            span.usage[key] = current_value + value
+            span.usage[key] = span.usage.get(key, 0) + value
             call_id = span.parent_call_id
 
     def resolve_cwd(self, path: str | None = None) -> Path:

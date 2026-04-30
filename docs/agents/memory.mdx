@@ -99,3 +99,11 @@ This creates branching conversations:
 <Note>
 Each branch maintains independent memory from the branching point. Learn more about the underlying mechanisms in [Context](/core-concepts/context).
 </Note>
+
+## Memory Compaction
+
+For long-running conversations, memory can grow large enough to exceed the model's context window. Timbal provides built-in **memory compaction** strategies — such as keeping only the last N turns, truncating tool results, or summarizing older messages with an LLM — that fire automatically when context utilization crosses a configurable threshold.
+
+<Note>
+Memory compaction is a beta feature. See [Memory Compaction](/agents/memory-compaction) for the full reference.
+</Note>

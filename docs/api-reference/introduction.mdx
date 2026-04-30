@@ -5,6 +5,30 @@ description: "Introduction to the Timbal Platform API"
 
 The Timbal API is organized around [REST](https://en.wikipedia.org/wiki/REST). Our API has predictable resource-oriented URLs, accepts JSON-encoded request bodies, returns JSON-encoded responses, and uses standard HTTP response codes, authentication, and verbs.
 
-Unlike traditional APIs that offer a single _test mode_ or _sandbox_, the Timbal Platform empowers you with unlimited deployment flexibility through versioning. 
-Every resource you create automatically supports versioning, similar to Git's branching and commit system. You can create new versions of your agents, workflows, and knowledge bases, then seamlessly navigate between versions, roll back changes, or branch off in different directions. 
+Unlike traditional APIs that offer a single _test mode_ or _sandbox_, the Timbal Platform empowers you with unlimited deployment flexibility through versioning.
+Every resource you create automatically supports versioning, similar to Git's branching and commit system. You can create new versions of your agents, workflows, and knowledge bases, then seamlessly navigate between versions, roll back changes, or branch off in different directions.
 Each version of your agents, workflows, and knowledge bases can be configured with its own environment variables, permissions, and settings—allowing you to seamlessly manage development, staging, production, or any custom configuration that suits your deployment pipeline.
+
+## Organization scoping
+
+Most resources in Timbal are scoped to an **organization**, meaning their API path is prefixed with `/orgs/{org_id}`. Resources are then nested under their parent in a standard RESTful hierarchy. For example:
+
+```
+/orgs/{org_id}/projects
+/orgs/{org_id}/projects/{project_id}/envs
+/orgs/{org_id}/projects/{project_id}/envs/{env_id}/deploy
+/orgs/{org_id}/kbs/{kb_id}/embeddings
+```
+
+<Info>
+Not all endpoints are org-scoped. Some are user-scoped and live under `/me` (e.g. listing organizations or managing API keys). **`POST /files`** uploads a short-lived binary to object storage (Bearer auth, same as the rest of the API); it does **not** include `org_id` in the path—org context comes from the authenticated key.
+</Info>
+
+HTTP verbs follow REST conventions:
+
+| Verb     | Usage                        |
+| -------- | ---------------------------- |
+| `GET`    | Retrieve a resource or list  |
+| `POST`   | Create a resource            |
+| `PATCH`  | Partially update a resource  |
+| `DELETE` | Delete a resource            |

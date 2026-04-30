@@ -1,0 +1,6 @@
+---
+title: "List Files"
+openapi: "GET /orgs/{org_id}/k2/{kb_id}/files"
+---
+
+Both regular files and folders are returned. Folder entries have `content_type` set to `application/vnd.timbal.k2-directory` and `content_length` of `0`. Use the optional directory query parameter to scope results to a specific folder (e.g. `?directory=docs`).

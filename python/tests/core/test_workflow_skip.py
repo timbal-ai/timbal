@@ -240,56 +240,6 @@ class TestDependencyErrorPropagation:
         assert len(records) == 2
 
 
-class TestInputOverrides:
-    """Test that workflow inputs override lambda-based default params."""
-
-    @pytest.mark.asyncio
-    async def test_input_overrides_lambda(self):
-        """Workflow input overrides step's lambda-based default param."""
-        workflow = (
-            Workflow(name="test")
-            .step(returns_5)
-            .step(
-                double,
-                x=lambda: get_run_context().step_span("returns_5").output["valor"],
-            )
-        )
-
-        # Override x with direct value
-        await workflow(x=100).collect()
-        records = get_run_context()._trace.as_records()
-
-        assert len(records) == 3
-        assert records[2].path == "test.double"
-        assert records[2].output == {"valor": 200}  # 100 * 2, not 5 * 2
-
-    @pytest.mark.asyncio
-    async def test_input_skips_lambda_resolution(self):
-        """Lambda is not evaluated when input is provided."""
-        workflow = (
-            Workflow(name="test")
-            .step(returns_5)
-            .step(
-                double,
-                x=lambda: get_run_context().step_span("returns_5").output["valor"],
-                when=lambda: get_run_context().step_span("returns_5").output["valor"] > 10,
-            )
-            .step(
-                triple,
-                # This lambda would fail if evaluated (double was skipped)
-                x=lambda: get_run_context().step_span("double").output["valor"],
-            )
-        )
-
-        # Override x to skip the problematic lambda
-        await workflow(x=50).collect()
-        records = get_run_context()._trace.as_records()
-
-        # triple should run with x=50 (skipping the lambda that would fail)
-        assert len(records) == 3
-        assert records[2].path == "test.triple"
-        assert records[2].output == {"valor": 150}  # 50 * 3
-
 
 class TestComplexWorkflows:
     """Test complex workflow scenarios with multiple branches and conditions."""

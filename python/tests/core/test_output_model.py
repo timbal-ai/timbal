@@ -32,6 +32,7 @@ class TestOutputModel:
         agent = Agent(name="agent", model="openai/gpt-4o-mini", output_model=MyOutput)
         assert agent.return_model is MyOutput
 
+    @pytest.mark.integration
     @pytest.mark.parametrize("model,max_tokens", MODELS)
     async def test_simple_output_model(self, model: str, max_tokens: int | None):
         """Test that the force_output_model tool is properly created and used."""
@@ -52,6 +53,7 @@ class TestOutputModel:
         assert isinstance(response_obj.confidence, float)
         assert 0.0 <= response_obj.confidence <= 1.0
 
+    @pytest.mark.integration
     @pytest.mark.parametrize("model,max_tokens", MODELS)
     async def test_output_model_with_optional_fields(self, model: str, max_tokens: int | None):
         """Test output model with optional fields that can be None."""
@@ -85,6 +87,7 @@ class TestOutputModel:
         assert obj2.required_field == "complete"
         # LLM should populate the optional fields as requested
 
+    @pytest.mark.integration
     @pytest.mark.parametrize("model,max_tokens", MODELS)
     async def test_complex_nested_model_with_validation(self, model: str, max_tokens: int | None):
         """Test complex nested model with multiple validation constraints."""
@@ -130,6 +133,7 @@ class TestOutputModel:
         assert all(isinstance(a, Assignee) for a in task.assignees)
         assert 1 <= len(task.tags) <= 10
 
+    @pytest.mark.integration
     @pytest.mark.parametrize("model,max_tokens", MODELS)
     async def test_forced_output_despite_off_topic_prompt(self, model: str, max_tokens: int | None):
         """Test that output model is ALWAYS returned, even when prompted to do something else entirely."""
@@ -155,6 +159,7 @@ class TestOutputModel:
         assert isinstance(result.sentiment, str)
         assert isinstance(result.key_points, list)
 
+    @pytest.mark.integration
     @pytest.mark.parametrize("model,max_tokens", MODELS)
     async def test_output_model_with_contradictory_instructions(self, model: str, max_tokens: int | None):
         """Test that structured output is always returned even with contradictory instructions."""
@@ -179,6 +184,7 @@ class TestOutputModel:
         assert isinstance(result.word_count, int)
         assert result.word_count >= 0
 
+    @pytest.mark.integration
     @pytest.mark.parametrize("model,max_tokens", MODELS)
     async def test_deeply_nested_optional_model(self, model: str, max_tokens: int | None):
         """Test deeply nested model with optional fields at various levels."""
@@ -231,6 +237,7 @@ class TestOutputModel:
         if person.company:
             assert isinstance(person.company, Company)
 
+    @pytest.mark.integration
     @pytest.mark.parametrize("model,max_tokens", MODELS)
     async def test_output_model_with_defaults(self, model: str, max_tokens: int | None):
         """Test output model with default values for optional fields."""
@@ -257,6 +264,7 @@ class TestOutputModel:
         assert isinstance(config.enabled, bool)
         assert isinstance(config.tags, list)
 
+    @pytest.mark.integration
     @pytest.mark.parametrize("model,max_tokens", MODELS)
     async def test_output_model_with_completely_unrelated_prompt(self, model: str, max_tokens: int | None):
         """Test that structured output is returned even when prompt has zero relation to the model.

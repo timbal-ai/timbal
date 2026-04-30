@@ -11,6 +11,8 @@ Do not rely on this module's interface in external code.
 
 import asyncio
 import os
+import random
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import structlog
@@ -27,12 +29,56 @@ from openai import RateLimitError as OpenAIRateLimitError  # APIError as OpenAIA
 from pydantic import BaseModel, SecretStr
 
 from ..errors import APIKeyNotFoundError
-from ..state import get_call_id, get_or_create_run_context
+from ..state import get_call_id, get_or_create_run_context, set_billing_id
 from ..types.message import Message
 from ..utils import transform_schema
 from .runnable import Runnable
 
 logger = structlog.get_logger("timbal.core.llm_router")
+MAX_RETRY_DELAY = 30.0
+
+# Module-level client cache keyed by (client_class, api_key, base_url, provider).
+# Reusing clients preserves the underlying httpx connection pool, avoiding a
+# fresh TCP+TLS handshake on every LLM call (~200-300ms saved per request).
+# Per-request tracing headers (run_id, call_id) are passed via extra_headers
+# on each individual .create() call instead.
+# Concurrency-safe: all coroutines run on one thread in asyncio; the GIL
+# ensures check-and-assign is atomic (no await between the if and the write).
+_CLIENT_CACHE: dict[tuple, AsyncOpenAI | AsyncAnthropic] = {}
+
+# Shared httpx client for async file loading. Reused across LLM calls to
+# preserve connection pools to file origins (CDNs, S3, etc.). Lazy-initialized
+# on first use — never created if the conversation has no files.
+# Loop-aware: httpx.AsyncClient is bound to the event loop at creation time.
+# When the loop changes (e.g. between pytest-asyncio tests with per-function
+# loop scope), the old client becomes unusable ("Event loop is closed").
+# We detect this and transparently recreate the client.
+_FILE_CLIENT: Any = None
+_FILE_CLIENT_LOOP: Any = None
+
+
+def _get_file_client() -> Any:
+    global _FILE_CLIENT, _FILE_CLIENT_LOOP
+    loop = asyncio.get_running_loop()
+    if _FILE_CLIENT is not None and (_FILE_CLIENT.is_closed or _FILE_CLIENT_LOOP is not loop):
+        _FILE_CLIENT = None
+    if _FILE_CLIENT is None:
+        import httpx
+
+        _FILE_CLIENT = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+        _FILE_CLIENT_LOOP = loop
+    return _FILE_CLIENT
+
+
+def _get_client(cls: type, api_key: str, base_url: str | None, provider: str) -> AsyncOpenAI | AsyncAnthropic:
+    cache_key = (cls, api_key, base_url, provider)
+    if cache_key not in _CLIENT_CACHE:
+        kwargs: dict[str, Any] = {"api_key": api_key, "default_headers": {"x-provider": provider}}
+        if base_url:
+            kwargs["base_url"] = base_url
+        _CLIENT_CACHE[cache_key] = cls(**kwargs)
+    return _CLIENT_CACHE[cache_key]
+
 
 TIMBAL_OPENAI_API = os.getenv("TIMBAL_OPENAI_API", "responses")
 if TIMBAL_OPENAI_API != "responses":
@@ -41,117 +87,125 @@ if TIMBAL_OPENAI_API != "responses":
         "which should be preferred for all new development. Set TIMBAL_OPENAI_API=responses to switch."
     )
 
-# Model type with provider prefixes
-Model = Literal[
-    "openai/gpt-5.4",
-    "openai/gpt-5.3-chat-latest",
-    "openai/gpt-5.2",
-    "openai/gpt-5.2-pro",
-    "openai/gpt-5.1",
-    "openai/gpt-5.1-mini",
-    "openai/gpt-5.1-codex",
-    "openai/gpt-5",
-    "openai/gpt-5-mini",
-    "openai/gpt-5-nano",
-    "openai/gpt-4.1",
-    "openai/gpt-4.1-mini",
-    "openai/gpt-4.1-nano",
-    "openai/gpt-4o",
-    "openai/gpt-4o-mini",
-    "openai/o4-mini",
-    "openai/o4-mini-deep-research",
-    "openai/o3",
-    "openai/o3-mini",
-    "openai/o3-pro",
-    "openai/o3-deep-research",
-    "openai/o1",
-    "openai/o1-mini",
-    "anthropic/claude-opus-4-6",
-    "anthropic/claude-opus-4-5",
-    "anthropic/claude-opus-4-1",
-    "anthropic/claude-opus-4-0",
-    "anthropic/claude-sonnet-4-6",
-    "anthropic/claude-sonnet-4-5",
-    "anthropic/claude-sonnet-4-0",
-    "anthropic/claude-haiku-4-5",
-    "anthropic/claude-3-7-sonnet-latest",
-    "anthropic/claude-3-5-haiku-latest",
-    "anthropic/claude-3-opus-latest",
-    "anthropic/claude-3-haiku-20240307",
-    "togetherai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
-    "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    "togetherai/meta-llama/Llama-3.2-3B-Instruct-Turbo",
-    "togetherai/Qwen/Qwen3.5-397B-A17B",
-    "togetherai/Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
-    "togetherai/Qwen/Qwen3-235B-A22B-Thinking-2507",
-    "togetherai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
-    "togetherai/Qwen/Qwen3-Coder-Next-FP8",
-    "togetherai/Qwen/Qwen3-Next-80B-A3B-Instruct",
-    "togetherai/Qwen/Qwen2.5-7B-Instruct-Turbo",
-    "togetherai/deepseek-ai/DeepSeek-V3.1",
-    "togetherai/deepseek-ai/DeepSeek-R1",
-    "togetherai/moonshotai/Kimi-K2.5",
-    "togetherai/moonshotai/Kimi-K2-Instruct-0905",
-    "togetherai/moonshotai/Kimi-K2-Thinking",
-    "togetherai/MiniMaxAI/MiniMax-M2.5",
-    "togetherai/zai-org/GLM-5",
-    "togetherai/zai-org/GLM-4.7",
-    "togetherai/openai/gpt-oss-120b",
-    "togetherai/google/gemma-3n-E4B-it",
-    "togetherai/google/gemma-3-27b-it",
-    "togetherai/deepcogito/cogito-v2-1-671b",
-    "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",
-    "google/gemini-3.1-pro-preview",
-    "google/gemini-3.1-flash-lite-preview",
-    "google/gemini-3-flash-preview",
-    "google/gemini-2.5-pro",
-    "google/gemini-2.5-pro-preview-tts",
-    "google/gemini-2.5-flash",
-    "google/gemini-2.5-flash-lite",
-    "google/gemini-2.5-flash-native-audio-preview-12-2025",
-    "google/gemini-2.5-flash-image",
-    "google/gemini-2.5-flash-preview-tts",
-    "xai/grok-4",
-    "xai/grok-4-fast-reasoning",
-    "xai/grok-4-fast-non-reasoning",
-    "xai/grok-4-1-fast-reasoning",
-    "xai/grok-4-1-fast-non-reasoning",
-    "groq/meta-llama/llama-4-scout-17b-16e-instruct",
-    "groq/llama-3.3-70b-versatile",
-    "groq/llama-3.1-8b-instant",
-    "groq/qwen/qwen3-32b",
-    "groq/openai/gpt-oss-120b",
-    "groq/openai/gpt-oss-20b",
-    "groq/moonshotai/kimi-k2-instruct-0905",
-    "fireworks/accounts/fireworks/models/llama4-maverick-instruct-basic",
-    "fireworks/accounts/fireworks/models/llama4-scout-instruct-basic",
-    "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",
-    "fireworks/accounts/fireworks/models/llama-v3p1-405b-instruct",
-    "fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct",
-    "fireworks/accounts/fireworks/models/llama-v3p1-8b-instruct",
-    "fireworks/accounts/fireworks/models/qwen3-coder-480b-a35b-instruct",
-    "fireworks/accounts/fireworks/models/qwen3-235b-a22b",
-    "fireworks/accounts/fireworks/models/qwen3-32b",
-    "fireworks/accounts/fireworks/models/qwen3-8b",
-    "fireworks/accounts/fireworks/models/qwen2p5-72b-instruct",
-    "fireworks/accounts/fireworks/models/deepseek-v3p2",
-    "fireworks/accounts/fireworks/models/deepseek-v3p1",
-    "fireworks/accounts/fireworks/models/deepseek-r1",
-    "fireworks/accounts/fireworks/models/deepseek-r1-0528",
-    "fireworks/accounts/fireworks/models/deepseek-r1-distill-llama-70b",
-    "fireworks/accounts/fireworks/models/kimi-k2p5",
-    "fireworks/accounts/fireworks/models/kimi-k2-instruct-0905",
-    "fireworks/accounts/fireworks/models/kimi-k2-thinking",
-    "fireworks/accounts/fireworks/models/minimax-m2p5",
-    "fireworks/accounts/fireworks/models/gpt-oss-120b",
-    "fireworks/accounts/fireworks/models/gpt-oss-20b",
-    "fireworks/accounts/fireworks/models/mistral-large-3-fp8",
-    "fireworks/accounts/fireworks/models/mistral-small-24b-instruct-2501",
-    "fireworks/accounts/fireworks/models/gemma-3-27b-it",
-    "fireworks/accounts/fireworks/models/glm-5",
-    "fireworks/accounts/fireworks/models/glm-4p5",
-    "fireworks/accounts/fireworks/models/qwq-32b",
-]
+
+# ---------------------------------------------------------------------------
+# Provider configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderConfig:
+    """Static configuration for a single LLM provider."""
+
+    env_key: str
+    """Environment variable name for the API key (e.g. ``OPENAI_API_KEY``)."""
+
+    default_base_url: str | None = None
+    """Default API base URL.  ``None`` uses the SDK default."""
+
+    proxy_name: str = "openai-completions"
+    """Platform proxy path segment (e.g. ``openai-responses``, ``anthropic``)."""
+
+    proxy_suffix: str = "/v1"
+    """Appended to the proxy URL.  Anthropic uses ``""``."""
+
+    client_type: Literal["openai", "anthropic"] = "openai"
+    """Which SDK client to create."""
+
+    flatten_text_content: bool = False
+    """Flatten text-only content arrays to plain strings for providers with incomplete Chat Completions support."""
+
+    supports_stream_options: bool = True
+    """Whether the provider supports ``stream_options`` in Chat Completions."""
+
+
+_PROVIDERS: dict[str, _ProviderConfig] = {
+    "openai": _ProviderConfig(
+        env_key="OPENAI_API_KEY",
+        proxy_name="openai-responses" if TIMBAL_OPENAI_API == "responses" else "openai-completions",
+    ),
+    "anthropic": _ProviderConfig(
+        env_key="ANTHROPIC_API_KEY",
+        proxy_name="anthropic",
+        proxy_suffix="",
+        client_type="anthropic",
+    ),
+    "google": _ProviderConfig(
+        env_key="GEMINI_API_KEY",
+        default_base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    ),
+    "togetherai": _ProviderConfig(
+        env_key="TOGETHER_API_KEY",
+        default_base_url="https://api.together.xyz/v1/",
+    ),
+    "xai": _ProviderConfig(
+        env_key="XAI_API_KEY",
+        default_base_url="https://api.x.ai/v1",
+        proxy_name="openai-responses",
+    ),
+    "groq": _ProviderConfig(
+        env_key="GROQ_API_KEY",
+        default_base_url="https://api.groq.com/openai/v1",
+    ),
+    "fireworks": _ProviderConfig(
+        env_key="FIREWORKS_API_KEY",
+        default_base_url="https://api.fireworks.ai/inference/v1",
+    ),
+    "byteplus": _ProviderConfig(
+        env_key="BYTEPLUS_API_KEY",
+        default_base_url="https://ark.ap-southeast.bytepluses.com/api/v3",
+    ),
+    "xiaomi": _ProviderConfig(
+        env_key="XIAOMI_API_KEY",
+        default_base_url="https://api.xiaomimimo.com/v1",
+        flatten_text_content=True,
+        supports_stream_options=False,
+    ),
+    "cerebras": _ProviderConfig(
+        env_key="CEREBRAS_API_KEY",
+        default_base_url="https://api.cerebras.ai/v1",
+    ),
+    "sambanova": _ProviderConfig(
+        env_key="SAMBANOVA_API_KEY",
+        default_base_url="https://api.sambanova.ai/v1",
+        flatten_text_content=True,
+    ),
+}
+
+
+def _resolve_client(
+    provider: str,
+    config: _ProviderConfig,
+    api_key: str | None,
+    base_url: str | None,
+    run_context: Any,
+) -> tuple[AsyncOpenAI | AsyncAnthropic, str | None]:
+    """Resolve API key, base URL, and return the appropriate SDK client.
+
+    Returns:
+        (client, resolved_base_url) — base_url may have been updated for platform proxies.
+    """
+    if not api_key:
+        api_key = os.getenv(config.env_key)
+    if not api_key:
+        if run_context.platform_config is not None and run_context.platform_config.subject is not None:
+            api_key = run_context.platform_config.auth.header_value
+            base_url = (
+                f"https://{run_context.platform_config.host}"
+                f"/orgs/{run_context.platform_config.subject.org_id}"
+                f"/proxies/{config.proxy_name}{config.proxy_suffix}"
+            )
+    if not api_key:
+        raise APIKeyNotFoundError(f"{config.env_key} not found.")
+
+    if config.client_type == "anthropic":
+        return _get_client(AsyncAnthropic, api_key, base_url, "anthropic"), base_url
+    return _get_client(AsyncOpenAI, api_key, base_url or config.default_base_url, provider), base_url
+
+
+# ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
 
 
 async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, context: str):
@@ -226,9 +280,11 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
             elif isinstance(e, (OpenAIAPIStatusError, AnthropicAPIStatusError)):
                 # Check status code for retryable HTTP errors
                 status_code = getattr(e, "status_code", None)
-                if status_code in [500, 502, 503, 504]:
+                if status_code in [429, 500, 502, 503, 504]:
                     is_retryable = True
-                    if status_code == 503:
+                    if status_code == 429:
+                        error_type = "rate_limit"
+                    elif status_code == 503:
                         error_type = "service_unavailable"
                     else:
                         error_type = f"server_error_{status_code}"
@@ -243,7 +299,11 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
 
         # Retry logic for retryable errors
         if attempt < max_retries:
-            delay = retry_delay * (2**attempt)
+            cap = min(retry_delay * (2**attempt), MAX_RETRY_DELAY)
+            delay = random.uniform(0, cap)
+            retry_after = _retry_after_seconds(last_error)
+            if retry_after is not None:
+                delay = max(delay, retry_after)
             logger.warning(
                 "Retryable error from LLM provider, retrying...",
                 context=context,
@@ -263,8 +323,29 @@ async def _retry_on_error(async_gen_func, max_retries: int, retry_delay: float, 
             raise last_error
 
 
+def _retry_after_seconds(exc: BaseException | None) -> float | None:
+    if exc is None:
+        return None
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    retry_after = headers.get("Retry-After")
+    if retry_after is None:
+        return None
+    try:
+        return float(retry_after)
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Main router
+# ---------------------------------------------------------------------------
+
+
 async def _llm_router(
-    model: Model | str,
+    model: Any,  # Model | str | TestModel — typed as Any so Pydantic doesn't reject TestModel instances
     system_prompt: str | None = None,
     messages: list[Message] | None = None,
     tools: list[Runnable] | None = None,
@@ -286,161 +367,87 @@ async def _llm_router(
     messages = messages or []
     provider_params = provider_params or {}
 
+    if getattr(model, "__timbal_fallback_model__", False):
+        async for chunk in model.route(
+            _llm_router,
+            system_prompt=system_prompt,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            output_model=output_model,
+            base_url=base_url,
+            api_key=api_key,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            provider_params=provider_params,
+        ):
+            yield chunk  # type: ignore[return-type]
+        return
+
     # Convert SecretStr to str if needed
     if isinstance(base_url, SecretStr):
         base_url = base_url.get_secret_value()
     if isinstance(api_key, SecretStr):
         api_key = api_key.get_secret_value()
 
+    # TestModel short-circuit — delegates to model.stream() with no network call.
+    if hasattr(model, "stream"):
+        async for chunk in model.stream(messages=messages):
+            yield chunk  # type: ignore[return-type]
+        return
+
     if "/" not in model:
         raise ValueError("Model must be in format 'provider/model_name'")
 
+    set_billing_id(model)
     provider, model_name = model.split("/", 1)
+
+    config = _PROVIDERS.get(provider)
+    if config is None:
+        raise ValueError(f"Unsupported provider: {provider}")
+
+    # Anthropic requires max_tokens
+    if provider == "anthropic" and not max_tokens:
+        raise ValueError("'max_tokens' is required for claude models.")
 
     run_context = get_or_create_run_context()
     call_id = get_call_id()
-    default_headers = {
+    # Per-request headers: change every call, so passed via extra_headers on each .create().
+    request_headers: dict[str, str] = {
         "x-timbal-run-id": run_context.id,
         "x-timbal-call-id": call_id,
     }
     if run_context.platform_config and run_context.platform_config.subject:
         if run_context.platform_config.subject.app_id:
-            default_headers["x-timbal-app-id"] = run_context.platform_config.subject.app_id
+            request_headers["x-timbal-app-id"] = run_context.platform_config.subject.app_id
         if run_context.platform_config.subject.version_id:
-            default_headers["x-timbal-version-id"] = run_context.platform_config.subject.version_id
+            request_headers["x-timbal-version-id"] = run_context.platform_config.subject.version_id
 
-    if provider == "openai":
-        default_headers["x-provider"] = "openai"
-        if not api_key:
-            api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
-                api_key = run_context.platform_config.auth.header_value
-                proxy_api = "openai-responses"
-                if TIMBAL_OPENAI_API != "responses":
-                    proxy_api = "openai-completions"
-                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/{proxy_api}/v1"
-        if not api_key:
-            raise APIKeyNotFoundError("OPENAI_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(api_key=api_key, default_headers=default_headers)
+    client, base_url = _resolve_client(provider, config, api_key, base_url, run_context)
 
-    elif provider == "anthropic":
-        default_headers["x-provider"] = "anthropic"
-        if not max_tokens:
-            raise ValueError("'max_tokens' is required for claude models.")
-        if not api_key:
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
-            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
-                api_key = run_context.platform_config.auth.header_value
-                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/anthropic"
-        if not api_key:
-            raise APIKeyNotFoundError("ANTHROPIC_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncAnthropic(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncAnthropic(api_key=api_key, default_headers=default_headers)
+    # Eagerly load all unloaded file content (async, concurrent) before
+    # serialization.  This scan lives here — not inside to_*_input() — because:
+    #   1. gather() needs the full list upfront for concurrent downloads.
+    #   2. to_*_input() stays sync and pure (format conversion, no I/O).
+    # The double iteration (scan here + serialize in to_*_input) is intentional:
+    # content arrays are small (1-5 items) and the cost is negligible vs the
+    # network calls that follow.
+    from ..types.content import FileContent
 
-    elif provider == "google":
-        default_headers["x-provider"] = "google"
-        if not api_key:
-            api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
-                api_key = run_context.platform_config.auth.header_value
-                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
-        if not api_key:
-            raise APIKeyNotFoundError("GEMINI_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(
-                api_key=api_key,
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                default_headers=default_headers,
-            )
-
-    elif provider == "togetherai":
-        default_headers["x-provider"] = "togetherai"
-        if not api_key:
-            api_key = os.getenv("TOGETHER_API_KEY")
-        if not api_key:
-            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
-                api_key = run_context.platform_config.auth.header_value
-                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
-        if not api_key:
-            raise APIKeyNotFoundError("TOGETHER_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(
-                api_key=api_key, base_url="https://api.together.xyz/v1/", default_headers=default_headers
-            )
-
-    elif provider == "xai":
-        default_headers["x-provider"] = "xai"
-        if not api_key:
-            api_key = os.getenv("XAI_API_KEY")
-        if not api_key:
-            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
-                api_key = run_context.platform_config.auth.header_value
-                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
-        if not api_key:
-            raise APIKeyNotFoundError("XAI_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(api_key=api_key, base_url="https://api.x.ai/v1", default_headers=default_headers)
-
-    elif provider == "groq":
-        default_headers["x-provider"] = "groq"
-        if not api_key:
-            api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
-                api_key = run_context.platform_config.auth.header_value
-                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
-        if not api_key:
-            raise APIKeyNotFoundError("GROQ_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(
-                api_key=api_key, base_url="https://api.groq.com/openai/v1", default_headers=default_headers
-            )
-
-    elif provider == "fireworks":
-        default_headers["x-provider"] = "fireworks"
-        if not api_key:
-            api_key = os.getenv("FIREWORKS_API_KEY")
-        if not api_key:
-            if run_context.platform_config is not None and run_context.platform_config.subject is not None:
-                api_key = run_context.platform_config.auth.header_value
-                base_url = f"https://{run_context.platform_config.host}/orgs/{run_context.platform_config.subject.org_id}/proxies/openai-completions/v1"
-        if not api_key:
-            raise APIKeyNotFoundError("FIREWORKS_API_KEY not found.")
-        if base_url is not None:
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
-        else:
-            client = AsyncOpenAI(
-                api_key=api_key, base_url="https://api.fireworks.ai/inference/v1", default_headers=default_headers
-            )
-
-    else:
-        raise ValueError(f"Unsupported provider: {provider}")
+    _unloaded_files = [
+        c.file
+        for m in messages
+        for c in m.content
+        if isinstance(c, FileContent) and object.__getattribute__(c.file, "__fileobj__") is None
+    ]
+    if _unloaded_files:
+        await asyncio.gather(*(f.load(client=_get_file_client()) for f in _unloaded_files))
 
     if provider == "anthropic":
-        anthropic_messages = []
-        for message in messages:
-            anthropic_message = message.to_anthropic_input()
-            anthropic_messages.append(anthropic_message)
-
         anthropic_kwargs = {
             "model": model_name,
-            "messages": anthropic_messages,
+            "messages": [message.to_anthropic_input() for message in messages],
             "max_tokens": max_tokens,
             "stream": True,
         }
@@ -449,38 +456,31 @@ async def _llm_router(
             anthropic_kwargs["system"] = system_prompt
 
         if tools:
-            anthropic_tools = []
-            for tool in tools:
-                anthropic_tools.append(tool.anthropic_schema)
+            anthropic_tools = [tool.anthropic_schema for tool in tools]
             if anthropic_tools:
                 anthropic_kwargs["tools"] = anthropic_tools
 
         if temperature is not None:
             anthropic_kwargs["temperature"] = temperature
 
-        # Forward any extra provider-specific params (e.g. top_p, top_k, stop_sequences)
         anthropic_kwargs.update(provider_params)
 
         async def _create_stream():
             if output_model is not None:
-                # TODO: Review when Anthropic promotes structured outputs to stable API.
-                # Currently using beta endpoint because structured outputs (output_format with json_schema)
-                # is only available via the beta API with the "structured-outputs-2025-11-13" feature flag.
-                # See: https://platform.claude.com/docs/en/build-with-claude/structured-outputs
-                anthropic_kwargs["output_format"] = {
-                    "type": "json_schema",
-                    "schema": transform_schema(output_model),
+                anthropic_kwargs["output_config"] = {
+                    "format": {
+                        "type": "json_schema",
+                        "schema": transform_schema(output_model),
+                    }
                 }
-                res = await client.beta.messages.create(betas=["structured-outputs-2025-11-13"], **anthropic_kwargs)  # type: ignore[attr-defined]
-            else:
-                res = await client.messages.create(**anthropic_kwargs)  # type: ignore[attr-defined]
+            res = await client.messages.create(extra_headers=request_headers, **anthropic_kwargs)  # type: ignore[attr-defined]
             async for chunk in res:
                 yield chunk
 
         async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, "Anthropic"):
             yield res_chunk  # type: ignore[return-type]
 
-    elif provider == "openai" and TIMBAL_OPENAI_API == "responses":
+    elif provider in ("openai", "xai") and TIMBAL_OPENAI_API == "responses":
         responses_kwargs = {
             "model": model_name,
             "stream": True,
@@ -515,18 +515,17 @@ async def _llm_router(
                 }
             }
 
-        # Forward any extra provider-specific params (e.g. top_p, service_tier)
         responses_kwargs.update(provider_params)
 
         async def _create_stream():
-            res = await client.responses.create(**responses_kwargs)  # type: ignore[attr-defined]
+            res = await client.responses.create(extra_headers=request_headers, **responses_kwargs)  # type: ignore[attr-defined]
             async for chunk in res:
                 yield chunk
 
         async for res_chunk in _retry_on_error(_create_stream, max_retries, retry_delay, "OpenAI Responses"):
             yield res_chunk  # type: ignore[return-type]
 
-    # Try with OpenAI Chat Completions compatible providers
+    # OpenAI Chat Completions compatible providers
     else:
         chat_completions_messages = []
         if system_prompt:
@@ -535,17 +534,27 @@ async def _llm_router(
             chat_completions_message = message.to_openai_chat_completions_input()
             chat_completions_messages.append(chat_completions_message)
 
-        chat_completions_kwargs = {
+        # Some providers have incomplete OpenAI chat completions support.
+        # Flatten text-only content arrays to plain strings for compatibility.
+        if config.flatten_text_content:
+            for msg in chat_completions_messages:
+                content = msg.get("content")
+                if isinstance(content, list) and all(
+                    isinstance(item, dict) and item.get("type") == "text" for item in content
+                ):
+                    msg["content"] = "\n".join(item["text"] for item in content)
+
+        chat_completions_kwargs: dict[str, Any] = {
             "model": model_name,
             "messages": chat_completions_messages,
             "stream": True,
-            "stream_options": {"include_usage": True},
         }
 
+        if config.supports_stream_options:
+            chat_completions_kwargs["stream_options"] = {"include_usage": True}
+
         if tools:
-            chat_completions_tools = []
-            for tool in tools:
-                chat_completions_tools.append(tool.openai_chat_completions_schema)
+            chat_completions_tools = [tool.openai_chat_completions_schema for tool in tools]
             if chat_completions_tools:
                 chat_completions_kwargs["tools"] = chat_completions_tools
 
@@ -565,11 +574,10 @@ async def _llm_router(
                 },
             }
 
-        # Forward any extra provider-specific params (e.g. top_p, frequency_penalty, logprobs, stop)
         chat_completions_kwargs.update(provider_params)
 
         async def _create_stream():
-            res = await client.chat.completions.create(**chat_completions_kwargs)  # type: ignore[attr-defined]
+            res = await client.chat.completions.create(extra_headers=request_headers, **chat_completions_kwargs)  # type: ignore[attr-defined]
             async for chunk in res:
                 yield chunk
 

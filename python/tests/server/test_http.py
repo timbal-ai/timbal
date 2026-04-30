@@ -284,6 +284,12 @@ class TestServerLifecycle:
         assert hasattr(runnable, "return_model_schema")
         assert callable(runnable)
 
+    def test_create_app_raises_without_env_var(self, monkeypatch):
+        """Cover line 47: RuntimeError when TIMBAL_RUNNABLE is not set."""
+        monkeypatch.delenv("TIMBAL_RUNNABLE", raising=False)
+        with pytest.raises(RuntimeError, match="TIMBAL_RUNNABLE"):
+            create_app()
+
     def test_ngrok_env_var_detection(self):
         """Test ngrok integration environment variable detection."""
         # Test that env var detection works correctly

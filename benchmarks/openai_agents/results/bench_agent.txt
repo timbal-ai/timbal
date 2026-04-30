@@ -1,0 +1,219 @@
+
+[1m================================================================================================[0m
+[1m  Timbal vs OpenAI Agents SDK - agent loop benchmark[0m
+  100 iters | burst {1: 50, 2: 30, 3: 40} | 100 mem | 200 throughput ops
+  Timbal: TestModel offline | OpenAI Agents: custom Model offline
+  OpenAI Agents SDK found - will measure tracing disabled + local tracing processor
+[1m================================================================================================[0m
+
+  [2mSpot-checking correctness (Scenario 1)...[0m
+  Timbal: OK  |  OAI: OK
+
+  [2m[Scenario 1][0m
+    Timbal latency... p50=747.8 us
+    Timbal memory... 57 KB peak
+    Timbal burst (50 concurrent)... p50=17.44 ms
+    Timbal burst memory (50 concurrent)... 1876 KB peak
+    Timbal throughput conc=1... 1502/s
+    Timbal throughput conc=10... 1710/s
+    Timbal throughput conc=50... 1816/s
+    OAI (bare) latency... p50=1.53 ms
+    OAI (bare) memory... 118 KB peak
+    OAI (bare) burst (50 concurrent)... p50=22.86 ms
+    OAI (bare) burst memory (50 concurrent)... 1810 KB peak
+    OAI (bare) throughput conc=1... 462/s
+    OAI (bare) throughput conc=10... 1474/s
+    OAI (bare) throughput conc=50... 1722/s
+    OAI + tracing latency... p50=1.71 ms
+    OAI + tracing memory... 153 KB peak
+    OAI + tracing burst (50 concurrent)... p50=26.72 ms
+    OAI + tracing burst memory (50 concurrent)... 1932 KB peak
+    OAI + tracing throughput conc=1... 573/s
+    OAI + tracing throughput conc=10... 1357/s
+    OAI + tracing throughput conc=50... 1650/s
+
+  [2m[Scenario 2][0m
+    Timbal latency... p50=716.0 us
+    Timbal memory... 98 KB peak
+    Timbal burst (30 concurrent)... p50=29.09 ms
+    Timbal burst memory (30 concurrent)... 2085 KB peak
+    Timbal throughput conc=1... 647/s
+    Timbal throughput conc=10... 760/s
+    Timbal throughput conc=50... 812/s
+    OAI (bare) latency... p50=3.33 ms
+    OAI (bare) memory... 176 KB peak
+    OAI (bare) burst (30 concurrent)... p50=32.72 ms
+    OAI (bare) burst memory (30 concurrent)... 1420 KB peak
+    OAI (bare) throughput conc=1... 297/s
+    OAI (bare) throughput conc=10... 748/s
+    OAI (bare) throughput conc=50... 749/s
+    OAI + tracing latency... p50=3.36 ms
+    OAI + tracing memory... 209 KB peak
+    OAI + tracing burst (30 concurrent)... p50=34.04 ms
+    OAI + tracing burst memory (30 concurrent)... 1565 KB peak
+    OAI + tracing throughput conc=1... 292/s
+    OAI + tracing throughput conc=10... 690/s
+    OAI + tracing throughput conc=50... 695/s
+
+  [2m[Scenario 3][0m
+    Timbal latency... p50=771.2 us
+    Timbal memory... 95 KB peak
+    Timbal burst (40 concurrent)... p50=21.58 ms
+    Timbal burst memory (40 concurrent)... 2531 KB peak
+    Timbal throughput conc=1... 974/s
+    Timbal throughput conc=10... 1118/s
+    Timbal throughput conc=50... 1144/s
+    OAI (bare) latency... p50=1.87 ms
+    OAI (bare) memory... 149 KB peak
+    OAI (bare) burst (40 concurrent)... p50=28.08 ms
+    OAI (bare) burst memory (40 concurrent)... 2066 KB peak
+    OAI (bare) throughput conc=1... 532/s
+    OAI (bare) throughput conc=10... 1125/s
+    OAI (bare) throughput conc=50... 1037/s
+    OAI + tracing latency... p50=1.83 ms
+    OAI + tracing memory... 177 KB peak
+    OAI + tracing burst (40 concurrent)... p50=28.96 ms
+    OAI + tracing burst memory (40 concurrent)... 2159 KB peak
+    OAI + tracing throughput conc=1... 515/s
+    OAI + tracing throughput conc=10... 1078/s
+    OAI + tracing throughput conc=50... 932/s
+
+[1m[36m------------------------------------------------------------------------------------------------[0m
+[1m[36m  Scenario 1: Single tool  (LLM -> add -> LLM -> answer)[0m
+[1m[36m------------------------------------------------------------------------------------------------[0m
+
+  [1mLatency  (x100 sequential runs)[0m
+                          Timbal        OAI (bare)     OAI + tracing
+  ------------  ----------------  ----------------  ----------------
+          mean          761.0 us           1.58 ms           1.73 ms
+           p50          747.8 us           1.53 ms           1.71 ms
+           p95           1.27 ms           2.04 ms           2.19 ms
+           p99           1.47 ms           2.32 ms           2.38 ms
+
+  [1mMemory  (x100 runs)[0m
+  framework                         peak       per run
+  ------------------------  ------------  ------------
+  Timbal                          56.6 KB         579  B
+  OAI (bare)                     117.6 KB        1204  B
+  OAI + tracing                  153.3 KB        1570  B
+
+  [1mBurst  (50 concurrent)[0m
+                          Timbal        OAI (bare)     OAI + tracing
+  ------------  ----------------  ----------------  ----------------
+           p50          17.44 ms          22.86 ms          26.72 ms
+           p75          17.56 ms          23.05 ms          26.84 ms
+           p95          17.84 ms          23.34 ms          27.17 ms
+           p99          18.35 ms          23.53 ms          27.41 ms
+           max          18.35 ms          23.53 ms          27.41 ms
+
+  [2mwall: Timbal: 18.4 ms | OAI (bare): 23.5 ms | OAI + tracing: 27.4 ms[0m
+
+  [1mBurst memory  (50 concurrent)[0m
+  framework                         peak       per run
+  ------------------------  ------------  ------------
+  Timbal                        1876.3 KB       38427  B
+  OAI (bare)                    1809.5 KB       37059  B
+  OAI + tracing                 1931.6 KB       39560  B
+
+  [1mThroughput  (200 loops)[0m
+                          Timbal        OAI (bare)     OAI + tracing
+  ------------  ----------------  ----------------  ----------------
+             1            1502/s             462/s             573/s
+            10            1710/s            1474/s            1357/s
+            50            1816/s            1722/s            1650/s
+
+[1m[36m------------------------------------------------------------------------------------------------[0m
+[1m[36m  Scenario 2: Multi-step  (LLM -> add -> LLM -> mul -> LLM -> sub -> LLM -> answer)[0m
+[1m[36m------------------------------------------------------------------------------------------------[0m
+
+  [1mLatency  (x100 sequential runs)[0m
+                          Timbal        OAI (bare)     OAI + tracing
+  ------------  ----------------  ----------------  ----------------
+          mean          765.8 us           3.36 ms           3.37 ms
+           p50          716.0 us           3.33 ms           3.36 ms
+           p95           1.15 ms           3.92 ms           3.90 ms
+           p99           2.59 ms           5.25 ms           4.30 ms
+
+  [1mMemory  (x100 runs)[0m
+  framework                         peak       per run
+  ------------------------  ------------  ------------
+  Timbal                          98.5 KB        1009  B
+  OAI (bare)                     176.3 KB        1806  B
+  OAI + tracing                  208.7 KB        2137  B
+
+  [1mBurst  (30 concurrent)[0m
+                          Timbal        OAI (bare)     OAI + tracing
+  ------------  ----------------  ----------------  ----------------
+           p50          29.09 ms          32.72 ms          34.04 ms
+           p75          30.00 ms          32.89 ms          34.21 ms
+           p95          30.31 ms          33.29 ms          34.36 ms
+           p99          30.34 ms          33.43 ms          34.50 ms
+           max          30.34 ms          33.43 ms          34.50 ms
+
+  [2mwall: Timbal: 30.3 ms | OAI (bare): 33.4 ms | OAI + tracing: 34.5 ms[0m
+
+  [1mBurst memory  (30 concurrent)[0m
+  framework                         peak       per run
+  ------------------------  ------------  ------------
+  Timbal                        2085.0 KB       71169  B
+  OAI (bare)                    1419.9 KB       48467  B
+  OAI + tracing                 1564.8 KB       53411  B
+
+  [1mThroughput  (200 loops)[0m
+                          Timbal        OAI (bare)     OAI + tracing
+  ------------  ----------------  ----------------  ----------------
+             1             647/s             297/s             292/s
+            10             760/s             748/s             690/s
+            50             812/s             749/s             695/s
+
+[1m[36m------------------------------------------------------------------------------------------------[0m
+[1m[36m  Scenario 3: Parallel tools  (LLM -> [add, mul, neg] concurrent -> LLM -> answer)[0m
+[1m[36m------------------------------------------------------------------------------------------------[0m
+
+  [1mLatency  (x100 sequential runs)[0m
+                          Timbal        OAI (bare)     OAI + tracing
+  ------------  ----------------  ----------------  ----------------
+          mean          790.9 us           1.88 ms           1.90 ms
+           p50          771.2 us           1.87 ms           1.83 ms
+           p95           1.28 ms           2.39 ms           2.38 ms
+           p99           1.48 ms           2.61 ms           2.54 ms
+
+  [1mMemory  (x100 runs)[0m
+  framework                         peak       per run
+  ------------------------  ------------  ------------
+  Timbal                          94.8 KB         971  B
+  OAI (bare)                     149.2 KB        1528  B
+  OAI + tracing                  176.7 KB        1809  B
+
+  [1mBurst  (40 concurrent)[0m
+                          Timbal        OAI (bare)     OAI + tracing
+  ------------  ----------------  ----------------  ----------------
+           p50          21.58 ms          28.08 ms          28.96 ms
+           p75          22.02 ms          28.54 ms          29.14 ms
+           p95          23.70 ms          28.79 ms          29.39 ms
+           p99          23.74 ms          28.95 ms          29.59 ms
+           max          23.74 ms          28.95 ms          29.59 ms
+
+  [2mwall: Timbal: 23.7 ms | OAI (bare): 28.9 ms | OAI + tracing: 29.6 ms[0m
+
+  [1mBurst memory  (40 concurrent)[0m
+  framework                         peak       per run
+  ------------------------  ------------  ------------
+  Timbal                        2530.9 KB       64790  B
+  OAI (bare)                    2066.0 KB       52890  B
+  OAI + tracing                 2159.0 KB       55271  B
+
+  [1mThroughput  (200 loops)[0m
+                          Timbal        OAI (bare)     OAI + tracing
+  ------------  ----------------  ----------------  ----------------
+             1             974/s             532/s             515/s
+            10            1118/s            1125/s            1078/s
+            50            1144/s            1037/s             932/s
+
+[2m------------------------------------------------------------------------------------------------
+  Timbal: TestModel, built-in InMemory tracing always on.
+  OAI (bare): custom offline Model with RunConfig(tracing_disabled=True).
+  OAI + tracing: same custom Model with local in-memory tracing processor, no export.
+  Dependency note: OpenAI Agents SDK 0.14.6 requires openai>=2.26; use uv --with flags above.
+------------------------------------------------------------------------------------------------[0m
+

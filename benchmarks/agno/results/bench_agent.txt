@@ -1,0 +1,241 @@
+
+[1m══════════════════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal vs Agno — agent loop benchmark[0m
+  100 iters · burst {1: 50, 2: 30, 3: 40} · 100 mem · 200 throughput ops
+  Timbal: TestModel (offline) · Agno: FakeModel (offline)
+  Agno found — will measure bare (tel=False) + telemetry mocked
+  [2mBoth frameworks dispatch parallel tool calls concurrently.[0m
+  [33mNote: Agno default (telemetry=True) awaits a blocking HTTP POST per run (~400–500 ms).[0m
+  [33m      'Agno (no tel)' uses telemetry=False — the explicit opt-out required for production.[0m
+[1m══════════════════════════════════════════════════════════════════════════════════════════[0m
+
+  [2mSpot-checking correctness (Scenario 1)...[0m
+  Timbal: ✓  |  Agno: ✓
+
+  [2m[Phase 1 · Scenario 1][0m
+    Timbal latency... p50=786.6 µs
+    Timbal memory... 58 KB peak
+    Timbal burst (50 concurrent)... p50=16.97 ms
+    Timbal burst memory (50 concurrent)... 1897 KB peak
+    Timbal throughput conc=1... 1418/s
+    Timbal throughput conc=10... 1634/s
+    Timbal throughput conc=50... 1711/s
+    Agno (no tel) latency... p50=1.75 ms
+    Agno (no tel) memory... 817 KB peak
+    Agno (no tel) burst (50 concurrent)... p50=35.83 ms
+    Agno (no tel) burst memory (50 concurrent)... 1954 KB peak
+    Agno (no tel) throughput conc=1... 540/s
+    Agno (no tel) throughput conc=10... 711/s
+    Agno (no tel) throughput conc=50... 528/s
+
+  [2m[Phase 1 · Scenario 2][0m
+    Timbal latency... p50=946.9 µs
+    Timbal memory... 99 KB peak
+    Timbal burst (30 concurrent)... p50=27.87 ms
+    Timbal burst memory (30 concurrent)... 2097 KB peak
+    Timbal throughput conc=1... 673/s
+    Timbal throughput conc=10... 773/s
+    Timbal throughput conc=50... 800/s
+    Agno (no tel) latency... p50=4.05 ms
+    Agno (no tel) memory... 883 KB peak
+    Agno (no tel) burst (30 concurrent)... p50=55.14 ms
+    Agno (no tel) burst memory (30 concurrent)... 2086 KB peak
+    Agno (no tel) throughput conc=1... 269/s
+    Agno (no tel) throughput conc=10... 302/s
+    Agno (no tel) throughput conc=50... 311/s
+
+  [2m[Phase 1 · Scenario 3][0m
+    Timbal latency... p50=749.8 µs
+    Timbal memory... 96 KB peak
+    Timbal burst (40 concurrent)... p50=18.95 ms
+    Timbal burst memory (40 concurrent)... 2570 KB peak
+    Timbal throughput conc=1... 1140/s
+    Timbal throughput conc=10... 1167/s
+    Timbal throughput conc=50... 1201/s
+    Agno (no tel) latency... p50=3.25 ms
+    Agno (no tel) memory... 886 KB peak
+    Agno (no tel) burst (40 concurrent)... p50=67.20 ms
+    Agno (no tel) burst memory (40 concurrent)... 2654 KB peak
+    Agno (no tel) throughput conc=1... 263/s
+    Agno (no tel) throughput conc=10... 291/s
+    Agno (no tel) throughput conc=50... 310/s
+
+  [2mPatching agno.api.agent.acreate_agent_run with AsyncMock...[0m
+  Telemetry HTTP call mocked.
+
+  [2m[Phase 2 · Scenario 1][0m
+    Agno (tel mock) latency... p50=1.61 ms
+    Agno (tel mock) memory... 816 KB peak
+    Agno (tel mock) burst (50 concurrent)... p50=33.30 ms
+    Agno (tel mock) burst memory (50 concurrent)... 1953 KB peak
+    Agno (tel mock) throughput conc=1... 642/s
+    Agno (tel mock) throughput conc=10... 746/s
+    Agno (tel mock) throughput conc=50... 801/s
+
+  [2m[Phase 2 · Scenario 2][0m
+    Agno (tel mock) latency... p50=3.91 ms
+    Agno (tel mock) memory... 881 KB peak
+    Agno (tel mock) burst (30 concurrent)... p50=56.30 ms
+    Agno (tel mock) burst memory (30 concurrent)... 2087 KB peak
+    Agno (tel mock) throughput conc=1... 235/s
+    Agno (tel mock) throughput conc=10... 285/s
+    Agno (tel mock) throughput conc=50... 302/s
+
+  [2m[Phase 2 · Scenario 3][0m
+    Agno (tel mock) latency... p50=3.62 ms
+    Agno (tel mock) memory... 888 KB peak
+    Agno (tel mock) burst (40 concurrent)... p50=65.72 ms
+    Agno (tel mock) burst memory (40 concurrent)... 2657 KB peak
+    Agno (tel mock) throughput conc=1... 294/s
+    Agno (tel mock) throughput conc=10... 315/s
+    Agno (tel mock) throughput conc=50... 328/s
+
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 1: Single tool  (LLM → add → LLM → answer)[0m
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×100 sequential runs)[0m
+                          Timbal     Agno (no tel)   Agno (tel mock)
+  ────────────  ────────────────  ────────────────  ────────────────
+          mean          756.9 µs           1.92 ms           1.59 ms
+           p50          786.6 µs           1.75 ms           1.61 ms
+           p95           1.33 ms           3.17 ms           1.93 ms
+           p99           1.51 ms           8.53 ms           2.02 ms
+
+  [1mMemory  (×100 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          57.6 KB         590  B
+  Agno (no tel)                  816.7 KB        8363  B
+  Agno (tel mock)                815.8 KB        8354  B
+
+  [1mBurst  (50 concurrent — fully async on both frameworks)[0m
+                          Timbal     Agno (no tel)   Agno (tel mock)
+  ────────────  ────────────────  ────────────────  ────────────────
+           p50          16.97 ms          35.83 ms          33.30 ms
+           p75          17.27 ms          47.06 ms          44.61 ms
+           p95          17.89 ms          59.00 ms          54.34 ms
+           p99          17.91 ms          61.86 ms          56.82 ms
+           max          17.91 ms          61.86 ms          56.82 ms
+
+  [2mwall: Timbal: 17.9 ms | Agno (no tel): 61.9 ms | Agno (tel mock): 56.8 ms[0m
+
+  [1mBurst memory  (50 concurrent — peak during full burst, no GC between)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                        1897.2 KB       38855  B
+  Agno (no tel)                 1954.0 KB       40019  B
+  Agno (tel mock)               1953.3 KB       40003  B
+
+  [1mThroughput  (200 loops)[0m
+                          Timbal     Agno (no tel)   Agno (tel mock)
+  ────────────  ────────────────  ────────────────  ────────────────
+             1            1418/s             540/s             642/s
+            10            1634/s             711/s             746/s
+            50            1711/s             528/s             801/s
+
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 2: Multi-step  (LLM → add → LLM → mul → LLM → sub → LLM → answer)[0m
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×100 sequential runs)[0m
+                          Timbal     Agno (no tel)   Agno (tel mock)
+  ────────────  ────────────────  ────────────────  ────────────────
+          mean           1.02 ms           4.21 ms           3.93 ms
+           p50          946.9 µs           4.05 ms           3.91 ms
+           p95           2.24 ms           5.82 ms           4.55 ms
+           p99           2.92 ms          10.00 ms           4.72 ms
+
+  [1mMemory  (×100 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          99.1 KB        1014  B
+  Agno (no tel)                  883.0 KB        9042  B
+  Agno (tel mock)                880.6 KB        9017  B
+
+  [1mBurst  (30 concurrent — fully async on both frameworks)[0m
+                          Timbal     Agno (no tel)   Agno (tel mock)
+  ────────────  ────────────────  ────────────────  ────────────────
+           p50          27.87 ms          55.14 ms          56.30 ms
+           p75          29.08 ms          74.74 ms          76.57 ms
+           p95          29.47 ms          91.17 ms          93.31 ms
+           p99          29.52 ms          94.71 ms          97.25 ms
+           max          29.52 ms          94.71 ms          97.25 ms
+
+  [2mwall: Timbal: 29.5 ms | Agno (no tel): 94.7 ms | Agno (tel mock): 97.2 ms[0m
+
+  [1mBurst memory  (30 concurrent — peak during full burst, no GC between)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                        2096.7 KB       71567  B
+  Agno (no tel)                 2086.5 KB       71218  B
+  Agno (tel mock)               2087.4 KB       71250  B
+
+  [1mThroughput  (200 loops)[0m
+                          Timbal     Agno (no tel)   Agno (tel mock)
+  ────────────  ────────────────  ────────────────  ────────────────
+             1             673/s             269/s             235/s
+            10             773/s             302/s             285/s
+            50             800/s             311/s             302/s
+
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 3: Parallel tools  (LLM → [add, mul, neg] concurrent → LLM → answer)[0m
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×100 sequential runs)[0m
+                          Timbal     Agno (no tel)   Agno (tel mock)
+  ────────────  ────────────────  ────────────────  ────────────────
+          mean          766.2 µs           3.28 ms           3.63 ms
+           p50          749.8 µs           3.25 ms           3.62 ms
+           p95           1.24 ms           3.72 ms           4.08 ms
+           p99           1.53 ms           3.95 ms           4.42 ms
+
+  [1mMemory  (×100 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          95.6 KB         979  B
+  Agno (no tel)                  886.4 KB        9077  B
+  Agno (tel mock)                888.1 KB        9094  B
+
+  [1mBurst  (40 concurrent — fully async on both frameworks)[0m
+                          Timbal     Agno (no tel)   Agno (tel mock)
+  ────────────  ────────────────  ────────────────  ────────────────
+           p50          18.95 ms          67.20 ms          65.72 ms
+           p75          22.08 ms          92.32 ms          91.09 ms
+           p95          22.51 ms         113.40 ms         111.53 ms
+           p99          22.56 ms         116.33 ms         114.90 ms
+           max          22.56 ms         116.33 ms         114.90 ms
+
+  [2mwall: Timbal: 22.6 ms | Agno (no tel): 116.3 ms | Agno (tel mock): 114.9 ms[0m
+
+  [1mBurst memory  (40 concurrent — peak during full burst, no GC between)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                        2570.1 KB       65795  B
+  Agno (no tel)                 2654.4 KB       67953  B
+  Agno (tel mock)               2657.5 KB       68031  B
+
+  [1mThroughput  (200 loops)[0m
+                          Timbal     Agno (no tel)   Agno (tel mock)
+  ────────────  ────────────────  ────────────────  ────────────────
+             1            1140/s             263/s             294/s
+            10            1167/s             291/s             315/s
+            50            1201/s             310/s             328/s
+
+[2m──────────────────────────────────────────────────────────────────────────────────────────
+  Timbal: TestModel (sync handler, stateless). Built-in InMemory tracing always on.
+
+  Agno (no tel):   FakeModel (sync handler, stateless). telemetry=False.
+                   Explicit opt-out required — default is telemetry=True.
+
+  Agno (tel mock): telemetry=True with acreate_agent_run replaced by AsyncMock.
+                   Measures JSON-serialisation overhead of the telemetry path
+                   without the network call to api.agno.com.
+
+  Default telemetry=True: awaited HTTP POST on every run — ~400–500 ms overhead.
+  No batching, no queue. Not benchmarked directly (network variance dominates).
+
+  Scenario 3: both Timbal and Agno dispatch all 3 tools concurrently
+  (Agno uses asyncio.gather over function_calls_to_run in aresponse()).
+──────────────────────────────────────────────────────────────────────────────────────────[0m
+

@@ -26,7 +26,6 @@ pub const ProjectType = enum {
 };
 
 pub const blueprint_api_url = "https://github.com/timbal-ai/blueprint-api/archive/refs/heads/main.tar.gz";
-pub const blueprint_ui_url = "https://github.com/timbal-ai/blueprint-ui/archive/refs/heads/main.tar.gz";
 pub const blueprint_ui_simple_chat_url = "https://github.com/timbal-ai/blueprint-ui-simple-chat/archive/refs/heads/main.tar.gz";
 
 // Embed template files into the binary.
@@ -277,10 +276,10 @@ pub fn fetchBlueprint(allocator: std.mem.Allocator, project_path: []const u8, de
 }
 
 /// Creates a new workforce member directory with template files.
-/// Returns the generated funny name (caller owns the memory).
-pub fn addWorkforceMember(allocator: std.mem.Allocator, app_dir: std.fs.Dir, project_name: []const u8, project_type: ProjectType) ![]u8 {
-    // Generate a funny name for the workforce member
-    const funny_name = try genFunnyName(allocator);
+/// Returns the name used (caller owns the memory).
+pub fn addWorkforceMember(allocator: std.mem.Allocator, app_dir: std.fs.Dir, project_name: []const u8, project_type: ProjectType, maybe_name: ?[]const u8) ![]u8 {
+    // Use provided name or generate a funny one
+    const funny_name = if (maybe_name) |n| try allocator.dupe(u8, n) else try genFunnyName(allocator);
     errdefer allocator.free(funny_name);
 
     // Determine the fully qualified name based on project type

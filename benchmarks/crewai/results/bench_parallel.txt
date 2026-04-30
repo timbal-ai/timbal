@@ -1,0 +1,154 @@
+
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal vs CrewAI Flow — Wide Parallel Fan-out[0m
+  Topology: root → [N async branches] → sink
+  Widths: [4, 8, 16, 32, 64]  |  200 iters  |  200 burst
+  CrewAI Flow found + OpenInference
+  [2mFlow steps: N @listen methods + OI → N+3 spans/kickoff (structurally equal to Timbal).[0m
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+
+  [2mVerifying correctness (N=4, trivial)...[0m
+  N=4: Timbal=84  Flow steps=84  ✓ match
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario A — Trivial branches (async, no sleep)  ← pure scheduling overhead[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency p50  (×200 sequential runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4        802.8 µs         2.12 ms
+       8         1.16 ms         2.61 ms
+      16         1.87 ms         3.44 ms
+      32         3.45 ms         5.81 ms
+      64         7.13 ms         10.0 ms
+
+  [1mLatency p95  (×200 sequential runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4         1.02 ms         2.74 ms
+       8         1.40 ms         3.21 ms
+      16         2.46 ms         4.07 ms
+      32         4.10 ms         8.14 ms
+      64         8.51 ms         11.8 ms
+
+  [1mLatency p99  (×200 sequential runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4         1.38 ms         3.75 ms
+       8         1.72 ms         3.63 ms
+      16         9.46 ms         4.31 ms
+      32         4.44 ms         58.7 ms
+      64         12.3 ms         42.7 ms
+
+  [1mOverhead per extra branch  (slope of p50 latency vs N)[0m
+  [2mEstimated by linear regression over the N values above[0m
+  Timbal          +105.8 µs / branch
+  Flow steps      +133.3 µs / branch
+
+  [1mBurst p50  (200 concurrent runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4        112.7 ms        245.2 ms
+       8        256.1 ms        346.3 ms
+      16        509.8 ms        566.6 ms
+      32        940.2 ms        955.0 ms
+      64       2470.9 ms       1847.2 ms
+
+  [1mBurst p95  (200 concurrent runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4        115.0 ms        359.0 ms
+       8        259.2 ms        483.8 ms
+      16        513.2 ms        691.3 ms
+      32        945.1 ms       1116.8 ms
+      64       2479.4 ms       2018.6 ms
+
+  [1mBurst p99  (200 concurrent runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4        115.2 ms        368.8 ms
+       8        259.4 ms        494.3 ms
+      16        513.5 ms        703.6 ms
+      32        945.5 ms       1133.7 ms
+      64       2480.2 ms       2032.3 ms
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario B — 1 ms async sleep per branch  ← parallelism verification[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency p50  (×200 sequential runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4         1.96 ms         3.22 ms
+       8         2.14 ms         3.37 ms
+      16         2.60 ms         3.86 ms
+      32         3.64 ms         5.39 ms
+      64         6.82 ms         9.82 ms
+
+  [1mLatency p95  (×200 sequential runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4         2.26 ms         3.84 ms
+       8         2.38 ms         4.15 ms
+      16         2.90 ms         4.31 ms
+      32         4.25 ms         6.08 ms
+      64         7.66 ms         11.0 ms
+
+  [1mLatency p99  (×200 sequential runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4         3.04 ms         10.5 ms
+       8         2.65 ms         4.65 ms
+      16         13.8 ms         4.61 ms
+      32         4.82 ms         6.42 ms
+      64         79.8 ms         86.9 ms
+
+  [1mOverhead per extra branch  (slope of p50 latency vs N)[0m
+  [2mEstimated by linear regression over the N values above[0m
+  Timbal          +81.4 µs / branch
+  Flow steps      +111.8 µs / branch
+
+  [1mBurst p50  (200 concurrent runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4        206.5 ms        327.4 ms
+       8        272.4 ms        510.3 ms
+      16        626.5 ms        690.1 ms
+      32       1184.1 ms       1194.6 ms
+      64       2420.1 ms       2470.2 ms
+
+  [1mBurst p95  (200 concurrent runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4        209.2 ms        432.9 ms
+       8        276.1 ms        621.7 ms
+      16        630.6 ms        806.5 ms
+      32       1189.7 ms       1324.4 ms
+      64       2429.6 ms       2644.1 ms
+
+  [1mBurst p99  (200 concurrent runs)[0m
+       N          Timbal      Flow steps
+  ──────  ──────────────  ──────────────
+       4        209.4 ms        442.7 ms
+       8        276.4 ms        631.4 ms
+      16        630.9 ms        817.0 ms
+      32       1190.2 ms       1336.3 ms
+      64       2430.3 ms       2659.5 ms
+
+  [2mTheoretical serial: N × 1000 µs  |  Theoretical parallel: ~1000 µs flat[0m
+  [2mBoth frameworks use asyncio.gather — expect near-flat latency across widths[0m
+
+[2m────────────────────────────────────────────────────────────────────────────────────────
+  Timbal: one asyncio.Task + Span per branch — full per-branch observability.
+
+  Flow steps: N individual @listen methods built dynamically via type(). Each
+  branch is a first-class Flow step. OI instruments _execute_method() → one span
+  per @start/@listen invocation = N+3 spans per kickoff (root + N branches + sink
+  + 1 kickoff span). Structurally equivalent to Timbal. NullExporter: full span
+  pipeline measured, no network I/O. suppress_flow_events=True on all flows.
+
+  Scenario B: asyncio.sleep yields so all N branches run concurrently.
+  Latency should be ~1 ms flat for truly parallel execution.
+────────────────────────────────────────────────────────────────────────────────────────[0m
+

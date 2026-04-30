@@ -48,10 +48,7 @@ class Message:
             return f"Message(role={self.role}, content={self.content}, stop_reason={self.stop_reason})"
         return f"Message(role={self.role}, content={self.content})"
 
-    def __repr__(self) -> str:
-        if self.stop_reason:
-            return f"Message(role={self.role}, content={self.content}, stop_reason={self.stop_reason})"
-        return f"Message(role={self.role}, content={self.content})"
+    __repr__ = __str__
 
     def to_openai_responses_input(self) -> list[dict[str, Any]]:
         """Convert the message to OpenAI's responses api expected input format."""
@@ -114,6 +111,29 @@ class Message:
             "role": role,
             "content": content,
         }
+
+    async def load(self, client: Any = None) -> None:
+        """Eagerly load all file content in this message concurrently.
+
+        Args:
+            client: Optional shared httpx.AsyncClient for connection reuse across messages.
+        """
+        import asyncio
+
+        from .content import FileContent
+
+        unloaded = [
+            c.file for c in self.content
+            if isinstance(c, FileContent) and object.__getattribute__(c.file, "__fileobj__") is None
+        ]
+        if not unloaded:
+            return
+        if client is not None:
+            await asyncio.gather(*(f.load(client=client) for f in unloaded))
+        else:
+            import httpx
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as own_client:
+                await asyncio.gather(*(f.load(client=own_client) for f in unloaded))
 
     def collect_text(self) -> str:
         """Collect all text from the message content."""

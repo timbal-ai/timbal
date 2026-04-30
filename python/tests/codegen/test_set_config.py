@@ -191,6 +191,60 @@ class TestAgentConfig:
         assert result.returncode != 0
         assert "Unknown agent config field(s)" in result.stderr
 
+    def test_name_matching_entry_point_configures_agent(self, workspace):
+        """When --name matches the entry point variable, configure the agent itself (not a tool)."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"system_prompt": "You are helpful."})
+        output = _run_dry(ws, "--name", "agent", "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].system_prompt == "You are helpful."
+
+    def test_name_matching_entry_point_sets_model(self, workspace):
+        """--name equal to entry point should set model on the agent."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"model": "openai/gpt-4o"})
+        output = _run_dry(ws, "--name", "agent", "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].model == "openai/gpt-4o"
+
+    def test_name_matching_entry_point_with_tools(self, workspace):
+        """--name matching entry point configures the agent even when tools exist."""
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch()
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        config = json.dumps({"system_prompt": "Be concise.", "max_iter": 5})
+        output = _run_dry(ws, "--name", "agent", "--config", config)
+        ns = _exec_agent(output)
+        assert ns["agent"].system_prompt == "Be concise."
+        assert ns["agent"].max_iter == 5
+        # Tools should be untouched.
+        assert len(ns["agent"].tools) == 1
+
+    def test_name_matching_entry_point_rejects_unknown_fields(self, workspace):
+        """--name matching entry point still validates against AGENT_FIELDS."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        """)
+        config = json.dumps({"invalid_field": "value"})
+        result = _run_dry_fail(ws, "--name", "agent", "--config", config)
+        assert result.returncode != 0
+        assert "Unknown agent config field(s)" in result.stderr
+
 
 # ---------------------------------------------------------------------------
 # Tool config
@@ -456,147 +510,6 @@ def _run_dry_wf_fail(workspace_path: Path, *cli_args: str) -> subprocess.Complet
     )
 
 
-class TestStepParams:
-    def test_set_params_on_step(self, wf_workspace):
-        """Set params on a workflow step to link it to another step's output."""
-        ws = wf_workspace("""\
-        from timbal import Agent, Workflow
-
-        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
-        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
-
-        workflow = Workflow(name="my_workflow")
-        workflow.step(agent_a)
-        workflow.step(agent_b)
-        """)
-        output = _run_dry_wf(
-            ws, "--name", "agent_b",
-            "--params", '{"prompt": {"step": "agent_a"}}',
-        )
-        assert 'get_run_context().step_span("agent_a").output' in output
-        assert "from timbal.state import get_run_context" in output
-
-    def test_set_params_with_key(self, wf_workspace):
-        """Set params with key indexing into the output."""
-        ws = wf_workspace("""\
-        from timbal import Agent, Workflow
-
-        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
-        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
-
-        workflow = Workflow(name="my_workflow")
-        workflow.step(agent_a)
-        workflow.step(agent_b)
-        """)
-        output = _run_dry_wf(
-            ws, "--name", "agent_b",
-            "--params", '{"prompt": {"step": "agent_a", "key": "valor"}}',
-        )
-        assert 'get_run_context().step_span("agent_a").output["valor"]' in output
-
-    def test_set_multiple_params(self, wf_workspace):
-        """Multiple params in a single --params JSON."""
-        ws = wf_workspace("""\
-        from timbal import Agent, Workflow
-
-        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
-        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
-        agent_c = Agent(name="agent_c", model="openai/gpt-4o-mini")
-
-        workflow = Workflow(name="my_workflow")
-        workflow.step(agent_a)
-        workflow.step(agent_b)
-        workflow.step(agent_c)
-        """)
-        output = _run_dry_wf(
-            ws, "--name", "agent_c",
-            "--params", '{"prompt": {"step": "agent_a"}, "context": {"step": "agent_b"}}',
-        )
-        assert 'get_run_context().step_span("agent_a").output' in output
-        assert 'get_run_context().step_span("agent_b").output' in output
-
-    def test_set_depends_on(self, wf_workspace):
-        """Set explicit ordering dependency on a step."""
-        ws = wf_workspace("""\
-        from timbal import Agent, Workflow
-
-        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
-        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
-
-        workflow = Workflow(name="my_workflow")
-        workflow.step(agent_a)
-        workflow.step(agent_b)
-        """)
-        output = _run_dry_wf(
-            ws, "--name", "agent_b",
-            "--depends-on", "agent_a",
-        )
-        normalized = " ".join(output.split())
-        assert 'depends_on=["agent_a"]' in normalized
-
-    def test_set_multiple_depends_on(self, wf_workspace):
-        """Multiple --depends-on flags create a list."""
-        ws = wf_workspace("""\
-        from timbal import Agent, Workflow
-
-        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
-        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
-        agent_c = Agent(name="agent_c", model="openai/gpt-4o-mini")
-
-        workflow = Workflow(name="my_workflow")
-        workflow.step(agent_a)
-        workflow.step(agent_b)
-        workflow.step(agent_c)
-        """)
-        output = _run_dry_wf(
-            ws, "--name", "agent_c",
-            "--depends-on", "agent_a",
-            "--depends-on", "agent_b",
-        )
-        normalized = " ".join(output.split())
-        assert 'depends_on=["agent_a", "agent_b"]' in normalized
-
-    def test_set_params_and_depends_on_together(self, wf_workspace):
-        """Params and depends_on can be set together."""
-        ws = wf_workspace("""\
-        from timbal import Agent, Workflow
-
-        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
-        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
-
-        workflow = Workflow(name="my_workflow")
-        workflow.step(agent_a)
-        workflow.step(agent_b)
-        """)
-        output = _run_dry_wf(
-            ws, "--name", "agent_b",
-            "--params", '{"prompt": {"step": "agent_a"}}',
-            "--depends-on", "agent_a",
-        )
-        normalized = " ".join(output.split())
-        assert 'depends_on=["agent_a"]' in normalized
-        assert 'get_run_context().step_span("agent_a").output' in output
-
-    def test_update_existing_params(self, wf_workspace):
-        """Re-running set-config updates existing params on the .step() call."""
-        ws = wf_workspace("""\
-        from timbal import Agent, Workflow
-        from timbal.state import get_run_context
-
-        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
-        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
-
-        workflow = Workflow(name="my_workflow")
-        workflow.step(agent_a)
-        workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
-        """)
-        output = _run_dry_wf(
-            ws, "--name", "agent_b",
-            "--params", '{"prompt": {"step": "agent_a", "key": "text"}}',
-        )
-        assert 'get_run_context().step_span("agent_a").output["text"]' in output
-
-
 class TestStepConstructorConfig:
     def test_set_step_model(self, wf_workspace):
         """Update a step's constructor config (e.g. model)."""
@@ -611,8 +524,8 @@ class TestStepConstructorConfig:
         output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"model": "openai/gpt-4o"}')
         assert 'model="openai/gpt-4o"' in output
 
-    def test_set_step_config_with_params(self, wf_workspace):
-        """Set both constructor config and params in one call."""
+    def test_rename_step_updates_depends_on(self, wf_workspace):
+        """Renaming a step via set-config updates depends_on references."""
         ws = wf_workspace("""\
         from timbal import Agent, Workflow
 
@@ -621,27 +534,77 @@ class TestStepConstructorConfig:
 
         workflow = Workflow(name="my_workflow")
         workflow.step(agent_a)
+        workflow.step(agent_b, depends_on=["agent_a"])
+        """)
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"name": "first_agent"}')
+        assert 'name="first_agent"' in output
+        assert 'depends_on=["first_agent"]' in output
+        assert 'depends_on=["agent_a"]' not in output
+
+    def test_rename_step_updates_step_span(self, wf_workspace):
+        """Renaming a step via set-config updates step_span references."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
+        """)
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"name": "first_agent"}')
+        assert 'name="first_agent"' in output
+        assert 'step_span("first_agent")' in output
+        assert 'step_span("agent_a")' not in output
+
+    def test_rename_step_updates_multiple_depends_on(self, wf_workspace):
+        """Renaming updates depends_on even when mixed with other dependencies."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+        agent_c = Agent(name="agent_c", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
         workflow.step(agent_b)
+        workflow.step(agent_c, depends_on=["agent_a", "agent_b"])
         """)
-        output = _run_dry_wf(
-            ws, "--name", "agent_b",
-            "--config", '{"model": "openai/gpt-4o"}',
-            "--params", '{"prompt": {"step": "agent_a"}}',
-        )
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"name": "first_agent"}')
+        assert 'depends_on=["first_agent", "agent_b"]' in output
+
+    def test_rename_step_with_other_config(self, wf_workspace):
+        """Renaming via set-config together with other config changes."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        workflow.step(agent_b, depends_on=["agent_a"])
+        """)
+        config = json.dumps({"name": "first_agent", "model": "openai/gpt-4o"})
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", config)
+        assert 'name="first_agent"' in output
         assert 'model="openai/gpt-4o"' in output
-        assert 'get_run_context().step_span("agent_a").output' in output
+        assert 'depends_on=["first_agent"]' in output
 
+    def test_no_name_change_leaves_references_alone(self, wf_workspace):
+        """When name is not in config, depends_on and step_span are untouched."""
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
 
-class TestStepConfigValidation:
-    def test_rejects_params_on_agent_entry_point(self, workspace):
-        """--params should be rejected for Agent entry points."""
-        ws = workspace("""\
-        from timbal.core import Agent
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
 
-        agent = Agent(name="a", model="openai/gpt-4o-mini")
+        workflow = Workflow(name="my_workflow")
+        workflow.step(agent_a)
+        workflow.step(agent_b, depends_on=["agent_a"])
         """)
-        result = _run_dry_fail(
-            ws, "--name", "some_tool",
-            "--params", '{"prompt": {"step": "other"}}',
-        )
-        assert result.returncode != 0
+        output = _run_dry_wf(ws, "--name", "agent_a", "--config", '{"model": "openai/gpt-4o"}')
+        assert 'depends_on=["agent_a"]' in output

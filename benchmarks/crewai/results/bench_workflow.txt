@@ -1,0 +1,147 @@
+
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal Workflow vs CrewAI Flow — DAG benchmark[0m
+  200 iters · 200 burst · 200 mem · 500 throughput ops
+  CrewAI Flow found + OpenInference
+  [2mTimbal: built-in InMemory tracing always on.[0m
+  [2mFlow+OI: spans created + serialized via NullExporter (HTTP mocked).[0m
+[1m════════════════════════════════════════════════════════════════════════════════════════[0m
+
+  [2mVerifying correctness...[0m
+  sequential: Timbal=19  Flow=19  ✓
+  fanout: Timbal=54  Flow=54  ✓
+  diamond: Timbal=46  Flow=46  ✓
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 1: Sequential  (A → B → C → D)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+  [2mCollecting Timbal...[0m
+  [2mCollecting Flow bare...[0m
+  [2mCollecting Flow+OI...[0m
+
+  [1mLatency  (×200)[0m
+                        Timbal       Flow bare         Flow+OI
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         1.30 ms         1.53 ms         1.93 ms
+           p50         1.26 ms         1.47 ms         1.91 ms
+           p95         1.56 ms         1.99 ms         2.19 ms
+           p99         1.80 ms         2.49 ms         2.36 ms
+
+  [1mMemory  (×200 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          63.3 KB         324  B
+  Flow bare                      333.8 KB        1709  B
+  Flow+OI                        359.5 KB        1840  B
+
+  [1mBurst  (200 concurrent)[0m
+                        Timbal       Flow bare         Flow+OI
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       114.11 ms       142.41 ms       270.87 ms
+           p75       115.60 ms       183.87 ms       314.92 ms
+           p95       200.29 ms       218.72 ms       351.31 ms
+           p99       200.68 ms       226.83 ms       358.26 ms
+           max       201.21 ms       229.83 ms       359.42 ms
+
+  [2mwall: Timbal: 201.2 ms | Flow bare: 229.8 ms | Flow+OI: 359.4 ms[0m
+
+  [1mThroughput  (500 runs)[0m
+                        Timbal       Flow bare         Flow+OI
+  ────────────  ──────────────  ──────────────  ──────────────
+             1           699/s           627/s           532/s
+            10          1203/s           776/s           665/s
+            50           961/s           992/s           563/s
+           200           947/s           827/s           532/s
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 2: Fan-out/in  (A → [B, C, D] → E)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+  [2mCollecting Timbal...[0m
+  [2mCollecting Flow bare...[0m
+  [2mCollecting Flow+OI...[0m
+
+  [1mLatency  (×200)[0m
+                        Timbal       Flow bare         Flow+OI
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         1.42 ms         1.35 ms         1.89 ms
+           p50         1.42 ms         1.33 ms         1.87 ms
+           p95         1.66 ms         1.59 ms         2.17 ms
+           p99         1.98 ms         1.72 ms         2.35 ms
+
+  [1mMemory  (×200 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          84.3 KB         431  B
+  Flow bare                      368.2 KB        1885  B
+  Flow+OI                        396.7 KB        2031  B
+
+  [1mBurst  (200 concurrent)[0m
+                        Timbal       Flow bare         Flow+OI
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       243.94 ms       128.24 ms       378.68 ms
+           p75       244.42 ms       168.77 ms       413.68 ms
+           p95       244.78 ms       201.08 ms       442.66 ms
+           p99       245.22 ms       207.77 ms       450.87 ms
+           max       245.24 ms       208.98 ms       452.08 ms
+
+  [2mwall: Timbal: 245.2 ms | Flow bare: 209.0 ms | Flow+OI: 452.1 ms[0m
+
+  [1mThroughput  (500 runs)[0m
+                        Timbal       Flow bare         Flow+OI
+  ────────────  ──────────────  ──────────────  ──────────────
+             1           696/s           693/s           458/s
+            10           911/s           557/s           494/s
+            50           727/s           737/s           468/s
+           200           718/s           826/s           545/s
+
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 3: Diamond  (A → [B, C] → D)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────────────────[0m
+  [2mCollecting Timbal...[0m
+  [2mCollecting Flow bare...[0m
+  [2mCollecting Flow+OI...[0m
+
+  [1mLatency  (×200)[0m
+                        Timbal       Flow bare         Flow+OI
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean         1.23 ms         1.40 ms         1.80 ms
+           p50         1.23 ms         1.33 ms         1.79 ms
+           p95         1.41 ms         1.84 ms         2.16 ms
+           p99         1.64 ms         2.44 ms         2.43 ms
+
+  [1mMemory  (×200 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          71.5 KB         366  B
+  Flow bare                      336.8 KB        1724  B
+  Flow+OI                        367.2 KB        1880  B
+
+  [1mBurst  (200 concurrent)[0m
+                        Timbal       Flow bare         Flow+OI
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50       208.54 ms       114.87 ms       277.43 ms
+           p75       209.22 ms       151.22 ms       316.32 ms
+           p95       210.20 ms       180.84 ms       348.27 ms
+           p99       210.38 ms       188.42 ms       357.04 ms
+           max       210.39 ms       189.75 ms       358.76 ms
+
+  [2mwall: Timbal: 210.4 ms | Flow bare: 189.7 ms | Flow+OI: 358.8 ms[0m
+
+  [1mThroughput  (500 runs)[0m
+                        Timbal       Flow bare         Flow+OI
+  ────────────  ──────────────  ──────────────  ──────────────
+             1           795/s           757/s           577/s
+            10          1235/s           848/s           721/s
+            50           959/s          1031/s           606/s
+           200           802/s           746/s           633/s
+
+[2m────────────────────────────────────────────────────────────────────────────────────────
+  Timbal: built-in InMemory tracing on every run — spans recorded per step.
+  Flow bare: @start/@listen dispatched via asyncio.gather; no instrumentation.
+  Flow+OI: OpenInference patches Flow._execute_method() — one OTel span per
+  @start/@listen invocation. NullExporter: span creation + serialization cost
+  measured, export discarded (no network I/O). suppress_flow_events=True on
+  all Flow classes — CrewAI's own event bus suppressed, OI patches directly.
+  Graph construction / Flow class definition excluded from timing.
+────────────────────────────────────────────────────────────────────────────────────────[0m
+

@@ -1,11 +1,19 @@
 import importlib
 import pkgutil
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
-import libcst as cst
+try:
+    import libcst as cst
+except ImportError as e:
+    raise ImportError(
+        "libcst is required for codegen transformer operations. "
+        "Install it with: pip install 'timbal[codegen]'"
+    ) from e
 
 from timbal.codegen import parse_fqn
+from timbal.codegen.cst_utils import collect_assignments, resolve_runnable_name
 from timbal.codegen.format import format_code
 
 _transformer_modules = None
@@ -139,6 +147,122 @@ def remove_unused_code(code: str, protected: set[str]) -> str:
         tree = tree.visit(_Remover(unused_funcs, unused_vars))
 
 
+def reorder_step_calls(code: str, entry_point: str) -> str:
+    """Topologically sort workflow .step() calls so dependencies come first.
+
+    Extracts the dependency graph from depends_on lists and step_span()
+    references in kwargs, then reorders the .step() statements accordingly.
+    Steps with no ordering constraint preserve their relative source order.
+    """
+    tree = cst.parse_module(code)
+    assignments = collect_assignments(tree)
+    body = list(tree.body)
+
+    # Collect step call indices and their metadata.
+    step_calls: list[tuple[int, str, set[str]]] = []  # (index, step_name, deps)
+
+    for i, stmt in enumerate(body):
+        if not isinstance(stmt, cst.SimpleStatementLine):
+            continue
+        for item in stmt.body:
+            if not (isinstance(item, cst.Expr) and isinstance(item.value, cst.Call)):
+                continue
+            call = item.value
+            if not (
+                isinstance(call.func, cst.Attribute)
+                and isinstance(call.func.value, cst.Name)
+                and call.func.value.value == entry_point
+                and call.func.attr.value == "step"
+            ):
+                continue
+
+            # Resolve step name from first arg.
+            if not call.args:
+                continue
+            first_arg = call.args[0].value
+            step_name = None
+            if isinstance(first_arg, cst.Name):
+                var_name = first_arg.value
+                if var_name in assignments:
+                    step_name = resolve_runnable_name(assignments[var_name])
+                if step_name is None:
+                    step_name = var_name
+            if step_name is None:
+                continue
+
+            # Collect dependencies from depends_on and step_span references.
+            deps: set[str] = set()
+            call_code = cst.parse_module("").code_for_node(call)
+
+            # depends_on list.
+            for arg in call.args[1:]:
+                if isinstance(arg.keyword, cst.Name) and arg.keyword.value == "depends_on":
+                    if isinstance(arg.value, cst.List):
+                        for el in arg.value.elements:
+                            if isinstance(el.value, (cst.SimpleString, cst.ConcatenatedString)):
+                                deps.add(el.value.evaluated_value)
+
+            # step_span("...") references in any kwarg value.
+            for match in re.finditer(r'step_span\("([^"]+)"\)', call_code):
+                deps.add(match.group(1))
+
+            step_calls.append((i, step_name, deps))
+
+    if len(step_calls) <= 1:
+        return code
+
+    # Check if already in valid order — skip rewrite if so.
+    name_to_pos = {name: order for order, (_, name, _) in enumerate(step_calls)}
+    needs_sort = False
+    for _, name, deps in step_calls:
+        for dep in deps:
+            if dep in name_to_pos and name_to_pos[dep] > name_to_pos[name]:
+                needs_sort = True
+                break
+        if needs_sort:
+            break
+
+    if not needs_sort:
+        return code
+
+    # Kahn's algorithm, using original index as tiebreaker for stable order.
+    original_order = {name: idx for idx, (_, name, _) in enumerate(step_calls)}
+    graph: dict[str, set[str]] = {name: set() for _, name, _ in step_calls}
+    in_degree: dict[str, int] = {name: 0 for _, name, _ in step_calls}
+
+    for _, name, deps in step_calls:
+        for dep in deps:
+            if dep in graph:
+                graph[dep].add(name)
+                in_degree[name] += 1
+
+    queue = sorted(
+        [n for n, d in in_degree.items() if d == 0],
+        key=lambda n: original_order[n],
+    )
+    sorted_names: list[str] = []
+    while queue:
+        node = queue.pop(0)
+        sorted_names.append(node)
+        for neighbor in sorted(graph[node], key=lambda n: original_order[n]):
+            in_degree[neighbor] -= 1
+            if in_degree[neighbor] == 0:
+                queue.append(neighbor)
+                queue.sort(key=lambda n: original_order[n])
+
+    # Build mapping: new_body_index -> old_body_index for step statements.
+    idx_by_name = {name: body_idx for body_idx, name, _ in step_calls}
+    step_body_indices = [body_idx for body_idx, _, _ in step_calls]
+    sorted_body_indices = [idx_by_name[name] for name in sorted_names]
+
+    # Swap step statements into their new positions.
+    new_body = list(body)
+    for target_idx, source_idx in zip(step_body_indices, sorted_body_indices):
+        new_body[target_idx] = body[source_idx]
+
+    return tree.with_changes(body=new_body).code
+
+
 def apply_operation(workspace_path: str | Path, operation: str, **kwargs) -> str:
     """Run a codegen operation and return the formatted result.
 
@@ -167,8 +291,17 @@ def apply_operation(workspace_path: str | Path, operation: str, **kwargs) -> str
         raise ValueError(f"unknown operation: {operation}")
 
     args = SimpleNamespace(**kwargs)
-    transformer = mod.run(spec.target, args, tree=tree)
+    result = mod.run(spec.target, args, tree=tree)
+    # run() may return (transformer, modified_tree) when pre-processing was needed.
+    if isinstance(result, tuple):
+        transformer, tree = result
+    else:
+        transformer = result
     new_tree = tree.visit(transformer)
 
     code = remove_unused_code(new_tree.code, protected={spec.target})
+
+    if getattr(transformer, "needs_reorder", False):
+        code = reorder_step_calls(code, spec.target)
+
     return format_code(code, spec.path)

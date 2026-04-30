@@ -6,6 +6,10 @@ dist/
 wheels/
 *.egg-info
 .pytest_cache
+.coverage
+coverage.json
+htmlcov/
+.tool_cache/
 _version.py
 
 .zig-cache
@@ -15,6 +19,7 @@ version.zig
 .venv
 .env
 .env.test*
+*.log*
 .DS_Store
 
 # State savers artifacts
@@ -35,7 +40,21 @@ node_modules/
 
 **/ace/
 !/tui/src/screens/ace/
+!/docs/api-reference/ace/
+!/docs/api-reference/ace/**
 
 **/target/
 
 **/*lancedb*/
+
+**/socials/
+**/NOTES.md
+
+
+# Internal planning docs
+planning/
+
+.claude/
+.cursor/
+
+scripts/generate_costs_sql.py

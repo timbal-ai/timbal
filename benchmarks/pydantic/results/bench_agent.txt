@@ -1,0 +1,236 @@
+
+[1m══════════════════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal vs PydanticAI — agent loop benchmark[0m
+  100 iters · burst {1: 50, 2: 30, 3: 40} · 100 mem · 200 throughput ops
+  Timbal: TestModel (offline) · PydanticAI: FunctionModel (offline)
+  PydanticAI found — will measure bare + Logfire (+obs)
+  [2mBoth frameworks run fully async and dispatch parallel tool calls concurrently.[0m
+[1m══════════════════════════════════════════════════════════════════════════════════════════[0m
+
+  [2mSpot-checking correctness (Scenario 1)...[0m
+  Timbal: ✓  |  PAI: ✓
+
+  [2m[Phase 1 · Scenario 1][0m
+    Timbal latency... p50=711.5 µs
+    Timbal memory... 58 KB peak
+    Timbal burst (50 concurrent)... p50=15.63 ms
+    Timbal burst memory (50 concurrent)... 1889 KB peak
+    Timbal throughput conc=1... 1492/s
+    Timbal throughput conc=10... 1649/s
+    Timbal throughput conc=50... 1814/s
+    PAI bare latency... p50=2.64 ms
+    PAI bare memory... 519 KB peak
+    PAI bare burst (50 concurrent)... p50=55.83 ms
+    PAI bare burst memory (50 concurrent)... 3169 KB peak
+    PAI bare throughput conc=1... 366/s
+    PAI bare throughput conc=10... 609/s
+    PAI bare throughput conc=50... 618/s
+
+  [2m[Phase 1 · Scenario 2][0m
+    Timbal latency... p50=783.7 µs
+    Timbal memory... 102 KB peak
+    Timbal burst (30 concurrent)... p50=29.80 ms
+    Timbal burst memory (30 concurrent)... 2042 KB peak
+    Timbal throughput conc=1... 654/s
+    Timbal throughput conc=10... 740/s
+    Timbal throughput conc=50... 822/s
+    PAI bare latency... p50=4.70 ms
+    PAI bare memory... 694 KB peak
+    PAI bare burst (30 concurrent)... p50=63.43 ms
+    PAI bare burst memory (30 concurrent)... 2074 KB peak
+    PAI bare throughput conc=1... 217/s
+    PAI bare throughput conc=10... 354/s
+    PAI bare throughput conc=50... 366/s
+
+  [2m[Phase 1 · Scenario 3][0m
+    Timbal latency... p50=773.6 µs
+    Timbal memory... 91 KB peak
+    Timbal burst (40 concurrent)... p50=20.15 ms
+    Timbal burst memory (40 concurrent)... 2537 KB peak
+    Timbal throughput conc=1... 1007/s
+    Timbal throughput conc=10... 1108/s
+    Timbal throughput conc=50... 1154/s
+    PAI bare latency... p50=2.94 ms
+    PAI bare memory... 633 KB peak
+    PAI bare burst (40 concurrent)... p50=52.21 ms
+    PAI bare burst memory (40 concurrent)... 3416 KB peak
+    PAI bare throughput conc=1... 338/s
+    PAI bare throughput conc=10... 508/s
+    PAI bare throughput conc=50... 535/s
+
+  [2mActivating Logfire instrumentation (send_to_logfire=False)...[0m
+  Logfire instrumented.
+
+  [2m[Phase 2 · Scenario 1][0m
+    PAI+Logfire latency... p50=3.67 ms
+    PAI+Logfire memory... 536 KB peak
+    PAI+Logfire burst (50 concurrent)... p50=78.28 ms
+    PAI+Logfire burst memory (50 concurrent)... 3730 KB peak
+    PAI+Logfire throughput conc=1... 278/s
+    PAI+Logfire throughput conc=10... 375/s
+    PAI+Logfire throughput conc=50... 408/s
+
+  [2m[Phase 2 · Scenario 2][0m
+    PAI+Logfire latency... p50=6.70 ms
+    PAI+Logfire memory... 714 KB peak
+    PAI+Logfire burst (30 concurrent)... p50=112.51 ms
+    PAI+Logfire burst memory (30 concurrent)... 2487 KB peak
+    PAI+Logfire throughput conc=1... 164/s
+    PAI+Logfire throughput conc=10... 245/s
+    PAI+Logfire throughput conc=50... 243/s
+
+  [2m[Phase 2 · Scenario 3][0m
+    PAI+Logfire latency... p50=3.85 ms
+    PAI+Logfire memory... 647 KB peak
+    PAI+Logfire burst (40 concurrent)... p50=152.77 ms
+    PAI+Logfire burst memory (40 concurrent)... 4286 KB peak
+    PAI+Logfire throughput conc=1... 255/s
+    PAI+Logfire throughput conc=10... 364/s
+    PAI+Logfire throughput conc=50... 361/s
+
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 1: Single tool  (LLM → add → LLM → answer)[0m
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×100 sequential runs)[0m
+                        Timbal      PAI (bare)     PAI+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean        741.7 µs         2.68 ms         3.76 ms
+           p50        711.5 µs         2.64 ms         3.67 ms
+           p95         1.25 ms         3.29 ms         4.70 ms
+           p99         1.42 ms         3.63 ms         5.06 ms
+
+  [1mMemory  (×100 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          58.4 KB         598  B
+  PAI (bare)                     519.0 KB        5315  B
+  PAI+Logfire                    535.9 KB        5488  B
+
+  [1mBurst  (50 concurrent — fully async on both frameworks)[0m
+                        Timbal      PAI (bare)     PAI+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50        15.63 ms        55.83 ms        78.28 ms
+           p75        16.66 ms        59.13 ms        81.26 ms
+           p95        16.81 ms        62.44 ms        84.89 ms
+           p99        16.81 ms        64.14 ms        88.06 ms
+           max        16.81 ms        64.14 ms        88.06 ms
+
+  [2mwall: Timbal: 16.8 ms | PAI (bare): 64.1 ms | PAI+Logfire: 88.1 ms[0m
+
+  [1mBurst memory  (50 concurrent — peak during full burst, no GC between)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                        1889.4 KB       38695  B
+  PAI (bare)                    3169.1 KB       64903  B
+  PAI+Logfire                   3730.3 KB       76396  B
+
+  [1mThroughput  (200 loops)[0m
+                        Timbal      PAI (bare)     PAI+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+             1          1492/s           366/s           278/s
+            10          1649/s           609/s           375/s
+            50          1814/s           618/s           408/s
+
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 2: Multi-step  (LLM → add → LLM → mul → LLM → sub → LLM → answer)[0m
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×100 sequential runs)[0m
+                        Timbal      PAI (bare)     PAI+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean        801.5 µs         4.69 ms         6.70 ms
+           p50        783.7 µs         4.70 ms         6.70 ms
+           p95         1.38 ms         5.48 ms         7.63 ms
+           p99         2.16 ms         5.63 ms         9.66 ms
+
+  [1mMemory  (×100 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                         102.0 KB        1045  B
+  PAI (bare)                     693.9 KB        7105  B
+  PAI+Logfire                    713.6 KB        7307  B
+
+  [1mBurst  (30 concurrent — fully async on both frameworks)[0m
+                        Timbal      PAI (bare)     PAI+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50        29.80 ms        63.43 ms       112.51 ms
+           p75        30.02 ms        64.92 ms       115.93 ms
+           p95        30.98 ms        67.54 ms       118.00 ms
+           p99        31.00 ms        68.51 ms       119.53 ms
+           max        31.00 ms        68.51 ms       119.53 ms
+
+  [2mwall: Timbal: 31.0 ms | PAI (bare): 68.5 ms | PAI+Logfire: 119.5 ms[0m
+
+  [1mBurst memory  (30 concurrent — peak during full burst, no GC between)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                        2042.4 KB       69712  B
+  PAI (bare)                    2073.7 KB       70784  B
+  PAI+Logfire                   2486.6 KB       84874  B
+
+  [1mThroughput  (200 loops)[0m
+                        Timbal      PAI (bare)     PAI+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+             1           654/s           217/s           164/s
+            10           740/s           354/s           245/s
+            50           822/s           366/s           243/s
+
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 3: Parallel tools  (LLM → [add, mul, neg] concurrent → LLM → answer)[0m
+[1m[36m──────────────────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×100 sequential runs)[0m
+                        Timbal      PAI (bare)     PAI+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+          mean        784.4 µs         2.99 ms         3.97 ms
+           p50        773.6 µs         2.94 ms         3.85 ms
+           p95         1.42 ms         3.67 ms         4.93 ms
+           p99         1.64 ms         4.64 ms         5.14 ms
+
+  [1mMemory  (×100 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                          91.1 KB         933  B
+  PAI (bare)                     632.9 KB        6481  B
+  PAI+Logfire                    646.7 KB        6622  B
+
+  [1mBurst  (40 concurrent — fully async on both frameworks)[0m
+                        Timbal      PAI (bare)     PAI+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+           p50        20.15 ms        52.21 ms       152.77 ms
+           p75        22.59 ms        54.79 ms       163.79 ms
+           p95        22.76 ms        58.19 ms       173.27 ms
+           p99        22.79 ms        58.52 ms       173.42 ms
+           max        22.79 ms        58.52 ms       173.42 ms
+
+  [2mwall: Timbal: 22.8 ms | PAI (bare): 58.5 ms | PAI+Logfire: 173.4 ms[0m
+
+  [1mBurst memory  (40 concurrent — peak during full burst, no GC between)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                        2536.6 KB       64937  B
+  PAI (bare)                    3415.6 KB       87440  B
+  PAI+Logfire                   4285.6 KB      109711  B
+
+  [1mThroughput  (200 loops)[0m
+                        Timbal      PAI (bare)     PAI+Logfire
+  ────────────  ──────────────  ──────────────  ──────────────
+             1          1007/s           338/s           255/s
+            10          1108/s           508/s           364/s
+            50          1154/s           535/s           361/s
+
+[2m──────────────────────────────────────────────────────────────────────────────────────────
+  Timbal: TestModel (sync handler, stateless). Built-in InMemory tracing always on.
+
+  PAI bare:    PydanticAI with FunctionModel (sync handler, stateless).
+               No observability instrumentation.
+
+  PAI+Logfire: Logfire instrumented via logfire.instrument_pydantic_ai().
+               send_to_logfire=False — span-creation overhead only, no HTTP calls.
+               Logfire patches PydanticAI globally; bare pass must run first.
+
+  Scenario 3: both Timbal and PydanticAI dispatch all 3 tools concurrently
+  (PydanticAI uses asyncio.gather for multiple ToolCallParts in one response).
+──────────────────────────────────────────────────────────────────────────────────────────[0m
+

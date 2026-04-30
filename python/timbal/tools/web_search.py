@@ -6,17 +6,23 @@ specification-only tool: it emits native search schemas for Anthropic
 (``web_search_20250305``) and OpenAI/xAI Responses API (``{"type":
 "web_search"}``), but is **not executable**.  This is the original behaviour.
 
-When ``provider`` is set to ``"tavily"``, ``"scraperapi"``, ``"cala"``, or
-``"firecrawl"``,
+When ``provider`` is set to ``"tavily"``, ``"scraperapi"``, ``"cala"``,
+``"firecrawl"``, or ``"google"``,
 WebSearch becomes a fully executable function-calling tool that works with
 **every** LLM provider (Anthropic, OpenAI, Gemini, Groq, Cerebras, …).
 
 **Credentials (executable mode):** resolution order is explicit ``api_key`` on the
-tool, then ``Integration("web_search")`` when the org stores a bundled web-search
-credential, then the provider-specific environment variable (``TAVILY_API_KEY``,
-``SCRAPERAPI_KEY``, ``CALA_API_KEY``, ``FIRECRAWL_API_KEY``).
+tool (and ``cx`` for Google), then ``Integration("web_search")`` when the org
+stores a bundled web-search credential (Google: expect ``api_key`` + ``cx`` in
+that payload), then the provider-specific environment variable (``TAVILY_API_KEY``,
+``SCRAPERAPI_KEY``, ``CALA_API_KEY``, ``FIRECRAWL_API_KEY``,
+``GOOGLE_CUSTOM_SEARCH_API_KEY`` + ``GOOGLE_CSE_CX``).
+
+For ``provider="google"`` (Custom Search JSON API), at most 10 results are
+returned per request; pass ``start`` to paginate for more.
 """
 
+import os
 from functools import cached_property
 from typing import Annotated, Any, Literal
 
@@ -42,6 +48,7 @@ from ..tools.tavily import _resolve_api_key as _resolve_tavily_key
 
 def _get_logger():
     import structlog
+
     return structlog.get_logger("timbal.tools.web_search")
 
 
@@ -166,7 +173,8 @@ def _make_firecrawl_handler(*, integration=None, api_key=None, max_results=None)
         query: str = Field(..., description="Search query"),
         limit: int = Field(5, description="Number of results to return (max 20)"),
         tbs: str | None = Field(
-            None, description='Time filter: "qdr:h" (hour), "qdr:d" (day), "qdr:w" (week), "qdr:m" (month), "qdr:y" (year)'
+            None,
+            description='Time filter: "qdr:h" (hour), "qdr:d" (day), "qdr:w" (week), "qdr:m" (month), "qdr:y" (year)',
         ),
         location: str | None = Field(None, description="Geo-targeted location (e.g. 'Germany', 'San Francisco')"),
         country: str | None = Field(None, description="ISO country code for localized results (e.g. 'US', 'DE')"),
@@ -198,9 +206,97 @@ def _make_firecrawl_handler(*, integration=None, api_key=None, max_results=None)
     return web_search
 
 
+_GOOGLE_BASE_URL = "https://www.googleapis.com/customsearch/v1"
+
+
+async def _resolve_google_credentials(
+    *,
+    integration: Any = None,
+    api_key: SecretStr | None = None,
+    cx: str | None = None,
+) -> tuple[str, str]:
+    """Resolve Google Custom Search ``(api_key, cx)`` from args, integration, or env."""
+    resolved_key: str | None = None
+    resolved_cx = cx
+    if api_key is not None:
+        resolved_key = api_key.get_secret_value()
+    if isinstance(integration, Integration) and (resolved_key is None or resolved_cx is None):
+        creds = await integration.resolve()
+        if resolved_key is None:
+            k = creds.get("api_key")
+            if k is not None:
+                resolved_key = str(k)
+        if resolved_cx is None:
+            c = creds.get("cx")
+            if c is not None:
+                resolved_cx = str(c)
+    if resolved_key is None:
+        resolved_key = os.getenv("GOOGLE_CUSTOM_SEARCH_API_KEY")
+    if resolved_cx is None:
+        resolved_cx = os.getenv("GOOGLE_CSE_CX")
+    if not resolved_key or not resolved_cx:
+        raise ValueError(
+            "Google Custom Search requires both an API key and a Programmable Search Engine ID (cx). "
+            "Set GOOGLE_CUSTOM_SEARCH_API_KEY and GOOGLE_CSE_CX, pass api_key/cx on the tool, "
+            "or configure Integration('web_search') with api_key and cx."
+        )
+    return resolved_key, resolved_cx
+
+
+def _make_google_handler(
+    *,
+    integration=None,
+    api_key=None,
+    cx=None,
+    fixed_max_results=None,
+):
+    """Return an async handler that searches via Google Custom Search JSON API."""
+
+    async def web_search(
+        query: str = Field(..., description="Search query"),
+        num: int = Field(10, description="Number of results to return per request (1-10)"),
+        start: int | None = Field(None, description="Pagination offset for the first result (Custom Search API)."),
+        gl: str | None = Field(None, description="Geolocation hint (ISO 3166-1 alpha-2, e.g. 'us', 'de')"),
+        lr: str | None = Field(None, description="Language restrict (e.g. 'lang_en')"),
+        date_restrict: str | None = Field(None, description='Time filter for results: "d1", "w1", "m1", "y1"'),
+    ) -> dict:
+        resolved_key, resolved_cx = await _resolve_google_credentials(integration=integration, api_key=api_key, cx=cx)
+        import httpx
+
+        n = fixed_max_results if fixed_max_results is not None else num
+        n = max(1, min(int(n), 10))
+
+        params: dict[str, Any] = {
+            "key": resolved_key,
+            "cx": resolved_cx,
+            "q": query,
+            "num": n,
+        }
+        if start is not None:
+            params["start"] = start
+        if gl:
+            params["gl"] = gl
+        if lr:
+            params["lr"] = lr
+        if date_restrict:
+            params["dateRestrict"] = date_restrict
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                _GOOGLE_BASE_URL,
+                params=params,
+                timeout=httpx.Timeout(10.0, read=None),
+            )
+            response.raise_for_status()
+            return response.json()
+
+    return web_search
+
+
 # ---------------------------------------------------------------------------
 # WebSearch tool
 # ---------------------------------------------------------------------------
+
 
 class WebSearch(Tool):
     """See module docstring for native vs provider-backed behaviour and credential order."""
@@ -209,11 +305,12 @@ class WebSearch(Tool):
     description: str | None = None
 
     # --- provider selection ---
-    provider: Literal["tavily", "scraperapi", "cala", "firecrawl"] | None = None
+    provider: Literal["tavily", "scraperapi", "cala", "firecrawl", "google"] | None = None
 
     # --- credential fields (used when provider is set) ---
     integration: Annotated[str, Integration("web_search")] | None = None
     api_key: SecretStr | None = None
+    cx: str | None = Field(None, description="Google Programmable Search Engine ID (only for provider=google).")
 
     # --- native-mode fields ---
     allowed_domains: list[str] | None = None
@@ -255,9 +352,18 @@ class WebSearch(Tool):
                     api_key=kwargs.get("api_key"),
                     max_results=kwargs.get("max_results"),
                 )
+            elif provider == "google":
+                kwargs["handler"] = _make_google_handler(
+                    integration=kwargs.get("integration"),
+                    api_key=kwargs.get("api_key"),
+                    cx=kwargs.get("cx"),
+                    fixed_max_results=kwargs.get("max_results"),
+                )
             else:
+
                 def _unreachable():
                     raise NotImplementedError("This is a specification-only tool")
+
                 kwargs["handler"] = _unreachable
 
         super().__init__(**kwargs)
@@ -275,6 +381,7 @@ class WebSearch(Tool):
                     "user_location": self.user_location,
                     "integration": self.integration,
                     "api_key": self.api_key,
+                    "cx": self.cx,
                 }
             ),
         }

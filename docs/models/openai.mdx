@@ -3,11 +3,26 @@ title: "OpenAI"
 description: "GPT-5, GPT-4, and o-series models with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [OpenAI model docs](https://platform.openai.com/docs/models)</Note>
+<Note>Source: [OpenAI model docs](https://platform.openai.com/docs/models) · [API pricing](https://openai.com/api/pricing/) (cached input &#36;0.50 / 1M for GPT-5.5)</Note>
 
 ## GPT-5 Series
 
 <CardGroup cols={2}>
+  <Card title="gpt-5.5">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `openai/gpt-5.5`
+
+  OpenAI's latest flagship for coding, knowledge work, and research—positioned above GPT-5.4 with a 1M-token API context (per OpenAI model table) and higher per-token pricing.
+
+  - &#36;5 / &#36;30 per 1M tokens (input / output); cached input &#36;0.50 / 1M
+  - <Icon icon="window-maximize" size={14} /> 1M context
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Extended thinking
+  - <Icon icon="globe" size={14} /> Web search
+  </Card>
+
   <Card title="gpt-5.4">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
@@ -21,6 +36,36 @@ description: "GPT-5, GPT-4, and o-series models with specs, pricing, and capabil
   - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="brain" size={14} /> Extended thinking
   - <Icon icon="globe" size={14} /> Web search
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2025
+  </Card>
+
+  <Card title="gpt-5.4-mini">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `openai/gpt-5.4-mini`
+
+  OpenAI's most capable small model, significantly improving over GPT-5 mini across coding, reasoning, multimodal understanding, and tool use while running more than 2x faster.
+
+  - &#36;0.75 / &#36;4.50
+  - <Icon icon="window-maximize" size={14} /> 400K context
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="brain" size={14} /> Thinking
+  - <Icon icon="globe" size={14} /> Web search
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2025
+  </Card>
+
+  <Card title="gpt-5.4-nano">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `openai/gpt-5.4-nano`
+
+  The smallest, cheapest version of GPT-5.4 for tasks where speed and cost matter most. Ideal for classification, data extraction, ranking, and coding subagents.
+
+  - &#36;0.20 / &#36;1.25
+  - <Icon icon="window-maximize" size={14} /> 400K context
+  - <Icon icon="right-from-bracket" size={14} /> 128K max output
+  - <Icon icon="keyboard" size={14} /> Text, Image input
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2025
   </Card>
 
@@ -149,8 +194,6 @@ description: "GPT-5, GPT-4, and o-series models with specs, pricing, and capabil
   - <Icon icon="calendar" size={14} /> Knowledge cutoff May 2024
   </Card>
 </CardGroup>
-
-<Warning>**gpt-5.1-mini** does not exist as a standalone API model. Use `gpt-5-mini` or `gpt-5.1-codex` instead.</Warning>
 
 ---
 

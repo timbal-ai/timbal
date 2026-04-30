@@ -1,0 +1,124 @@
+---
+title: "Approval-Required Tools"
+description: "Pause an agent for human approval, capture the gate, and resume with a decision — including redaction and audit fields"
+---
+
+This example wires up a refund tool that gates above $100, captures the `ApprovalEvent` mid-stream, and resumes with a decision. See the full reference on the [Human-in-the-Loop Approvals](/agents/approvals) page.
+
+```python
+import asyncio
+from timbal import Agent, Tool
+from timbal.types.approval import ApprovalResolution
+from timbal.types.events import ApprovalEvent
+
+
+def refund_customer(amount: int, customer_id: str) -> str:
+    return f"refunded ${amount} to {customer_id}"
+
+
+refund = Tool(
+    handler=refund_customer,
+    requires_approval=lambda amount, **_: amount > 100,
+    approval_prompt=lambda amount, customer_id: (
+        f"Approve refunding ${amount} to {customer_id}?"
+    ),
+    approval_redact_keys=["customer_id"],
+)
+
+agent = Agent(
+    name="support_agent",
+    model="openai/gpt-5",
+    tools=[refund],
+)
+
+
+async def main() -> None:
+    # First call — agent will try to refund and pause for approval.
+    pending: list[ApprovalEvent] = []
+    async for event in agent(prompt="Refund $250 to customer C-42"):
+        if isinstance(event, ApprovalEvent):
+            pending.append(event)
+
+    # Show the reviewer the redacted prompt + input.
+    for event in pending:
+        print(event.prompt, event.input)
+        # event.input["customer_id"] == "***"  (redacted)
+
+    # Second call — resume with the reviewer's decision.
+    decisions = {
+        event.approval_id: ApprovalResolution(
+            approved=True,
+            approver_id="user_42",
+            comment="Verified invoice and customer history.",
+        )
+        for event in pending
+    }
+    result = await agent(
+        prompt="Refund $250 to customer C-42",
+        approval_decisions=decisions,
+    ).collect()
+
+    print(result.output.collect_text())
+    # Refund executed, agent reports success.
+
+
+asyncio.run(main())
+```
+
+## Resuming From a Different Process
+
+To approve in a UI now and resume in a worker later, configure a durable tracing provider and pass `parent_id`:
+
+```python
+from pathlib import Path
+from timbal.state.tracing.providers import JsonlTracingProvider
+
+provider = JsonlTracingProvider.configured(_path=Path("traces.jsonl"))
+
+agent = Agent(
+    name="support_agent",
+    model="openai/gpt-5",
+    tools=[refund],
+    tracing_provider=provider,
+)
+
+# In the worker, after the reviewer decided:
+result = await agent(
+    prompt="Refund $250 to customer C-42",
+    parent_id=paused_run_id,
+    approval_decisions={approval_id: True},
+).collect()
+
+if result.status.reason == "approval_already_claimed":
+    # Another worker already resumed this approval. Safe to no-op.
+    return
+```
+
+`JsonlTracingProvider` (and `SqliteTracingProvider`) implement durable `(parent_id, approval_id)` claims, so two workers racing on the same gate will not both execute the handler.
+
+## Denying With a Reason
+
+When the agent calls a denied tool, Timbal converts the denial into a `ToolResultContent` so the model can react (apologize, escalate, try another path) instead of crashing:
+
+```python
+result = await agent(
+    prompt="Refund $250 to customer C-42",
+    approval_decisions={
+        approval_id: ApprovalResolution(
+            approved=False,
+            reason="Refund exceeds policy limit.",
+            approver_id="user_42",
+        )
+    },
+).collect()
+```
+
+For direct tool calls (no agent), denial returns `status.reason == "approval_denied"` and the handler does not run.
+
+## Key Features
+
+- **Callable policy** — `requires_approval=lambda amount, **_: amount > 100` runs against the validated handler input
+- **Redaction** — `approval_redact_keys` masks fields in the public approval surface; the handler still receives unredacted input
+- **Audit fields** — `approver_id`, `comment`, `decided_at` persist under `span.metadata["approval"]["resolution"]`
+- **Durable resume** — pair with `JsonlTracingProvider` / `SqliteTracingProvider` and `parent_id` to span processes
+- **Duplicate protection** — `claim_approval` ensures a single worker resumes each gate

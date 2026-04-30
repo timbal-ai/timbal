@@ -1,0 +1,8 @@
+---
+title: "Delete File"
+openapi: "DELETE /orgs/{org_id}/k2/{kb_id}/files/{file_id}"
+---
+
+Use this endpoint to delete a **regular file** by `file_id`, and also to remove a **directory** from the knowledge base.
+
+For a folder, use the same **`id`** returned for that row in **`GET /orgs/{org_id}/k2/{kb_id}/files`** (or the `placeholder_file_id` from create-directory). Deleting that listing row removes the folder from file listings.

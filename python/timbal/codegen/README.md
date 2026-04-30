@@ -66,15 +66,15 @@ python -m timbal.codegen add-tool --type WebSearch --step agent_a
 ### `remove-tool` — Remove a tool from an Agent
 
 ```bash
-python -m timbal.codegen remove-tool web_search
+python -m timbal.codegen remove-tool --name web_search
 
 # Remove a tool from a specific step in a Workflow
-python -m timbal.codegen remove-tool web_search --step agent_a
+python -m timbal.codegen remove-tool --name web_search --step agent_a
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `<tool_name>` | yes | Name of the tool variable or runtime name to remove |
+| `--name` | yes | Name of the tool variable or runtime name to remove |
 | `--step` | no | Target step name within a Workflow (removes tool from that step's tools list) |
 
 **Requires**: Agent entry point, or Workflow entry point when using `--step`.
@@ -105,7 +105,7 @@ python -m timbal.codegen set-config --config '{"system_prompt": null}'
 #### Configure a tool on an Agent
 
 ```bash
-python -m timbal.codegen set-config web_search --config '{"timeout": 30}'
+python -m timbal.codegen set-config --name web_search --config '{"timeout": 30}'
 ```
 
 Config fields are validated against the tool's schema. Supported configurable tools: `WebSearch`, `CalaSearch`, `Tool` (custom).
@@ -113,76 +113,15 @@ Config fields are validated against the tool's schema. Supported configurable to
 #### Configure a workflow step's constructor
 
 ```bash
-python -m timbal.codegen set-config agent_b --config '{"model": "openai/gpt-4o"}'
+python -m timbal.codegen set-config --name agent_b --config '{"model": "openai/gpt-4o"}'
 ```
 
 Updates the step's variable assignment (e.g. `agent_b = Agent(model="openai/gpt-4o")`).
 
-#### Wire workflow step inputs (`--params`)
-
-```bash
-python -m timbal.codegen set-config agent_b \
-  --params '{"prompt": {"step": "agent_a"}}'
-```
-
-This generates a lambda that reads from the source step's output:
-
-```python
-workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
-```
-
-To index into the output with a key:
-
-```bash
-python -m timbal.codegen set-config agent_b \
-  --params '{"prompt": {"step": "agent_a", "key": "result"}}'
-```
-
-Generates:
-
-```python
-workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output["result"])
-```
-
-Multiple params can be set at once:
-
-```bash
-python -m timbal.codegen set-config agent_b \
-  --params '{"prompt": {"step": "agent_a"}, "context": {"step": "input_handler", "key": "data"}}'
-```
-
-#### Set step dependencies (`--depends-on`)
-
-```bash
-python -m timbal.codegen set-config agent_b --depends-on agent_a
-python -m timbal.codegen set-config agent_c --depends-on agent_a --depends-on agent_b
-```
-
-Generates:
-
-```python
-workflow.step(agent_c, depends_on=["agent_a", "agent_b"])
-```
-
-#### Combined: constructor config + params + dependencies
-
-All flags can be used together:
-
-```bash
-python -m timbal.codegen set-config agent_b \
-  --config '{"model": "openai/gpt-4o"}' \
-  --params '{"prompt": {"step": "agent_a"}}' \
-  --depends-on agent_a
-```
-
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `<name>` | no | Target tool or step name. Omit to configure the entry point itself. |
+| `--name` | no | Target tool or step name. Omit to configure the entry point itself. |
 | `--config` | depends | JSON object with constructor kwargs |
-| `--params` | no | JSON object mapping input params to source steps (Workflow only) |
-| `--depends-on` | no | Step dependency name, repeatable (Workflow only) |
-
-**Removing params or dependencies**: To remove a `--params` mapping or `--depends-on` entry, re-send the full set without the one you want to remove. The provided values replace the existing ones entirely — there is no separate "remove" operation.
 
 ---
 
@@ -207,32 +146,165 @@ python -m timbal.codegen add-step --type Custom \
 | `--config` | Agent only | JSON with Agent constructor params (must include `name`) |
 | `--definition` | Custom only | Full function definition |
 | `--name` | no | Override the step name |
+| `--x` | no | X canvas position (float). Auto-computed if omitted. |
+| `--y` | no | Y canvas position (float). Auto-computed if omitted. |
 
 **Requires**: Workflow entry point.
 
 **What it does**:
 - Adds necessary imports
-- Creates the variable assignment or function definition
+- Creates the variable assignment or function definition with `metadata={"position": {"x": ..., "y": ...}}`
 - Appends a `workflow.step(...)` call after the last existing step (or after the entry point)
 - Idempotent — re-running with the same name updates the existing step
 
 Agent config fields are validated against the same set as `set-config`.
+
+**Auto-positioning**: When `--x` and `--y` are omitted, the new step is placed automatically based on the existing nodes. The position is computed by finding the rightmost column of nodes and offsetting one column to the right (360px), vertically centered on that column. Bare function steps (not wrapped in `Tool`/`Agent`) are treated as nodes at the default column (`x=100`), stacked vertically with 140px spacing. If no existing steps have positions, the first step starts at `(100, 100)`.
 
 ---
 
 ### `remove-step` — Remove a step from a Workflow
 
 ```bash
-python -m timbal.codegen remove-step agent_b
+python -m timbal.codegen remove-step --name agent_b
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `<step_name>` | yes | Name of the step to remove |
+| `--name` | yes | Name of the step to remove |
 
 **Requires**: Workflow entry point.
 
 Removes the `workflow.step(...)` call for the named step. Unused variables, functions, and imports are cleaned up automatically. If the step doesn't exist, the operation is a no-op.
+
+---
+
+### `set-param` — Set a parameter on a workflow step
+
+Sets a parameter on a workflow step. Two modes: **map** wires a param from another step's output, **value** sets a static value.
+
+```bash
+# Map a param from another step's output
+python -m timbal.codegen set-param --target agent_b --name prompt \
+  --type map --source agent_a
+
+# Map with a dot-notation key path into the source output
+python -m timbal.codegen set-param --target agent_b --name prompt \
+  --type map --source agent_a --key output.cleaned
+
+# Map with nested index and attribute access
+python -m timbal.codegen set-param --target agent_b --name prompt \
+  --type map --source agent_a --key output.0.items.name
+
+# Set a static value
+python -m timbal.codegen set-param --target agent_a --name prompt \
+  --type value --value '"Hello world"'
+
+# Remove a param (set value to null)
+python -m timbal.codegen set-param --target agent_b --name prompt \
+  --type value --value 'null'
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--target` | yes | Target step name |
+| `--name` | yes | Parameter name to set |
+| `--type` | yes | `map` (wire from another step's output) or `value` (static value) |
+| `--source` | map only | Source step name |
+| `--key` | no | Dot-notation path into the source step's output (e.g. `output.cleaned`, `output.0.items.name`) |
+| `--value` | value only | JSON literal for the static value. Use `null` to remove the param. |
+
+**Requires**: Workflow entry point.
+
+**Key path syntax**: The `--key` uses dot-notation where numeric segments become index access and string segments become attribute access:
+
+| Key path | Generated Python |
+|----------|-----------------|
+| `output.cleaned` | `.output.cleaned` |
+| `output.0.items` | `.output[0].items` |
+| `output.0.data.name.2` | `.output[0].data.name[2]` |
+
+**What it does**:
+- `type=map`: adds a lambda kwarg that reads from the source step's output via `get_run_context().step_span("source").output`
+- `type=map` with `--key`: traverses into the output using the dot-notation path
+- `type=value`: sets a static value on the step's `.step()` call
+- `type=value` with `null`: removes the param
+- Adds `from timbal.state import get_run_context` import when needed (map type)
+- Idempotent — re-running updates rather than duplicates
+
+---
+
+### `set-position` — Set the canvas position for a node
+
+Sets the `(x, y)` position for a node on the ReactFlow canvas. The position is stored inside the runnable's `metadata` dict and surfaced as a top-level `position` key in `get-flow` output.
+
+```bash
+# Set position on the Agent entry point
+python -m timbal.codegen set-position --x 100 --y 200
+
+# Set position on a workflow step
+python -m timbal.codegen set-position --name agent_a --x 150 --y 250
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--x` | yes | X coordinate (float) |
+| `--y` | yes | Y coordinate (float) |
+| `--name` | no | Step name (required for Workflow, rejected for Agent) |
+
+**What it does**:
+- Upserts `metadata={"position": {"x": ..., "y": ...}}` on the constructor
+- Preserves existing metadata keys — only the `"position"` key is touched
+- Idempotent — re-running updates the position in place
+
+---
+
+### `add-edge` — Add an ordering or conditional edge between workflow steps
+
+Adds an execution ordering dependency between two steps. For wiring data between steps, use `set-param` instead.
+
+```bash
+# Pure ordering (adds source to target's depends_on)
+python -m timbal.codegen add-edge --source agent_a --target agent_b
+
+# Conditional edge (ordering + condition)
+python -m timbal.codegen add-edge --source agent_a --target agent_b \
+  --when 'lambda: get_run_context().step_span("agent_a").output.content != ""'
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--source` | yes | Source step name |
+| `--target` | yes | Target step name |
+| `--when` | no | Python expression for a conditional edge |
+
+**Requires**: Workflow entry point.
+
+**What it does**:
+- Merges the source into the target's `depends_on=[...]` list
+- With `--when`: adds a `when=` kwarg to the target's `.step()` call
+- Adds `from timbal.state import get_run_context` import when needed
+- Idempotent — re-running updates rather than duplicates
+
+---
+
+### `remove-edge` — Remove an edge between two workflow steps
+
+```bash
+python -m timbal.codegen remove-edge --source agent_a --target agent_b
+```
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--source` | yes | Source step name |
+| `--target` | yes | Target step name |
+
+**Requires**: Workflow entry point.
+
+Removes all references to the source step from the target's `.step()` call:
+- Removes the source from `depends_on=[...]`
+- Removes param kwargs that reference the source via `step_span("source")`
+- Removes the `when=` kwarg if it references the source
 
 ---
 
@@ -273,43 +345,201 @@ workflow.step(agent_a)
 
 ---
 
-### `rename` — Rename a step or tool
-
-```bash
-# Rename a workflow step
-python -m timbal.codegen rename agent_a --to agent_b
-
-# Rename a tool
-python -m timbal.codegen rename web_search --to my_search
-```
-
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `<old_name>` | yes | Current runtime name of the step or tool |
-| `--to` | yes | New name |
-
-**What it does**:
-- Renames the variable and updates the `name=` kwarg in the constructor
-- Updates all references: `tools=[...]` list entries, `.step()` call arguments
-- Updates string references in `depends_on=["..."]` and `step_span("...")` calls
-- Cannot rename the entry point variable (referenced by `timbal.yaml`)
-
----
-
 ### `list-tools` — List available framework tool types
 
 ```bash
 python -m timbal.codegen list-tools
+python -m timbal.codegen list-tools --no-cache   # skip disk cache
 ```
 
-Outputs a JSON array of framework tools discovered from `timbal.tools`:
+Outputs all framework tools as a flat JSON array. **Note:** with 700+ tools this can be slow. Prefer `get-tools` for paginated, filtered access.
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--no-cache` | off | Skip the disk cache and force a full rediscovery |
 
 ```json
-[
-  {"type": "Bash", "module": "timbal.tools", "name": "bash", "description": null},
-  {"type": "CalaSearch", "module": "timbal.tools", "name": "cala_search", "description": "Search for verified knowledge..."},
-  ...
-]
+{
+  "tools": [
+    {"type": "Bash", "module": "timbal.tools", "name": "bash", "description": null, "provider": null, "provider_logo": null},
+    ...
+  ]
+}
+```
+
+---
+
+### `get-tools` — Browse and search tools (paginated)
+
+Two-tier tool discovery with pagination to avoid loading all tools at once.
+
+#### Default: list providers
+
+```bash
+python -m timbal.codegen get-tools
+```
+
+Returns provider summaries sorted by tool count:
+
+```json
+{
+  "providers": [
+    {"name": "zendesk", "logo": "https://content.timbal.ai/assets/zendesk_favicon.svg", "tool_count": 442},
+    {"name": "slack", "logo": "https://content.timbal.ai/assets/slack_favicon.svg", "tool_count": 27},
+    {"name": "system", "logo": null, "tool_count": 6}
+  ]
+}
+```
+
+Tools with no provider appear under `"system"`.
+
+#### Filter by provider
+
+```bash
+python -m timbal.codegen get-tools --provider slack
+python -m timbal.codegen get-tools --provider system
+```
+
+#### Search across all tools
+
+```bash
+python -m timbal.codegen get-tools --search "create ticket"
+```
+
+Case-insensitive substring match on tool name, type (class name), and description.
+
+#### Combined filters
+
+```bash
+python -m timbal.codegen get-tools --provider stripe --search invoice
+```
+
+`--provider` and `--search` compose as AND.
+
+#### Pagination
+
+```bash
+python -m timbal.codegen get-tools --provider zendesk --limit 10 --offset 20
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--provider` | none | Filter by provider name (`"system"` for tools with no provider) |
+| `--search` | none | Case-insensitive substring search on name, type, description |
+| `--limit` | 50 | Max tools to return |
+| `--offset` | 0 | Number of tools to skip |
+
+Response includes pagination metadata:
+
+```json
+{
+  "tools": [...],
+  "total": 442,
+  "limit": 10,
+  "offset": 20
+}
+```
+
+---
+
+### `get-models` — Browse and search LLM models (paginated)
+
+Two-tier model discovery with pagination, following the same pattern as `get-tools`.
+
+#### Default: list providers
+
+```bash
+python -m timbal.codegen get-models
+```
+
+Returns provider summaries sorted by model count:
+
+```json
+{
+  "providers": [
+    {"name": "togetherai", "logo": "https://content.timbal.ai/assets/togetherai_favicon.svg", "model_count": 30},
+    {"name": "openai", "logo": "https://content.timbal.ai/assets/openai_favicon.svg", "model_count": 20},
+    {"name": "anthropic", "logo": "https://content.timbal.ai/assets/anthropic_favicon.svg", "model_count": 10}
+  ]
+}
+```
+
+#### Filter by provider
+
+```bash
+python -m timbal.codegen get-models --provider anthropic
+```
+
+#### Search across all models
+
+```bash
+python -m timbal.codegen get-models --search "vision"
+```
+
+Case-insensitive substring match on model `id`, `display_name`, and `description`.
+
+#### Combined filters
+
+```bash
+python -m timbal.codegen get-models --provider openai --search "gpt-4"
+```
+
+`--provider` and `--search` compose as AND.
+
+#### Pagination
+
+```bash
+python -m timbal.codegen get-models --provider togetherai --limit 10 --offset 20
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--provider` | none | Filter by provider name |
+| `--search` | none | Case-insensitive substring search on id, display_name, description |
+| `--limit` | 50 | Max models to return |
+| `--offset` | 0 | Number of models to skip |
+
+When filtering, response includes pagination metadata and full model objects:
+
+```json
+{
+  "models": [
+    {
+      "id": "anthropic/claude-opus-4-6",
+      "provider": "anthropic",
+      "display_name": "Claude Opus 4.6",
+      "description": "Anthropic's most capable model, excelling at planning and debugging within large codebases.",
+      "input_price": 5.0,
+      "output_price": 25.0,
+      "context_window": 200000,
+      "capabilities": ["vision", "tools", "reasoning"]
+    }
+  ],
+  "total": 10,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+**Model fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Full routing ID passed to `model=` (e.g. `"anthropic/claude-opus-4-6"`) |
+| `provider` | string | Provider key (`anthropic`, `openai`, `google`, `togetherai`, `xai`, `groq`, `fireworks`, `byteplus`, `xiaomi`, `cerebras`, `sambanova`) |
+| `display_name` | string | Human-readable name for UI |
+| `description` | string | One-sentence description from provider docs |
+| `input_price` | float \| null | USD per 1M input tokens (`null` if not publicly listed) |
+| `output_price` | float \| null | USD per 1M output tokens |
+| `context_window` | int \| null | Maximum context in tokens |
+| `capabilities` | string[] | Subset of `vision`, `tools`, `reasoning`, `audio`, `video`, `image_generation` |
+
+**Model registry (`models.yaml`):**
+
+Model metadata lives in `python/timbal/models.yaml`. To add or update a model, edit the YAML — it is the single source of truth. The `model=` type annotation in `llm_router.py` is derived from it via `scripts/generate_models.py`:
+
+```bash
+uv run python scripts/generate_models.py
 ```
 
 ---
@@ -320,7 +550,38 @@ Outputs a JSON array of framework tools discovered from `timbal.tools`:
 python -m timbal.codegen get-flow
 ```
 
-Outputs a JSON representation of the entry point's execution graph.
+Outputs a JSON representation of the entry point's execution graph with `nodes` and `edges`.
+
+Each node has a top-level `position` key (`{"x": ..., "y": ...}`) for ReactFlow canvas placement, defaulting to `{"x": 0, "y": 0}` when not set. Use `set-position` to configure it.
+
+Each node's `data.params.properties` includes OpenAPI-style schema fields (`type`, `title`, `description`, etc.) plus a `value` field describing how the param is set:
+
+```json
+{
+  "prompt": {
+    "title": "Prompt",
+    "type": "string",
+    "value": {"type": "map", "source": "agent_a", "key": "output.cleaned"}
+  }
+}
+```
+
+The `value` field has two forms:
+- **Map**: `{"type": "map", "source": "<step_name>"}` with an optional `"key"` for dot-notation path
+- **Static**: `{"type": "value", "value": <json_value>}`
+- **Absent**: param has no default set
+
+Config fields that reference the model registry use `"x-timbal-ref": "models"` instead of inlining the full enum. Call `get-models` to get the available options:
+
+```json
+{
+  "model": {
+    "type": "string",
+    "x-timbal-ref": "models",
+    "value": "anthropic/claude-haiku-4-5"
+  }
+}
+```
 
 ---
 
@@ -356,7 +617,7 @@ Every code transformation follows this pipeline:
 timbal.yaml → parse entry point FQN
     → load source file
     → parse to CST (libcst)
-    → apply transformer (add/remove/set-config)
+    → apply transformer (add/remove/set-config/set-param/set-position)
     → remove unused code (iterative dead code elimination)
     → format with ruff
     → write to file (or stdout with --dry-run)
@@ -375,6 +636,6 @@ Operations fail with a non-zero exit code and a message to stderr when:
 - `timbal.yaml` is missing or has no `fqn` field
 - The source file doesn't exist
 - The entry point type doesn't match the operation (Agent vs Workflow)
-- Required arguments are missing (`--definition` for Custom, `name` for Agent steps)
+- Required arguments are missing (`--definition` for Custom, `name` for Agent steps, `--source` for map params)
 - Config fields are unknown or invalid
 - JSON arguments are malformed

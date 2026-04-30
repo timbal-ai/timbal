@@ -1,9 +1,12 @@
 import contextlib
+import hashlib
 import importlib
 import inspect
 import io
+import json
 import re
 import typing
+from pathlib import Path
 from typing import Annotated
 
 
@@ -28,12 +31,73 @@ class FrameworkTool:
         self.provider_logo = provider_logo
 
 
-def get_framework_tools() -> dict[str, FrameworkTool]:
-    """Discover framework tools from timbal.tools.
+# ---------------------------------------------------------------------------
+# Disk cache helpers
+# ---------------------------------------------------------------------------
 
-    Returns dict: class_name -> FrameworkTool
-    e.g. {"WebSearch": FrameworkTool(module="timbal.tools", name="web_search", ...), ...}
-    """
+_CACHE_DIR = Path(__file__).resolve().parent / ".tool_cache"
+_CACHE_FILE = _CACHE_DIR / "framework_tools.json"
+
+
+def _tools_fingerprint() -> str:
+    """Hash the tools package __init__.py to detect when the tool list changes."""
+    init_path = Path(__file__).resolve().parent.parent / "tools" / "__init__.py"
+    if init_path.exists():
+        return hashlib.md5(init_path.read_bytes()).hexdigest()
+    return ""
+
+
+def _load_cache(fingerprint: str) -> dict[str, FrameworkTool] | None:
+    """Load cached tool registry if the fingerprint matches."""
+    try:
+        if not _CACHE_FILE.exists():
+            return None
+        data = json.loads(_CACHE_FILE.read_text())
+        if data.get("fingerprint") != fingerprint:
+            return None
+        registry: dict[str, FrameworkTool] = {}
+        for cls_name, entry in data["tools"].items():
+            registry[cls_name] = FrameworkTool(
+                module=entry["module"],
+                name=entry["name"],
+                description=entry["description"],
+                provider=entry["provider"],
+                provider_logo=entry["provider_logo"],
+            )
+        return registry
+    except Exception:
+        return None
+
+
+def _save_cache(fingerprint: str, registry: dict[str, FrameworkTool]) -> None:
+    """Persist the tool registry to disk."""
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        data = {
+            "fingerprint": fingerprint,
+            "tools": {
+                cls_name: {
+                    "module": ft.module,
+                    "name": ft.name,
+                    "description": ft.description,
+                    "provider": ft.provider,
+                    "provider_logo": ft.provider_logo,
+                }
+                for cls_name, ft in registry.items()
+            },
+        }
+        _CACHE_FILE.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+
+def _discover_framework_tools() -> dict[str, FrameworkTool]:
+    """Introspect timbal.tools classes (the slow path)."""
     redirect = io.StringIO()
     with contextlib.redirect_stdout(redirect):
         from pydantic_core import PydanticUndefined
@@ -81,6 +145,58 @@ def get_framework_tools() -> dict[str, FrameworkTool]:
             )
 
     return registry
+
+
+def invalidate_cache() -> None:
+    """Delete the disk cache, forcing a full rediscovery on the next call."""
+    try:
+        if _CACHE_FILE.exists():
+            _CACHE_FILE.unlink()
+    except Exception:
+        pass
+
+
+def get_framework_tools(*, no_cache: bool = False) -> dict[str, FrameworkTool]:
+    """Discover framework tools from timbal.tools.
+
+    Uses a disk cache keyed by a hash of ``timbal/tools/__init__.py`` to avoid
+    the expensive Pydantic class introspection on repeated calls.
+
+    Args:
+        no_cache: If True, skip the cache and force a full rediscovery.
+
+    Returns dict: class_name -> FrameworkTool
+    e.g. {"WebSearch": FrameworkTool(module="timbal.tools", name="web_search", ...), ...}
+    """
+    fingerprint = _tools_fingerprint()
+
+    if not no_cache:
+        cached = _load_cache(fingerprint)
+        if cached is not None:
+            return cached
+
+    registry = _discover_framework_tools()
+    _save_cache(fingerprint, registry)
+    return registry
+
+
+def get_provider_summaries(*, no_cache: bool = False) -> list[dict]:
+    """Return provider summaries with tool counts, sorted by count descending.
+
+    Tools with no provider are grouped under ``"system"``.
+    """
+    tools = get_framework_tools(no_cache=no_cache)
+    groups: dict[str, dict] = {}
+    for ft in tools.values():
+        provider = ft.provider or "system"
+        if provider not in groups:
+            groups[provider] = {
+                "name": provider,
+                "logo": ft.provider_logo,
+                "tool_count": 0,
+            }
+        groups[provider]["tool_count"] += 1
+    return sorted(groups.values(), key=lambda g: g["tool_count"], reverse=True)
 
 
 def get_framework_tool_names() -> dict[str, str]:

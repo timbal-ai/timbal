@@ -1,0 +1,6 @@
+---
+title: "Cost Analytics"
+openapi: "GET /orgs/{org_id}/projects/{project_id}/analytics/credits"
+---
+
+Only **project admins** can call this endpoint. Each response returns at most **1440** time bins; there is no pagination. You may omit `group_by`, `from`, and/or `to` — the server applies defaults — and the JSON body includes `group_by`, `from`, and `to` so you can see the bin size and range that were actually used.

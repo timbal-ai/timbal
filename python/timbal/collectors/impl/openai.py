@@ -14,10 +14,14 @@ from openai.types.responses import (
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
     ResponseCreatedEvent,
+    ResponseCustomToolCall,
+    ResponseCustomToolCallInputDeltaEvent,
+    ResponseCustomToolCallInputDoneEvent,
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
+    ResponseIncompleteEvent,
     ResponseInProgressEvent,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
@@ -29,6 +33,8 @@ from openai.types.responses import (
     ResponseReasoningSummaryPartDoneEvent,
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseReasoningSummaryTextDoneEvent,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     ResponseWebSearchCallCompletedEvent,
@@ -37,7 +43,7 @@ from openai.types.responses import (
 )
 from uuid_extensions import uuid7
 
-from ...state import get_run_context
+from ...state import get_billing_id, get_run_context
 from ...types.content.text import TextContent
 from ...types.content.thinking import ThinkingContent
 from ...types.content.tool_use import ToolUseContent
@@ -82,6 +88,11 @@ ResponseEvent = (
     | ResponseTextDoneEvent
     | ResponseContentPartDoneEvent
     | ResponseCompletedEvent
+    | ResponseReasoningTextDeltaEvent
+    | ResponseReasoningTextDoneEvent
+    | ResponseIncompleteEvent
+    | ResponseCustomToolCallInputDeltaEvent
+    | ResponseCustomToolCallInputDoneEvent
 )
 
 logger = structlog.get_logger("timbal.collectors.impl.openai")
@@ -98,13 +109,18 @@ class ChatCompletionCollector(BaseCollector):
         super().__init__(**kwargs)
         self._start = start
         self._content: str = ""
+        # `_current_tool_call` is appended to `_tool_calls` by reference (same dict).
+        # Subsequent mutations of `_current_tool_call` propagate to the entry in
+        # `_tool_calls` without needing to re-append.
         self._tool_calls: list[dict[str, Any]] = []
         self._current_tool_call: dict[str, Any] | None = None
+        self._tool_use_header_emitted: bool = False
         self._first_token: float | None = None
         self._output_tokens: int = 0
         self._text_block_started: bool = False
         self._content_blocks: set[str] = set()
         self._stop_reason: str | None = None
+        self._pending_usage: Any | None = None  # Last usage event, written once in result()
 
     @classmethod
     @override
@@ -114,9 +130,12 @@ class ChatCompletionCollector(BaseCollector):
     @override
     def process(self, event: ChatCompletionEvent) -> Any:
         """Processes OpenAI streaming events."""
-        # Handle usage statistics
+        # Stash usage for deferred processing in result().
+        # Some providers (e.g. Gemini) send cumulative usage on every chunk,
+        # not just the final one. By always overwriting _pending_usage and
+        # writing once in result(), we avoid double-counting.
         if event.usage:
-            self._handle_usage(event)
+            self._pending_usage = event
         if not len(event.choices):
             return None
         # Capture finish_reason from the choice
@@ -134,10 +153,14 @@ class ChatCompletionCollector(BaseCollector):
         if event.choices[0].delta.content:
             return self._handle_text_content(event)
 
+    @staticmethod
+    def _usage_billing_id(api_model: str) -> str:
+        return get_billing_id() or api_model
+
     def _handle_usage(self, event: ChatCompletionEvent) -> None:
         """Handle usage statistics from OpenAI events."""
         run_context = get_run_context()
-        openai_model = event.model
+        billing_id = self._usage_billing_id(event.model)
         openai_usage = event.usage
         input_tokens = int(openai_usage.prompt_tokens)
         input_tokens_details = openai_usage.prompt_tokens_details
@@ -145,13 +168,13 @@ class ChatCompletionCollector(BaseCollector):
             input_cached_tokens = int(input_tokens_details.cached_tokens)
             if input_cached_tokens:
                 input_tokens -= input_cached_tokens
-                run_context.update_usage(f"{openai_model}:input_cached_tokens", input_cached_tokens)
+                run_context.update_usage(f"{billing_id}:input_cached_tokens", input_cached_tokens)
         if hasattr(input_tokens_details, "audio_tokens") and input_tokens_details.audio_tokens is not None:
             input_audio_tokens = int(input_tokens_details.audio_tokens)
             if input_audio_tokens:
                 input_tokens -= input_audio_tokens
-                run_context.update_usage(f"{openai_model}:input_audio_tokens", input_audio_tokens)
-        run_context.update_usage(f"{openai_model}:input_text_tokens", input_tokens)
+                run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
+        run_context.update_usage(f"{billing_id}:input_text_tokens", input_tokens)
         output_tokens = int(openai_usage.completion_tokens)
         self._output_tokens += output_tokens
         output_tokens_details = openai_usage.completion_tokens_details
@@ -159,20 +182,56 @@ class ChatCompletionCollector(BaseCollector):
             output_audio_tokens = int(output_tokens_details.audio_tokens)
             if output_audio_tokens:
                 output_tokens -= output_audio_tokens
-                run_context.update_usage(f"{openai_model}:output_audio_tokens", output_audio_tokens)
-        run_context.update_usage(f"{openai_model}:output_text_tokens", output_tokens)
+                run_context.update_usage(f"{billing_id}:output_audio_tokens", output_audio_tokens)
+        run_context.update_usage(f"{billing_id}:output_text_tokens", output_tokens)
 
     def _handle_tool_calls(self, event: ChatCompletionEvent) -> TimbalToolUse | TimbalToolUseDelta | None:
         """Handle tool call events from OpenAI."""
         tool_call = event.choices[0].delta.tool_calls[0]
+        fn = tool_call.function
+        fn_name = fn.name if fn is not None else None
+        fn_args_part = fn.arguments if fn is not None else None
+
+        def _merge_same_id_stream() -> TimbalToolUse | TimbalToolUseDelta | None:
+            """Continue the same tool_call when the provider resends the same id (e.g. Fireworks/Kimi)."""
+            assert self._current_tool_call is not None
+            if fn_name:
+                self._current_tool_call["name"] = fn_name
+            if fn_args_part is not None:
+                self._current_tool_call["input"] += fn_args_part
+            if not self._tool_use_header_emitted and self._current_tool_call["name"]:
+                self._tool_calls.append(self._current_tool_call)
+                self._tool_use_header_emitted = True
+                return TimbalToolUse(
+                    id=self._current_tool_call["id"],
+                    name=self._current_tool_call["name"],
+                    input=self._current_tool_call["input"],
+                    is_server_tool_use=False,
+                )
+            if self._tool_use_header_emitted and fn_args_part is not None:
+                return TimbalToolUseDelta(
+                    id=self._current_tool_call["id"],
+                    input_delta=fn_args_part,
+                )
+            return None
+
         # TODO Review this for parallel tool calls
         if tool_call.id:
-            # Start new tool call
+            same_stream = (
+                self._current_tool_call is not None
+                and self._current_tool_call.get("id") == tool_call.id
+            )
+            if same_stream:
+                return _merge_same_id_stream()
+
+            # New tool call stream. Some providers (e.g. Fireworks / Kimi) send tool_call.id before
+            # function.name is set; defer emitting TimbalToolUse until we have a name.
+            self._tool_use_header_emitted = bool(fn_name)
             self._current_tool_call = {
                 "type": "tool_use",
                 "id": tool_call.id,
-                "name": tool_call.function.name,
-                "input": tool_call.function.arguments,
+                "name": fn_name or "",
+                "input": fn_args_part if fn_args_part is not None else "",
             }
 
             # Check for extra_content (Google Gemini thought signature)
@@ -182,20 +241,40 @@ class ChatCompletionCollector(BaseCollector):
                 if google_extra:
                     self._current_tool_call["thought_signature"] = google_extra.get("thought_signature")
 
-            self._tool_calls.append(self._current_tool_call)
             self._content_blocks.add(tool_call.id)
+            if fn_name:
+                self._tool_calls.append(self._current_tool_call)
+                return TimbalToolUse(
+                    id=tool_call.id,
+                    name=fn_name,
+                    input=self._current_tool_call["input"],
+                    is_server_tool_use=False,
+                )
+            return None
+
+        if self._current_tool_call is None:
+            return None
+
+        if fn_name:
+            self._current_tool_call["name"] = fn_name
+        if fn_args_part is not None:
+            self._current_tool_call["input"] += fn_args_part
+
+        if not self._tool_use_header_emitted and self._current_tool_call["name"]:
+            self._tool_calls.append(self._current_tool_call)
+            self._tool_use_header_emitted = True
             return TimbalToolUse(
-                id=tool_call.id,
-                name=tool_call.function.name,
-                input=tool_call.function.arguments,
+                id=self._current_tool_call["id"],
+                name=self._current_tool_call["name"],
+                input=self._current_tool_call["input"],
                 is_server_tool_use=False,
             )
-        else:
-            self._current_tool_call["input"] += tool_call.function.arguments
+        if self._tool_use_header_emitted and fn_args_part is not None:
             return TimbalToolUseDelta(
                 id=self._current_tool_call["id"],
-                input_delta=tool_call.function.arguments,
+                input_delta=fn_args_part,
             )
+        return None
 
     def _handle_text_content(self, event: ChatCompletionEvent) -> TimbalText | TimbalTextDelta:
         """Handle text content from OpenAI events."""
@@ -221,6 +300,10 @@ class ChatCompletionCollector(BaseCollector):
     @override
     def result(self) -> Message:
         """Returns structured OpenAI response."""
+        # Write usage once from the last chunk that carried it.
+        if self._pending_usage is not None:
+            self._handle_usage(self._pending_usage)
+
         span = get_run_context().current_span()
         ttft = self._first_token - self._start
         span.metadata["ttft"] = ttft
@@ -290,7 +373,7 @@ class ResponseCollector(BaseCollector):
             return None
         elif isinstance(event, ResponseOutputItemDoneEvent):
             return self._handle_output_item_done(event)
-        elif isinstance(event, ResponseCompletedEvent):
+        elif isinstance(event, ResponseCompletedEvent | ResponseIncompleteEvent):
             return self._handle_completed(event)
         elif isinstance(event, ResponseOutputTextAnnotationAddedEvent):
             return self._handle_output_text_annotation_added(event)
@@ -302,12 +385,29 @@ class ResponseCollector(BaseCollector):
             return None
         elif isinstance(event, ResponseReasoningSummaryPartDoneEvent):
             return None
+        elif isinstance(event, ResponseReasoningTextDeltaEvent):
+            return self._handle_reasoning_text_delta(event)
+        elif isinstance(event, ResponseReasoningTextDoneEvent):
+            return None
+        elif isinstance(event, ResponseCustomToolCallInputDeltaEvent | ResponseCustomToolCallInputDoneEvent):
+            return None
         else:
             logger.warning("Unhandled response event", response_event=event)
 
     def _handle_created(self, event: ResponseCreatedEvent) -> None:
         """Handle created events from OpenAI."""
         self.model = event.response.model
+
+    def _usage_billing_id(self, *, response_fallback: str | None = None) -> str:
+        bid = get_billing_id()
+        if bid:
+            return bid
+        m = getattr(self, "model", None)
+        if m:
+            return m
+        if response_fallback:
+            return response_fallback
+        return ""
 
     def _handle_output_item_added(self, event: ResponseOutputItemAddedEvent) -> None:
         """Handle output item added events from OpenAI."""
@@ -344,6 +444,17 @@ class ResponseCollector(BaseCollector):
             return TimbalThinking(
                 id=content_block_id,
                 thinking="",  # TODO Review this
+            )
+        elif isinstance(event.item, ResponseCustomToolCall):
+            # Server-side custom tools (e.g. xAI's x_keyword_search, web_fetch).
+            # Track as server tool use but don't emit to the stream.
+            content_block_id = event.item.id
+            self.content_blocks.add(content_block_id)
+            return TimbalToolUse(
+                id=content_block_id,
+                name=event.item.name,
+                input=event.item.input,
+                is_server_tool_use=True,
             )
         else:
             logger.warning("Unhandled output item added event", response_output_item_added_event=event)
@@ -416,12 +527,34 @@ class ResponseCollector(BaseCollector):
             thinking_delta=event.delta,
         )
 
+    def _handle_reasoning_text_delta(self, event: ResponseReasoningTextDeltaEvent) -> None:
+        """Handle raw reasoning text delta events (e.g. from xAI)."""
+        if event.item_id not in self.content:
+            self.content[event.item_id] = {
+                "type": "thinking",
+                "thinking": "",
+            }
+        self.content[event.item_id]["thinking"] += event.delta
+        content_block_id = event.item_id
+        if content_block_id not in self.content_blocks:
+            self.content_blocks.add(content_block_id)
+            return TimbalThinking(
+                id=content_block_id,
+                thinking=event.delta,
+            )
+        return TimbalThinkingDelta(
+            id=content_block_id,
+            thinking_delta=event.delta,
+        )
+
     def _handle_output_item_done(self, event: ResponseOutputItemDoneEvent) -> None:
         """Handle output item done events from OpenAI."""
         if isinstance(event.item, ResponseFunctionWebSearch):
-            get_run_context().update_usage(
-                f"{self.model}:web_search_requests", 1
-            )  # TODO Review. Do they only perform one query?
+            bid = self._usage_billing_id()
+            if bid:
+                get_run_context().update_usage(
+                    f"{bid}:web_search_requests", 1
+                )  # TODO Review. Do they only perform one query?
             # TODO Grab the query and return the result
             content_block_id = event.item.id
             if content_block_id in self.content_blocks:
@@ -434,10 +567,21 @@ class ResponseCollector(BaseCollector):
                 return TimbalContentBlockStop(id=content_block_id)
             else:
                 return None
+        elif isinstance(event.item, ResponseCustomToolCall):
+            # Track server-side custom tool requests for cost tracking.
+            tool_name = event.item.name
+            bid = self._usage_billing_id()
+            if bid:
+                get_run_context().update_usage(f"{bid}:{tool_name}_requests", 1)
+            content_block_id = event.item.id
+            if content_block_id in self.content_blocks:
+                return TimbalContentBlockStop(id=content_block_id)
+            else:
+                return None
         else:
             logger.warning("Unhandled output item done event", response_output_item_done_event=event)
 
-    def _handle_completed(self, event: ResponseCompletedEvent) -> None:
+    def _handle_completed(self, event: ResponseCompletedEvent | ResponseIncompleteEvent) -> None:
         """Handle completed events from OpenAI."""
         # Capture stop reason from the response
         # status can be: 'completed', 'failed', 'in_progress', 'cancelled', 'queued', 'incomplete'
@@ -449,19 +593,20 @@ class ResponseCollector(BaseCollector):
 
         run_context = get_run_context()
         usage = event.response.usage
+        billing_id = self._usage_billing_id(response_fallback=event.response.model)
         input_tokens = int(usage.input_tokens)
         input_tokens_details = usage.input_tokens_details
         if hasattr(input_tokens_details, "cached_tokens"):
             input_cached_tokens = int(input_tokens_details.cached_tokens)
             if input_cached_tokens:
                 input_tokens -= input_cached_tokens
-                run_context.update_usage(f"{self.model}:input_cached_tokens", input_cached_tokens)
+                run_context.update_usage(f"{billing_id}:input_cached_tokens", input_cached_tokens)
         if hasattr(input_tokens_details, "audio_tokens"):
             input_audio_tokens = int(input_tokens_details.audio_tokens)
             if input_audio_tokens:
                 input_tokens -= input_audio_tokens
-                run_context.update_usage(f"{self.model}:input_audio_tokens", input_audio_tokens)
-        run_context.update_usage(f"{self.model}:input_text_tokens", input_tokens)
+                run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
+        run_context.update_usage(f"{billing_id}:input_text_tokens", input_tokens)
         output_tokens = int(usage.output_tokens)
         self._output_tokens += output_tokens
         output_tokens_details = usage.output_tokens_details
@@ -469,8 +614,8 @@ class ResponseCollector(BaseCollector):
             output_audio_tokens = int(output_tokens_details.audio_tokens)
             if output_audio_tokens:
                 output_tokens -= output_audio_tokens
-                run_context.update_usage(f"{self.model}:output_audio_tokens", output_audio_tokens)
-        run_context.update_usage(f"{self.model}:output_text_tokens", output_tokens)
+                run_context.update_usage(f"{billing_id}:output_audio_tokens", output_audio_tokens)
+        run_context.update_usage(f"{billing_id}:output_text_tokens", output_tokens)
 
     @override
     def result(self) -> Message:

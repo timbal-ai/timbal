@@ -23,6 +23,20 @@ from ..platform.types import UploadFileResponse
 from ..state import get_or_create_run_context
 
 
+def _extract_filename(headers: dict, url: str) -> str:
+    """Extract filename from Content-Disposition header, falling back to URL path."""
+    filename = None
+    content_disposition = headers.get("Content-Disposition")
+    if content_disposition and "filename=" in content_disposition:
+        try:
+            filename = content_disposition.split("filename=")[1].strip("\"'")
+        except (IndexError, AttributeError):
+            pass
+    if not filename:
+        filename = url.split("/")[-1]
+    return filename
+
+
 class File(io.IOBase):
     """A wrapper class that provides a uniform file-like interface for various file sources.
 
@@ -50,13 +64,105 @@ class File(io.IOBase):
         "__content_type__",
     )
 
+    _UNSET = object()
+
+    def __new__(cls, source: Any, *args, **kwargs):  # noqa: ARG004
+        if isinstance(source, cls):
+            return source  # identity shortcut — same instance, no copy
+        return super().__new__(cls)
+
     def __init__(
+        self,
+        source: Any,
+        source_scheme: Any = _UNSET,
+        source_extension: str | None = None,
+        fetcher: Callable[[], io.IOBase] | None = None,
+        *,
+        extension: str | None = None,
+        name: str | None = None,
+    ) -> None:
+        # Guard: __new__ returned an existing File, already initialized
+        try:
+            object.__getattribute__(self, "__source__")
+            return
+        except AttributeError:
+            pass
+
+        if source_scheme is not File._UNSET:
+            # Internal direct path — preserve full backwards compat
+            self._setup(source, source_scheme, source_extension, fetcher)
+            return
+
+        # Smart routing path — what validate() used to do
+        if isinstance(source, bytes | bytearray):
+            bio = io.BytesIO(source)
+            if name is not None:
+                bio.name = name
+            self._setup(bio, "bytes", extension)
+            return
+
+        if isinstance(source, io.IOBase):
+            if name is not None:
+                source.name = name
+            self._setup(source, "bytes", extension)
+            return
+
+        if isinstance(source, Path):
+            source = source.expanduser().resolve().as_posix()
+
+        if not isinstance(source, str):
+            raise ValueError("File must be a string, path, or file-like object.")
+
+        parsed_url = urlparse(source)
+
+        # Local path
+        if parsed_url.scheme == "":
+            path = Path(source).expanduser().resolve()
+            if not path.exists() or not path.is_file():
+                raise ValueError("Invalid file path.")
+            self._setup(
+                source, "local_path", path.suffix,
+                fetcher=lambda: self._fetch_local_file(path=path),
+            )
+            return
+
+        # Data URL
+        if parsed_url.scheme == "data":
+            parsed_url_mimetype = parsed_url.path.split(";", 1)
+            if len(parsed_url_mimetype) != 2:
+                raise ValueError("Data url must specify a mimetype.")
+            parsed_url_mimetype = parsed_url_mimetype[0]
+            parsed_url_extension = mimetypes.guess_extension(parsed_url_mimetype)
+            if parsed_url_extension is None:
+                if not parsed_url_mimetype.startswith("timbal/"):
+                    raise ValueError("Custom mimetypes must be specified as 'timbal/<extension>'.")
+                parsed_url_extension = "." + parsed_url_mimetype[7:]
+            self._setup(
+                source, "data_url", parsed_url_extension,
+                fetcher=lambda: self._fetch_data_url_file(data_url=source),
+            )
+            return
+
+        # HTTP/HTTPS URL
+        if parsed_url.scheme in ("http", "https"):
+            parsed_url_name = parsed_url.path.split("/")[-1]
+            parsed_url_extension = f".{parsed_url_name.split('.')[-1]}" if "." in parsed_url_name else ""
+            self._setup(
+                source, "url", parsed_url_extension,
+                fetcher=lambda: self._fetch_http_file(url=source),
+            )
+            return
+
+        raise ValueError("Invalid file source. Must be a local file path, data URL, or HTTP/HTTPS url.")
+
+    def _setup(
         self,
         source: Any,
         source_scheme: str,
         source_extension: str | None = None,
         fetcher: Callable[[], io.IOBase] | None = None,
     ) -> None:
+        """Initialize internal slots. This is the original __init__ body."""
         object.__setattr__(self, "__source__", source)
         object.__setattr__(self, "__source_scheme__", source_scheme)
         object.__setattr__(self, "__source_extension__", source_extension)
@@ -177,103 +283,50 @@ class File(io.IOBase):
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
         return self.__getattr__("seek")(offset, whence)
 
+    async def load(self, client: Any = None) -> None:
+        """Eagerly load the file content. For URL sources this fetches async via httpx.
+
+        Args:
+            client: Optional shared httpx.AsyncClient for connection reuse.
+                    If None, a temporary client is created and closed after the request.
+        """
+        if object.__getattribute__(self, "__fileobj__") is not None:
+            return
+        if self.__source_scheme__ != "url":
+            # Local/bytes/data_url — trigger existing sync fetcher (cheap, no network I/O)
+            _ = self.__wrapped__
+            return
+        import httpx
+        url = str(self)
+        headers = {"User-Agent": f"Timbal/{__version__}"}
+        own_client = client is None
+        if own_client:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+        try:
+            res = await client.get(url, headers=headers, follow_redirects=True)
+            res.raise_for_status()
+        finally:
+            if own_client:
+                await client.aclose()
+        fileobj = io.BytesIO(res.content)
+        fileobj.name = _extract_filename(res.headers, url)
+        server_content_type = res.headers.get("Content-Type", "application/octet-stream")
+        if server_content_type not in ("application/octet-stream", "binary/octet-stream"):
+            fileobj.__content_type__ = server_content_type
+        if hasattr(fileobj, "__content_type__"):
+            object.__setattr__(self, "__content_type__", fileobj.__content_type__)
+        object.__setattr__(self, "__fileobj__", fileobj)
+
     @classmethod
     def validate(
         cls,
         value: ValidatorFunctionWrapHandler,
         info: dict | ValidationInfo | None = None,  # noqa: ARG003
     ) -> "File":
-        """Create a new Field instance validating a local path, an url, an s3 uri, a data url or a file-like object.
-        Validation info can be used to pass context information to the file fetcher:
-            >>> model_instance = model.model_validate(
-            ...     {**model_params_dict},
-            ...     context={...},
-            ... )
-        """
-        if isinstance(value, cls):
-            return value
-
-        if isinstance(value, bytes | bytearray):
-            source_extension = None
-            source_name = None
-            if isinstance(info, dict):
-                source_extension = info.get("extension")
-                source_name = info.get("name")
-            source = io.BytesIO(value)
-            if source_name is not None:
-                source.name = source_name
-            return File(
-                source,
-                source_scheme="bytes",
-                source_extension=source_extension,
-            )
-
-        if isinstance(value, io.IOBase):
-            source_extension = None
-            source_name = None
-            if isinstance(info, dict):
-                source_extension = info.get("extension")
-                source_name = info.get("name")
-            source = value
-            if source_name is not None:
-                source.name = source_name
-            return File(
-                source,
-                source_scheme="bytes",
-                source_extension=source_extension,
-            )
-
-        if isinstance(value, Path):
-            value = value.expanduser().resolve().as_posix()
-
-        if not isinstance(value, str):
-            raise ValueError("File must be a string, path, or file-like object.")
-
-        parsed_url = urlparse(value)
-
-        # Check for valid local path.
-        if parsed_url.scheme == "":
-            path = Path(value).expanduser().resolve()
-            if not path.exists() or not path.is_file():
-                raise ValueError("Invalid file path.")
-            parsed_url_extension = path.suffix
-            return File(
-                value,
-                source_scheme="local_path",
-                source_extension=parsed_url_extension,
-                fetcher=lambda: cls._fetch_local_file(path=path),
-            )
-
-        # Data urls: data:[<mediatype>][;base64],<data>.
-        if parsed_url.scheme == "data":
-            parsed_url_mimetype = parsed_url.path.split(";", 1)
-            if len(parsed_url_mimetype) != 2:
-                raise ValueError("Data url must specify a mimetype.")
-            parsed_url_mimetype = parsed_url_mimetype[0]
-            parsed_url_extension = mimetypes.guess_extension(parsed_url_mimetype)
-            if parsed_url_extension is None:
-                # Custom mimetypes must be specified as ^timbal\/\w*$
-                if not parsed_url_mimetype.startswith("timbal/"):
-                    raise ValueError("Custom mimetypes must be specified as 'timbal/<extension>'.")
-                parsed_url_extension = "." + parsed_url_mimetype[7:]
-            return File(
-                value,
-                source_scheme="data_url",
-                source_extension=parsed_url_extension,
-                fetcher=lambda: cls._fetch_data_url_file(data_url=value),
-            )
-
-        if parsed_url.scheme == "http" or parsed_url.scheme == "https":
-            parsed_url_name = parsed_url.path.split("/")[-1]
-            parsed_url_extension = f".{parsed_url_name.split('.')[-1]}" if "." in parsed_url_name else ""
-            return File(
-                value,
-                source_scheme="url",
-                source_extension=parsed_url_extension,
-                fetcher=lambda: cls._fetch_http_file(url=value),
-            )
-
-        raise ValueError("Invalid file source. Must be a local file path, data URL, or HTTP/HTTPS url.")
+        """Pydantic-compat shim. Delegates to File(source, extension=..., name=...)."""
+        extension = info.get("extension") if isinstance(info, dict) else None
+        name = info.get("name") if isinstance(info, dict) else None
+        return cls(value, extension=extension, name=name)
 
     def to_disk(self, path: Path) -> None:
         """Save the file to disk."""
@@ -334,15 +387,11 @@ class File(io.IOBase):
             object.__setattr__(self, "__persisted__", temp_path)
             return temp_path
 
-        subject = run_context.platform_config.subject
-        org_id = org_id or subject.org_id
-        # ? We could add more subject info here
-
         self.seek(0)
         content = self.read()
         self.seek(0)  # Return the pointer to the beginning of the file
 
-        path = f"orgs/{org_id}/files"
+        path = "files"
         files = {"file": (self.name, content, self.__content_type__)}
 
         from ..platform.utils import _request
@@ -390,28 +439,15 @@ class File(io.IOBase):
         res = urlopen(data_url)  # noqa: S310
         return io.BytesIO(res.read())
 
-    # TODO Make async
     @classmethod
     def _fetch_http_file(cls, url: str) -> io.IOBase:
-        """Fetch a file from a HTTP/HTTPS URL."""
-        import requests
+        """Fetch a file from a HTTP/HTTPS URL (sync fallback)."""
+        import httpx
         headers = {"User-Agent": f"Timbal/{__version__}"}
-        res = requests.get(url, stream=True, headers=headers)
+        res = httpx.get(url, headers=headers, follow_redirects=True, timeout=30.0)
         res.raise_for_status()
         fileobj = io.BytesIO(res.content)
-        # Try to get a meaningful filename from URL or Content-Disposition header
-        filename = None
-        # Check Content-Disposition header first
-        content_disposition = res.headers.get("Content-Disposition")
-        if content_disposition and "filename=" in content_disposition:
-            try:
-                filename = content_disposition.split("filename=")[1].strip("\"'")
-            except (IndexError, AttributeError):
-                pass
-        # Fallback to URL path
-        if not filename:
-            filename = url.split("/")[-1]
-        fileobj.name = filename
+        fileobj.name = _extract_filename(res.headers, url)
         # Set content type from server response
         # NOTE: This will overwrite the File's extension-based content type detection
         server_content_type = res.headers.get("Content-Type", "application/octet-stream")

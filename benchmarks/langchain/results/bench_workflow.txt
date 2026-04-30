@@ -1,0 +1,133 @@
+
+[1m════════════════════════════════════════════════════════════════════════════[0m
+[1m  Timbal Workflow vs LangGraph StateGraph — DAG benchmark[0m
+  200 iters · 500 burst · 200 mem runs · 1000 throughput ops
+  Trivial handlers (no LLM). Pure DAG scheduling overhead.
+  [2mBoth use native async (ainvoke / .collect()). Single shared instance.[0m
+[1m════════════════════════════════════════════════════════════════════════════[0m
+
+  [2mVerifying correctness...[0m
+  sequential: Timbal=19  LangGraph=19  ok
+  fanout: Timbal=54  LangGraph=54  ok
+  diamond: Timbal=46  LangGraph=46  ok
+
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 1: Sequential  (A → B → C → D)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×200)[0m
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean      1.17 ms      1.97 ms      2.58 ms
+           p50      1.13 ms      1.54 ms      2.23 ms
+           p95      1.48 ms      3.08 ms      3.75 ms
+           p99      1.88 ms     15.87 ms     15.30 ms
+
+  [1mMemory  (×200 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                         160.6 KB         822  B
+  LG (bare)                       73.7 KB         377  B
+  LG + LangSmith                7161.0 KB       36664  B
+
+  [1mBurst  (500 concurrent)[0m
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50    415.24 ms    330.57 ms    644.38 ms
+           p75    417.63 ms    347.03 ms    660.97 ms
+           p95    418.62 ms    364.51 ms    673.93 ms
+           p99    419.34 ms    367.65 ms    677.88 ms
+           max    419.42 ms    368.66 ms    678.49 ms
+
+  [2mwall: Timbal 419.4 ms  |  LG bare 368.7 ms  |  LG+Smith 678.5 ms[0m
+
+  [1mThroughput  (1000 runs)[0m
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1         814/s         883/s         407/s
+            10        1171/s        1308/s         621/s
+            50        1010/s        1068/s         568/s
+           200         841/s         960/s         492/s
+
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 2: Fan-out/in  (A → [B, C, D] → E)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×200)[0m
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean      1.28 ms      1.33 ms      2.49 ms
+           p50      1.20 ms      1.30 ms      2.43 ms
+           p95      1.69 ms      1.67 ms      3.39 ms
+           p99      2.79 ms      1.84 ms      3.97 ms
+
+  [1mMemory  (×200 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                         444.6 KB        2277  B
+  LG (bare)                      107.1 KB         548  B
+  LG + LangSmith                8486.3 KB       43450  B
+
+  [1mBurst  (500 concurrent)[0m
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50    705.05 ms    549.38 ms    991.77 ms
+           p75    707.53 ms    567.97 ms   1016.86 ms
+           p95    709.55 ms    584.97 ms   1042.57 ms
+           p99    709.99 ms    588.58 ms   1047.41 ms
+           max    710.07 ms    589.63 ms   1048.35 ms
+
+  [2mwall: Timbal 710.1 ms  |  LG bare 589.6 ms  |  LG+Smith 1048.4 ms[0m
+
+  [1mThroughput  (1000 runs)[0m
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1         635/s         674/s         432/s
+            10         862/s        1005/s         479/s
+            50         691/s         660/s         394/s
+           200         515/s         565/s         331/s
+
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+[1m[36m  Scenario 3: Diamond  (A → [B, C] → D)[0m
+[1m[36m────────────────────────────────────────────────────────────────────────────[0m
+
+  [1mLatency  (×200)[0m
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+          mean      1.20 ms      1.31 ms      2.24 ms
+           p50      1.12 ms      1.26 ms      2.16 ms
+           p95      1.62 ms      1.72 ms      3.31 ms
+           p99      2.91 ms      1.83 ms      3.88 ms
+
+  [1mMemory  (×200 runs)[0m
+  framework                         peak       per run
+  ────────────────────────  ────────────  ────────────
+  Timbal                         197.1 KB        1009  B
+  LG (bare)                       95.2 KB         487  B
+  LG + LangSmith                7251.3 KB       37127  B
+
+  [1mBurst  (500 concurrent)[0m
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+           p50    449.95 ms    413.70 ms    753.63 ms
+           p75    450.90 ms    428.79 ms    787.28 ms
+           p95    452.30 ms    443.95 ms    859.53 ms
+           p99    452.79 ms    447.69 ms    883.94 ms
+           max    453.40 ms    448.73 ms    884.90 ms
+
+  [2mwall: Timbal 453.4 ms  |  LG bare 448.7 ms  |  LG+Smith 884.9 ms[0m
+
+  [1mThroughput  (1000 runs)[0m
+                      Timbal     LG (bare)      LG+Smith
+  ────────────  ────────────  ────────────  ────────────
+             1         654/s         820/s         481/s
+            10        1177/s        1110/s         535/s
+            50         890/s         924/s         501/s
+           200         661/s         526/s         221/s
+
+[2m────────────────────────────────────────────────────────────────────────────
+  Both frameworks execute identical DAGs with trivial handlers.
+  Both run natively async (ainvoke / .collect()) on a single shared instance.
+  Graph compilation and Workflow construction excluded from timing.
+────────────────────────────────────────────────────────────────────────────[0m
+

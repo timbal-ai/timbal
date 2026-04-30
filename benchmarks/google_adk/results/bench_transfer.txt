@@ -1,0 +1,59 @@
+
+[1m================================================================================================[0m
+[1m  Timbal delegation vs Google ADK transfer benchmark[0m
+  100 iters | 40 burst | 100 mem | 200 throughput ops
+[1m================================================================================================[0m
+  Timbal: OK  |  ADK: OK
+    Timbal delegation latency... p50=696.3 us
+    Timbal delegation memory... 76 KB peak
+    Timbal delegation burst (40 concurrent)... p50=20.05 ms
+    Timbal delegation throughput conc=1... 1360/s
+    Timbal delegation throughput conc=10... 1378/s
+    Timbal delegation throughput conc=50... 1405/s
+    ADK transfer latency... p50=977.1 us
+    ADK transfer memory... 1800 KB peak
+    ADK transfer burst (40 concurrent)... p50=21.49 ms
+    ADK transfer throughput conc=1... 968/s
+    ADK transfer throughput conc=10... 1028/s
+    ADK transfer throughput conc=50... 1037/s
+
+[1m[36m------------------------------------------------------------------------------------------------[0m
+[1m[36m  Delegation / transfer[0m
+[1m[36m------------------------------------------------------------------------------------------------[0m
+
+  [1mLatency  (x100 sequential runs)[0m
+                 Timbal delegation        ADK transfer
+  ------------  ------------------  ------------------
+          mean            722.4 us             1.01 ms
+           p50            696.3 us            977.1 us
+           p95            872.6 us             1.21 ms
+           p99             1.09 ms             1.64 ms
+
+  [1mMemory  (x100 runs)[0m
+  framework                         peak       per run
+  ------------------------  ------------  ------------
+  Timbal delegation               76.3 KB         781  B
+  ADK transfer                  1800.1 KB       18433  B
+
+  [1mBurst  (40 concurrent)[0m
+                 Timbal delegation        ADK transfer
+  ------------  ------------------  ------------------
+           p50            20.05 ms            21.49 ms
+           p75            20.24 ms            21.95 ms
+           p95            20.43 ms            22.40 ms
+           p99            20.67 ms            22.41 ms
+           max            20.67 ms            22.41 ms
+
+  [1mThroughput  (200 loops)[0m
+                 Timbal delegation        ADK transfer
+  ------------  ------------------  ------------------
+             1              1360/s               968/s
+            10              1378/s              1028/s
+            50              1405/s              1037/s
+
+[2m------------------------------------------------------------------------------------------------
+  Google ADK has a true sub-agent transfer primitive via transfer_to_agent.
+  Timbal column is the closest agent-composition equivalent: supervisor -> worker tool -> final.
+  This is not a workflow/DAG benchmark; ADK does not expose a comparable workflow engine.
+------------------------------------------------------------------------------------------------[0m
+

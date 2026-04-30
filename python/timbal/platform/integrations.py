@@ -10,11 +10,8 @@ _EXPIRY_BUFFER = timedelta(seconds=60)
 _credential_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 
-class Integration(str):
+class Integration:
     """Platform integration: Pydantic annotation marker + runtime credential resolver.
-
-    Subclasses ``str`` so that ``json.dumps`` serializes it as the
-    ``org_integration_id`` string without requiring a custom encoder.
 
     Usage::
 
@@ -24,9 +21,6 @@ class Integration(str):
         credential = await config.integration.resolve()
         token = credential.token
     """
-
-    def __new__(cls, provider: str, org_integration_id: str | None = None) -> "Integration":
-        return super().__new__(cls, org_integration_id or "")
 
     def __init__(self, provider: str, org_integration_id: str | None = None) -> None:
         self.provider = provider
@@ -85,3 +79,6 @@ class Integration(str):
 
     def __repr__(self) -> str:
         return f"Integration(provider={self.provider!r}, id={self._org_integration_id!r})"
+
+    def __str__(self) -> str:
+        return self._org_integration_id or ""

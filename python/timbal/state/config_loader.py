@@ -12,6 +12,12 @@ logger = structlog.get_logger("timbal.state.config_loader")
 
 TIMBAL_CONFIG_DIR = Path.home() / ".timbal"
 
+_TRUTHY_STRINGS = frozenset({"true", "1", "t", "yes", "y", "enabled", "on"})
+
+
+def _is_truthy_string(value: str) -> bool:
+    return value.lower() in _TRUTHY_STRINGS
+
 
 class FileConfig(NamedTuple):
     """Raw values extracted from ~/.timbal/ config and credentials files."""
@@ -19,6 +25,7 @@ class FileConfig(NamedTuple):
     base_url: str | None
     api_key: SecretStr | None
     org: str | None
+    sync_traces_enabled: bool | None
 
 
 def _resolve_section_name(profile: str) -> str:
@@ -55,7 +62,8 @@ def load_file_config(
 
     base_url: str | None = None
     org: str | None = None
-    api_key: str | None = None
+    api_key: SecretStr | None = None
+    sync_traces_enabled: bool | None = None
 
     if config_path.is_file():
         config = configparser.ConfigParser()
@@ -64,6 +72,10 @@ def load_file_config(
             if config.has_section(section):
                 base_url = config.get(section, "base_url", fallback=None)
                 org = config.get(section, "org", fallback=None)
+                if config.has_option(section, "sync_traces"):
+                    sync_traces_enabled = _is_truthy_string(config.get(section, "sync_traces"))
+                else:
+                    sync_traces_enabled = None
             else:
                 logger.debug(
                     f"Profile section '{section}' not found in config file.",
@@ -98,7 +110,27 @@ def load_file_config(
                 error=str(e),
             )
 
-    return FileConfig(base_url=base_url, api_key=api_key, org=org)
+    return FileConfig(
+        base_url=base_url,
+        api_key=api_key,
+        org=org,
+        sync_traces_enabled=sync_traces_enabled,
+    )
+
+
+def _merge_sync_traces_enabled(platform_config: PlatformConfig, file_config: FileConfig) -> None:
+    """Fill sync_traces_enabled from file then default (True) when not set on platform_config."""
+    if platform_config.sync_traces_enabled is not None:
+        return
+    if file_config.sync_traces_enabled is not None:
+        platform_config.sync_traces_enabled = file_config.sync_traces_enabled
+        logger.debug(
+            "Resolved sync_traces_enabled from config file.",
+            value=file_config.sync_traces_enabled,
+        )
+        return
+    platform_config.sync_traces_enabled = True
+    logger.debug("Defaulted sync_traces_enabled to True.")
 
 
 def _strip_scheme(url: str) -> str:
@@ -108,6 +140,10 @@ def _strip_scheme(url: str) -> str:
     if url.startswith("http://"):
         return url[len("http://") :]
     return url
+
+
+_cached_default_config: PlatformConfig | None = None
+_default_config_resolved: bool = False
 
 
 def resolve_platform_config(
@@ -122,11 +158,25 @@ def resolve_platform_config(
     2. Environment variables
     3. ~/.timbal/ config and credentials files
 
+    Sync trace persistence uses ``sync_traces_enabled`` on ``PlatformConfig``.
+    When that field is unset, the ``sync_traces`` option in ~/.timbal/config is checked,
+    then defaults to True.
+
+    When called with default arguments (no platform_config, profile, or config_dir),
+    the result is cached for subsequent calls. This avoids re-reading config files
+    and environment variables on every RunContext creation.
+
     Args:
         platform_config: Existing config to fill in missing fields for.
         profile: Profile name for file config. Defaults to TIMBAL_PROFILE env var or "default".
         config_dir: Override the config directory (for testing).
     """
+    global _cached_default_config, _default_config_resolved
+
+    is_default_call = platform_config is None and profile is None and config_dir is None
+    if is_default_call and _default_config_resolved:
+        return _cached_default_config.model_copy() if _cached_default_config else None
+
     file_config = load_file_config(profile=profile, config_dir=config_dir)
     logger.debug("Loaded file config.", file_config=file_config._asdict())
 
@@ -149,6 +199,8 @@ def resolve_platform_config(
 
         if not host or not api_key:
             logger.debug("Could not resolve platform config.", has_host=bool(host), has_api_key=bool(api_key))
+            if is_default_call:
+                _cached_default_config, _default_config_resolved = None, True
             return None
 
         platform_config = PlatformConfig(
@@ -178,6 +230,9 @@ def resolve_platform_config(
 
     if not org_id:
         logger.debug("No org_id found, skipping subject resolution.")
+        _merge_sync_traces_enabled(platform_config, file_config)
+        if is_default_call:
+            _cached_default_config, _default_config_resolved = platform_config, True
         return platform_config
 
     app_id = None
@@ -198,5 +253,10 @@ def resolve_platform_config(
         version_id=version_id,
     )
     logger.debug("Resolved platform subject.", org_id=org_id, app_id=app_id, version_id=version_id)
+
+    _merge_sync_traces_enabled(platform_config, file_config)
+
+    if is_default_call:
+        _cached_default_config, _default_config_resolved = platform_config, True
 
     return platform_config

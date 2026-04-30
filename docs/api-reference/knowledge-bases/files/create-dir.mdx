@@ -1,0 +1,8 @@
+---
+title: "Create Directory"
+openapi: "POST /orgs/{org_id}/k2/{kb_id}/directories"
+---
+
+Folders appear in file listings with `content_type` set to `application/vnd.timbal.k2-directory`. Creating a folder that already exists is idempotent and returns `200`.
+
+Folders and files share the same namespace: creating folder `reports` under `docs/` returns `409` if a file named reports already exists there.

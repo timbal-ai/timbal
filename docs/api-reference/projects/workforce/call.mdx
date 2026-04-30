@@ -1,0 +1,32 @@
+---
+title: "Call Workforce"
+openapi: "POST /orgs/{org_id}/projects/{project_id}/workforce/{workforce}/{*path}"
+---
+
+This route is a **gateway proxy** to a **running** workforce deployment (an agent or workflow). The platform forwards your HTTP request to the deployment; responses pass back through unchanged (aside from normal proxy behavior).
+
+<Note>
+  The reference below is for **POST** so the API playground and generated fields render. The same path and parameters apply to **GET**, **PUT**, **PATCH**, and **DELETE** — use the verb you need when calling the API directly.
+</Note>
+
+## Supported HTTP methods
+
+| Method | Use case |
+|--------|----------|
+| **GET** | Read-only calls (e.g. health, metadata). |
+| **POST** | Typical RPC-style calls (e.g. `…/run`). |
+| **PUT** / **PATCH** | Idempotent or partial updates when your component exposes them. |
+| **DELETE** | Deletes or teardown actions your component exposes. |
+
+Path, query, and auth are the same for every method. The deployment must handle the method you send.
+
+## Path and query
+
+- **`workforce`** — Which component to hit: numeric id, manifest UUID, or name (same identifiers you use elsewhere in the project API).
+- **`path`** — Suffix on the deployment server after the component segment (for example `run` or `healthcheck`). Use the path your running app defines; can be empty for the deployment root.
+- **`rev`** (query, required) — Git branch the deployment is tied to (for example `main`).
+
+## Limits
+
+- **WebSocket upgrades are not supported** on this proxy route.
+- If nothing is running for that component on `rev`, you get **404**. If the deployment returns an error upstream, you may see **502**.

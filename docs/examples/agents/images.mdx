@@ -12,7 +12,7 @@ from timbal.types.file import File
 agent = Agent(
     name="VisionAgent",
     model="anthropic/claude-3-7-sonnet-latest",  # Vision-capable model
-    model_params={"max_tokens": 256},
+    max_tokens=256,
     system_prompt="Analyze images and provide detailed descriptions."
 )
 

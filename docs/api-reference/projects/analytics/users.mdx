@@ -1,0 +1,6 @@
+---
+title: "User Analytics"
+openapi: "GET /orgs/{org_id}/projects/{project_id}/analytics/users"
+---
+
+Only **project admins** can call this endpoint. Results are **paginated**: pass `page_token` from the previous response's `next_page_token` to fetch the next page. The response includes `from` and `to` for the window you requested.
