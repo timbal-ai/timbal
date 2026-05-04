@@ -594,14 +594,18 @@ class TestPlatformTracingProvider:
         monkeypatch.setattr("timbal.state.config_loader._cached_default_config", None)
         monkeypatch.setattr("timbal.state.config_loader._default_config_resolved", True)
 
-    def _make_run_context(self, app_id: str | None = "app_456") -> "RunContext":
+    def _make_run_context(
+        self,
+        app_id: str | None = "app_456",
+        rev: str | None = None,
+    ) -> "RunContext":
         from timbal.state.config import PlatformAuth, PlatformAuthType, PlatformConfig, PlatformSubject
         from timbal.state.context import RunContext
 
         cfg = PlatformConfig(
             host="api.timbal.ai",
             auth=PlatformAuth(type=PlatformAuthType.BEARER, token="tok"),
-            subject=PlatformSubject(org_id="org_123", app_id=app_id, version_id="v1"),
+            subject=PlatformSubject(org_id="org_123", app_id=app_id, version_id="v1", rev=rev),
         )
         return RunContext(id="run_abc", parent_id="run_parent", platform_config=cfg, tracing_provider=None)
 
@@ -724,3 +728,31 @@ class TestPlatformTracingProvider:
         with patch("timbal.platform.utils._request", new=AsyncMock()):
             with pytest.raises((ValueError, AssertionError)):
                 await PlatformTracingProvider._store(run_context)
+
+    @pytest.mark.asyncio
+    async def test_store_includes_rev_when_set(self):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        mock_res = self._mock_response({})
+        run_context = self._make_run_context(rev="feat/runs-rev")
+        mock_request = AsyncMock(return_value=mock_res)
+
+        with patch("timbal.platform.utils._request", new=mock_request):
+            await PlatformTracingProvider._store(run_context)
+
+        json_payload = mock_request.call_args.kwargs.get("json", {})
+        assert json_payload.get("rev") == "feat/runs-rev"
+
+    @pytest.mark.asyncio
+    async def test_store_omits_rev_when_unset(self):
+        from timbal.state.tracing.providers.platform import PlatformTracingProvider
+
+        mock_res = self._mock_response({})
+        run_context = self._make_run_context()
+        mock_request = AsyncMock(return_value=mock_res)
+
+        with patch("timbal.platform.utils._request", new=mock_request):
+            await PlatformTracingProvider._store(run_context)
+
+        json_payload = mock_request.call_args.kwargs.get("json", {})
+        assert "rev" not in json_payload

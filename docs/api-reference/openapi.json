@@ -5375,6 +5375,18 @@
             }
           },
           {
+            "name": "rev",
+            "in": "query",
+            "description": "Filter runs by the git branch they were executed against (e.g. `main`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "from",
             "in": "query",
             "description": "Filter runs by start time (epoch timestamp in milliseconds)",
