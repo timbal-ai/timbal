@@ -9,13 +9,13 @@ from ..platform.integrations import Integration
 _BASE_URL = "https://api.firecrawl.dev/v2"
 
 
-async def _resolve_api_key(tool: Any) -> str:
+async def _resolve_api_key(*, integration: Any = None, api_key: SecretStr | None = None) -> str:
     """Resolve Firecrawl API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
+    if isinstance(integration, Integration):
+        credentials = await integration.resolve()
         return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
+    if api_key is not None:
+        return api_key.get_secret_value()
     env_key = os.getenv("FIRECRAWL_API_KEY")
     if env_key:
         return env_key
@@ -64,7 +64,10 @@ class FirecrawlScrape(Tool):
                 None, description="Milliseconds to wait for the page to load before scraping"
             ),
             mobile: bool = Field(False, description="Emulate a mobile device when scraping"),
-            skip_tls_verification: bool = Field(True, description="Skip TLS certificate verification"),
+            skip_tls_verification: bool = Field(
+                False,
+                description="Skip TLS certificate verification (insecure; enable only for misconfigured targets)",
+            ),
             location_country: str | None = Field(
                 None, description="ISO 3166-1 alpha-2 country code for geo-located scraping (e.g. 'US', 'DE')"
             ),
@@ -85,7 +88,7 @@ class FirecrawlScrape(Tool):
             ),
             timeout: int = Field(30000, description="Request timeout in milliseconds (1000-300000)"),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
             payload: dict[str, Any] = {
@@ -133,7 +136,9 @@ class FirecrawlSearch(Tool):
     name: str = "firecrawl_search"
     description: str | None = (
         "Search the web and optionally scrape full page content from each result in one call. "
-        "Supports web, news, and image sources with time-based filtering."
+        "Supports web, news, and image sources with time-based filtering. "
+        "Geo: pass ``location`` as a human-readable place (e.g. 'Germany') and ``country`` as an ISO 3166-1 alpha-2 code (e.g. 'DE'); "
+        "they map to Firecrawl v2 ``location`` and ``country`` JSON fields respectively."
     )
     integration: Annotated[str, Integration("firecrawl")] | None = None
     api_key: SecretStr | None = None
@@ -176,7 +181,7 @@ class FirecrawlSearch(Tool):
             ),
             timeout: int = Field(60000, description="Request timeout in milliseconds"),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
             payload: dict[str, Any] = {
@@ -258,7 +263,7 @@ class FirecrawlCrawl(Tool):
             ),
             block_ads: bool = Field(True, description="Block ads and cookie popups during scraping"),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import asyncio
 
             import httpx
@@ -339,7 +344,7 @@ class FirecrawlMap(Tool):
                 None, description="Filter and rank URLs by relevance to this search term"
             ),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
             payload: dict[str, Any] = {"url": url}
@@ -393,7 +398,7 @@ class FirecrawlExtract(Tool):
                 False, description="Search related pages beyond the specified URLs for additional information"
             ),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
             if not prompt and not schema:
