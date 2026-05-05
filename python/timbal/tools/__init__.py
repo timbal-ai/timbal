@@ -102,7 +102,15 @@ if TYPE_CHECKING:
         GeminiImagesGenerateImageWithReference,
         GeminiImagesImageToBase64,
     )
-    from .gmail import GmailAddLabel, GmailListLabels, GmailRemoveLabel, GmailReply, GmailSearch, GmailSend
+    from .gmail import (
+        GmailAddLabel,
+        GmailCreateDraft,
+        GmailListLabels,
+        GmailRemoveLabel,
+        GmailReply,
+        GmailSearch,
+        GmailSend,
+    )
     from .google_calendar import (
         GoogleCalendarCheckFreeSlots,
         GoogleCalendarCreateEvent,
@@ -904,6 +912,7 @@ __all__ = [
     "FirecrawlScrape",
     "FirecrawlSearch",
     "GmailAddLabel",
+    "GmailCreateDraft",
     "GmailListLabels",
     "GmailRemoveLabel",
     "GmailReply",
@@ -1748,6 +1757,7 @@ _LAZY_IMPORTS = {
     "FirecrawlScrape": ".firecrawl",
     "FirecrawlSearch": ".firecrawl",
     "GmailAddLabel": ".gmail",
+    "GmailCreateDraft": ".gmail",
     "GmailListLabels": ".gmail",
     "GmailRemoveLabel": ".gmail",
     "GmailReply": ".gmail",

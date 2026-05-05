@@ -2,6 +2,7 @@ import base64
 import mimetypes
 import re
 from datetime import datetime
+from email.header import Header
 from html import escape as html_escape
 from typing import Annotated, Any, Literal
 
@@ -11,6 +12,15 @@ from ..core.tool import Tool
 from ..platform.integrations import Integration
 
 _BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
+
+
+def _encode_header(value: str) -> str:
+    """RFC 2047-encode a header value if it contains non-ASCII characters."""
+    try:
+        value.encode("ascii")
+        return value
+    except UnicodeEncodeError:
+        return Header(value, "utf-8").encode()
 
 
 async def _download_and_encode_attachment(url: str) -> tuple[str, str, str]:
@@ -190,7 +200,7 @@ class GmailSend(Tool):
                 bcc_str = ", ".join(bcc) if isinstance(bcc, list) else bcc
                 message_parts.append(f"Bcc: {bcc_str}")
 
-            message_parts.append(f"Subject: {subject}")
+            message_parts.append(f"Subject: {_encode_header(subject)}")
 
             if attachment_urls or message_format == "html" or email_signature:
                 boundary = "----=_NextPart_" + base64.urlsafe_b64encode(str(hash(body)).encode()).decode()[:16]
@@ -270,6 +280,141 @@ class GmailSend(Tool):
                 return response.json()
 
         super().__init__(handler=_send_email, **kwargs)
+
+
+class GmailCreateDraft(Tool):
+    name: str = "gmail_create_draft"
+    description: str | None = "Create an email draft in Gmail."
+    integration: Annotated[str, Integration("gmail")] | None = None
+
+    def get_config(self) -> dict[str, Any]:
+        """See base class."""
+        config = {
+            **super().get_config(),
+            **self._annotate_config(
+                {"integration": self.integration},
+                required={"integration"},
+            ),
+        }
+        return config
+
+    def __init__(self, **kwargs: Any) -> None:
+        async def _create_draft(
+            to: str | list[str] | None = Field(None, description="Recipient email address(es)"),
+            subject: str | None = Field(None, description="Email subject"),
+            body: str = Field("", description="Email body content"),
+            cc: str | list[str] | None = Field(None, description="CC recipient(s)"),
+            bcc: str | list[str] | None = Field(None, description="BCC recipient(s)"),
+            attachment_urls: list[str] | None = Field(None, description="URLs of files to attach"),
+            message_format: Literal["text", "html"] = Field("text", description='"text" or "html"'),
+            email_signature: str | None = Field(None, description="Email signature to append"),
+            thread_id: str | None = Field(None, description="Thread ID to attach the draft to"),
+        ) -> Any:
+            if not isinstance(self.integration, Integration):
+                raise ValueError("Gmail integration not configured.")
+            credentials = await self.integration.resolve()
+            api_key = credentials["token"]
+            import httpx
+
+            message_parts: list[str] = []
+
+            if to is not None:
+                to_str = ", ".join(to) if isinstance(to, list) else to
+                message_parts.append(f"To: {to_str}")
+
+            if cc:
+                cc_str = ", ".join(cc) if isinstance(cc, list) else cc
+                message_parts.append(f"Cc: {cc_str}")
+
+            if bcc:
+                bcc_str = ", ".join(bcc) if isinstance(bcc, list) else bcc
+                message_parts.append(f"Bcc: {bcc_str}")
+
+            if subject is not None:
+                message_parts.append(f"Subject: {_encode_header(subject)}")
+
+            if attachment_urls or message_format == "html" or email_signature:
+                boundary = "----=_NextPart_" + base64.urlsafe_b64encode(str(hash(body)).encode()).decode()[:16]
+                message_parts.append("MIME-Version: 1.0")
+                message_parts.append(f'Content-Type: multipart/mixed; boundary="{boundary}"')
+                message_parts.append("")
+
+                message_parts.append(f"--{boundary}")
+                if message_format == "html":
+                    message_parts.append("Content-Type: text/html; charset=utf-8")
+                    message_parts.append("Content-Transfer-Encoding: 7bit")
+                    message_parts.append("")
+
+                    signature_html = ""
+                    if email_signature:
+                        signature_parts = ["<br><br>", "<!-- Signature -->"]
+                        if not email_signature.strip().startswith("<div"):
+                            signature_parts.extend(
+                                [
+                                    '<div style="font-size:13px; color:#444; margin-top: 20px;">',
+                                    f"{email_signature}",
+                                    "</div>",
+                                ]
+                            )
+                        else:
+                            signature_parts.append(f"{email_signature}")
+                        signature_html = "\n".join(signature_parts)
+
+                    body_content = body + signature_html
+                    message_parts.append(body_content)
+                else:
+                    message_parts.append("Content-Type: text/plain; charset=utf-8")
+                    message_parts.append("Content-Transfer-Encoding: 7bit")
+                    message_parts.append("")
+                    body_content = body
+                    if email_signature:
+                        body_content += "\n\n" + email_signature
+                    message_parts.append(body_content)
+                message_parts.append("")
+
+                if attachment_urls:
+                    for url in attachment_urls:
+                        try:
+                            filename, att_content_type, base64_content = await _download_and_encode_attachment(url)
+
+                            message_parts.append(f"--{boundary}")
+                            message_parts.append(f"Content-Type: {att_content_type}")
+                            message_parts.append("Content-Transfer-Encoding: base64")
+                            message_parts.append(f'Content-Disposition: attachment; filename="{filename}"')
+                            message_parts.append("")
+                            message_parts.append(base64_content)
+                            message_parts.append("")
+                        except ValueError as e:
+                            raise ValueError(f"Failed to attach {url}: {e}") from e
+
+                message_parts.append(f"--{boundary}--")
+            else:
+                content_type = "text/html" if message_format == "html" else "text/plain"
+                message_parts.append(f"Content-Type: {content_type}; charset=utf-8")
+                message_parts.append("")
+                if email_signature:
+                    message_parts.append(body + "\n\n" + email_signature)
+                else:
+                    message_parts.append(body)
+
+            message = "\r\n".join(message_parts)
+            raw = base64.urlsafe_b64encode(message.encode()).decode()
+
+            draft_message: dict[str, Any] = {"raw": raw}
+            if thread_id:
+                draft_message["threadId"] = thread_id
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{_BASE_URL}/drafts",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={"message": draft_message},
+                    timeout=httpx.Timeout(10.0, read=None),
+                )
+                response.raise_for_status()
+                return response.json()
+
+        super().__init__(handler=_create_draft, **kwargs)
 
 
 class GmailReply(Tool):
@@ -355,7 +500,7 @@ class GmailReply(Tool):
             if cc_recipients:
                 message_parts.append(f"Cc: {', '.join(cc_recipients)}")
 
-            message_parts.append(f"Subject: {reply_subject}")
+            message_parts.append(f"Subject: {_encode_header(reply_subject)}")
 
             if message_id_header:
                 message_parts.append(f"In-Reply-To: {message_id_header}")
