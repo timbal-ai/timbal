@@ -1,7 +1,7 @@
 """End-to-end tests that chain every codegen operation and validate each intermediate state.
 
 TestFullLifecycle:
-    Basic lifecycle: agent → add/remove tools → convert to workflow → add/remove steps → set-config rename.
+    Basic lifecycle: agent → add/remove tools → workflow setup → add/remove steps → set-config rename.
 
 TestComplexWorkflow:
     Multi-step workflow with custom function steps, framework tool steps, chained params
@@ -11,6 +11,7 @@ TestComplexWorkflow:
 """
 
 import json
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -95,8 +96,27 @@ def _norm(source: str) -> str:
 
 def _has_step_call(source: str, step_name: str, entry_point: str = "agent") -> bool:
     """Check if source contains entry_point.step(step_name ...) allowing ruff formatting."""
-    import re
     return bool(re.search(rf"{re.escape(entry_point)}\.step\(\s*{re.escape(step_name)}\b", source))
+
+
+def _inject_workflow(ws: Path, workflow_name: str) -> None:
+    """Manually convert the 'agent' entry point into a Workflow wrapping it as a step.
+
+    Mirrors what convert-to-workflow did: renames 'agent = Agent(' to
+    'agent_step = Agent(', adds a Workflow import, then appends the Workflow
+    construction and .step() call.
+    """
+    source = _read_source(ws)
+    new_source = re.sub(r"(?m)^agent = Agent\(", "agent_step = Agent(", source)
+    if "from timbal import Workflow" not in new_source:
+        new_source = re.sub(
+            r"(from timbal(?:\.\w+)* import [^\n]+)",
+            r"\1\nfrom timbal import Workflow",
+            new_source,
+            count=1,
+        )
+    new_source += f'\nagent = Workflow(name="{workflow_name}")\nagent.step(agent_step)\n'
+    (ws / "agent.py").write_text(new_source)
 
 
 class TestFullLifecycle:
@@ -188,9 +208,9 @@ class TestFullLifecycle:
         assert len(ns["agent"].tools) == 2
 
         # ---------------------------------------------------------------
-        # Step 8: Convert to workflow
+        # Step 8: Wrap agent in a workflow
         # ---------------------------------------------------------------
-        _run(ws, "convert-to-workflow", "--name", "my_workflow")
+        _inject_workflow(ws, "my_workflow")
         source = _read_source(ws)
         ns = _exec_code(source)
 
@@ -365,9 +385,9 @@ class TestComplexWorkflow:
         assert search_tool.allowed_domains == ["wikipedia.org", "arxiv.org"]
 
         # ===============================================================
-        # Phase 2: Convert to workflow
+        # Phase 2: Wrap agent in a workflow
         # ===============================================================
-        _run(ws, "convert-to-workflow", "--name", "pipeline")
+        _inject_workflow(ws, "pipeline")
         source = _read_source(ws)
         ns = _exec_code(source)
 
