@@ -803,6 +803,42 @@
         ]
       }
     },
+    "/orgs/{org_id}/contacts": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "description": "Account-side contacts assigned to an organization.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Contacts for the organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgContactsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/domains": {
       "get": {
         "tags": [
@@ -7516,7 +7552,8 @@
         "type": "object",
         "properties": {
           "dry_run": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "When omitted or when the request has no JSON body, treated as `false`."
           }
         }
       },
@@ -9573,6 +9610,20 @@
           }
         }
       },
+      "ListOrgContactsResBody": {
+        "type": "object",
+        "required": [
+          "contacts"
+        ],
+        "properties": {
+          "contacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgContact"
+            }
+          }
+        }
+      },
       "ListOrgNotificationChannelsResBody": {
         "type": "object",
         "title": "ListOrgNotificationChannelsResponse",
@@ -9957,8 +10008,7 @@
           "overage_enabled",
           "credits_per_usd",
           "created_at",
-          "role",
-          "contacts"
+          "role"
         ],
         "properties": {
           "banner_url": {
@@ -9984,13 +10034,6 @@
               "string",
               "null"
             ]
-          },
-          "contacts": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/OrgContact"
-            },
-            "description": "Account-side contacts assigned to this organization (e.g. AI Solutions\nArchitect, Account Executive). Typically populated for enterprise plans."
           },
           "country": {
             "type": [
