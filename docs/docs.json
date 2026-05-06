@@ -335,6 +335,7 @@
               "api-reference/knowledge-bases/get",
               "api-reference/knowledge-bases/update",
               "api-reference/knowledge-bases/delete",
+              "api-reference/knowledge-bases/restart",
               "api-reference/knowledge-bases/query",
               "api-reference/knowledge-bases/schema",
               "api-reference/knowledge-bases/upload",

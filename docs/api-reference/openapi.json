@@ -2162,6 +2162,71 @@
         ]
       }
     },
+    "/orgs/{org_id}/k2/{kb_id}/restart": {
+      "post": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Drop the knowledge base's in-memory connections so the next request opens a fresh database handle. Caller must be an org admin.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Connections dropped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not an admin of this knowledge base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Knowledge base not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/k2/{kb_id}/restores": {
       "get": {
         "tags": [
@@ -5377,7 +5442,7 @@
           {
             "name": "rev",
             "in": "query",
-            "description": "Filter runs by the git branch they were executed against (e.g. `main`).",
+            "description": "Filter runs by the git branch they were executed against (e.g. `main`).\nRuns without a recorded branch are always included for backwards\ncompatibility with rows created before this field was tracked.",
             "required": false,
             "schema": {
               "type": [
@@ -9892,7 +9957,8 @@
           "overage_enabled",
           "credits_per_usd",
           "created_at",
-          "role"
+          "role",
+          "contacts"
         ],
         "properties": {
           "banner_url": {
@@ -9918,6 +9984,13 @@
               "string",
               "null"
             ]
+          },
+          "contacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgContact"
+            },
+            "description": "Account-side contacts assigned to this organization (e.g. AI Solutions\nArchitect, Account Executive). Typically populated for enterprise plans."
           },
           "country": {
             "type": [
@@ -9978,6 +10051,102 @@
             ]
           }
         }
+      },
+      "OrgContact": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "name",
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgContactChannel"
+            },
+            "description": "Ways to reach this contact."
+          },
+          "id": {
+            "type": "string",
+            "description": "Unique contact identifier."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name (e.g. \"Jane Doe\")."
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional profile photo URL."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional job title (e.g. \"Senior AI Solutions Architect\")."
+          },
+          "type": {
+            "$ref": "#/components/schemas/OrgContactType",
+            "description": "Role this contact plays for the org."
+          }
+        }
+      },
+      "OrgContactChannel": {
+        "type": "object",
+        "required": [
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/OrgContactChannelKind"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional display label like \"Mobile\" or \"Work\"."
+          },
+          "primary": {
+            "type": "boolean",
+            "description": "Marks the preferred channel of this kind when multiple are listed."
+          },
+          "value": {
+            "type": "string",
+            "description": "Channel-specific identifier: email address, E.164 phone number, slack\nhandle, calendly URL, etc. Format is enforced by the channel kind."
+          }
+        }
+      },
+      "OrgContactChannelKind": {
+        "type": "string",
+        "enum": [
+          "email",
+          "phone",
+          "whatsapp",
+          "telegram",
+          "slack",
+          "calendly",
+          "linkedin",
+          "signal",
+          "other"
+        ]
+      },
+      "OrgContactType": {
+        "type": "string",
+        "description": "Role a contact plays for the org. Free-form on the wire/DB so new roles\ncan be introduced without a migration; unknown values fall back to `Other`.",
+        "enum": [
+          "aisa",
+          "account_executive",
+          "account_manager",
+          "csm",
+          "other"
+        ]
       },
       "OrgPreview": {
         "type": "object",

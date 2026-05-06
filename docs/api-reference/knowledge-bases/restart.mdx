@@ -1,0 +1,6 @@
+---
+title: "Restart Knowledge Base"
+openapi: "POST /orgs/{org_id}/k2/{kb_id}/restart"
+---
+
+Drops the knowledge base's in-memory connections so the next request opens a fresh database handle. Requires org admin.
