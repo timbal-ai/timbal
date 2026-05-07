@@ -10,11 +10,13 @@ from typing import Any
 from timbal.codegen import parse_fqn
 
 
-def _get_when_source(step: Any) -> str | None:
-    """Extract the source code of a step's when callable."""
-    if not step.when or "callable" not in step.when:
-        return None
-    fn = step.when["callable"]
+def _get_callable_source(fn: Any) -> str | None:
+    """Extract a readable source representation of a callable.
+
+    For inline lambdas, returns the lambda expression. For named functions,
+    returns ``<fn_name>``. Returns None if the source can't be retrieved
+    and the callable has no name.
+    """
     try:
         source = inspect.getsource(fn)
         source = textwrap.dedent(source).strip()
@@ -28,6 +30,13 @@ def _get_when_source(step: Any) -> str | None:
         return source
     except (OSError, TypeError):
         return f"<{fn.__name__}>" if hasattr(fn, "__name__") else None
+
+
+def _get_when_source(step: Any) -> str | None:
+    """Extract the source code of a step's when callable."""
+    if not step.when or "callable" not in step.when:
+        return None
+    return _get_callable_source(step.when["callable"])
 
 
 def _extract_key_from_lambda(fn: Any, source_step: str) -> str | None:
@@ -124,14 +133,20 @@ def _enrich_params_schema(runnable: Any) -> dict[str, Any]:
             info = runnable._default_runtime_params[param_name]
             deps = info.get("dependencies", [])
             source = deps[0] if deps else None
-            entry: dict[str, Any] = {
-                "type": "map",
-                "source": source,
-            }
             if source:
+                entry: dict[str, Any] = {
+                    "type": "map",
+                    "source": source,
+                }
                 key = _extract_key_from_lambda(info["callable"], source)
                 if key:
                     entry["key"] = key
+            else:
+                # No statically-resolvable upstream step (helper-fn lambda,
+                # partial, lambda defined elsewhere, etc.). Don't emit a
+                # phantom map edge — record the callable as opaque.
+                expr = _get_callable_source(info["callable"]) or "<callable>"
+                entry = {"type": "callable", "expr": expr}
             prop["value"] = entry
         elif param_name in runnable._default_fixed_params:
             value = runnable._default_fixed_params[param_name]
@@ -236,8 +251,10 @@ def get_flow(workspace_path: str | Path) -> dict[str, Any]:
 # Compact formatter — token-efficient, LLM-readable summary
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _short(node_id: str) -> str:
-    """'workflow.step_name' → 'step_name'."""
+def _short(node_id: str | None) -> str:
+    """'workflow.step_name' → 'step_name'. Tolerates missing/None ids."""
+    if not node_id:
+        return "?"
     return node_id.split(".")[-1]
 
 
@@ -296,20 +313,26 @@ def _fmt_node_lines(node: dict, indent: str) -> list[str]:
         for pname, prop in props.items():
             val = prop.get("value", {})
             if isinstance(val, dict) and val.get("type") == "map":
-                source = _short(val.get("source", "?"))
+                source = _short(val.get("source") or "?")
                 key = val.get("key")
                 src = f"{source}.{key}" if key else source
                 lines.append(f"{indent}  {pname} ← {src}")
+            elif isinstance(val, dict) and val.get("type") == "callable":
+                expr = val.get("expr") or "<callable>"
+                lines.append(f"{indent}  {pname} ← {expr}")
 
     elif ntype == "tool":
         sig_parts: list[str] = []
         for pname, prop in props.items():
             val = prop.get("value", {})
             if isinstance(val, dict) and val.get("type") == "map":
-                source = _short(val.get("source", "?"))
+                source = _short(val.get("source") or "?")
                 key = val.get("key")
                 src = f"{source}.{key}" if key else source
                 sig_parts.append(f"{pname}:←{src}")
+            elif isinstance(val, dict) and val.get("type") == "callable":
+                expr = val.get("expr") or "<callable>"
+                sig_parts.append(f"{pname}:←{expr}")
             elif isinstance(val, dict) and val.get("type") == "value":
                 sig_parts.append(f"{pname}={repr(val['value'])[:30]}")
             else:

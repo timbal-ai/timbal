@@ -599,6 +599,64 @@ class TestParamDefaults:
         # No value set — should not have our custom value field
         assert "value" not in prompt_prop
 
+    def test_helper_lambda_param_is_callable_not_phantom_map(self, workspace):
+        """Regression: a runtime lambda whose source doesn't reference
+        step_span(...) (helper-fn call) used to crash the compact formatter
+        because it produced {'type': 'map', 'source': None}.
+
+        Now it should be recorded as a 'callable' entry and never as a
+        map with source=None."""
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+
+        def _build_prompt():
+            return "hello"
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        agent.step(agent_b, depends_on=["agent_a"], prompt=lambda: _build_prompt())
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        agent_b_node = [n for n in flow["nodes"] if n["id"] == "wf.agent_b"][0]
+        prompt_prop = agent_b_node["data"]["params"]["properties"]["prompt"]
+        val = prompt_prop["value"]
+        assert val["type"] == "callable"
+        assert "expr" in val and val["expr"]
+        # No phantom map edge with null source.
+        assert val != {"type": "map", "source": None}
+
+    def test_no_phantom_map_with_null_source_anywhere(self, workspace):
+        """Stronger guarantee: no node in the graph has a value of
+        {'type': 'map', 'source': None}."""
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+
+        def _build_prompt():
+            return "x"
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        agent.step(agent_b, depends_on=["agent_a"], prompt=lambda: _build_prompt())
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        flow = _flow(ws)
+        for node in flow["nodes"]:
+            for prop in node["data"]["params"].get("properties", {}).values():
+                val = prop.get("value")
+                if isinstance(val, dict) and val.get("type") == "map":
+                    assert val.get("source"), f"phantom map with null source: {val}"
+
 
 # ---------------------------------------------------------------------------
 # format_compact
@@ -819,6 +877,55 @@ class TestFormatCompact:
         )
         out = _compact(ws)
         assert "EDGES" not in out
+
+    def test_compact_with_helper_lambda_does_not_crash(self, workspace):
+        """Regression for AttributeError: 'NoneType' object has no attribute
+        'split' in _short(). A lambda that doesn't statically reference
+        step_span(...) used to produce source=None and crash the formatter."""
+        ws = workspace(
+            """\
+        from timbal.core import Agent, Workflow
+
+        def _build_prompt():
+            return "go"
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini", max_tokens=128)
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini", max_tokens=128)
+
+        agent = Workflow(name="wf")
+        agent.step(agent_a)
+        agent.step(agent_b, depends_on=["agent_a"], prompt=lambda: _build_prompt())
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        # Should render the callable on the prompt line without crashing.
+        assert "agent_b" in out
+        assert "prompt ← " in out
+        # And must not emit a "?" placeholder for that line (we have a real expr).
+        assert "prompt ← ?" not in out
+
+    def test_compact_with_helper_lambda_on_tool_step(self, workspace):
+        """Same regression but on a Tool step (different code path in
+        _fmt_node_lines)."""
+        ws = workspace(
+            """\
+        from timbal.core import Tool, Workflow
+
+        def _build_x():
+            return "y"
+
+        def consumer(x: str) -> str:
+            return x
+
+        agent = Workflow(name="wf")
+        agent.step(Tool(handler=consumer), x=lambda: _build_x())
+        """,
+            fqn='fqn: "agent.py::agent"\n',
+        )
+        out = _compact(ws)
+        assert "tool   consumer(" in out
+        assert "x:←" in out
 
     def test_workflow_fan_out_edges(self, workspace):
         ws = workspace(
