@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from timbal import Agent, Tool
 from timbal.core.agent import AgentParams
@@ -426,6 +428,75 @@ class TestAgentErrorHandling:
         # Should handle gracefully — TestModel responds without calling any tool
         output = await result.collect()
         assert isinstance(output, OutputEvent)
+
+    @pytest.mark.asyncio
+    async def test_hallucinated_tool_does_not_hang(self):
+        """LLM emits a tool_use for a tool that doesn't exist (e.g. a skill name
+        called as if it were a tool). Agent must not hang on queue.get(); it must
+        feed an error tool_result back to the LLM so it can self-correct."""
+        def real_tool(x: int) -> int:
+            return x * 2
+
+        agent = Agent(
+            name="hallucinate_agent",
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="not_a_tool", input={"x": 5})],
+                    stop_reason="tool_use",
+                ),
+                "Sorry, I retried with the right tool.",
+            ]),
+            tools=[real_tool],
+            max_iter=3,
+        )
+
+        with Timer() as timer:
+            output = await asyncio.wait_for(
+                agent(prompt="hi").collect(),
+                timeout=10.0,
+            )
+
+        assert timer.elapsed < 5
+        assert isinstance(output, OutputEvent)
+        assert output.status.code == "success"
+        assert output.error is None
+        assert "retried" in output.output.collect_text().lower()
+
+    @pytest.mark.asyncio
+    async def test_hallucinated_tool_logs_warning_with_suggestion(self, caplog):
+        """The error fed back to the LLM should include close matches as a hint."""
+        import logging
+        caplog.set_level(logging.WARNING)
+
+        def make_pptx(slides: int) -> str:
+            return f"made {slides} slides"
+
+        # LLM hallucinates `make_ppt` (close to `make_pptx`)
+        agent = Agent(
+            name="suggest_agent",
+            model=TestModel(responses=[
+                Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="c1", name="make_ppt", input={"slides": 3})],
+                    stop_reason="tool_use",
+                ),
+                "Got it, used the real tool.",
+            ]),
+            tools=[make_pptx],
+            max_iter=3,
+        )
+
+        captured_results: list[str] = []
+        async for event in agent(prompt="make a deck"):
+            if isinstance(event, OutputEvent) and event.path.endswith(".make_ppt"):
+                # synthetic event for the hallucinated tool
+                captured_results.append(event.error)
+
+        assert captured_results, "expected synthetic error event for hallucinated tool"
+        msg = captured_results[0]
+        assert "make_pptx" in msg
+        assert "Did you mean" in msg
 
 
 class TestAgentMemory:

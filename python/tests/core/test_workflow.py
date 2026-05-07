@@ -490,3 +490,67 @@ class TestWorkflowIntegration:
         assert "name" in anthropic_schema
         assert openai_chat_completions_schema["function"]["name"] == "simple_workflow"
         assert anthropic_schema["name"] == "simple_workflow"
+
+
+class TestWorkflowSentinelStarvation:
+    """Regression tests: paths through `_enqueue_step_events` that previously
+    leaked an exception past `except Exception` (e.g. a BaseException raised
+    by a `when` callable or an input-resolver lambda) skipped the
+    `await queue.put(None)` sentinel and hung the consumer on `queue.get()`
+    forever. Each test runs with a tight timeout — a regression here would
+    show up as a TimeoutError, not a silent hang in CI.
+    """
+
+    @pytest.mark.asyncio
+    async def test_when_baseexception_does_not_hang(self):
+        """`when` callable raising BaseException must not hang the workflow."""
+        from ..conftest import Timer
+
+        def good_step():
+            return "ok"
+
+        def evil_when():
+            raise BaseException("boom")  # noqa: TRY002
+
+        wf = Workflow(name="when_hanger").step(good_step, when=evil_when)
+
+        with Timer() as timer:
+            try:
+                result = await asyncio.wait_for(wf().collect(), timeout=2.0)
+            except TimeoutError:
+                pytest.fail("workflow hung — sentinel-starvation in _enqueue_step_events")
+
+        assert timer.elapsed < 1.0, (
+            f"workflow took {timer.elapsed:.2f}s — only finished because wait_for "
+            "cancelled it; sentinel was never pushed"
+        )
+        assert result.status.code in {"error", "success"}
+
+    @pytest.mark.asyncio
+    async def test_param_resolver_baseexception_does_not_hang(self):
+        """Param resolver lambda raising BaseException must not hang the workflow.
+
+        Same starvation path, different leak point: `await step._resolve_input_params`
+        evaluates user-provided runtime callables before the second try/except.
+        """
+        from ..conftest import Timer
+
+        def consumer(x: str) -> str:
+            return f"got {x}"
+
+        def evil_resolver():
+            raise BaseException("boom from resolver")  # noqa: TRY002
+
+        wf = Workflow(name="resolver_hanger").step(consumer, x=evil_resolver)
+
+        with Timer() as timer:
+            try:
+                result = await asyncio.wait_for(wf().collect(), timeout=2.0)
+            except TimeoutError:
+                pytest.fail("workflow hung — sentinel-starvation in param resolution")
+
+        assert timer.elapsed < 1.0, (
+            f"workflow took {timer.elapsed:.2f}s — only finished because wait_for "
+            "cancelled it; sentinel was never pushed"
+        )
+        assert result.status.code in {"error", "success"}
