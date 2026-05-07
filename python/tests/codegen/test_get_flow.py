@@ -465,6 +465,109 @@ class TestConfigSchema:
         assert "enum" not in config["model"]
         assert "anyOf" not in config["model"]
 
+    def test_fallback_model_is_json_serialisable(self, workspace):
+        """Regression: FallbackModel as agent.model used to crash json.dumps
+        with `TypeError: Object of type FallbackModel is not JSON serializable`
+        because get_config wrote the raw object into config['model']['value'].
+
+        Also verifies the new shape:
+          - `model` is always a string (the primary model only).
+          - `fallbacks` is an array of objects, one per non-primary entry,
+            carrying every ModelEntry logic field.
+        """
+        import json
+
+        ws = workspace("""\
+        from timbal.core import Agent, FallbackModel
+
+        agent = Agent(
+            name="a",
+            model=FallbackModel(
+                "openai/gpt-4o-mini",
+                "anthropic/claude-haiku-4-5",
+                "google/gemini-2.5-flash",
+            ),
+            max_tokens=128,
+        )
+        """)
+        flow = _flow(ws)
+        json.dumps(flow)
+        config = _single_node(flow)["data"]["config"]
+        assert config["model"]["value"] == "openai/gpt-4o-mini"
+
+        fb = config["fallbacks"]
+        assert fb["type"] == "array"
+        assert fb["items"]["type"] == "object"
+        assert set(fb["items"]["properties"].keys()) == {
+            "model",
+            "max_retries",
+            "retry_delay",
+            "api_key",
+            "base_url",
+        }
+        assert fb["items"]["required"] == ["model"]
+        assert fb["value"] == [
+            {
+                "model": "anthropic/claude-haiku-4-5",
+                "max_retries": 2,
+                "retry_delay": 1.0,
+                "api_key": None,
+                "base_url": None,
+            },
+            {
+                "model": "google/gemini-2.5-flash",
+                "max_retries": 2,
+                "retry_delay": 1.0,
+                "api_key": None,
+                "base_url": None,
+            },
+        ]
+
+    def test_fallback_model_entry_fields_round_trip(self, workspace):
+        """Custom max_retries / retry_delay / base_url / api_key on a
+        ModelEntry must be preserved (api_key masked)."""
+        import json
+
+        ws = workspace("""\
+        from timbal.core import Agent, FallbackModel, ModelEntry
+
+        agent = Agent(
+            name="a",
+            model=FallbackModel(
+                "openai/gpt-4o-mini",
+                ModelEntry(
+                    model="anthropic/claude-haiku-4-5",
+                    max_retries=5,
+                    retry_delay=2.5,
+                    api_key="hunter2",
+                    base_url="https://example.com",
+                ),
+            ),
+            max_tokens=128,
+        )
+        """)
+        flow = _flow(ws)
+        json.dumps(flow)
+        config = _single_node(flow)["data"]["config"]
+        assert config["fallbacks"]["value"] == [
+            {
+                "model": "anthropic/claude-haiku-4-5",
+                "max_retries": 5,
+                "retry_delay": 2.5,
+                "api_key": "**********",
+                "base_url": "https://example.com",
+            },
+        ]
+
+    def test_no_fallback_model_has_empty_fallbacks(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
+        """)
+        config = _single_node(_flow(ws))["data"]["config"]
+        assert config["fallbacks"]["value"] == []
+
     def test_callable_type_in_schema(self, workspace):
         ws = workspace("""\
         from timbal.core import Agent
@@ -730,6 +833,45 @@ class TestFormatCompact:
         """)
         out = _compact(ws)
         assert "web_search" in out
+
+    def test_standalone_agent_fallbacks_rendered(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent, FallbackModel
+
+        agent = Agent(
+            name="a",
+            model=FallbackModel("openai/gpt-4o-mini", "anthropic/claude-haiku-4-5"),
+            max_tokens=128,
+        )
+        """)
+        out = _compact(ws)
+        assert "openai/gpt-4o-mini" in out  # primary still in header
+        assert "fallbacks: anthropic/claude-haiku-4-5" in out
+
+    def test_standalone_agent_fallbacks_render_non_default_fields(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent, FallbackModel, ModelEntry
+
+        agent = Agent(
+            name="a",
+            model=FallbackModel(
+                "openai/gpt-4o-mini",
+                ModelEntry(model="anthropic/claude-haiku-4-5", max_retries=5, retry_delay=2.5),
+            ),
+            max_tokens=128,
+        )
+        """)
+        out = _compact(ws)
+        assert "anthropic/claude-haiku-4-5(retries=5, delay=2.5)" in out
+
+    def test_standalone_agent_no_fallbacks_line_when_empty(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", max_tokens=128)
+        """)
+        out = _compact(ws)
+        assert "fallbacks:" not in out
 
     def test_standalone_agent_no_tools(self, workspace):
         ws = workspace("""\

@@ -58,6 +58,55 @@ def _estimate_tokens_from_memory(memory: list[Message]) -> int:
     return max(1, sum(_content_chars(c) for msg in memory for c in msg.content) // 4)
 
 
+def _coerce_model_to_str(model: Any) -> str:
+    """Reduce an agent ``model`` (str, FallbackModel, TestModel, …) to a JSON-
+    safe string for serialisation by ``get_config``.
+
+    - Plain strings pass through unchanged.
+    - ``FallbackModel`` returns the primary (first) model only; the
+      remaining fallbacks are surfaced via ``_extract_fallbacks``.
+    - Anything else falls back to ``str(model)`` and finally a
+      ``"<ClassName>"`` placeholder so codegen never produces non-JSON
+      objects.
+    """
+    if isinstance(model, str):
+        return model
+    if getattr(model, "__timbal_fallback_model__", False):
+        entries = getattr(model, "entries", None)
+        if entries:
+            return entries[0].model
+    try:
+        return str(model)
+    except Exception:
+        return f"<{type(model).__name__}>"
+
+
+_FALLBACK_ITEM_KEYS = ("model", "max_retries", "retry_delay", "api_key", "base_url")
+
+
+def _extract_fallbacks(model: Any) -> list[dict[str, Any]]:
+    """Return the secondary entries from a ``FallbackModel`` chain (i.e. all
+    entries after the primary), serialised as plain dicts with every
+    ``ModelEntry`` logic field. Empty list for plain string models.
+
+    ``api_key`` is masked to ``"**********"`` when set, mirroring how
+    ``SecretStr`` renders elsewhere in the codegen output.
+    """
+    if not getattr(model, "__timbal_fallback_model__", False):
+        return []
+    entries = getattr(model, "entries", None) or ()
+    out: list[dict[str, Any]] = []
+    for entry in entries[1:]:
+        item: dict[str, Any] = {}
+        for key in _FALLBACK_ITEM_KEYS:
+            val = getattr(entry, key, None)
+            if key == "api_key" and val is not None:
+                val = "**********"
+            item[key] = val
+        out.append(item)
+    return out
+
+
 class AgentParams(BaseModel):
     """Input parameters for Agent execution. Use either 'prompt' or 'messages', not both."""
 
@@ -278,7 +327,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         config = self._annotate_config(
             {
-                "model": self.model,
+                "model": _coerce_model_to_str(self.model),
                 "system_prompt": system_prompt,
                 "max_iter": self.max_iter,
                 "max_tokens": self.max_tokens,
@@ -287,6 +336,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 "api_key": self.api_key,
             }
         )
+
+        config["fallbacks"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "x-timbal-ref": "models"},
+                    "max_retries": {"type": "integer", "default": 2},
+                    "retry_delay": {"type": "number", "default": 1.0},
+                    "api_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+                    "base_url": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+                },
+                "required": ["model"],
+            },
+            "value": _extract_fallbacks(self.model),
+        }
 
         return {**super().get_config(), **config}
 

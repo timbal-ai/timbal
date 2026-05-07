@@ -281,6 +281,29 @@ def _config_val(field: dict) -> Any:
     return v
 
 
+def _fmt_fallback_entry(entry: Any) -> str:
+    """Render one fallback entry compactly. Shows the model name and any
+    non-default ModelEntry fields (max_retries, retry_delay, base_url).
+
+    api_key is intentionally not surfaced — it's already masked upstream.
+    """
+    if isinstance(entry, str):
+        return entry
+    if not isinstance(entry, dict):
+        return str(entry)
+    model = entry.get("model") or "?"
+    extras: list[str] = []
+    if entry.get("max_retries") not in (None, 2):
+        extras.append(f"retries={entry['max_retries']}")
+    if entry.get("retry_delay") not in (None, 1.0):
+        extras.append(f"delay={entry['retry_delay']}")
+    if entry.get("base_url"):
+        extras.append(f"base_url={entry['base_url']}")
+    if extras:
+        return f"{model}({', '.join(extras)})"
+    return model
+
+
 def _fmt_node_lines(node: dict, indent: str) -> list[str]:
     lines: list[str] = []
     ntype = node["type"]
@@ -298,6 +321,11 @@ def _fmt_node_lines(node: dict, indent: str) -> list[str]:
             if val is not None:
                 extras.append(f"{key}={val}")
         lines.append(f"{indent}agent  {name}  [{', '.join(extras)}]")
+
+        fallbacks = _config_val(config.get("fallbacks", {})) or []
+        if fallbacks:
+            names = [_fmt_fallback_entry(f) for f in fallbacks]
+            lines.append(f"{indent}  fallbacks: {', '.join(names)}")
 
         sp = _config_val(config.get("system_prompt", {}))
         if sp:
@@ -411,6 +439,10 @@ def format_compact(flow: dict) -> str:
         lines.append(header)
 
         if ntype == "AGENT":
+            fallbacks = _config_val(config.get("fallbacks", {})) or []
+            if fallbacks:
+                names = [_fmt_fallback_entry(f) for f in fallbacks]
+                lines.append(f"fallbacks: {', '.join(names)}")
             sp = _config_val(config.get("system_prompt", {}))
             if sp:
                 sp_short = sp[:120].replace("\n", " ") + ("…" if len(sp) > 120 else "")
