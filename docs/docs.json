@@ -180,6 +180,10 @@
                 "pages": ["api-reference/orgs/billing/overage"]
               },
               {
+                "group": "Credit Grants",
+                "pages": ["api-reference/orgs/credit-grants/list"]
+              },
+              {
                 "group": "Domains",
                 "pages": [
                   "api-reference/orgs/domains/list",

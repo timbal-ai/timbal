@@ -839,6 +839,45 @@
         ]
       }
     },
+    "/orgs/{org_id}/credit-grants": {
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "description": "Credit grants awarded to an organization, most recent first.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credit grants for the organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListCreditGrantsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/domains": {
       "get": {
         "tags": [
@@ -7895,6 +7934,71 @@
           }
         }
       },
+      "CreditGrant": {
+        "type": "object",
+        "description": "A single credit grant on an organization.",
+        "required": [
+          "uid",
+          "source",
+          "source_metadata",
+          "amount_credits",
+          "starts_at",
+          "created_at"
+        ],
+        "properties": {
+          "amount_credits": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credits awarded by this grant. Always positive; corrections ship as a\nseparate grant rather than a negative amount."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Grant creation timestamp."
+          },
+          "exhausted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Set once the grant has been fully consumed by usage; `null` while\nthe grant still has unspent credits or hasn't been reconciled yet."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the grant stops being spendable. `null` = never expires."
+          },
+          "granted_by_user_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "User who triggered the grant. `null` for system-issued grants."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the grant came from (e.g. `onboarding`, `promo`, `support`,\n`referral`, `refund`)."
+          },
+          "source_metadata": {
+            "description": "Source-specific payload. Shape depends on `source`."
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the grant became (or will become) spendable."
+          },
+          "uid": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable public identifier for this grant."
+          }
+        }
+      },
       "DeleteChannelBody": {
         "type": "object",
         "properties": {
@@ -9494,6 +9598,20 @@
           }
         }
       },
+      "ListCreditGrantsResBody": {
+        "type": "object",
+        "required": [
+          "credit_grants"
+        ],
+        "properties": {
+          "credit_grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CreditGrant"
+            }
+          }
+        }
+      },
       "ListDeploymentsResBody": {
         "type": "object",
         "required": [
@@ -10006,7 +10124,7 @@
           "plan",
           "plan_metadata",
           "overage_enabled",
-          "credits_per_usd",
+          "plan_cancel_at_period_end",
           "created_at",
           "role"
         ],
@@ -10045,10 +10163,6 @@
             "type": "string",
             "format": "date-time"
           },
-          "credits_per_usd": {
-            "type": "number",
-            "format": "double"
-          },
           "description": {
             "type": [
               "string",
@@ -10081,17 +10195,23 @@
           "plan": {
             "type": "string"
           },
+          "plan_cancel_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix timestamp (seconds) of the scheduled plan cancellation; `null` when\nno cancellation is pending."
+          },
+          "plan_cancel_at_period_end": {
+            "type": "boolean",
+            "description": "`true` between the moment a user schedules a plan cancellation in the\nBilling Portal and the final cancellation taking effect."
+          },
           "plan_metadata": {
 
           },
           "role": {
             "type": "string"
-          },
-          "stripe_customer_id": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         }
       },
