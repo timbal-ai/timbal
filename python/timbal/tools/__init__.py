@@ -310,6 +310,12 @@ if TYPE_CHECKING:
         PowerBIListWorkspaces,
         PowerBIQueryDataset,
     )
+    from .quiver_ai import (
+        QuiverAIGenerateSVG,
+        QuiverAIGetModel,
+        QuiverAIListModels,
+        QuiverAIVectorizeSVG,
+    )
     from .read import Read
     from .replicate import (
         ReplicateCancelPrediction,
@@ -964,6 +970,10 @@ __all__ = [
     "PineconeListIndexes",
     "PineconeQuery",
     "PineconeUpsertVectors",
+    "QuiverAIGenerateSVG",
+    "QuiverAIGetModel",
+    "QuiverAIListModels",
+    "QuiverAIVectorizeSVG",
     "Read",
     "ScraperAPIAmazonProduct",
     "ScraperAPIAmazonSearch",
@@ -1809,6 +1819,10 @@ _LAZY_IMPORTS = {
     "PineconeListIndexes": ".pinecone",
     "PineconeQuery": ".pinecone",
     "PineconeUpsertVectors": ".pinecone",
+    "QuiverAIGenerateSVG": ".quiver_ai",
+    "QuiverAIGetModel": ".quiver_ai",
+    "QuiverAIListModels": ".quiver_ai",
+    "QuiverAIVectorizeSVG": ".quiver_ai",
     "Read": ".read",
     "ScraperAPIAmazonProduct": ".scraperapi",
     "ScraperAPIAmazonSearch": ".scraperapi",
