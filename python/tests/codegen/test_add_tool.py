@@ -540,6 +540,50 @@ class TestConfigFlag:
         # Sanity: only one name= kwarg.
         assert output.count('name="from_config"') == 1
 
+    def test_rejects_empty_name_on_fresh_add(self, workspace):
+        """`--name ""` is rejected before any code is generated."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "WebSearch", "--name", "",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "--name cannot be empty" in result.stderr
+
+    def test_rejects_empty_name_on_re_add(self, workspace):
+        """The re-add (merge) path rejects --name '' identically to a fresh add.
+
+        Regression: previously the merge path used `is not None` while the
+        build path used truthiness, so `--name ""` produced `WebSearch()`
+        on a fresh add but `WebSearch(name="")` on a re-add.
+        """
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch(allowed_domains=["example.com"])
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "WebSearch", "--name", "",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "--name cannot be empty" in result.stderr
+
     def test_idempotent_name_in_config_no_duplicate(self, workspace):
         """Re-adding with --name and config that does NOT include 'name' must not duplicate name=."""
         import json

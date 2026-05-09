@@ -72,6 +72,12 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     if tool_type not in valid_types:
         raise ValueError(f"--type must be one of {valid_types}, got '{tool_type}'.")
 
+    # Reject `--name ""` early so downstream code can treat tool_name as a
+    # tri-state (None / non-empty string) and the build/merge helpers don't
+    # disagree about whether empty means "absent" or "explicit empty value".
+    if args.tool_name is not None and args.tool_name == "":
+        raise ValueError("--name cannot be empty. Omit --name to use the default tool name.")
+
     config = json.loads(args.config) if getattr(args, "config", None) else {}
     if config:
         # Reject keys that would collide with explicit flags / derived values.
@@ -102,8 +108,8 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         if func_def is None:
             raise ValueError("--definition must contain a function definition.")
         func_name = func_def.name.value
-        var_name = args.tool_name if args.tool_name else f"{func_name}_tool"
-        runtime_name = args.tool_name if args.tool_name else func_name
+        var_name = args.tool_name if args.tool_name is not None else f"{func_name}_tool"
+        runtime_name = args.tool_name if args.tool_name is not None else func_name
         return ToolAdder(
             entry_point, assignments,
             target=target,
@@ -119,8 +125,8 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
     # Framework tool.
     framework_names = get_framework_tool_names()
-    var_name = args.tool_name if args.tool_name else framework_names[tool_type]
-    runtime_name = args.tool_name if args.tool_name else framework_names[tool_type]
+    var_name = args.tool_name if args.tool_name is not None else framework_names[tool_type]
+    runtime_name = args.tool_name if args.tool_name is not None else framework_names[tool_type]
     return ToolAdder(
         entry_point, assignments,
         target=target,
@@ -271,7 +277,7 @@ class ToolAdder(cst.CSTTransformer):
     def _build_assignment_call(self) -> cst.Call:
         """Build the CST Call node for the variable assignment RHS."""
         args: list[cst.Arg] = []
-        if self.tool_name:
+        if self.tool_name is not None:
             args.append(cst.Arg(keyword=cst.Name("name"), value=cst.SimpleString(f'"{self.tool_name}"')))
         if self.tool_type == "Custom":
             args.append(cst.Arg(keyword=cst.Name("handler"), value=cst.Name(self.func_name)))
@@ -279,7 +285,7 @@ class ToolAdder(cst.CSTTransformer):
         # contain duplicate keyword arguments. `run()` rejects these cases with
         # a clear error, so this is just defense in depth.
         skip_keys: set[str] = set()
-        if self.tool_name:
+        if self.tool_name is not None:
             skip_keys.add("name")
         if self.tool_type == "Custom":
             skip_keys.add("handler")
