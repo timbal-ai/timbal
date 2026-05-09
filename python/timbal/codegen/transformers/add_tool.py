@@ -3,6 +3,7 @@ import json
 
 import libcst as cst
 
+from ..cli_utils import arg_input
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
@@ -22,7 +23,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sp.add_argument(
         "--definition",
         default=None,
-        help="Full function definition for custom tools. E.g. 'def my_tool(query: str) -> str:\\n    return query'",
+        type=arg_input,
+        help=(
+            "Full function definition for custom tools. "
+            "E.g. 'def my_tool(query: str) -> str:\\n    return query'. "
+            "Use '@path' to read from file or '-' to read from stdin."
+        ),
     )
     sp.add_argument(
         "--name",
@@ -33,7 +39,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sp.add_argument(
         "--config",
         default=None,
-        help='Tool constructor params as JSON. E.g. \'{"limit": 5}\'. Validated against the tool\'s schema.',
+        type=arg_input,
+        help=(
+            'Tool constructor params as JSON. E.g. \'{"limit": 5}\'. '
+            "Validated against the tool's schema. "
+            "Use '@path' to read from file or '-' to read from stdin."
+        ),
     )
     sp.add_argument(
         "--step",

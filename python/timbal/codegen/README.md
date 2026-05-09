@@ -15,6 +15,28 @@ python -m timbal.codegen [--path <workspace>] [--dry-run] <operation> [options]
 | `--path` | `.` | Workspace directory containing `timbal.yaml` |
 | `--dry-run` | off | Print transformed code to stdout without writing to disk |
 
+### File and stdin redirection for string args
+
+Any argument that carries JSON, a Python expression, or a function definition
+(e.g. `--config`, `--definition`, `--input`, `--context`, `--value`, `--when`)
+also accepts:
+
+- `@path/to/file` — the leading `@` is stripped and the file is read as text.
+- `-` — read from stdin.
+
+Use this whenever the payload contains characters the shell cares about
+(newlines, parentheses, quotes, backslashes). It removes the need for
+heredoc gymnastics:
+
+```bash
+# Idiomatic
+python -m timbal.codegen set-config --config @./config.json
+echo '{"model": "openai/gpt-4o"}' | python -m timbal.codegen set-config --config -
+
+# Still works
+python -m timbal.codegen set-config --config '{"model": "openai/gpt-4o"}'
+```
+
 ### Workspace
 
 Every workspace must have a `timbal.yaml` with a fully-qualified entry point:
