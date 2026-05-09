@@ -38,6 +38,10 @@ python -m timbal.codegen add-tool --type WebSearch
 # Framework tool with custom name
 python -m timbal.codegen add-tool --type WebSearch --name my_search
 
+# Framework tool with constructor config (one-shot add + configure)
+python -m timbal.codegen add-tool --type WebSearch \
+  --config '{"allowed_domains": ["example.com"]}'
+
 # Custom tool from a function definition
 python -m timbal.codegen add-tool --type Custom \
   --definition "def search(query: str) -> str:\n    return results"
@@ -51,14 +55,16 @@ python -m timbal.codegen add-tool --type WebSearch --step agent_a
 | `--type` | yes | `Bash`, `CalaSearch`, `Edit`, `Read`, `WebSearch`, `Write`, or `Custom` |
 | `--definition` | Custom only | Full function definition as a string |
 | `--name` | no | Override the default tool name |
+| `--config` | no | Constructor kwargs as JSON. Validated against the tool's schema. Use `null` to remove a key. |
 | `--step` | no | Target step name within a Workflow (adds tool to that step's tools list) |
 
 **Requires**: Agent entry point, or Workflow entry point when using `--step`.
 
 **What it does**:
 - Adds the import (`from timbal.tools import WebSearch` or `from timbal.core import Tool`)
-- Creates a variable assignment (`web_search = WebSearch()`)
+- Creates a variable assignment (`web_search = WebSearch(...)`)
 - Adds the variable to the Agent's `tools=[...]` list
+- With `--config`: merges the kwargs into the assignment (overriding same-named existing kwargs, preserving the rest, dropping kwargs whose new value is `null`)
 - Idempotent — re-running updates rather than duplicates
 
 ---
