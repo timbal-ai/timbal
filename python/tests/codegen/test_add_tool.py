@@ -482,3 +482,82 @@ class TestConfigFlag:
         ns = _exec_agent(output)
         my_search = next(t for t in ns["agent"].tools if t.name == "my_search")
         assert my_search.description == "uppercase search"
+
+    def test_rejects_name_in_config_when_name_flag_set(self, workspace):
+        """--name + --config '{"name": ...}' is ambiguous — must error, not generate duplicate kwargs."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "WebSearch", "--name", "explicit",
+                "--config", json.dumps({"name": "from_config"}),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "--name" in result.stderr and "name" in result.stderr
+        # No leaking of the underlying ruff/SyntaxError.
+        assert "Duplicate keyword argument" not in result.stderr
+
+    def test_rejects_handler_in_config_for_custom(self, workspace):
+        """Custom tools derive handler from --definition; reject 'handler' in --config."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "Custom",
+                "--definition", "def foo() -> int:\n    return 1",
+                "--config", json.dumps({"handler": "anything"}),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "handler" in result.stderr and "--definition" in result.stderr
+        assert "Duplicate keyword argument" not in result.stderr
+
+    def test_name_in_config_alone_works(self, workspace):
+        """Setting 'name' via --config alone (without --name) is fine."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        output = _run_dry(ws, "--type", "WebSearch", "--config", json.dumps({"name": "from_config"}))
+        assert 'name="from_config"' in output
+        # Sanity: only one name= kwarg.
+        assert output.count('name="from_config"') == 1
+
+    def test_idempotent_name_in_config_no_duplicate(self, workspace):
+        """Re-adding with --name and config that does NOT include 'name' must not duplicate name=."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch(name="explicit")
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        output = _run_dry(
+            ws, "--type", "WebSearch", "--name", "explicit",
+            "--config", json.dumps({"allowed_domains": ["example.com"]}),
+        )
+        # Single name= kwarg, single allowed_domains= kwarg.
+        assert output.count("name=") == 2  # one on Agent, one on WebSearch
+        assert output.count("allowed_domains=") == 1
+        ns = _exec_agent(output)
+        ws_tool = next(t for t in ns["agent"].tools if t.name == "explicit")
+        assert ws_tool.allowed_domains == ["example.com"]

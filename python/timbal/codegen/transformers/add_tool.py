@@ -74,6 +74,18 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
     config = json.loads(args.config) if getattr(args, "config", None) else {}
     if config:
+        # Reject keys that would collide with explicit flags / derived values.
+        # Without this, the generated source has duplicate kwargs and ruff
+        # rejects it with a SyntaxError ("Duplicate keyword argument").
+        if "name" in config and args.tool_name is not None:
+            raise ValueError(
+                "--name and --config both set 'name'; pass it via --name only "
+                "(or omit --name and set 'name' inside --config)."
+            )
+        if tool_type == "Custom" and "handler" in config:
+            raise ValueError(
+                "Custom tools derive 'handler' from --definition; remove 'handler' from --config."
+            )
         # Validate against the tool's schema. Custom tools are wrapped in `Tool`
         # so they share its schema; framework tools validate against their own.
         validate_tool_config("Tool" if tool_type == "Custom" else tool_type, config)
@@ -263,8 +275,16 @@ class ToolAdder(cst.CSTTransformer):
             args.append(cst.Arg(keyword=cst.Name("name"), value=cst.SimpleString(f'"{self.tool_name}"')))
         if self.tool_type == "Custom":
             args.append(cst.Arg(keyword=cst.Name("handler"), value=cst.Name(self.func_name)))
+        # Skip keys that are already emitted above; otherwise the output would
+        # contain duplicate keyword arguments. `run()` rejects these cases with
+        # a clear error, so this is just defense in depth.
+        skip_keys: set[str] = set()
+        if self.tool_name:
+            skip_keys.add("name")
+        if self.tool_type == "Custom":
+            skip_keys.add("handler")
         for key, value in self.config.items():
-            if value is None:
+            if value is None or key in skip_keys:
                 continue
             args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
         if self.tool_type != "Custom":
@@ -291,12 +311,17 @@ class ToolAdder(cst.CSTTransformer):
             a for a in existing.args
             if not (isinstance(a.keyword, cst.Name) and a.keyword.value in override_keys)
         ]
-        # Re-add name= when --name was provided.
+        # Re-add name= when --name was provided. We then skip "name" in the
+        # config loop below to avoid emitting two `name=` kwargs (which would
+        # be a SyntaxError). `run()` already rejects --name + config['name']
+        # together, so this is defense in depth.
         if self.tool_name is not None:
             args.append(cst.Arg(keyword=cst.Name("name"), value=cst.SimpleString(f'"{self.tool_name}"')))
         # Append new config kwargs.
         for key, value in self.config.items():
             if value is None:
+                continue
+            if key == "name" and self.tool_name is not None:
                 continue
             args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
         return existing.with_changes(args=args)
