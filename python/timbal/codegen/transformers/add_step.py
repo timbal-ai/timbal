@@ -3,6 +3,7 @@ import json
 
 import libcst as cst
 
+from ..cli_utils import arg_input
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
@@ -140,7 +141,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sp.add_argument(
         "--definition",
         default=None,
-        help="Full function definition for custom steps. E.g. 'def process(x: str) -> str:\\n    return x.upper()'",
+        type=arg_input,
+        help=(
+            "Full function definition for custom steps. "
+            "E.g. 'def process(x: str) -> str:\\n    return x.upper()'. "
+            "Use '@path' to read from file or '-' to read from stdin."
+        ),
     )
     sp.add_argument(
         "--name",
@@ -151,7 +157,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sp.add_argument(
         "--config",
         default=None,
-        help='Agent constructor params as JSON. E.g. \'{"name": "agent_a", "model": "openai/gpt-4o-mini"}\'.',
+        type=arg_input,
+        help=(
+            'Agent constructor params as JSON. E.g. \'{"name": "agent_a", "model": "openai/gpt-4o-mini"}\'. '
+            "Use '@path' to read from file or '-' to read from stdin."
+        ),
     )
     sp.add_argument("--x", default=None, type=float, help="X canvas position. Auto-computed if omitted.")
     sp.add_argument("--y", default=None, type=float, help="Y canvas position. Auto-computed if omitted.")

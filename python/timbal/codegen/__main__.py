@@ -59,10 +59,25 @@ def main() -> None:
     get_models_parser.add_argument("--offset", type=int, default=0, help="Number of models to skip (default 0).")
 
     # Test run operation
+    from timbal.codegen.cli_utils import arg_input
+
     test_parser = subparsers.add_parser("test", help="Execute a single test run of the workspace entry point.")
-    test_parser.add_argument("--input", "-i", default=None, help="JSON string of input params.")
     test_parser.add_argument(
-        "--context", "-c", default=None, help='JSON string of RunContext fields (e.g. \'{"id": "my-run-id"}\').'
+        "--input",
+        "-i",
+        default=None,
+        type=arg_input,
+        help="JSON string of input params. Use '@path' to read from file or '-' to read from stdin.",
+    )
+    test_parser.add_argument(
+        "--context",
+        "-c",
+        default=None,
+        type=arg_input,
+        help=(
+            "JSON string of RunContext fields (e.g. '{\"id\": \"my-run-id\"}'). "
+            "Use '@path' to read from file or '-' to read from stdin."
+        ),
     )
     test_parser.add_argument(
         "--stream", "-s", action="store_true", help="Print every event instead of only the final output event."
