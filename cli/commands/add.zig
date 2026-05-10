@@ -15,7 +15,7 @@ fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.writeAll("Add a component to an existing timbal project.\n" ++
         "\n" ++
-        "\x1b[1;32mUsage: \x1b[1;36mtimbal add \x1b[0;36m<COMPONENT> \x1b[0;33m[name]\n" ++
+        "\x1b[1;32mUsage: \x1b[1;36mtimbal add \x1b[0;36m<COMPONENT> \x1b[0;33m[name] \x1b[0m[options]\n" ++
         "\n" ++
         "\x1b[1;32mComponents:\n" ++
         "    \x1b[1;36magent    \x1b[0mAdd a new agent to the workforce\n" ++
@@ -26,8 +26,22 @@ fn printUsage() !void {
         "\x1b[1;32mArguments:\n" ++
         "    \x1b[1;33mname     \x1b[0mOptional name for the workforce member (agent/workflow only)\n" ++
         "\n" ++
+        "\x1b[1;32mOptions:\n" ++
+        "    \x1b[1;36m-f\x1b[0m, \x1b[1;36m--force      \x1b[0mOverwrite the target directory without prompting (ui/api only)\n" ++
+        "\n" ++
         utils.global_options_help ++
         "\n");
+}
+
+/// Case-insensitive match against any of `yes`, `y`.
+fn isAffirmative(input: []const u8) bool {
+    const trimmed = std.mem.trim(u8, input, " \t\r\n");
+    if (trimmed.len == 0) return false;
+    if (trimmed.len > 8) return false; // longest accepted is "yes"
+    var lower_buf: [8]u8 = undefined;
+    for (trimmed, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
+    const lower = lower_buf[0..trimmed.len];
+    return std.mem.eql(u8, lower, "y") or std.mem.eql(u8, lower, "yes");
 }
 
 fn confirmOverwrite(name: []const u8) bool {
@@ -36,10 +50,35 @@ fn confirmOverwrite(name: []const u8) bool {
 
     stdout.print("'{s}' directory already exists. Overwrite? (y/N): ", .{name}) catch return false;
 
-    var buf: [16]u8 = undefined;
+    var buf: [32]u8 = undefined;
     const line = stdin.reader().readUntilDelimiter(&buf, '\n') catch return false;
-    const trimmed = std.mem.trim(u8, line, " \t\r");
-    return trimmed.len == 1 and (trimmed[0] == 'y' or trimmed[0] == 'Y');
+    return isAffirmative(line);
+}
+
+/// Decide whether to overwrite an existing component directory.
+///
+/// - `--force` → unconditional yes.
+/// - Non-interactive stdin → refuse with a clear message instructing the
+///   caller to pass `--force`, then exit non-zero so CI/scripts notice.
+///   Previously the prompt would silently abort under piped contexts
+///   because `readUntilDelimiter` failed and we'd return exit 0.
+/// - Interactive stdin → prompt as before; abort stays exit 0 to match
+///   the prior interactive behaviour.
+///
+/// Returns `true` when the caller should proceed with the overwrite.
+fn shouldOverwrite(name: []const u8, force: bool) bool {
+    if (force) return true;
+    if (!std.io.getStdIn().isTty()) {
+        std.debug.print(
+            "Error: '{s}' directory already exists. Re-run with --force to overwrite, " ++
+                "or remove the directory manually.\n",
+            .{name},
+        );
+        std.process.exit(1);
+    }
+    if (confirmOverwrite(name)) return true;
+    std.debug.print("Aborted.\n", .{});
+    return false;
 }
 
 const builtin = @import("builtin");
@@ -71,11 +110,14 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const stdout = std.io.getStdOut().writer();
     var component: ?[]const u8 = null;
     var name: ?[]const u8 = null;
+    var force = false;
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage();
             return;
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--force")) {
+            force = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             if (component == null) {
                 component = arg;
@@ -123,10 +165,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         });
     } else if (std.mem.eql(u8, comp, "ui")) {
         if (cwd.access("ui", .{})) |_| {
-            if (!confirmOverwrite("ui")) {
-                std.debug.print("Aborted.\n", .{});
-                return;
-            }
+            if (!shouldOverwrite("ui", force)) return;
             try cwd.deleteTree("ui");
         } else |_| {}
 
@@ -139,12 +178,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             Color.reset,
         });
     } else if (std.mem.eql(u8, comp, "api")) {
-        // Check if api/ already exists
         if (cwd.access("api", .{})) |_| {
-            if (!confirmOverwrite("api")) {
-                std.debug.print("Aborted.\n", .{});
-                return;
-            }
+            if (!shouldOverwrite("api", force)) return;
             try cwd.deleteTree("api");
         } else |_| {}
 
