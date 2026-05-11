@@ -1,7 +1,5 @@
 # Timbal
 
-> **Timbal 2.0 is in beta.** The API is stable — we're finalizing docs and tooling before the full release.
-
 Simple, performant, battle-tested framework for building reliable AI applications.
 
 Full documentation: [docs.timbal.ai](https://docs.timbal.ai)
@@ -125,10 +123,13 @@ anthropic/claude-opus-4-7         openai/gpt-5.5
 anthropic/claude-opus-4-6         openai/gpt-5.5-2026-04-23
 anthropic/claude-haiku-4-5        openai/o3
 google/gemini-2.5-flash           togetherai/deepseek-ai/DeepSeek-V4-Pro
-google/gemini-2.5-pro-preview     togetherai/moonshotai/Kimi-K2.6
+google/gemini-2.5-pro             togetherai/moonshotai/Kimi-K2.6
 groq/llama-3.3-70b-versatile      xai/grok-4
-cerebras/llama-3.1-8b             sambanova/Meta-Llama-3.3-70B-Instruct
+fireworks/.../qwen3p6-plus        cerebras/llama3.1-8b
+sambanova/Meta-Llama-3.3-70B-Instruct
 ```
+
+Providers: Anthropic, OpenAI, Google, xAI, Groq, TogetherAI, Fireworks, Cerebras, SambaNova, ByteDance Seed, Xiaomi MiMo.
 
 Recent additions (see `python/timbal/models.yaml`): DeepSeek V4 via Together/Fireworks, GLM-5.1, MiniMax M2.7, Kimi K2.6, Qwen 3.6 Plus (Fireworks), and the `gpt-5.5-2026-04-23` snapshot.
 
@@ -164,6 +165,26 @@ async for event in agent(prompt="Write a short poem"):
     if isinstance(event, DeltaEvent) and isinstance(event.item, TextDelta):
         print(event.item.text_delta, end="", flush=True)
 ```
+
+---
+
+## Model fallbacks
+
+Chain providers so transient failures, rate limits, or auth errors automatically roll over to the next model. Pre-stream errors trigger fallback by default; mid-stream errors propagate (you can't switch providers after tokens have started flowing).
+
+```python
+from timbal import Agent, FallbackModel, ModelEntry
+
+model = FallbackModel(
+    "openai/gpt-5.5",
+    ModelEntry("anthropic/claude-sonnet-4-6", max_retries=3, retry_delay=0.5),
+    "google/gemini-2.5-pro",
+)
+
+agent = Agent(name="resilient", model=model, max_tokens=2048)
+```
+
+Pass `fallback_on=` (an exception class, tuple, or predicate) to narrow what triggers fallback. Use `is_retryable_provider_error` from `timbal.core.fallback_model` for the conservative "transient provider errors only" behavior.
 
 ---
 
@@ -331,15 +352,13 @@ from timbal.state.tracing.providers import JsonlTracingProvider
 from pathlib import Path
 
 provider = JsonlTracingProvider.configured(_path=Path("sessions.jsonl"))
-agent = Agent(model="...", tracing_provider=provider)
+agent = Agent(name="chat", model="...", tracing_provider=provider)
 
 run1 = await agent.collect(prompt="My name is Alice.")
-print(run1.run_id)   # "abc123"
+print(run1.run_id)   # e.g. "abc123"
 
-# Next session — agent remembers the previous one
-from timbal.state.context import RunContext
-ctx = RunContext(parent_id="abc123", tracing_provider=provider)
-run2 = await agent.collect(prompt="What's my name?", run_context=ctx)
+# Next session — chain via parent_id; tracing provider replays prior memory.
+run2 = await agent.collect(prompt="What's my name?", parent_id=run1.run_id)
 ```
 
 ---
@@ -375,30 +394,55 @@ curl -X POST http://localhost:4444/run \
 
 ## Evals
 
-Declarative evaluation suite with built-in validators.
+Declarative evaluation suite with built-in validators. YAML-driven, pytest-style runner.
 
 ```yaml
-# evals.yaml
-evals:
-  - name: "greets_user"
-    params:
-      prompt: "Say hello to Alice"
-    agent!:
-      output!:
-        contains_all!: ["Hello", "Alice"]
-      duration!:
-        lt!: 5
+# eval_greeting.yaml
+- name: greets_user
+  description: Verify the agent greets the user by name
+  runnable: agent.py::my_agent
+  tags: ["greeting", "smoke"]
+  timeout: 30000
+
+  params:
+    prompt: "Say hello to Alice"
+
+  output:
+    type!: "string"
+    contains_all!: ["Hello", "Alice"]
+
+  elapsed:
+    lt!: 5000
+
+  seq!:
+    - llm
 ```
+
+```bash
+python -m timbal.evals.cli path/to/eval_greeting.yaml
+```
+
+Or call the runner directly from Python:
 
 ```python
+import yaml
+from pathlib import Path
+from timbal.evals.models import Eval
 from timbal.evals.runner import run_eval
 
-result = await run_eval(eval_config, agent=my_agent)
-print(result.passed)
-print(result.validator_results)
+spec = yaml.safe_load(Path("eval_greeting.yaml").read_text())[0]
+spec["path"] = Path("eval_greeting.yaml")
+spec["runnable"] = my_agent  # any Runnable instance
+
+result = await run_eval(Eval.model_validate(spec))
+print(result.passed, [v.passed for v in result.validator_results])
 ```
 
-**Validators:** `contains`, `contains_all`, `contains_any`, `starts_with`, `ends_with`, `pattern`, `length`, `min_length`, `max_length`, `eq`, `lt`, `gt`, `type`, `email`, `json`, `semantic` (LLM-based), `language`. All support `not_` negation.
+**Value validators:** `contains`, `contains_all`, `contains_any`, `starts_with`, `ends_with`, `pattern`, `length`, `min_length`, `max_length`, `eq`, `lt`, `lte`, `gt`, `gte`, `type`, `not_null`, `email`, `json`, `semantic` (LLM-based), `language`.
+
+**Flow validators:** `seq!`, `parallel!`, `any!` — assert tool execution patterns inside the run trace.
+
+Most validators support `not_` negation (e.g. `not_contains!`, `not_pattern!`, `not_semantic!`).
 
 ---
 
@@ -475,15 +519,19 @@ See [`benchmarks/README.md`](benchmarks/README.md) for methodology and how to re
 timbal/
 ├── python/
 │   ├── timbal/
-│   │   ├── core/             # Agent, Workflow, Tool, LLM router, Skills, MCP
+│   │   ├── core/             # Agent, Workflow, Tool, LLM router, FallbackModel, Skills, MCP
 │   │   ├── state/            # RunContext, tracing providers + exporters
 │   │   ├── types/            # Message, File, Events
 │   │   ├── collectors/       # Output processing
-│   │   ├── evals/            # Evaluation framework
-│   │   ├── server/           # HTTP serving
+│   │   ├── evals/            # Evaluation framework + validators
+│   │   ├── server/           # HTTP and voice serving
+│   │   ├── voice/            # Voice session + ElevenLabs integration
 │   │   ├── platform/         # Timbal platform integration
-│   │   └── tools/            # Built-in tool library
-│   └── tests/core/
+│   │   ├── codegen/          # Code generation utilities
+│   │   ├── tools/            # Built-in tool library
+│   │   ├── models.yaml       # Source of truth for supported LLMs
+│   │   └── errors.py         # Public exception types
+│   └── tests/                # core/, state/, tools/, platform/, ...
 ├── benchmarks/
 │   ├── README.md
 │   └── langchain/
@@ -501,7 +549,7 @@ timbal/
 
 **One interface for everything.** Agents, workflows, and tools all share the same `__call__` / `.collect()` convention and the same event stream. Compose them freely.
 
-**Provider-agnostic.** Anthropic, OpenAI, Google, Groq, xAI, Cerebras, SambaNova — same code, swap the model string.
+**Provider-agnostic.** Anthropic, OpenAI, Google, xAI, Groq, TogetherAI, Fireworks, Cerebras, SambaNova, ByteDance Seed, Xiaomi MiMo — same code, swap the model string. Built-in `FallbackModel` chains them for automatic failover.
 
 ---
 
