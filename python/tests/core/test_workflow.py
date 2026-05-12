@@ -180,6 +180,15 @@ class TestWorkflowCreation:
         with pytest.raises(Exception, match="Input should be a valid string"):
             Workflow(name=123)
 
+    @pytest.mark.asyncio
+    async def test_empty_workflow_runs_successfully(self):
+        """Empty workflow (no steps) must run cleanly with output=None."""
+        wf = Workflow(name="workflow")
+        result = await wf().collect()
+        assert result.status.code == "success"
+        assert result.error is None
+        assert result.output is None
+
 
 class TestStepManagement:
     def test_step_without_explicit_name(self):

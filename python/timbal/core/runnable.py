@@ -924,8 +924,17 @@ class Runnable(ABC, BaseModel):
 
         if async_gen:
             output = None
-            # Peek at first element to determine collector type
-            first_chunk = await async_gen.__anext__()
+            # Peek at first element to determine collector type.
+            # An empty generator (e.g. a Workflow with zero steps) is valid: leave
+            # output as None and skip collector setup. We must catch
+            # StopAsyncIteration here because letting it escape the body of
+            # this async generator becomes a RuntimeError per PEP 479/525.
+            try:
+                first_chunk = await async_gen.__anext__()
+            except StopAsyncIteration:
+                first_chunk = None
+                async_gen = None
+        if async_gen:
             collector_type = get_collector_registry().get_collector_type(first_chunk)
             if collector_type:
                 collector = collector_type(async_gen=async_gen, start=handler_start)
