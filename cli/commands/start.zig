@@ -178,6 +178,48 @@ const ParsedEnv = struct {
     value: []const u8, // owned
 };
 
+/// Positionally-derived bucket indices for env scoping. `scope_names` is built
+/// in a fixed order (ui first if present, then api, then each member in order),
+/// so we know which bucket index each service occupies without doing a name
+/// lookup. That matters because a name lookup is ambiguous when a workforce
+/// member's name happens to collide with "ui" or "api" — the previous
+/// implementation used last-match for the read side and first-match for the
+/// write side, which silently dropped scoped env entries.
+const ScopeBuckets = struct {
+    /// 0 means the UI service is not present; otherwise this is the bucket
+    /// index (1-based — index 0 is the global bucket).
+    ui_bucket: usize,
+    api_bucket: usize,
+    /// Parallel to `members.items`. Owned; caller must call `deinit`.
+    member_buckets: []usize,
+
+    fn deinit(self: *ScopeBuckets, allocator: std.mem.Allocator) void {
+        allocator.free(self.member_buckets);
+    }
+};
+
+fn assignScopeBuckets(
+    allocator: std.mem.Allocator,
+    has_ui: bool,
+    has_api: bool,
+    member_count: usize,
+) !ScopeBuckets {
+    var offset: usize = 0;
+    var ui_bucket: usize = 0;
+    var api_bucket: usize = 0;
+    if (has_ui) {
+        offset += 1;
+        ui_bucket = offset;
+    }
+    if (has_api) {
+        offset += 1;
+        api_bucket = offset;
+    }
+    const member_buckets = try allocator.alloc(usize, member_count);
+    for (member_buckets, 0..) |*b, i| b.* = offset + 1 + i;
+    return .{ .ui_bucket = ui_bucket, .api_bucket = api_bucket, .member_buckets = member_buckets };
+}
+
 fn freeParsedEnvList(allocator: std.mem.Allocator, list: *std.ArrayList(ParsedEnv)) void {
     for (list.items) |e| {
         allocator.free(e.key);
@@ -230,6 +272,10 @@ fn parseEnvFile(allocator: std.mem.Allocator, content: []const u8) !std.ArrayLis
         const key_owned = try allocator.dupe(u8, key_raw);
         errdefer allocator.free(key_owned);
         const val_owned = try allocator.dupe(u8, value);
+        // Without this, an OOM from `out.append` would leak val_owned: the
+        // function-level errdefer on `out` only frees entries already inside
+        // the list, and the previous errdefer only covers key_owned.
+        errdefer allocator.free(val_owned);
         try out.append(.{ .key = key_owned, .value = val_owned });
     }
 
@@ -1996,18 +2042,25 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer shell_env.deinit();
     shell_env.remove("PORT");
 
-    // Look up bucket indices for ui/api/each member in advance.
-    var ui_bucket: usize = 0;
-    var api_bucket: usize = 0;
-    var member_buckets = try allocator.alloc(usize, members.items.len);
-    defer allocator.free(member_buckets);
-    for (scope_names.items, 0..) |name, idx| {
-        if (std.mem.eql(u8, name, "ui")) ui_bucket = idx + 1;
-        if (std.mem.eql(u8, name, "api")) api_bucket = idx + 1;
-        for (members.items, 0..) |m, mi| {
-            if (std.mem.eql(u8, name, m.name)) member_buckets[mi] = idx + 1;
+    // Positional bucket assignment — see ScopeBuckets for why we don't look up
+    // by name. The storage path for --env/--env-file uses first-match-by-name
+    // against `scope_names`, which means a `--env ui:KEY=VAL` always routes to
+    // the UI service (scope_names[0] when has_ui), never to a workforce member
+    // that happens to be named "ui". Warn the user so the shadowing is visible.
+    for (members.items) |m| {
+        if (std.mem.eql(u8, m.name, "ui") or std.mem.eql(u8, m.name, "api")) {
+            try stderr_writer.print(
+                "Warning: workforce member '{s}' shadows the reserved '{s}' scope; '--env {s}:KEY=VAL' will route to the {s} service, not the member.\n",
+                .{ m.name, m.name, m.name, m.name },
+            );
         }
     }
+
+    var scope_buckets = try assignScopeBuckets(allocator, has_ui, has_api, members.items.len);
+    defer scope_buckets.deinit(allocator);
+    const ui_bucket = scope_buckets.ui_bucket;
+    const api_bucket = scope_buckets.api_bucket;
+    const member_buckets = scope_buckets.member_buckets;
 
     // -- Build per-service envs --
 
@@ -2409,6 +2462,25 @@ test "parseEnvFile handles comments, blank lines, quotes, and export prefix" {
     try std.testing.expectEqualStrings("multi=signs=in=value", entries.items[5].value);
 }
 
+test "parseEnvFile does not leak val_owned when out.append OOMs" {
+    // Force an allocation failure precisely on the ArrayList.append after
+    // both key_owned and val_owned have been duped. The testing allocator
+    // detects any leaked allocation; if val_owned were leaked we'd fail here.
+    //
+    // Allocation order inside the loop:
+    //   N: key_owned dupe
+    //   N+1: val_owned dupe
+    //   N+2: ArrayList capacity grow (this is the one we want to fail)
+    //
+    // Before the loop, ArrayList.init does no allocation, so the first
+    // iteration's failing index is 2.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    const result = parseEnvFile(failing.allocator(), "KEY=value");
+    try std.testing.expectError(error.OutOfMemory, result);
+    // FailingAllocator wraps a testing.allocator that panics on leaks at
+    // tear-down; reaching here without a panic means val_owned was freed.
+}
+
 test "parseEnvFile leaves bare equals values empty and skips invalid keys" {
     const content =
         \\EMPTY=
@@ -2709,6 +2781,87 @@ test "shell env scrubbing removes PORT before layering" {
 
     try std.testing.expectEqual(@as(?[]const u8, null), env.get("PORT"));
     try std.testing.expectEqualStrings("untouched", env.get("OTHER").?);
+}
+
+test "assignScopeBuckets: ui+api+members get distinct positional buckets" {
+    var b = try assignScopeBuckets(std.testing.allocator, true, true, 3);
+    defer b.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), b.ui_bucket);
+    try std.testing.expectEqual(@as(usize, 2), b.api_bucket);
+    try std.testing.expectEqual(@as(usize, 3), b.member_buckets[0]);
+    try std.testing.expectEqual(@as(usize, 4), b.member_buckets[1]);
+    try std.testing.expectEqual(@as(usize, 5), b.member_buckets[2]);
+}
+
+test "assignScopeBuckets: missing services leave ui/api_bucket at 0 sentinel" {
+    {
+        var b = try assignScopeBuckets(std.testing.allocator, false, true, 2);
+        defer b.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 0), b.ui_bucket);
+        try std.testing.expectEqual(@as(usize, 1), b.api_bucket);
+        try std.testing.expectEqual(@as(usize, 2), b.member_buckets[0]);
+        try std.testing.expectEqual(@as(usize, 3), b.member_buckets[1]);
+    }
+    {
+        var b = try assignScopeBuckets(std.testing.allocator, true, false, 1);
+        defer b.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), b.ui_bucket);
+        try std.testing.expectEqual(@as(usize, 0), b.api_bucket);
+        try std.testing.expectEqual(@as(usize, 2), b.member_buckets[0]);
+    }
+    {
+        var b = try assignScopeBuckets(std.testing.allocator, false, false, 2);
+        defer b.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 0), b.ui_bucket);
+        try std.testing.expectEqual(@as(usize, 0), b.api_bucket);
+        try std.testing.expectEqual(@as(usize, 1), b.member_buckets[0]);
+        try std.testing.expectEqual(@as(usize, 2), b.member_buckets[1]);
+    }
+}
+
+test "scope routing: --env ui:KEY lands in UI's bucket even if a member is named 'ui'" {
+    // Reproduces the previous bug: the storage side used first-match in
+    // scope_names (which is ["ui", "api", "ui"] when has_ui and a member is
+    // named "ui"), while the read side used last-match. The scoped --env
+    // entry landed in bucket 1 (storage) while the UI service read from
+    // bucket 3 (last match wins). Positional assignment fixes both.
+    //
+    // We simulate just the scope_names + dispatch logic here, plus the
+    // positional ui_bucket computation.
+
+    const allocator = std.testing.allocator;
+    const has_ui = true;
+    const has_api = true;
+    // Members: ["ui", "worker"]. The first one shadows the reserved scope.
+    const member_names = [_][]const u8{ "ui", "worker" };
+
+    var scope_names = std.ArrayList([]const u8).init(allocator);
+    defer scope_names.deinit();
+    if (has_ui) try scope_names.append("ui");
+    if (has_api) try scope_names.append("api");
+    for (member_names) |n| try scope_names.append(n);
+
+    // Storage path (replicates the dispatch loop).
+    const storage_bucket: usize = blk: {
+        const s: []const u8 = "ui";
+        for (scope_names.items, 0..) |name, idx| {
+            if (std.mem.eql(u8, name, s)) break :blk idx + 1;
+        }
+        break :blk 0;
+    };
+
+    // Read path uses positional assignment.
+    var buckets = try assignScopeBuckets(allocator, has_ui, has_api, member_names.len);
+    defer buckets.deinit(allocator);
+
+    // The fix's guarantee: storage and the UI service's read bucket agree.
+    try std.testing.expectEqual(buckets.ui_bucket, storage_bucket);
+    try std.testing.expectEqual(@as(usize, 1), buckets.ui_bucket);
+
+    // The member that happens to be named "ui" has its own distinct bucket;
+    // it just can't be reached via the `ui:` scope prefix (warned at startup).
+    try std.testing.expect(buckets.member_buckets[0] != buckets.ui_bucket);
+    try std.testing.expectEqual(@as(usize, 3), buckets.member_buckets[0]);
 }
 
 test "composeServiceEnv: full precedence stack end-to-end" {
