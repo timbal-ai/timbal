@@ -300,7 +300,13 @@ fn parseStartArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parse
     }
 
     var opts = StartOptions.init(allocator);
-    errdefer opts.deinit(allocator);
+    // We cannot use `errdefer` here: a `ParseResult{ .err = ... }` return is a
+    // normal union return, not a Zig error return, so errdefer wouldn't fire
+    // and any heap state already pushed into `opts` (duped --env strings,
+    // duped --port NAME keys, ArrayList/HashMap buffers) would leak. Use a
+    // success flag the success path flips just before returning .options.
+    var ok = false;
+    defer if (!ok) opts.deinit(allocator);
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -383,6 +389,7 @@ fn parseStartArgs(allocator: std.mem.Allocator, args: []const []const u8) !Parse
         }
     }
 
+    ok = true;
     return ParseResult{ .options = opts };
 }
 
@@ -2620,6 +2627,46 @@ test "parseStartArgs - duplicate paths is an error" {
     const parsed = try parseStartArgs(std.testing.allocator, &args);
     try std.testing.expect(parsed == .err);
     std.testing.allocator.free(parsed.err);
+}
+
+test "parseStartArgs - .err return does not leak accumulated heap state" {
+    // Previously, returning `ParseResult{ .err = ... }` was a normal union
+    // return and did NOT fire `errdefer opts.deinit(...)`. Anything already
+    // duped into opts (--env strings, --port keys, ArrayList/HashMap buffers)
+    // was leaked. std.testing.allocator panics on leaks at teardown, so this
+    // test would have crashed before the fix.
+    {
+        const args = [_][]const u8{ "--env", "FOO=bar", "--unknown" };
+        const parsed = try parseStartArgs(std.testing.allocator, &args);
+        try std.testing.expect(parsed == .err);
+        std.testing.allocator.free(parsed.err);
+    }
+    {
+        const args = [_][]const u8{ "--port", "agent=7000", "--unknown" };
+        const parsed = try parseStartArgs(std.testing.allocator, &args);
+        try std.testing.expect(parsed == .err);
+        std.testing.allocator.free(parsed.err);
+    }
+    {
+        const args = [_][]const u8{ "--env-file", "/tmp/x", "--ui-port", "notaport" };
+        const parsed = try parseStartArgs(std.testing.allocator, &args);
+        try std.testing.expect(parsed == .err);
+        std.testing.allocator.free(parsed.err);
+    }
+    {
+        // Mixed accumulation across several flag families before the .err.
+        const args = [_][]const u8{
+            "--env",      "A=1",
+            "--env",      "B=2",
+            "--env-file", "/tmp/x",
+            "--port",     "agent=7000",
+            "--port",     "agent=7100", // forces fetchRemove + put — exercises that path
+            "--unknown",
+        };
+        const parsed = try parseStartArgs(std.testing.allocator, &args);
+        try std.testing.expect(parsed == .err);
+        std.testing.allocator.free(parsed.err);
+    }
 }
 
 test "parseStartArgs - port flags populate PortOverrides" {
