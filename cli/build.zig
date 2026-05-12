@@ -83,4 +83,16 @@ pub fn build(b: *std.Build) !void {
         // Make the main install step depend on this target-specific install step.
         b.getInstallStep().dependOn(&target_install.step);
     }
+
+    // Unit tests step: `zig build test`. Runs only against the host target so
+    // local development is fast and doesn't try to spawn cross-compiled tests.
+    const host_target = b.standardTargetOptions(.{});
+    const tests = b.addTest(.{
+        .root_source_file = b.path("tests.zig"),
+        .target = host_target,
+        .optimize = optimize,
+    });
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_tests.step);
 }
