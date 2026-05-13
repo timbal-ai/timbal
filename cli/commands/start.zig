@@ -233,6 +233,26 @@ fn appendDupedKv(
     try list.append(.{ .key = key_owned, .value = val_owned });
 }
 
+/// Move every ParsedEnv from `src` into `dest`, preserving order.
+///
+/// Each `ParsedEnv` owns its `.key`/`.value` heap strings. A naive
+/// `for (src.items) |e| try dest.append(e);` is unsafe because:
+///   - if append OOMs partway, the strings of un-transferred items are still
+///     referenced by src.items; src's plain `deinit()` would only free the
+///     slot buffer, not those strings.
+/// Pre-reserve capacity on `dest` so the inner copy can't fail, then clear
+/// `src` to signal that ownership has moved. The caller is expected to clean
+/// up `src` via `freeParsedEnvList` so the pre-reserve OOM path also frees
+/// strings still held by `src`.
+fn moveParsedEnvIntoBucket(
+    src: *std.ArrayList(ParsedEnv),
+    dest: *std.ArrayList(ParsedEnv),
+) !void {
+    try dest.ensureUnusedCapacity(src.items.len);
+    for (src.items) |e| dest.appendAssumeCapacity(e);
+    src.clearRetainingCapacity();
+}
+
 /// Minimal .env file parser:
 ///   - lines starting with `#` are comments
 ///   - blank lines are skipped
@@ -1984,9 +2004,12 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         };
         defer allocator.free(content);
         var parsed_entries = try parseEnvFile(allocator, content);
-        // Take ownership: move parsed entries into the correct bucket, then
-        // discard the temporary container.
-        defer parsed_entries.deinit();
+        // freeParsedEnvList (not plain deinit) is required: if the move below
+        // OOMs on ensureUnusedCapacity, parsed_entries still owns every
+        // string. After a successful move, clearRetainingCapacity leaves
+        // items empty and this becomes a no-op string loop plus a container
+        // free.
+        defer freeParsedEnvList(allocator, &parsed_entries);
 
         const bucket_idx: usize = blk: {
             const s = split.scope orelse break :blk 0;
@@ -1995,9 +2018,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
             break :blk 0;
         };
-        for (parsed_entries.items) |e| {
-            try env_file_buckets[bucket_idx].append(e);
-        }
+        try moveParsedEnvIntoBucket(&parsed_entries, &env_file_buckets[bucket_idx]);
     }
 
     // Pre-parse --env values into scoped lists, validating KEY=VALUE.
@@ -2497,6 +2518,60 @@ test "parseEnvFile does not leak when out.append OOMs" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
     const result = parseEnvFile(failing.allocator(), "KEY=value");
     try std.testing.expectError(error.OutOfMemory, result);
+}
+
+test "moveParsedEnvIntoBucket transfers all entries and empties src" {
+    const allocator = std.testing.allocator;
+    var src = std.ArrayList(ParsedEnv).init(allocator);
+    defer freeParsedEnvList(allocator, &src);
+    var dest = std.ArrayList(ParsedEnv).init(allocator);
+    defer freeParsedEnvList(allocator, &dest);
+
+    try appendDupedKv(allocator, &src, "K1", "V1");
+    try appendDupedKv(allocator, &src, "K2", "V2");
+    try appendDupedKv(allocator, &src, "K3", "V3");
+
+    try moveParsedEnvIntoBucket(&src, &dest);
+
+    try std.testing.expectEqual(@as(usize, 0), src.items.len);
+    try std.testing.expectEqual(@as(usize, 3), dest.items.len);
+    // Order is preserved (relevant for env precedence: later wins).
+    try std.testing.expectEqualStrings("K1", dest.items[0].key);
+    try std.testing.expectEqualStrings("V1", dest.items[0].value);
+    try std.testing.expectEqualStrings("K2", dest.items[1].key);
+    try std.testing.expectEqualStrings("K3", dest.items[2].key);
+}
+
+test "moveParsedEnvIntoBucket: OOM on ensureUnusedCapacity does not leak src strings" {
+    // Pre-populate src under the testing allocator (so its strings live in
+    // the real heap), then perform the move under a FailingAllocator wired
+    // to fail on the first allocation it sees (the dest's capacity grow).
+    //
+    // src must use the *same* underlying allocator that owns its strings,
+    // otherwise the defer freeParsedEnvList would call free with the wrong
+    // allocator. We satisfy that by giving src/dest the same FailingAllocator,
+    // but pre-load src BEFORE arming the failure (fail_index counts from the
+    // moment FailingAllocator.init returns).
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 999 });
+    const fa = failing.allocator();
+
+    var src = std.ArrayList(ParsedEnv).init(fa);
+    defer freeParsedEnvList(fa, &src);
+    var dest = std.ArrayList(ParsedEnv).init(fa);
+    defer freeParsedEnvList(fa, &dest);
+
+    try appendDupedKv(fa, &src, "K1", "V1");
+    try appendDupedKv(fa, &src, "K2", "V2");
+
+    // Now arm: the very next allocation (dest.ensureUnusedCapacity) fails.
+    failing.fail_index = failing.alloc_index;
+
+    try std.testing.expectError(error.OutOfMemory, moveParsedEnvIntoBucket(&src, &dest));
+
+    // src still owns both entries; the deferred freeParsedEnvList must free
+    // their strings. testing.allocator panics on any leak at teardown.
+    try std.testing.expectEqual(@as(usize, 2), src.items.len);
+    try std.testing.expectEqual(@as(usize, 0), dest.items.len);
 }
 
 test "parseEnvFile leaves bare equals values empty and skips invalid keys" {
