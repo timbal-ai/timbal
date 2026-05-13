@@ -76,26 +76,11 @@ const PortOverrides = struct {
     }
 };
 
-/// One env override: `scope` is null for global, otherwise it's `ui` / `api` /
-/// a workforce member name. Empty allocations are stored directly — the
-/// containing `StartOptions` owns the memory.
-const EnvEntry = struct {
-    scope: ?[]const u8,
-    key: []const u8,
-    value: []const u8,
-};
-
 /// Raw `--env` / `--env-file` argument before scope resolution. We can't
 /// classify the scope until we've discovered the project layout (because
 /// scopes match workforce member names), so we keep the original string.
 const RawScopedArg = struct {
     raw: []const u8, // owned
-};
-
-/// Parsed `--env-file` after scope resolution.
-const EnvFileSpec = struct {
-    scope: ?[]const u8, // borrowed
-    path: []const u8, // owned
 };
 
 /// Holds everything the user passed on the command line. Owns its strings.
@@ -228,6 +213,26 @@ fn freeParsedEnvList(allocator: std.mem.Allocator, list: *std.ArrayList(ParsedEn
     list.deinit();
 }
 
+/// Dupe `key`/`value` and append the pair to `list`. Each allocation is held
+/// under an errdefer, so an OOM from the second dupe or the append frees
+/// anything already allocated in this call.
+///
+/// Centralising this avoids the easy-to-miss-by-inlining pattern where
+/// `list.append(.{ .key = try dupe(...), .value = try dupe(...) })` leaks the
+/// key allocation if the value dupe OOMs, or both if append OOMs.
+fn appendDupedKv(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(ParsedEnv),
+    key: []const u8,
+    value: []const u8,
+) !void {
+    const key_owned = try allocator.dupe(u8, key);
+    errdefer allocator.free(key_owned);
+    const val_owned = try allocator.dupe(u8, value);
+    errdefer allocator.free(val_owned);
+    try list.append(.{ .key = key_owned, .value = val_owned });
+}
+
 /// Minimal .env file parser:
 ///   - lines starting with `#` are comments
 ///   - blank lines are skipped
@@ -269,14 +274,7 @@ fn parseEnvFile(allocator: std.mem.Allocator, content: []const u8) !std.ArrayLis
             }
         }
 
-        const key_owned = try allocator.dupe(u8, key_raw);
-        errdefer allocator.free(key_owned);
-        const val_owned = try allocator.dupe(u8, value);
-        // Without this, an OOM from `out.append` would leak val_owned: the
-        // function-level errdefer on `out` only frees entries already inside
-        // the list, and the previous errdefer only covers key_owned.
-        errdefer allocator.free(val_owned);
-        try out.append(.{ .key = key_owned, .value = val_owned });
+        try appendDupedKv(allocator, &out, key_raw, value);
     }
 
     return out;
@@ -2026,10 +2024,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
             break :blk 0;
         };
-        try env_arg_buckets[bucket_idx].append(.{
-            .key = try allocator.dupe(u8, kv.key),
-            .value = try allocator.dupe(u8, kv.value),
-        });
+        try appendDupedKv(allocator, &env_arg_buckets[bucket_idx], kv.key, kv.value);
     }
 
     // Soft built-ins shared by every service.
@@ -2469,23 +2464,39 @@ test "parseEnvFile handles comments, blank lines, quotes, and export prefix" {
     try std.testing.expectEqualStrings("multi=signs=in=value", entries.items[5].value);
 }
 
-test "parseEnvFile does not leak val_owned when out.append OOMs" {
-    // Force an allocation failure precisely on the ArrayList.append after
-    // both key_owned and val_owned have been duped. The testing allocator
-    // detects any leaked allocation; if val_owned were leaked we'd fail here.
+test "appendDupedKv frees both dupes when the append OOMs" {
+    // Allocation order inside appendDupedKv:
+    //   0: key_owned dupe
+    //   1: val_owned dupe
+    //   2: ArrayList capacity grow (force this one to fail)
     //
-    // Allocation order inside the loop:
-    //   N: key_owned dupe
-    //   N+1: val_owned dupe
-    //   N+2: ArrayList capacity grow (this is the one we want to fail)
-    //
-    // Before the loop, ArrayList.init does no allocation, so the first
-    // iteration's failing index is 2.
+    // testing.allocator panics on any leak at teardown; FailingAllocator
+    // wraps it, so reaching the end without a panic proves both dupes were
+    // freed via their errdefers.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    var list = std.ArrayList(ParsedEnv).init(failing.allocator());
+    defer list.deinit();
+
+    const result = appendDupedKv(failing.allocator(), &list, "KEY", "value");
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expectEqual(@as(usize, 0), list.items.len);
+}
+
+test "appendDupedKv frees the key when the value dupe OOMs" {
+    // Order: 0 = key dupe (succeeds), 1 = value dupe (fails).
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var list = std.ArrayList(ParsedEnv).init(failing.allocator());
+    defer list.deinit();
+
+    const result = appendDupedKv(failing.allocator(), &list, "KEY", "value");
+    try std.testing.expectError(error.OutOfMemory, result);
+}
+
+test "parseEnvFile does not leak when out.append OOMs" {
+    // Integration test: same failure scenario reached through parseEnvFile.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
     const result = parseEnvFile(failing.allocator(), "KEY=value");
     try std.testing.expectError(error.OutOfMemory, result);
-    // FailingAllocator wraps a testing.allocator that panics on leaks at
-    // tear-down; reaching here without a panic means val_owned was freed.
 }
 
 test "parseEnvFile leaves bare equals values empty and skips invalid keys" {
