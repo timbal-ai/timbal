@@ -233,6 +233,88 @@ fn appendDupedKv(
     try list.append(.{ .key = key_owned, .value = val_owned });
 }
 
+/// Two-pass port assignment for workforce members.
+///
+/// The naive single-pass approach (reserve explicit if present, otherwise
+/// auto-allocate from a rolling cursor) is non-deterministic because directory
+/// iteration order varies by filesystem. If member A is iterated first and
+/// auto-allocates, it can grab a port number that member B (later in the
+/// iteration) was about to claim via `--port B=PORT`. B then fails with a
+/// misleading "already in use" pointing at our own reservation.
+///
+/// Pass 1: reserve every member that has an explicit `--port NAME=PORT`.
+/// Pass 2: auto-allocate the rest from the rolling cursor; `reserveAvailablePort`
+///         naturally skips the ports Pass 1 already holds.
+///
+/// Pass 0 rejects two `--port` flags assigning the same number to different
+/// members, which would otherwise produce a confusing "already in use" error
+/// from Pass 1's second attempt.
+///
+/// Errors are reported to `stderr_w` with friendly messages before returning;
+/// the caller is expected to silently exit on `error.PortInUse` /
+/// `error.DuplicateExplicitPort` (no stack trace).
+fn reserveMemberPorts(
+    allocator: std.mem.Allocator,
+    members: []WorkforceMember,
+    port_overrides: *const std.StringHashMap(u16),
+    workforce_base: u16,
+    stderr_w: anytype,
+) !void {
+    {
+        var seen = std.AutoHashMap(u16, []const u8).init(allocator);
+        defer seen.deinit();
+        var it = port_overrides.iterator();
+        while (it.next()) |entry| {
+            const p = entry.value_ptr.*;
+            if (seen.get(p)) |prev_name| {
+                try stderr_w.print(
+                    "Error: --port assigns the same port {d} to multiple members ('{s}' and '{s}').\n",
+                    .{ p, prev_name, entry.key_ptr.* },
+                );
+                return error.DuplicateExplicitPort;
+            }
+            try seen.put(p, entry.key_ptr.*);
+        }
+    }
+
+    for (members) |*member| {
+        if (port_overrides.get(member.name)) |explicit| {
+            member.reservation = tryReservePort(explicit) orelse {
+                const holder = findPortHolderDescription(allocator, explicit);
+                defer if (holder) |h| allocator.free(h);
+                if (holder) |h| {
+                    try stderr_w.print(
+                        "Error: requested port {d} for '{s}' is already in use ({s}).\n",
+                        .{ explicit, member.name, h },
+                    );
+                } else {
+                    try stderr_w.print(
+                        "Error: requested port {d} for '{s}' is already in use.\n",
+                        .{ explicit, member.name },
+                    );
+                }
+                return error.PortInUse;
+            };
+            member.port = explicit;
+        }
+    }
+
+    var cursor: u16 = workforce_base;
+    for (members) |*member| {
+        if (member.reservation != null) continue;
+        const r = reserveAvailablePort(cursor, 200) orelse {
+            try stderr_w.print(
+                "Error: no free port for workforce member '{s}' starting from {d}.\n",
+                .{ member.name, cursor },
+            );
+            return error.PortInUse;
+        };
+        cursor = if (r.port == 65535) 65535 else r.port + 1;
+        member.port = r.port;
+        member.reservation = r;
+    }
+}
+
 /// Move every ParsedEnv from `src` into `dest`, preserving order.
 ///
 /// Each `ParsedEnv` owns its `.key`/`.value` heap strings. A naive
@@ -1689,8 +1771,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         members.deinit();
     }
 
-    var port = opts.ports.workforce_base orelse base_port;
-
+    // Phase 1: enumerate every member without reserving a port. Pure discovery.
     if (project_dir.openDir("workforce", .{ .iterate = true })) |*workforce_dir_ptr| {
         var workforce_dir = workforce_dir_ptr.*;
         defer workforce_dir.close();
@@ -1699,7 +1780,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         while (try iter.next()) |entry| {
             if (entry.kind != .directory) continue;
 
-            // Check if this subdirectory contains a timbal.yaml.
             const yaml_path = try std.fmt.allocPrint(allocator, "workforce/{s}/timbal.yaml", .{entry.name});
             defer allocator.free(yaml_path);
 
@@ -1710,58 +1790,33 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                     std.debug.print("Warning: invalid timbal.yaml in {s}, skipping\n", .{yaml_path});
                     continue;
                 };
+                // Until members.append succeeds, name and config are local; if
+                // either dupe/append errors we must free them. After a
+                // successful append the WorkforceMember owns both and the
+                // global members-defer handles cleanup.
                 const name = try allocator.dupe(u8, entry.name);
-
-                // Per-member port override takes priority over auto-allocation.
-                // On any error path here we own `name` and `config` and must free both.
-                // We *reserve* the port (hold a listener) so a concurrent
-                // `timbal start` probing the same default base can't pick it
-                // out from under us.
-                const reservation: PortReservation = blk: {
-                    if (opts.ports.members.get(name)) |explicit| {
-                        break :blk tryReservePort(explicit) orelse {
-                            const holder = findPortHolderDescription(allocator, explicit);
-                            defer if (holder) |h| allocator.free(h);
-                            if (holder) |h| {
-                                try stderr_writer.print(
-                                    "Error: requested port {d} for '{s}' is already in use ({s}).\n",
-                                    .{ explicit, name, h },
-                                );
-                            } else {
-                                try stderr_writer.print(
-                                    "Error: requested port {d} for '{s}' is already in use.\n",
-                                    .{ explicit, name },
-                                );
-                            }
-                            allocator.free(name);
-                            config.deinit(allocator);
-                            return;
-                        };
-                    }
-                    const r = reserveAvailablePort(port, 200) orelse {
-                        try stderr_writer.print(
-                            "Error: no free port for workforce member '{s}' starting from {d}.\n",
-                            .{ name, port },
-                        );
-                        allocator.free(name);
-                        config.deinit(allocator);
-                        return;
-                    };
-                    // Move cursor forward; saturate at 65535 so we don't overflow u16
-                    // (an exhausted port space is caught on the next iteration).
-                    port = if (r.port == 65535) 65535 else r.port + 1;
-                    break :blk r;
-                };
-
+                errdefer allocator.free(name);
+                errdefer config.deinit(allocator);
                 try members.append(.{
                     .name = name,
                     .config = config,
-                    .port = reservation.port,
-                    .reservation = reservation,
+                    .port = 0,
+                    .reservation = null,
                 });
             } else |_| {}
         }
     } else |_| {}
+
+    // Phase 2: reserve all ports in two passes (explicit first, auto second)
+    // so directory iteration order can't cause an auto-allocation to steal a
+    // port that another member explicitly requested.
+    reserveMemberPorts(
+        allocator,
+        members.items,
+        &opts.ports.members,
+        opts.ports.workforce_base orelse base_port,
+        stderr_writer,
+    ) catch return;
 
     // Warn (but don't fail) if the user passed --port NAME=PORT for a member
     // that doesn't exist — most likely a typo.
@@ -2448,6 +2503,131 @@ test "PortReservation.release is idempotent" {
     r.release();
     r.release(); // would crash if not idempotent
     try std.testing.expect(r.released);
+}
+
+// reserveMemberPorts tests live on test-only helpers since the real callers
+// pass real WorkforceMember instances with name/config heap allocations. The
+// helper itself just touches `.name`, `.port`, and `.reservation`, so we can
+// hand it a bare slice with whatever names we want.
+
+fn makeMembersForTest(comptime names: []const []const u8) [names.len]WorkforceMember {
+    var out: [names.len]WorkforceMember = undefined;
+    inline for (names, 0..) |n, i| {
+        out[i] = .{ .name = n, .config = undefined, .port = 0, .reservation = null };
+    }
+    return out;
+}
+
+fn releaseAllMemberReservations(members: []WorkforceMember) void {
+    for (members) |*m| if (m.reservation) |*r| r.release();
+}
+
+test "reserveMemberPorts: explicit override wins regardless of slice order" {
+    // The original bug: if member A iterates first and auto-allocates the
+    // base port, member B's explicit --port=base fails with "already in use"
+    // pointing at our own reservation. The two-pass helper must produce the
+    // same result for either order.
+
+    const allocator = std.testing.allocator;
+    // Find a base port that's currently free so the test is robust against
+    // whatever else is running on the host.
+    var probe = reserveAvailablePort(40000, 5000) orelse return error.NoFreePort;
+    const base = probe.port;
+    probe.release();
+
+    var overrides = std.StringHashMap(u16).init(allocator);
+    defer overrides.deinit();
+    try overrides.put("bob", base);
+
+    // Order A: alice first (would have grabbed `base` under the old logic).
+    {
+        var members = makeMembersForTest(&.{ "alice", "bob" });
+        defer releaseAllMemberReservations(&members);
+        var sink = std.ArrayList(u8).init(allocator);
+        defer sink.deinit();
+        try reserveMemberPorts(allocator, &members, &overrides, base, sink.writer());
+        try std.testing.expectEqual(base, members[1].port); // bob got its explicit port
+        try std.testing.expect(members[0].port != base); // alice rolled forward
+        try std.testing.expect(members[0].port > base);
+    }
+
+    // Order B: bob first (control — explicit happens to come first in iteration).
+    {
+        var members = makeMembersForTest(&.{ "bob", "alice" });
+        defer releaseAllMemberReservations(&members);
+        var sink = std.ArrayList(u8).init(allocator);
+        defer sink.deinit();
+        try reserveMemberPorts(allocator, &members, &overrides, base, sink.writer());
+        try std.testing.expectEqual(base, members[0].port);
+        try std.testing.expect(members[1].port != base);
+        try std.testing.expect(members[1].port > base);
+    }
+}
+
+test "reserveMemberPorts: auto-allocator skips ports held by Pass 1" {
+    // members = [alice, bob, charlie], --port charlie=base+1, auto starts at base.
+    // Without two passes, alice gets base, bob would grab base+1 — and then
+    // charlie's explicit would fail. With the fix: charlie reserves base+1
+    // first, alice gets base, bob skips to base+2.
+    const allocator = std.testing.allocator;
+    var probe = reserveAvailablePort(40000, 5000) orelse return error.NoFreePort;
+    const base = probe.port;
+    probe.release();
+    if (base >= 65534) return; // need room for base+2
+
+    var overrides = std.StringHashMap(u16).init(allocator);
+    defer overrides.deinit();
+    try overrides.put("charlie", base + 1);
+
+    var members = makeMembersForTest(&.{ "alice", "bob", "charlie" });
+    defer releaseAllMemberReservations(&members);
+    var sink = std.ArrayList(u8).init(allocator);
+    defer sink.deinit();
+    try reserveMemberPorts(allocator, &members, &overrides, base, sink.writer());
+
+    try std.testing.expectEqual(base, members[0].port);
+    try std.testing.expectEqual(base + 2, members[1].port);
+    try std.testing.expectEqual(base + 1, members[2].port);
+}
+
+test "reserveMemberPorts: duplicate explicit ports are rejected upfront" {
+    const allocator = std.testing.allocator;
+    var overrides = std.StringHashMap(u16).init(allocator);
+    defer overrides.deinit();
+    try overrides.put("alice", 9001);
+    try overrides.put("bob", 9001);
+
+    var members = makeMembersForTest(&.{ "alice", "bob" });
+    defer releaseAllMemberReservations(&members);
+    var sink = std.ArrayList(u8).init(allocator);
+    defer sink.deinit();
+
+    try std.testing.expectError(error.DuplicateExplicitPort, reserveMemberPorts(allocator, &members, &overrides, 4455, sink.writer()));
+    // Nothing got reserved — Pass 0 rejects before touching Pass 1.
+    try std.testing.expect(members[0].reservation == null);
+    try std.testing.expect(members[1].reservation == null);
+    try std.testing.expect(std.mem.indexOf(u8, sink.items, "same port 9001") != null);
+}
+
+test "reserveMemberPorts: explicit-port conflict with external holder fails Pass 1" {
+    const allocator = std.testing.allocator;
+    // Externally hold a port (simulating another process / our own ui/api).
+    var external = reserveAvailablePort(40000, 5000) orelse return error.NoFreePort;
+    defer external.release();
+    const taken = external.port;
+
+    var overrides = std.StringHashMap(u16).init(allocator);
+    defer overrides.deinit();
+    try overrides.put("alice", taken);
+
+    var members = makeMembersForTest(&.{"alice"});
+    defer releaseAllMemberReservations(&members);
+    var sink = std.ArrayList(u8).init(allocator);
+    defer sink.deinit();
+
+    try std.testing.expectError(error.PortInUse, reserveMemberPorts(allocator, &members, &overrides, 4455, sink.writer()));
+    try std.testing.expect(members[0].reservation == null);
+    try std.testing.expect(std.mem.indexOf(u8, sink.items, "already in use") != null);
 }
 
 // ===========================================================================
