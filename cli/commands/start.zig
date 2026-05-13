@@ -1794,9 +1794,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 // either dupe/append errors we must free them. After a
                 // successful append the WorkforceMember owns both and the
                 // global members-defer handles cleanup.
+                //
+                // The config errdefer must be registered BEFORE the next
+                // fallible op (`try allocator.dupe`); registering it after
+                // would leak config on a dupe OOM.
+                errdefer config.deinit(allocator);
                 const name = try allocator.dupe(u8, entry.name);
                 errdefer allocator.free(name);
-                errdefer config.deinit(allocator);
                 try members.append(.{
                     .name = name,
                     .config = config,
