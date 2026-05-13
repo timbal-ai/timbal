@@ -2010,7 +2010,15 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer if (root_env_entries) |*e| freeParsedEnvList(allocator, e);
 
     // Per-member auto-loaded .env entries (parallel to members.items).
+    //
+    // `allocator.alloc` returns uninitialised memory. The defer reads EVERY
+    // element, so if the fallible population loop below errors at index k,
+    // elements [k+1..] would still contain undefined bytes — reading them
+    // as `?std.ArrayList(...)` would dereference garbage (UB in release,
+    // safety panic in debug). Initialise everything to null *before* any
+    // fallible operation runs.
     var member_env_entries = try allocator.alloc(?std.ArrayList(ParsedEnv), members.items.len);
+    for (member_env_entries) |*slot| slot.* = null;
     defer {
         for (member_env_entries) |*maybe| {
             if (maybe.*) |*e| freeParsedEnvList(allocator, e);
@@ -2018,7 +2026,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         allocator.free(member_env_entries);
     }
     for (members.items, 0..) |member, idx| {
-        member_env_entries[idx] = null;
         const path = try std.fmt.allocPrint(allocator, "{s}{s}workforce{s}{s}{s}.env", .{ abs_project_path, sep, sep, member.name, sep });
         defer allocator.free(path);
         const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
