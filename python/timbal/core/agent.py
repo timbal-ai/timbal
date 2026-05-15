@@ -306,15 +306,65 @@ class Agent(Runnable):
             self.tools[i] = tool
 
         if skills:
+            namespaced_skills = [s for s in skills if s.namespace_tools and s.tools]
+            if namespaced_skills:
+                example = namespaced_skills[0]
+                example_inner = example.tools[0].name  # already prefixed
+                namespace_note = (
+                    "After loading, that skill's tools become available as separate "
+                    f"tools whose names are prefixed with the skill, e.g. `{example_inner}`. "
+                    "Call them by their full prefixed name; do NOT call the skill name "
+                    "directly as if it were a tool."
+                )
+            else:
+                namespace_note = (
+                    "Do NOT call a skill name directly as if it were a tool — use "
+                    "`read_skill` first; any skill-internal tools will then appear in "
+                    "your tool list."
+                )
             self._system_prompt_skills = f"""<skills>
 Skills provide additional knowledge of a specific topic. The following skills are available:
 {chr(10).join([f"- **{skill.name}**: {skill.description}" for skill in skills])}
 In skills documentation, you will encounter references to additional files.
 If the file is relevant for the user query, USE the `read_skill` tool to get its content.
+{namespace_note}
 </skills>"""
             read_skill_tool = ReadSkill(agent_path=self._path, skills=skills)
             read_skill_tool.nest(self._path)
             self.tools.append(read_skill_tool)
+
+        # Eager collision detection across every tool name the LLM will ever
+        # see: top-level tools (already de-duped above), skill-internal tools
+        # (namespaced by Skill validation, but `namespace_tools=False` opt-out
+        # can still produce flat names), and the synthetic `read_skill` tool.
+        # Non-Skill ToolSets resolve dynamically at runtime, so their names
+        # are unknown here — for those, the defensive logger.error in
+        # `_resolve_tools._register` is the safety net. This eager pass turns
+        # silent shadowing into a fail-fast at agent construction; the runtime
+        # check should be unreachable in practice and exists only to surface
+        # bugs in custom ToolSet.resolve() implementations.
+        llm_visible_names: dict[str, str] = {}
+
+        def _claim_name(name: str, origin: str) -> None:
+            if name in llm_visible_names:
+                raise ValueError(
+                    f"Tool name collision on agent {self.name!r}: {name!r} is "
+                    f"exposed both by {llm_visible_names[name]} and by {origin}. "
+                    f"Rename one of them, or set `namespace_tools=False` on a "
+                    f"Skill that should keep flat names. Two different skills "
+                    f"can collide if their slugified names match (e.g. 'my-skill' "
+                    f"and 'my_skill' both slugify to 'my_skill')."
+                )
+            llm_visible_names[name] = origin
+
+        for tool in self.tools:
+            if isinstance(tool, Skill):
+                for inner in tool.tools:
+                    _claim_name(inner.name, f"skill {tool.name!r}")
+            elif isinstance(tool, ToolSet):
+                continue
+            else:
+                _claim_name(tool.name, "top-level tools")
 
         self._is_orchestrator = True
         self._is_coroutine = False
@@ -646,7 +696,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         def _register(tool: Tool) -> None:
             if tool.name in tools_names:
-                logger.warning(f"Tool with name '{tool.name}' already exists. You can only add a tool once.")
+                # Should be unreachable: agent construction runs an eager
+                # collision check across all statically-known tool names, so
+                # hitting this branch implies a custom ToolSet.resolve() is
+                # producing names that overlap with another tool. Log loudly
+                # at error level (not warning) so users notice in production
+                # logs; we still drop the duplicate to keep the agent running.
+                logger.error(
+                    "Runtime tool name collision; dropping duplicate registration. "
+                    "This indicates a bug in a ToolSet.resolve() — the eager "
+                    "collision check at agent construction should have caught "
+                    "static duplicates.",
+                    agent_path=self._path,
+                    tool_name=tool.name,
+                    tool_path=getattr(tool, "_path", None),
+                )
                 return
             tools.append(tool)
             tools_names.add(tool.name)

@@ -1,7 +1,8 @@
 import importlib.util
+import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
@@ -21,14 +22,57 @@ from .tool_set import ToolSet
 logger = structlog.get_logger("timbal.core.skill")
 
 
+# Provider tool-name validators (OpenAI/Anthropic) accept ``[a-zA-Z0-9_-]{1,64}``.
+# We slugify the skill name with this in mind and cap the prefixed length to 64.
+TOOL_NAME_SEPARATOR = "__"
+TOOL_NAME_MAX_LEN = 64
+_TOOL_NAME_INVALID_RE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _slugify_tool_name(s: str) -> str:
+    """Replace any character not allowed in OpenAI/Anthropic tool names with ``_``.
+
+    Collapses runs of underscores to keep the prefix readable.
+    """
+    slug = _TOOL_NAME_INVALID_RE.sub("_", s)
+    return re.sub(r"_+", "_", slug).strip("_")
+
+
 class Skill(ToolSet):
-    """Skill is a tool set that can be used to provide context to the agent."""
+    """A bundle of related tools and documentation gated by ``read_skill``.
+
+    Inner tools are exposed to the LLM only after the agent loads the skill via
+    the ``read_skill`` tool. By default, exposed tool names are namespaced as
+    ``{skill_name}__{tool_name}`` so they cannot collide with top-level tools and
+    so the LLM can't confuse a skill-internal tool with a top-level one (a common
+    failure mode on weaker models). Set ``namespace_tools=False`` for legacy
+    behaviour where inner tools keep their flat names.
+    """
 
     path: Path
     tools: list[Runnable] = []
     references: dict[str, str] = {}
+    namespace_tools: bool = True
+    """When True (default), expose inner tools to the LLM as
+    ``{skill_name}__{tool_name}`` rather than their bare name. Eliminates name
+    collisions with top-level tools and makes skill provenance explicit, which
+    reduces skill-vs-tool confusion for weaker LLMs. Set to False to keep flat
+    names (legacy behaviour)."""
 
     _agent_path: str = PrivateAttr()
+    _name_prefix: str = PrivateAttr(default="")
+    """Slugified skill name applied as a prefix to inner tools when
+    ``namespace_tools`` is True; empty string otherwise."""
+
+    # Cross-instance map id(tool) -> original (un-namespaced) name. We need a
+    # class-level cache because `sys.modules` caches the imported tool module:
+    # the second ``Skill(path=...)`` for the same skill sees the already-renamed
+    # Tool object and would otherwise compound the prefix into ``cars__cars__x``.
+    # Keyed by id() rather than the Tool itself because Pydantic models have a
+    # custom __hash__ and we don't want to keep tools alive longer than needed —
+    # tools live for the process lifetime anyway via sys.modules, so id collision
+    # after GC is not a concern in practice.
+    _SHARED_TOOL_BASE_NAMES: ClassVar[dict[int, str]] = {}
 
     @model_validator(mode="after")
     def validate_skill_structure(self) -> "Skill":
@@ -92,6 +136,67 @@ class Skill(ToolSet):
                 if isinstance(attr, Runnable):
                     self.tools.append(attr)
                     logger.info(f"Loaded tool {attr_name} from {tool_path}")
+
+        # Namespace inner tools so they cannot collide with top-level tools and
+        # so the LLM sees their skill provenance in the name. Tool instances are
+        # shared across Skill constructions via Python's module cache, so we
+        # always (a) recover each tool's original name from a cross-instance
+        # tracker before deriving anything, and (b) reset the name on every
+        # construction — opting out of namespacing must restore the flat name
+        # even if a previous Skill() with the same path applied a prefix.
+        # Length validation happens up front because OpenAI and Anthropic both
+        # reject tool names longer than 64 chars at the API edge.
+        if self.namespace_tools:
+            self._name_prefix = _slugify_tool_name(self.name)
+            if not self._name_prefix:
+                raise ValueError(
+                    f"Skill name {self.name!r} has no characters valid for a tool-name "
+                    f"prefix (must contain at least one of [a-zA-Z0-9_-]). Either rename "
+                    f"the skill or set namespace_tools=False."
+                )
+
+        for tool in self.tools:
+            tool_key = id(tool)
+            base_name = self.__class__._SHARED_TOOL_BASE_NAMES.get(tool_key)
+            if base_name is None:
+                base_name = tool.name
+                self.__class__._SHARED_TOOL_BASE_NAMES[tool_key] = base_name
+
+            if self.namespace_tools:
+                target_name = f"{self._name_prefix}{TOOL_NAME_SEPARATOR}{base_name}"
+                if len(target_name) > TOOL_NAME_MAX_LEN:
+                    raise ValueError(
+                        f"Namespaced tool name {target_name!r} exceeds {TOOL_NAME_MAX_LEN} "
+                        f"chars (skill prefix {self._name_prefix!r} + tool name {base_name!r}). "
+                        f"Shorten the skill name or the inner tool name, or set "
+                        f"namespace_tools=False on this skill."
+                    )
+            else:
+                target_name = base_name
+
+            if tool.name != target_name:
+                tool.name = target_name
+                # nest() is called later by the agent and will reset _path;
+                # keep the local _path consistent so any pre-nest log lines
+                # or introspection see the right name.
+                tool._path = target_name
+                # Drop every cached_property derived from `self.name`. In
+                # production these caches are typically empty at this point
+                # (the agent hasn't built schemas yet), but the shared
+                # Tool object via sys.modules means a second Skill() for the
+                # same path with a different `namespace_tools` would otherwise
+                # serve stale schemas. Invalidate the full chain:
+                #   params_model -> params_model_schema -> _formatted_params_schema
+                #   -> {anthropic,openai_chat_completions,openai_responses}_schema
+                for cached in (
+                    "params_model",
+                    "params_model_schema",
+                    "_formatted_params_schema",
+                    "anthropic_schema",
+                    "openai_chat_completions_schema",
+                    "openai_responses_schema",
+                ):
+                    tool.__dict__.pop(cached, None)
 
         return self
 

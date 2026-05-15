@@ -410,6 +410,10 @@ class TestTracing:
         output = await agent(prompt=prompt).collect()
         skip_if_agent_error(output, "skill_standalone")
 
+        # Skill inner tools are namespaced as `{skill_name}__{tool_name}` by
+        # default, so trace paths reflect the prefix. `read_skill` is a
+        # synthetic top-level tool registered by the agent and is NOT
+        # namespaced.
         records = get_run_context()._trace.as_records()
         read_skill_paths = [r.path for r in records if "read_skill" in r.path]
         if read_skill_paths:
@@ -417,11 +421,17 @@ class TestTracing:
 
         refund_paths = [r.path for r in records if "process_refund" in r.path]
         if refund_paths:
-            assert any(p == "support_agent.process_refund" for p in refund_paths)
+            assert any(
+                p == "support_agent.payment_processing__process_refund"
+                for p in refund_paths
+            )
 
         status_paths = [r.path for r in records if "check_status" in r.path]
         if status_paths:
-            assert any(p == "support_agent.check_status" for p in status_paths)
+            assert any(
+                p == "support_agent.payment_processing__check_status"
+                for p in status_paths
+            )
 
         # Workflow-wrapped: paths should be prefixed with workflow name.
         wf = Workflow(name="support_wf").step(agent)
@@ -435,11 +445,17 @@ class TestTracing:
 
         refund_paths = [r.path for r in records if "process_refund" in r.path]
         if refund_paths:
-            assert any(p == "support_wf.support_agent.process_refund" for p in refund_paths)
+            assert any(
+                p == "support_wf.support_agent.payment_processing__process_refund"
+                for p in refund_paths
+            )
 
         status_paths = [r.path for r in records if "check_status" in r.path]
         if status_paths:
-            assert any(p == "support_wf.support_agent.check_status" for p in status_paths)
+            assert any(
+                p == "support_wf.support_agent.payment_processing__check_status"
+                for p in status_paths
+            )
 
 
 class TestEdgeCases:
