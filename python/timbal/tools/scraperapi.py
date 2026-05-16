@@ -1,4 +1,3 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
@@ -12,18 +11,13 @@ _ASYNC_URL = "https://async.scraperapi.com"
 
 
 async def _resolve_api_key(*, integration: Any = None, api_key: SecretStr | None = None) -> str:
-    """Resolve ScraperAPI key from integration, explicit field, or env var."""
-    if isinstance(integration, Integration):
-        credentials = await integration.resolve()
-        return credentials["api_key"]
-    if api_key is not None:
-        return api_key.get_secret_value()
-    env_key = os.getenv("SCRAPERAPI_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "ScraperAPI key not found. Set SCRAPERAPI_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
+    """Resolve ScraperAPI API key from integration, explicit field, or env var."""
+    from ._creds import resolve_api_key
+    return await resolve_api_key(
+        env_var="SCRAPERAPI_KEY",
+        provider_name="ScraperAPI",
+        integration=integration,
+        api_key=api_key,
     )
 
 

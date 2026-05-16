@@ -1,4 +1,3 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
@@ -11,17 +10,12 @@ _BASE_URL = "https://api.tavily.com"
 
 async def _resolve_api_key(*, integration: Any = None, api_key: SecretStr | None = None) -> str:
     """Resolve Tavily API key from integration, explicit field, or env var."""
-    if isinstance(integration, Integration):
-        credentials = await integration.resolve()
-        return credentials["api_key"]
-    if api_key is not None:
-        return api_key.get_secret_value()
-    env_key = os.getenv("TAVILY_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Tavily API key not found. Set TAVILY_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
+    from ._creds import resolve_api_key
+    return await resolve_api_key(
+        env_var="TAVILY_API_KEY",
+        provider_name="Tavily",
+        integration=integration,
+        api_key=api_key,
     )
 
 
