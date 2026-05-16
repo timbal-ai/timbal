@@ -175,84 +175,120 @@ class Workflow(Runnable):
         statuses: dict[str, StepStatus],
         **kwargs: Any,
     ) -> None:
-        """Execute a single workflow step and enqueue its events to the shared queue."""
+        """Execute a single workflow step and enqueue its events to the shared queue.
+
+        Sentinel contract: this coroutine MUST push exactly one sentinel value to
+        ``queue`` on every exit path (None, an Exception, or an ApprovalRequired).
+        The consumer in :meth:`handler` decrements ``remaining`` on each sentinel,
+        and a missed sentinel hangs the consumer on ``queue.get()`` forever. The
+        outer try/finally below guarantees this even when a ``BaseException``
+        subclass (e.g. a user-defined ``when`` callable raising ``BaseException``,
+        or task-level ``CancelledError``) leaks past ``except Exception``.
+        """
         status = statuses[step.name]
-
-        # Await for the completion of all ancestors
-        await asyncio.gather(*[statuses[step_name].done.wait() for step_name in step.previous_steps])
-        # This serves multiple purposes.
-        # - It ensures that the step is not executed multiple times.
-        # - It allows the step to be skipped from other steps, e.g. if a previous step failed.
-        if status.done.is_set():
-            logger.info(f"Skipping {step.name} as it's already marked as done.")
-            await queue.put(None)
-            return
-
-        # To evaluate `when` conditions and resolve parameters, lambdas call step_span()
-        # which looks for sibling spans by parent_call_id. We temporarily set parent_call_id
-        # to the workflow's call_id so step_span() finds the correct sibling steps.
-        workflow_call_id = get_call_id()
-        original_parent_call_id = get_parent_call_id()
-        set_parent_call_id(workflow_call_id)
+        # Value pushed to the queue exactly once when this coroutine exits.
+        # Defaults to None (= regular completion); branches that need a different
+        # signal (Exception, ApprovalRequired) overwrite it before returning.
+        sentinel: Any = None
 
         try:
-            if step.when:
-                should_run = await step._execute_runtime_callable(step.when["callable"], step.when["is_coroutine"])
-                if not should_run:
-                    logger.info(f"Skipping {step.name} because `when` condition returned False.")
-                    status.state = StepState.SKIPPED
-                    status.done.set()
-                    await queue.put(None)
-                    return
+            # Await for the completion of all ancestors
+            await asyncio.gather(*[statuses[step_name].done.wait() for step_name in step.previous_steps])
+            # This serves multiple purposes.
+            # - It ensures that the step is not executed multiple times.
+            # - It allows the step to be skipped from other steps, e.g. if a previous step failed.
+            if status.done.is_set():
+                logger.info(f"Skipping {step.name} as it's already marked as done.")
+                return
 
-            step_kwargs = {k: v for k, v in kwargs.items() if k not in step._default_runtime_params}
-            resolved_input = await step._resolve_input_params(step_kwargs)
+            # To evaluate `when` conditions and resolve parameters, lambdas call step_span()
+            # which looks for sibling spans by parent_call_id. We temporarily set parent_call_id
+            # to the workflow's call_id so step_span() finds the correct sibling steps.
+            workflow_call_id = get_call_id()
+            original_parent_call_id = get_parent_call_id()
+            set_parent_call_id(workflow_call_id)
 
-        except SpanNotFound as e:
-            logger.info(f"Skipping {step.name} because it needs span from skipped step {e.step_name}.")
-            status.state = StepState.SKIPPED
-            status.done.set()
-            await queue.put(None)
-            return
+            try:
+                if step.when:
+                    should_run = await step._execute_runtime_callable(
+                        step.when["callable"], step.when["is_coroutine"]
+                    )
+                    if not should_run:
+                        logger.info(f"Skipping {step.name} because `when` condition returned False.")
+                        status.state = StepState.SKIPPED
+                        status.done.set()
+                        return
 
-        except Exception as e:
-            logger.info(f"Failing {step.name} due to error during evaluation: {e}")
+                step_kwargs = {k: v for k, v in kwargs.items() if k not in step._default_runtime_params}
+                resolved_input = await step._resolve_input_params(step_kwargs)
+
+            except SpanNotFound as e:
+                logger.info(f"Skipping {step.name} because it needs span from skipped step {e.step_name}.")
+                status.state = StepState.SKIPPED
+                status.done.set()
+                return
+
+            except Exception as e:
+                logger.info(f"Failing {step.name} due to error during evaluation: {e}")
+                status.state = StepState.FAILED
+                status.done.set()
+                return
+
+            finally:
+                set_parent_call_id(original_parent_call_id)
+
+            status.state = StepState.RUNNING
+            try:
+                async for event in step(**resolved_input):
+                    await queue.put(event)
+                    if (
+                        isinstance(event, OutputEvent)
+                        and event.status.code == "cancelled"
+                        and event.status.reason in {"approval_required", "approval_denied"}
+                    ):
+                        logger.info(f"Step {step.name} cancelled because approval is required or denied.")
+                        status.state = StepState.FAILED
+                        sentinel = ApprovalRequired(event)
+                        return
+                    if isinstance(event, OutputEvent) and event.error is not None:
+                        logger.info(f"Step {step.name} completed with error.")
+                        status.state = StepState.FAILED
+                        status.done.set()
+                        return
+                status.state = StepState.COMPLETED
+            except Exception as e:
+                status.state = StepState.FAILED
+                sentinel = e
+                return
+            finally:
+                status.done.set()
+
+        except BaseException as e:
+            # Catch BaseException subclasses that bypass the inner `except Exception`
+            # (custom BaseException from user `when`/resolver callables, task-level
+            # CancelledError, etc.). Without this branch the outer `finally` still
+            # guarantees the sentinel, but flagging the step as FAILED keeps
+            # downstream-step state consistent. Re-raise so workflow cleanup
+            # (gather(..., return_exceptions=True) in handler's finally) proceeds.
+            logger.warning(
+                "Step %s exited via BaseException %s; ensuring sentinel is enqueued.",
+                step.name,
+                type(e).__name__,
+            )
             status.state = StepState.FAILED
-            status.done.set()
-            await queue.put(None)
-            return
+            if not status.done.is_set():
+                status.done.set()
+            raise
 
         finally:
-            set_parent_call_id(original_parent_call_id)
-
-        status.state = StepState.RUNNING
-        try:
-            async for event in step(**resolved_input):
-                await queue.put(event)
-                if (
-                    isinstance(event, OutputEvent)
-                    and event.status.code == "cancelled"
-                    and event.status.reason in {"approval_required", "approval_denied"}
-                ):
-                    logger.info(f"Step {step.name} cancelled because approval is required or denied.")
-                    status.state = StepState.FAILED
-                    await queue.put(ApprovalRequired(event))
-                    return
-                if isinstance(event, OutputEvent) and event.error is not None:
-                    logger.info(f"Step {step.name} completed with error.")
-                    status.state = StepState.FAILED
-                    status.done.set()
-                    await queue.put(None)
-                    return
-            status.state = StepState.COMPLETED
-        except Exception as e:
-            status.state = StepState.FAILED
-            await queue.put(e)
-            return
-        finally:
-            status.done.set()
-
-        await queue.put(None)
+            # GUARANTEE the consumer in handler() always sees a sentinel for this
+            # step. put_nowait is safe because the queue is unbounded; using a
+            # non-awaiting call here also avoids re-entering the event loop during
+            # exception unwinding.
+            try:
+                queue.put_nowait(sentinel)
+            except Exception:
+                logger.exception("Failed to enqueue sentinel for step %s", step.name)
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """Execute all steps concurrently, respecting dependencies.

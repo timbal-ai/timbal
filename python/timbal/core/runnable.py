@@ -439,6 +439,31 @@ class Runnable(ABC, BaseModel):
             return variants[0]
         return {"anyOf": variants}
 
+    @staticmethod
+    def _coerce_to_json_safe(value: Any) -> Any:
+        """Coerce a config value into something json.dumps can serialise.
+
+        Pydantic models are dumped, lists/tuples/sets/dicts are recursed,
+        primitives pass through, everything else falls back to ``str(value)``
+        (or a ``"<ClassName>"`` placeholder if even that fails).
+        """
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, BaseModel):
+            return value.model_dump(mode="json")
+        if isinstance(value, dict):
+            return {str(k): Runnable._coerce_to_json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [Runnable._coerce_to_json_safe(v) for v in value]
+        if hasattr(value, "model_name"):
+            chain = getattr(value, "model_name")
+            if isinstance(chain, str):
+                return chain
+        try:
+            return str(value)
+        except Exception:
+            return f"<{type(value).__name__}>"
+
     def _annotate_config(
         self,
         values: dict[str, Any],
@@ -499,7 +524,7 @@ class Runnable(ABC, BaseModel):
             if isinstance(value, Integration):
                 field_schema["value"] = str(value)
             else:
-                field_schema["value"] = value
+                field_schema["value"] = self._coerce_to_json_safe(value)
             result[key] = field_schema
         return result
 
@@ -899,8 +924,17 @@ class Runnable(ABC, BaseModel):
 
         if async_gen:
             output = None
-            # Peek at first element to determine collector type
-            first_chunk = await async_gen.__anext__()
+            # Peek at first element to determine collector type.
+            # An empty generator (e.g. a Workflow with zero steps) is valid: leave
+            # output as None and skip collector setup. We must catch
+            # StopAsyncIteration here because letting it escape the body of
+            # this async generator becomes a RuntimeError per PEP 479/525.
+            try:
+                first_chunk = await async_gen.__anext__()
+            except StopAsyncIteration:
+                first_chunk = None
+                async_gen = None
+        if async_gen:
             collector_type = get_collector_registry().get_collector_type(first_chunk)
             if collector_type:
                 collector = collector_type(async_gen=async_gen, start=handler_start)

@@ -4,6 +4,7 @@ import re
 
 import libcst as cst
 
+from ..cli_utils import arg_input
 from ..cst_utils import (
     collect_assignments,
     has_import,
@@ -85,7 +86,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sp.add_argument(
         "--value",
         default=None,
-        help="Static value as a JSON literal (required for type=value). Use 'null' to remove the param.",
+        type=arg_input,
+        help=(
+            "Static value as a JSON literal (required for type=value). Use 'null' to remove the param. "
+            "Use '@path' to read from file or '-' to read from stdin."
+        ),
     )
 
 

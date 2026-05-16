@@ -56,6 +56,8 @@ class PlatformSubject(BaseModel):
     """Application identifier. Either project or app must be specified."""
     version_id: str | None = None
     """Application version identifier."""
+    rev: str | None = None
+    """Git revision the run was executed against. Internal use."""
 
 
 class PlatformConfig(BaseModel):

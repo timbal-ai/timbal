@@ -1,9 +1,17 @@
 import argparse
+import json
 
 import libcst as cst
 
-from ..cst_utils import collect_assignments, has_import, resolve_entry_point_type, resolve_runnable_name
-from ..tool_discovery import get_framework_tool_names, get_framework_tools
+from ..cli_utils import arg_input
+from ..cst_utils import (
+    build_cst_value,
+    collect_assignments,
+    has_import,
+    resolve_entry_point_type,
+    resolve_runnable_name,
+)
+from ..tool_discovery import get_framework_tool_names, get_framework_tools, validate_tool_config
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -15,13 +23,28 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sp.add_argument(
         "--definition",
         default=None,
-        help="Full function definition for custom tools. E.g. 'def my_tool(query: str) -> str:\\n    return query'",
+        type=arg_input,
+        help=(
+            "Full function definition for custom tools. "
+            "E.g. 'def my_tool(query: str) -> str:\\n    return query'. "
+            "Use '@path' to read from file or '-' to read from stdin."
+        ),
     )
     sp.add_argument(
         "--name",
         default=None,
         dest="tool_name",
         help="Explicit name for the tool. When omitted, the tool uses its default name.",
+    )
+    sp.add_argument(
+        "--config",
+        default=None,
+        type=arg_input,
+        help=(
+            'Tool constructor params as JSON. E.g. \'{"limit": 5}\'. '
+            "Validated against the tool's schema. "
+            "Use '@path' to read from file or '-' to read from stdin."
+        ),
     )
     sp.add_argument(
         "--step",
@@ -49,6 +72,30 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
     if tool_type not in valid_types:
         raise ValueError(f"--type must be one of {valid_types}, got '{tool_type}'.")
 
+    # Reject `--name ""` early so downstream code can treat tool_name as a
+    # tri-state (None / non-empty string) and the build/merge helpers don't
+    # disagree about whether empty means "absent" or "explicit empty value".
+    if args.tool_name is not None and args.tool_name == "":
+        raise ValueError("--name cannot be empty. Omit --name to use the default tool name.")
+
+    config = json.loads(args.config) if getattr(args, "config", None) else {}
+    if config:
+        # Reject keys that would collide with explicit flags / derived values.
+        # Without this, the generated source has duplicate kwargs and ruff
+        # rejects it with a SyntaxError ("Duplicate keyword argument").
+        if "name" in config and args.tool_name is not None:
+            raise ValueError(
+                "--name and --config both set 'name'; pass it via --name only "
+                "(or omit --name and set 'name' inside --config)."
+            )
+        if tool_type == "Custom" and "handler" in config:
+            raise ValueError(
+                "Custom tools derive 'handler' from --definition; remove 'handler' from --config."
+            )
+        # Validate against the tool's schema. Custom tools are wrapped in `Tool`
+        # so they share its schema; framework tools validate against their own.
+        validate_tool_config("Tool" if tool_type == "Custom" else tool_type, config)
+
     if tool_type == "Custom":
         if not args.definition:
             raise ValueError("--definition is required for Custom tools.")
@@ -61,8 +108,8 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         if func_def is None:
             raise ValueError("--definition must contain a function definition.")
         func_name = func_def.name.value
-        var_name = args.tool_name if args.tool_name else f"{func_name}_tool"
-        runtime_name = args.tool_name if args.tool_name else func_name
+        var_name = args.tool_name if args.tool_name is not None else f"{func_name}_tool"
+        runtime_name = args.tool_name if args.tool_name is not None else func_name
         return ToolAdder(
             entry_point, assignments,
             target=target,
@@ -73,12 +120,13 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
             runtime_name=runtime_name,
             definition=args.definition,
             tool_name=args.tool_name,
+            config=config,
         )
 
     # Framework tool.
     framework_names = get_framework_tool_names()
-    var_name = args.tool_name if args.tool_name else framework_names[tool_type]
-    runtime_name = args.tool_name if args.tool_name else framework_names[tool_type]
+    var_name = args.tool_name if args.tool_name is not None else framework_names[tool_type]
+    runtime_name = args.tool_name if args.tool_name is not None else framework_names[tool_type]
     return ToolAdder(
         entry_point, assignments,
         target=target,
@@ -88,6 +136,7 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
         var_name=var_name,
         runtime_name=runtime_name,
         tool_name=args.tool_name,
+        config=config,
     )
 
 
@@ -105,6 +154,7 @@ class ToolAdder(cst.CSTTransformer):
         runtime_name: str,
         definition: str | None = None,
         tool_name: str | None = None,
+        config: dict | None = None,
     ):
         self.entry_point = entry_point
         self.target = target  # variable to add tools to (entry_point or step var)
@@ -116,6 +166,7 @@ class ToolAdder(cst.CSTTransformer):
         self.runtime_name = runtime_name  # name used by remove-tool
         self.definition = definition
         self.tool_name = tool_name  # explicit --name override (None = use default)
+        self.config = config or {}  # extra constructor kwargs to merge into the tool call
         # Track whether an existing variable assignment was found and updated.
         self._assignment_updated = False
 
@@ -152,7 +203,7 @@ class ToolAdder(cst.CSTTransformer):
                 if resolved == self.runtime_name:
                     self._assignment_updated = True
                     return updated_node.with_changes(
-                        value=self._build_assignment_call(),
+                        value=self._merge_config_into_call(updated_node.value),
                     )
         return updated_node
 
@@ -226,21 +277,60 @@ class ToolAdder(cst.CSTTransformer):
     def _build_assignment_call(self) -> cst.Call:
         """Build the CST Call node for the variable assignment RHS."""
         args: list[cst.Arg] = []
-        if self.tool_name:
+        if self.tool_name is not None:
             args.append(cst.Arg(keyword=cst.Name("name"), value=cst.SimpleString(f'"{self.tool_name}"')))
+        if self.tool_type == "Custom":
+            args.append(cst.Arg(keyword=cst.Name("handler"), value=cst.Name(self.func_name)))
+        # Skip keys that are already emitted above; otherwise the output would
+        # contain duplicate keyword arguments. `run()` rejects these cases with
+        # a clear error, so this is just defense in depth.
+        skip_keys: set[str] = set()
+        if self.tool_name is not None:
+            skip_keys.add("name")
+        if self.tool_type == "Custom":
+            skip_keys.add("handler")
+        for key, value in self.config.items():
+            if value is None or key in skip_keys:
+                continue
+            args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
         if self.tool_type != "Custom":
             return cst.Call(func=cst.Name(self.class_name), args=args)
-        else:
-            args.append(cst.Arg(keyword=cst.Name("handler"), value=cst.Name(self.func_name)))
-            return cst.Call(func=cst.Name("Tool"), args=args)
+        return cst.Call(func=cst.Name("Tool"), args=args)
 
     def _build_assignment_code(self) -> str:
         """Build the source code string for the variable assignment RHS."""
-        name_part = f'name="{self.tool_name}", ' if self.tool_name else ""
-        if self.tool_type != "Custom":
-            return f"{self.class_name}({name_part.rstrip(', ')})"
-        else:
-            return f"Tool({name_part}handler={self.func_name})"
+        # Generate code via CST so kwarg ordering and quoting stay consistent.
+        return cst.parse_module("").code_for_node(self._build_assignment_call())
+
+    def _merge_config_into_call(self, existing: cst.Call) -> cst.Call:
+        """Merge new config kwargs into an existing tool Call, preserving the rest.
+
+        - Drops kwargs whose name is in self.config (they are being overridden or removed).
+        - Re-emits the `name=` kwarg from --name when provided (overriding any prior value).
+        - Appends new config kwargs (skipping those whose new value is None — that means remove).
+        """
+        override_keys = set(self.config.keys())
+        if self.tool_name is not None:
+            override_keys.add("name")
+
+        args: list[cst.Arg] = [
+            a for a in existing.args
+            if not (isinstance(a.keyword, cst.Name) and a.keyword.value in override_keys)
+        ]
+        # Re-add name= when --name was provided. We then skip "name" in the
+        # config loop below to avoid emitting two `name=` kwargs (which would
+        # be a SyntaxError). `run()` already rejects --name + config['name']
+        # together, so this is defense in depth.
+        if self.tool_name is not None:
+            args.append(cst.Arg(keyword=cst.Name("name"), value=cst.SimpleString(f'"{self.tool_name}"')))
+        # Append new config kwargs.
+        for key, value in self.config.items():
+            if value is None:
+                continue
+            if key == "name" and self.tool_name is not None:
+                continue
+            args.append(cst.Arg(keyword=cst.Name(key), value=build_cst_value(value)))
+        return existing.with_changes(args=args)
 
     def _add_to_tools(self, call: cst.Call) -> cst.Call:
         """Add or update the tool reference in the tools=[...] list."""

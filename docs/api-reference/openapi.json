@@ -803,6 +803,81 @@
         ]
       }
     },
+    "/orgs/{org_id}/contacts": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "description": "Account-side contacts assigned to an organization.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Contacts for the organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgContactsResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/credit-grants": {
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "description": "Credit grants awarded to an organization, most recent first.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credit grants for the organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListCreditGrantsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/domains": {
       "get": {
         "tags": [
@@ -2151,6 +2226,71 @@
             "content": {
               "application/json": {
 
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/restart": {
+      "post": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Drop the knowledge base's in-memory connections so the next request opens a fresh database handle. Caller must be an org admin.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Connections dropped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not an admin of this knowledge base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Knowledge base not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
               }
             }
           }
@@ -5375,6 +5515,18 @@
             }
           },
           {
+            "name": "rev",
+            "in": "query",
+            "description": "Filter runs by the git branch they were executed against (e.g. `main`).\nRuns without a recorded branch are always included for backwards\ncompatibility with rows created before this field was tracked.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "from",
             "in": "query",
             "description": "Filter runs by start time (epoch timestamp in milliseconds)",
@@ -7439,7 +7591,8 @@
         "type": "object",
         "properties": {
           "dry_run": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "When omitted or when the request has no JSON body, treated as `false`."
           }
         }
       },
@@ -7778,6 +7931,71 @@
           "uid": {
             "type": "string",
             "description": "Identifier assigned in the project manifest for this component."
+          }
+        }
+      },
+      "CreditGrant": {
+        "type": "object",
+        "description": "A single credit grant on an organization.",
+        "required": [
+          "uid",
+          "source",
+          "source_metadata",
+          "amount_credits",
+          "starts_at",
+          "created_at"
+        ],
+        "properties": {
+          "amount_credits": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credits awarded by this grant. Always positive; corrections ship as a\nseparate grant rather than a negative amount."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Grant creation timestamp."
+          },
+          "exhausted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Set once the grant has been fully consumed by usage; `null` while\nthe grant still has unspent credits or hasn't been reconciled yet."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the grant stops being spendable. `null` = never expires."
+          },
+          "granted_by_user_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "User who triggered the grant. `null` for system-issued grants."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the grant came from (e.g. `onboarding`, `promo`, `support`,\n`referral`, `refund`)."
+          },
+          "source_metadata": {
+            "description": "Source-specific payload. Shape depends on `source`."
+          },
+          "starts_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the grant became (or will become) spendable."
+          },
+          "uid": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable public identifier for this grant."
           }
         }
       },
@@ -9380,6 +9598,20 @@
           }
         }
       },
+      "ListCreditGrantsResBody": {
+        "type": "object",
+        "required": [
+          "credit_grants"
+        ],
+        "properties": {
+          "credit_grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CreditGrant"
+            }
+          }
+        }
+      },
       "ListDeploymentsResBody": {
         "type": "object",
         "required": [
@@ -9493,6 +9725,20 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ListOrgContactsResBody": {
+        "type": "object",
+        "required": [
+          "contacts"
+        ],
+        "properties": {
+          "contacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgContact"
+            }
           }
         }
       },
@@ -9878,7 +10124,7 @@
           "plan",
           "plan_metadata",
           "overage_enabled",
-          "credits_per_usd",
+          "plan_cancel_at_period_end",
           "created_at",
           "role"
         ],
@@ -9917,10 +10163,6 @@
             "type": "string",
             "format": "date-time"
           },
-          "credits_per_usd": {
-            "type": "number",
-            "format": "double"
-          },
           "description": {
             "type": [
               "string",
@@ -9953,19 +10195,121 @@
           "plan": {
             "type": "string"
           },
+          "plan_cancel_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix timestamp (seconds) of the scheduled plan cancellation; `null` when\nno cancellation is pending."
+          },
+          "plan_cancel_at_period_end": {
+            "type": "boolean",
+            "description": "`true` between the moment a user schedules a plan cancellation in the\nBilling Portal and the final cancellation taking effect."
+          },
           "plan_metadata": {
 
           },
           "role": {
             "type": "string"
+          }
+        }
+      },
+      "OrgContact": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "name",
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgContactChannel"
+            },
+            "description": "Ways to reach this contact."
           },
-          "stripe_customer_id": {
+          "id": {
+            "type": "string",
+            "description": "Unique contact identifier."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name (e.g. \"Jane Doe\")."
+          },
+          "photo_url": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Optional profile photo URL."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional job title (e.g. \"Senior AI Solutions Architect\")."
+          },
+          "type": {
+            "$ref": "#/components/schemas/OrgContactType",
+            "description": "Role this contact plays for the org."
           }
         }
+      },
+      "OrgContactChannel": {
+        "type": "object",
+        "required": [
+          "kind",
+          "value"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/OrgContactChannelKind"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional display label like \"Mobile\" or \"Work\"."
+          },
+          "primary": {
+            "type": "boolean",
+            "description": "Marks the preferred channel of this kind when multiple are listed."
+          },
+          "value": {
+            "type": "string",
+            "description": "Channel-specific identifier: email address, E.164 phone number, slack\nhandle, calendly URL, etc. Format is enforced by the channel kind."
+          }
+        }
+      },
+      "OrgContactChannelKind": {
+        "type": "string",
+        "enum": [
+          "email",
+          "phone",
+          "whatsapp",
+          "telegram",
+          "slack",
+          "calendly",
+          "linkedin",
+          "signal",
+          "other"
+        ]
+      },
+      "OrgContactType": {
+        "type": "string",
+        "description": "Role a contact plays for the org. Free-form on the wire/DB so new roles\ncan be introduced without a migration; unknown values fall back to `Other`.",
+        "enum": [
+          "aisa",
+          "account_executive",
+          "account_manager",
+          "csm",
+          "other"
+        ]
       },
       "OrgPreview": {
         "type": "object",

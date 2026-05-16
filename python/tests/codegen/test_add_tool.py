@@ -341,3 +341,267 @@ class TestStepFlag:
         )
         assert result.returncode != 0
         assert "--step requires a Workflow" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# --config flag (one-shot add + configure)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigFlag:
+    def test_framework_tool_with_config(self, workspace):
+        """add-tool --config wires constructor kwargs in a single call."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        config = json.dumps({"allowed_domains": ["example.com"]})
+        output = _run_dry(ws, "--type", "WebSearch", "--config", config)
+        assert 'allowed_domains=["example.com"]' in output
+        ns = _exec_agent(output)
+        ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
+        assert ws_tool.allowed_domains == ["example.com"]
+
+    def test_framework_tool_with_name_and_config(self, workspace):
+        """--name and --config compose."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        config = json.dumps({"allowed_domains": ["example.com"]})
+        output = _run_dry(ws, "--type", "WebSearch", "--name", "my_search", "--config", config)
+        ns = _exec_agent(output)
+        ws_tool = next(t for t in ns["agent"].tools if t.name == "my_search")
+        assert ws_tool.allowed_domains == ["example.com"]
+
+    def test_rejects_unknown_config_field(self, workspace):
+        """Unknown config keys are rejected against the tool's schema."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        config = json.dumps({"not_a_real_field": 1})
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "WebSearch", "--config", config,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "Unknown config field(s)" in result.stderr
+
+    def test_rejects_invalid_json(self, workspace):
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "WebSearch", "--config", "{not json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+
+    def test_idempotent_merges_config(self, workspace):
+        """Re-adding with --config merges into existing assignment, preserving unrelated kwargs."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch(blocked_domains=["spam.com"])
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        config = json.dumps({"allowed_domains": ["example.com"]})
+        output = _run_dry(ws, "--type", "WebSearch", "--config", config)
+        ns = _exec_agent(output)
+        ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
+        assert ws_tool.allowed_domains == ["example.com"]
+        assert ws_tool.blocked_domains == ["spam.com"]
+
+    def test_config_overrides_existing_value(self, workspace):
+        """When the same key exists, --config replaces it."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch(allowed_domains=["old.com"])
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        config = json.dumps({"allowed_domains": ["new.com"]})
+        output = _run_dry(ws, "--type", "WebSearch", "--config", config)
+        ns = _exec_agent(output)
+        ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
+        assert ws_tool.allowed_domains == ["new.com"]
+
+    def test_config_null_removes_kwarg(self, workspace):
+        """Passing null in --config removes the kwarg from an existing assignment."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch(allowed_domains=["old.com"], blocked_domains=["spam.com"])
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        config = json.dumps({"allowed_domains": None})
+        output = _run_dry(ws, "--type", "WebSearch", "--config", config)
+        assert "allowed_domains" not in output
+        ns = _exec_agent(output)
+        ws_tool = next(t for t in ns["agent"].tools if t.name == "web_search")
+        assert ws_tool.blocked_domains == ["spam.com"]
+
+    def test_custom_tool_with_config(self, workspace):
+        """Custom tools accept --config and validate against the Tool schema."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        definition = "def my_search(query: str) -> str:\n    return query.upper()"
+        config = json.dumps({"description": "uppercase search"})
+        output = _run_dry(ws, "--type", "Custom", "--definition", definition, "--config", config)
+        assert 'description="uppercase search"' in output
+        ns = _exec_agent(output)
+        my_search = next(t for t in ns["agent"].tools if t.name == "my_search")
+        assert my_search.description == "uppercase search"
+
+    def test_rejects_name_in_config_when_name_flag_set(self, workspace):
+        """--name + --config '{"name": ...}' is ambiguous — must error, not generate duplicate kwargs."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "WebSearch", "--name", "explicit",
+                "--config", json.dumps({"name": "from_config"}),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "--name" in result.stderr and "name" in result.stderr
+        # No leaking of the underlying ruff/SyntaxError.
+        assert "Duplicate keyword argument" not in result.stderr
+
+    def test_rejects_handler_in_config_for_custom(self, workspace):
+        """Custom tools derive handler from --definition; reject 'handler' in --config."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "Custom",
+                "--definition", "def foo() -> int:\n    return 1",
+                "--config", json.dumps({"handler": "anything"}),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "handler" in result.stderr and "--definition" in result.stderr
+        assert "Duplicate keyword argument" not in result.stderr
+
+    def test_name_in_config_alone_works(self, workspace):
+        """Setting 'name' via --config alone (without --name) is fine."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        output = _run_dry(ws, "--type", "WebSearch", "--config", json.dumps({"name": "from_config"}))
+        assert 'name="from_config"' in output
+        # Sanity: only one name= kwarg.
+        assert output.count('name="from_config"') == 1
+
+    def test_rejects_empty_name_on_fresh_add(self, workspace):
+        """`--name ""` is rejected before any code is generated."""
+        ws = workspace("""\
+        from timbal.core import Agent
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "WebSearch", "--name", "",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "--name cannot be empty" in result.stderr
+
+    def test_rejects_empty_name_on_re_add(self, workspace):
+        """The re-add (merge) path rejects --name '' identically to a fresh add.
+
+        Regression: previously the merge path used `is not None` while the
+        build path used truthiness, so `--name ""` produced `WebSearch()`
+        on a fresh add but `WebSearch(name="")` on a re-add.
+        """
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch(allowed_domains=["example.com"])
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        result = subprocess.run(
+            [
+                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+                "add-tool", "--type", "WebSearch", "--name", "",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "--name cannot be empty" in result.stderr
+
+    def test_idempotent_name_in_config_no_duplicate(self, workspace):
+        """Re-adding with --name and config that does NOT include 'name' must not duplicate name=."""
+        import json
+        ws = workspace("""\
+        from timbal.core import Agent
+        from timbal.tools import WebSearch
+
+        web_search = WebSearch(name="explicit")
+
+        agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
+        """)
+        output = _run_dry(
+            ws, "--type", "WebSearch", "--name", "explicit",
+            "--config", json.dumps({"allowed_domains": ["example.com"]}),
+        )
+        # Single name= kwarg, single allowed_domains= kwarg.
+        assert output.count("name=") == 2  # one on Agent, one on WebSearch
+        assert output.count("allowed_domains=") == 1
+        ns = _exec_agent(output)
+        ws_tool = next(t for t in ns["agent"].tools if t.name == "explicit")
+        assert ws_tool.allowed_domains == ["example.com"]

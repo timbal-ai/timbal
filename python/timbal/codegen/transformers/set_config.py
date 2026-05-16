@@ -3,6 +3,7 @@ import json
 
 import libcst as cst
 
+from ..cli_utils import arg_input
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
@@ -41,7 +42,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sp.add_argument(
         "--config",
         default=None,
-        help='Configuration as a JSON object. E.g. \'{"model": "openai/gpt-4o-mini"}\'.',
+        type=arg_input,
+        help=(
+            'Configuration as a JSON object. E.g. \'{"model": "openai/gpt-4o-mini"}\'. '
+            "Use '@path' to read from file or '-' to read from stdin."
+        ),
     )
 
 

@@ -2,6 +2,7 @@ import argparse
 
 import libcst as cst
 
+from ..cli_utils import arg_input
 from ..cst_utils import (
     collect_assignments,
     collect_step_names,
@@ -28,9 +29,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sp.add_argument(
         "--when",
         default=None,
+        type=arg_input,
         help=(
             "Python expression for a conditional edge. "
-            'E.g. \'lambda: get_run_context().step_span("agent_a").output.content != ""\''
+            'E.g. \'lambda: get_run_context().step_span("agent_a").output.content != ""\'. '
+            "Use '@path' to read from file or '-' to read from stdin."
         ),
     )
 

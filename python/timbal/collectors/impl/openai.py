@@ -158,11 +158,25 @@ class ChatCompletionCollector(BaseCollector):
         return get_billing_id() or api_model
 
     def _handle_usage(self, event: ChatCompletionEvent) -> None:
-        """Handle usage statistics from OpenAI events."""
+        """Handle usage statistics from OpenAI events.
+
+        Output rule of thumb: every "billed-as-output" token (visible
+        completion + OpenAI o-series reasoning + Gemini hidden thinking) is
+        collapsed into a single `output_text_tokens` bucket — they are all
+        billed at the output rate and Gemini's hidden thinking is **not**
+        in `completion_tokens` (only visible via `total_tokens`). We
+        compute `output = total_tokens - prompt_tokens` after the input
+        side has been split out, falling back to `completion_tokens` when
+        `total_tokens` is missing/inconsistent.
+        """
         run_context = get_run_context()
         billing_id = self._usage_billing_id(event.model)
         openai_usage = event.usage
-        input_tokens = int(openai_usage.prompt_tokens)
+        raw_input = int(openai_usage.prompt_tokens)
+        raw_output = int(openai_usage.completion_tokens)
+        total_tokens = int(getattr(openai_usage, "total_tokens", 0) or 0)
+
+        input_tokens = raw_input
         input_tokens_details = openai_usage.prompt_tokens_details
         if hasattr(input_tokens_details, "cached_tokens") and input_tokens_details.cached_tokens is not None:
             input_cached_tokens = int(input_tokens_details.cached_tokens)
@@ -175,7 +189,13 @@ class ChatCompletionCollector(BaseCollector):
                 input_tokens -= input_audio_tokens
                 run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
         run_context.update_usage(f"{billing_id}:input_text_tokens", input_tokens)
-        output_tokens = int(openai_usage.completion_tokens)
+
+        # Total-derived output: visible completion + OpenAI o-series
+        # reasoning (already inside completion_tokens) + Gemini hidden
+        # thinking (only visible via total_tokens). max() with raw_output
+        # is a safety net for providers that report total_tokens
+        # inconsistently.
+        output_tokens = max(total_tokens - raw_input, raw_output) if total_tokens > 0 else raw_output
         self._output_tokens += output_tokens
         output_tokens_details = openai_usage.completion_tokens_details
         if hasattr(output_tokens_details, "audio_tokens") and output_tokens_details.audio_tokens is not None:
@@ -594,7 +614,11 @@ class ResponseCollector(BaseCollector):
         run_context = get_run_context()
         usage = event.response.usage
         billing_id = self._usage_billing_id(response_fallback=event.response.model)
-        input_tokens = int(usage.input_tokens)
+        raw_input = int(usage.input_tokens)
+        raw_output = int(usage.output_tokens)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+
+        input_tokens = raw_input
         input_tokens_details = usage.input_tokens_details
         if hasattr(input_tokens_details, "cached_tokens"):
             input_cached_tokens = int(input_tokens_details.cached_tokens)
@@ -607,7 +631,11 @@ class ResponseCollector(BaseCollector):
                 input_tokens -= input_audio_tokens
                 run_context.update_usage(f"{billing_id}:input_audio_tokens", input_audio_tokens)
         run_context.update_usage(f"{billing_id}:input_text_tokens", input_tokens)
-        output_tokens = int(usage.output_tokens)
+
+        # See `_handle_usage` in ChatCompletionCollector: collapse all
+        # billed-as-output tokens (visible + reasoning + hidden thinking)
+        # into a single bucket via `total - raw_input`.
+        output_tokens = max(total_tokens - raw_input, raw_output) if total_tokens > 0 else raw_output
         self._output_tokens += output_tokens
         output_tokens_details = usage.output_tokens_details
         if hasattr(output_tokens_details, "audio_tokens"):

@@ -102,7 +102,15 @@ if TYPE_CHECKING:
         GeminiImagesGenerateImageWithReference,
         GeminiImagesImageToBase64,
     )
-    from .gmail import GmailAddLabel, GmailListLabels, GmailRemoveLabel, GmailReply, GmailSearch, GmailSend
+    from .gmail import (
+        GmailAddLabel,
+        GmailCreateDraft,
+        GmailListLabels,
+        GmailRemoveLabel,
+        GmailReply,
+        GmailSearch,
+        GmailSend,
+    )
     from .google_calendar import (
         GoogleCalendarCheckFreeSlots,
         GoogleCalendarCreateEvent,
@@ -301,6 +309,12 @@ if TYPE_CHECKING:
         PowerBIListReports,
         PowerBIListWorkspaces,
         PowerBIQueryDataset,
+    )
+    from .quiver_ai import (
+        QuiverAIGenerateSVG,
+        QuiverAIGetModel,
+        QuiverAIListModels,
+        QuiverAIVectorizeSVG,
     )
     from .read import Read
     from .replicate import (
@@ -904,6 +918,7 @@ __all__ = [
     "FirecrawlScrape",
     "FirecrawlSearch",
     "GmailAddLabel",
+    "GmailCreateDraft",
     "GmailListLabels",
     "GmailRemoveLabel",
     "GmailReply",
@@ -955,6 +970,10 @@ __all__ = [
     "PineconeListIndexes",
     "PineconeQuery",
     "PineconeUpsertVectors",
+    "QuiverAIGenerateSVG",
+    "QuiverAIGetModel",
+    "QuiverAIListModels",
+    "QuiverAIVectorizeSVG",
     "Read",
     "ScraperAPIAmazonProduct",
     "ScraperAPIAmazonSearch",
@@ -1748,6 +1767,7 @@ _LAZY_IMPORTS = {
     "FirecrawlScrape": ".firecrawl",
     "FirecrawlSearch": ".firecrawl",
     "GmailAddLabel": ".gmail",
+    "GmailCreateDraft": ".gmail",
     "GmailListLabels": ".gmail",
     "GmailRemoveLabel": ".gmail",
     "GmailReply": ".gmail",
@@ -1799,6 +1819,10 @@ _LAZY_IMPORTS = {
     "PineconeListIndexes": ".pinecone",
     "PineconeQuery": ".pinecone",
     "PineconeUpsertVectors": ".pinecone",
+    "QuiverAIGenerateSVG": ".quiver_ai",
+    "QuiverAIGetModel": ".quiver_ai",
+    "QuiverAIListModels": ".quiver_ai",
+    "QuiverAIVectorizeSVG": ".quiver_ai",
     "Read": ".read",
     "ScraperAPIAmazonProduct": ".scraperapi",
     "ScraperAPIAmazonSearch": ".scraperapi",

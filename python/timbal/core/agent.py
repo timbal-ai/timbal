@@ -1,6 +1,9 @@
 import asyncio
 import contextvars
+import difflib
 import json
+import time
+import traceback
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from functools import cached_property
 from pathlib import Path
@@ -31,6 +34,7 @@ from ..state import get_run_context
 from ..types.content import CustomContent, FileContent, TextContent, ToolResultContent, ToolUseContent
 from ..types.events import BaseEvent, OutputEvent
 from ..types.message import Message
+from ..types.run_status import RunStatus
 from ..utils import coerce_to_dict, dump
 from .llm_router import _llm_router
 from .memory_compaction import MemoryCompactor
@@ -56,6 +60,55 @@ def _content_chars(c: TextContent | ToolUseContent | ToolResultContent) -> int:
 def _estimate_tokens_from_memory(memory: list[Message]) -> int:
     """Rough token estimate from message content. 1 token ≈ 4 chars (standard approximation)."""
     return max(1, sum(_content_chars(c) for msg in memory for c in msg.content) // 4)
+
+
+def _coerce_model_to_str(model: Any) -> str:
+    """Reduce an agent ``model`` (str, FallbackModel, TestModel, …) to a JSON-
+    safe string for serialisation by ``get_config``.
+
+    - Plain strings pass through unchanged.
+    - ``FallbackModel`` returns the primary (first) model only; the
+      remaining fallbacks are surfaced via ``_extract_fallbacks``.
+    - Anything else falls back to ``str(model)`` and finally a
+      ``"<ClassName>"`` placeholder so codegen never produces non-JSON
+      objects.
+    """
+    if isinstance(model, str):
+        return model
+    if getattr(model, "__timbal_fallback_model__", False):
+        entries = getattr(model, "entries", None)
+        if entries:
+            return entries[0].model
+    try:
+        return str(model)
+    except Exception:
+        return f"<{type(model).__name__}>"
+
+
+_FALLBACK_ITEM_KEYS = ("model", "max_retries", "retry_delay", "api_key", "base_url")
+
+
+def _extract_fallbacks(model: Any) -> list[dict[str, Any]]:
+    """Return the secondary entries from a ``FallbackModel`` chain (i.e. all
+    entries after the primary), serialised as plain dicts with every
+    ``ModelEntry`` logic field. Empty list for plain string models.
+
+    ``api_key`` is masked to ``"**********"`` when set, mirroring how
+    ``SecretStr`` renders elsewhere in the codegen output.
+    """
+    if not getattr(model, "__timbal_fallback_model__", False):
+        return []
+    entries = getattr(model, "entries", None) or ()
+    out: list[dict[str, Any]] = []
+    for entry in entries[1:]:
+        item: dict[str, Any] = {}
+        for key in _FALLBACK_ITEM_KEYS:
+            val = getattr(entry, key, None)
+            if key == "api_key" and val is not None:
+                val = "**********"
+            item[key] = val
+        out.append(item)
+    return out
 
 
 class AgentParams(BaseModel):
@@ -278,7 +331,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         config = self._annotate_config(
             {
-                "model": self.model,
+                "model": _coerce_model_to_str(self.model),
                 "system_prompt": system_prompt,
                 "max_iter": self.max_iter,
                 "max_tokens": self.max_tokens,
@@ -287,6 +340,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 "api_key": self.api_key,
             }
         )
+
+        config["fallbacks"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "x-timbal-ref": "models"},
+                    "max_retries": {"type": "integer", "default": 2},
+                    "retry_delay": {"type": "number", "default": 1.0},
+                    "api_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+                    "base_url": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+                },
+                "required": ["model"],
+            },
+            "value": _extract_fallbacks(self.model),
+        }
 
         return {**super().get_config(), **config}
 
@@ -606,15 +675,65 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         return tools, commands
 
+    def _build_unknown_tool_event(self, tool_call: ToolUseContent, tools: list[Tool]) -> OutputEvent:
+        """Build a synthetic OutputEvent for a tool the LLM hallucinated.
+
+        Weak models often confuse skills (which require ``read_skill`` first) with
+        regular tools, or invent tool names entirely. Without this synthetic event
+        the agent loop hangs forever on ``queue.get()`` because ``consume_tool``
+        used to assert before pushing the sentinel.
+
+        The event is shaped so ``_process_tool_event`` produces a tool_result
+        carrying the error message back to the LLM, letting it self-correct on the
+        next iteration. ``max_iter`` still bounds runaway hallucination loops.
+        """
+        available = sorted(t.name for t in tools)
+        suggestions = difflib.get_close_matches(tool_call.name, available, n=3, cutoff=0.5)
+        if suggestions:
+            hint = f" Did you mean: {', '.join(suggestions)}?"
+        else:
+            hint = ""
+        available_str = ", ".join(available) if available else "<none>"
+        message = (
+            f"Tool '{tool_call.name}' not found.{hint} Available tools: {available_str}. "
+            "If you intended to use a skill, call `read_skill` first to load it."
+        )
+
+        run_context = get_run_context()
+        now = int(time.time() * 1000)
+        return OutputEvent(
+            run_id=run_context.id if run_context is not None else "",
+            parent_run_id=None,
+            path=f"{self._path}.{tool_call.name}",
+            call_id=uuid7(as_type="str").replace("-", ""),
+            parent_call_id=None,
+            input=tool_call.input,
+            status=RunStatus(code="error", reason="tool_not_found", message=message),
+            output=None,
+            error=message,
+            t0=now,
+            t1=now,
+            usage={},
+            metadata={"tool_not_found": True, "requested_tool": tool_call.name},
+        )
+
     async def _multiplex_tools(self, tools: list[Tool], tool_calls: list[ToolUseContent]) -> AsyncGenerator[Any, None]:
         """Execute multiple tool calls concurrently and multiplex their events."""
         queue = asyncio.Queue()
         tasks = []
 
         async def consume_tool(tool_call: ToolUseContent):
-            tool = next((t for t in tools if t.name == tool_call.name), None)
-            assert tool is not None, f"Tool {tool_call.name} not found"
             try:
+                tool = next((t for t in tools if t.name == tool_call.name), None)
+                if tool is None:
+                    logger.warning(
+                        "LLM called unknown tool; feeding error back so it can self-correct.",
+                        agent_path=self._path,
+                        requested_tool=tool_call.name,
+                        available_tools=sorted(t.name for t in tools),
+                    )
+                    await queue.put((tool_call, self._build_unknown_tool_event(tool_call, tools)))
+                    return
                 async for event in tool(**tool_call.input):
                     # Link tool call id to span for memory resolution
                     if event.type == "START":
@@ -622,6 +741,41 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         tool_call_span = get_run_context()._trace[tool_call_id]
                         tool_call_span.metadata["tool_call_id"] = tool_call.id
                     await queue.put((tool_call, event))
+            except (asyncio.CancelledError, GeneratorExit, InterruptError):
+                raise
+            except Exception as e:
+                # Defensive: any unexpected error in dispatch must NOT swallow the
+                # sentinel. Without this, a bug here would hang the agent forever
+                # because the consumer loop waits on `remaining` to hit zero.
+                logger.exception(
+                    "Unexpected error dispatching tool; feeding error back to LLM.",
+                    agent_path=self._path,
+                    tool=tool_call.name,
+                )
+                run_context = get_run_context()
+                now = int(time.time() * 1000)
+                await queue.put((
+                    tool_call,
+                    OutputEvent(
+                        run_id=run_context.id if run_context is not None else "",
+                        parent_run_id=None,
+                        path=f"{self._path}.{tool_call.name}",
+                        call_id=uuid7(as_type="str").replace("-", ""),
+                        parent_call_id=None,
+                        input=tool_call.input,
+                        status=RunStatus(code="error", reason="dispatch_failed", message=str(e)),
+                        output=None,
+                        error={
+                            "type": type(e).__name__,
+                            "message": str(e),
+                            "traceback": traceback.format_exc(),
+                        },
+                        t0=now,
+                        t1=now,
+                        usage={},
+                        metadata={"dispatch_failed": True, "requested_tool": tool_call.name},
+                    ),
+                ))
             finally:
                 await queue.put((tool_call, None))
 

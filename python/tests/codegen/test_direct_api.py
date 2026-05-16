@@ -526,53 +526,6 @@ flow.step(agent_a)
 
 
 # ---------------------------------------------------------------------------
-# convert_to_workflow
-# ---------------------------------------------------------------------------
-
-class TestConvertToWorkflow:
-    def test_convert_agent_to_workflow(self, ws):
-        ws_path = ws(AGENT_SOURCE)
-        result = _apply(ws_path, "convert_to_workflow", workflow_name=None)
-        assert "Workflow(" in result
-        assert "from timbal import" in result
-        assert "Workflow" in result
-        assert ".step(" in result
-
-    def test_convert_with_custom_workflow_name(self, ws):
-        ws_path = ws(AGENT_SOURCE)
-        result = _apply(ws_path, "convert_to_workflow", workflow_name="my_pipeline")
-        assert 'name="my_pipeline"' in result
-
-    def test_convert_already_has_workflow_import(self, ws):
-        source = """\
-from timbal import Agent, Workflow
-
-flow = Agent(name="my_agent", model="openai/gpt-4o-mini")
-"""
-        ws_path = ws(source)
-        result = _apply(ws_path, "convert_to_workflow", workflow_name=None)
-        # Should not duplicate import
-        assert result.count("from timbal import") >= 1
-
-    def test_convert_requires_agent_entry_point(self, ws):
-        ws_path = ws(WORKFLOW_SOURCE)
-        with pytest.raises(ValueError, match="Agent"):
-            _apply(ws_path, "convert_to_workflow", workflow_name=None)
-
-    def test_convert_agent_name_collision(self, ws):
-        """When agent's name== entry_point var, it should use a _step suffix."""
-        source = """\
-from timbal import Agent
-
-flow = Agent(name="flow", model="openai/gpt-4o-mini")
-"""
-        ws_path = ws(source)
-        result = _apply(ws_path, "convert_to_workflow", workflow_name=None)
-        # The agent var should be renamed to avoid self-reference
-        assert "flow_step" in result
-
-
-# ---------------------------------------------------------------------------
 # set_position
 # ---------------------------------------------------------------------------
 

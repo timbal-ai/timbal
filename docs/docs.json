@@ -174,9 +174,14 @@
               "api-reference/orgs/create",
               "api-reference/orgs/get",
               "api-reference/orgs/update",
+              "api-reference/orgs/contacts/list",
               {
                 "group": "Billing",
                 "pages": ["api-reference/orgs/billing/overage"]
+              },
+              {
+                "group": "Credit Grants",
+                "pages": ["api-reference/orgs/credit-grants/list"]
               },
               {
                 "group": "Domains",
@@ -335,6 +340,7 @@
               "api-reference/knowledge-bases/get",
               "api-reference/knowledge-bases/update",
               "api-reference/knowledge-bases/delete",
+              "api-reference/knowledge-bases/restart",
               "api-reference/knowledge-bases/query",
               "api-reference/knowledge-bases/schema",
               "api-reference/knowledge-bases/upload",

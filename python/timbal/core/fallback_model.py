@@ -35,8 +35,20 @@ class ModelEntry:
 class FallbackModel:
     """Ordered fallback chain for LLM providers.
 
-    The first model is tried first. If it fails with a retryable provider error
-    after its per-model retries are exhausted, the next entry is attempted.
+    The first model is tried first. If it fails *before any chunk has been
+    yielded*, the next entry is attempted. By default any ``Exception`` triggers
+    fallback — the rationale is that if you bothered to configure a fallback,
+    you almost certainly want it to actually take over (auth failures, bad
+    requests, missing keys, transient network errors, etc.). ``BaseException``
+    subclasses (``KeyboardInterrupt``, ``SystemExit``, ``asyncio.CancelledError``)
+    are *not* caught and propagate normally.
+
+    Once any chunk has streamed from the current model, errors propagate
+    immediately — switching mid-stream would corrupt the response.
+
+    Pass ``fallback_on=`` (an exception class, tuple/list of classes, or a
+    predicate) to narrow the default. Use :func:`is_retryable_provider_error`
+    for the conservative "transient provider errors only" behavior.
     """
 
     __timbal_fallback_model__ = True
@@ -106,7 +118,11 @@ class FallbackModel:
 
     def _should_fallback(self, exc: BaseException) -> bool:
         if self.fallback_on is None:
-            return is_retryable_provider_error(exc)
+            # Default: fallback on anything that isn't a BaseException-only
+            # subclass (KeyboardInterrupt, SystemExit, CancelledError). The
+            # outer `except Exception` in route() already filters those out,
+            # so reaching here means the caller wanted recovery.
+            return True
         if isinstance(self.fallback_on, type) and issubclass(self.fallback_on, BaseException):
             return isinstance(exc, self.fallback_on)
         if isinstance(self.fallback_on, (tuple, list)):

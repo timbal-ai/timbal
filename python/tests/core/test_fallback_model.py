@@ -70,8 +70,53 @@ class TestFallbackModel:
         assert calls[0]["base_url"] == "https://entry"
 
     @pytest.mark.asyncio
-    async def test_non_retryable_error_does_not_fallback(self):
+    async def test_default_falls_back_on_any_exception(self):
+        """Default behavior: any pre-stream Exception triggers fallback."""
         model = FallbackModel("openai/primary", "openai/backup")
+        calls = []
+
+        async def router(**kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "openai/primary":
+                raise ValueError("bad request")
+            yield "ok"
+
+        chunks = [chunk async for chunk in model.route(router)]
+
+        assert chunks == ["ok"]
+        assert calls == ["openai/primary", "openai/backup"]
+
+    @pytest.mark.asyncio
+    async def test_default_falls_back_on_auth_error(self):
+        """401/403 should trigger fallback by default — conservative behavior is opt-in."""
+        from timbal.core.fallback_model import is_retryable_provider_error
+
+        model = FallbackModel("openai/primary", "openai/backup")
+        calls = []
+
+        async def router(**kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "openai/primary":
+                raise _status_error(401)
+            yield "ok"
+
+        chunks = [chunk async for chunk in model.route(router)]
+
+        assert chunks == ["ok"]
+        assert calls == ["openai/primary", "openai/backup"]
+        # And the conservative helper still classifies 401 as non-retryable
+        assert not is_retryable_provider_error(_status_error(401))
+
+    @pytest.mark.asyncio
+    async def test_conservative_predicate_skips_non_provider_errors(self):
+        """Opt-in conservative mode: only transient provider errors trigger fallback."""
+        from timbal.core.fallback_model import is_retryable_provider_error
+
+        model = FallbackModel(
+            "openai/primary",
+            "openai/backup",
+            fallback_on=is_retryable_provider_error,
+        )
         calls = []
 
         async def router(**kwargs):
@@ -80,6 +125,25 @@ class TestFallbackModel:
             yield
 
         with pytest.raises(ValueError, match="bad request"):
+            async for _ in model.route(router):
+                pass
+
+        assert calls == ["openai/primary"]
+
+    @pytest.mark.asyncio
+    async def test_base_exceptions_propagate_without_fallback(self):
+        """KeyboardInterrupt / CancelledError must not be swallowed by fallback."""
+        import asyncio
+
+        model = FallbackModel("openai/primary", "openai/backup")
+        calls = []
+
+        async def router(**kwargs):
+            calls.append(kwargs["model"])
+            raise asyncio.CancelledError()
+            yield
+
+        with pytest.raises(asyncio.CancelledError):
             async for _ in model.route(router):
                 pass
 

@@ -106,6 +106,8 @@ class PlatformTracingProvider(TracingProvider):
             payload["version_id"] = subject.version_id
         else:
             raise ValueError("Cannot use platform tracing provider without an app or project subject")
+        if subject.rev is not None:
+            payload["rev"] = subject.rev
         res = await _request(
             method="PATCH",
             path=f"orgs/{subject.org_id}/{subject_path}/runs/{run_context.id}",
