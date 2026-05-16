@@ -116,6 +116,59 @@ process_refund_tool = Tool(
 For complex skills, include additional reference files and link to them in `SKILL.md`.
 In the previous example, the `fraud_detection.md` file will only be read when the agent determines it is needed.
 
+## Selecting Which Skills to Load
+
+By default, every skill under `skills_path` is loaded into the agent. When a single directory is shared across multiple agents — each needing a different subset — use `skills` (whitelist) or `skills_exclude` (blacklist) to filter by directory name.
+
+### Whitelist
+
+Load only the listed skills:
+
+```python
+agent = Agent(
+    name="payments_agent",
+    model="anthropic/claude-3-5-sonnet",
+    skills_path="./skills",
+    skills=["payment_processing", "fraud_detection"],
+)
+```
+
+Unknown names raise `ValueError` — typos fail loudly instead of silently loading nothing.
+
+### Blacklist
+
+Load every skill except the listed ones:
+
+```python
+agent = Agent(
+    name="support_agent",
+    model="anthropic/claude-3-5-sonnet",
+    skills_path="./skills",
+    skills_exclude=["experimental_billing"],
+)
+```
+
+Unknown names in `skills_exclude` are silently ignored.
+
+<Note>
+`skills` and `skills_exclude` are mutually exclusive. Both require `skills_path` to be set.
+</Note>
+
+### Explicit Selection Without `skills_path`
+
+For full control, pass `Skill` instances directly via `tools=[...]`. This bypasses `skills_path` entirely and is useful when skills live in unrelated locations or when an agent only needs one or two:
+
+```python
+from timbal import Agent
+from timbal.core.skill import Skill
+
+agent = Agent(
+    name="refunds_agent",
+    model="anthropic/claude-3-5-sonnet",
+    tools=[Skill(path="./skills/payment_processing")],
+)
+```
+
 ## Best Practices
 - Each skill should have a single, well-defined purpose.
 - Write clear descriptions. Agents use it to decide when to activate a Skill.

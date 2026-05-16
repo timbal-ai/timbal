@@ -253,6 +253,24 @@ agent = Agent(
 
 The agent sees skill names and descriptions at startup. It calls `read_skill("web_research")` to load the tools and documentation when needed — keeping context clean until the skill is actually required.
 
+**Selecting a subset.** When `skills_path` holds many skills but a given agent only needs some, use `skills=` (whitelist) or `skills_exclude=` (blacklist). Names are matched against directory names. They are mutually exclusive; unknown names in `skills=` raise `ValueError`.
+
+```python
+# Whitelist: load only the listed skills
+Agent(skills_path="./skills", skills=["web_research", "sql"], ...)
+
+# Blacklist: load everything except the listed skills
+Agent(skills_path="./skills", skills_exclude=["experimental"], ...)
+```
+
+You can also pass `Skill` instances directly via `tools=[...]` for fully explicit, per-agent selection without a shared directory:
+
+```python
+from timbal.core.skill import Skill
+
+Agent(tools=[Skill(path="./skills/web_research")], ...)
+```
+
 ---
 
 ## MCP servers
