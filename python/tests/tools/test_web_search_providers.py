@@ -131,3 +131,114 @@ async def test_web_search_google_resolves_credentials_from_env(monkeypatch):
     assert params["cx"] == "env-cx"
     assert params["q"] == "q"
     assert params["num"] == 10
+
+
+@pytest.mark.asyncio
+async def test_web_search_scraperapi_get_passes_query_and_country():
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {"organic_results": []}
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        tool = WebSearch(provider="scraperapi", api_key=SecretStr("sa-key"))
+        await tool.handler(query="best espresso", country_code="es", hl="es", start=10)
+
+    mock_client.get.assert_awaited_once()
+    url = mock_client.get.await_args[0][0]
+    assert "/google/search" in url
+    params = mock_client.get.await_args.kwargs["params"]
+    assert params["api_key"] == "sa-key"
+    assert params["query"] == "best espresso"
+    assert params["country_code"] == "es"
+    assert params["hl"] == "es"
+    assert params["start"] == 10
+
+
+@pytest.mark.asyncio
+async def test_web_search_scraperapi_uses_fixed_user_location_country():
+    """`user_location={'country': 'GB'}` at construction overrides per-call country_code default."""
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {}
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        tool = WebSearch(
+            provider="scraperapi",
+            api_key=SecretStr("k"),
+            user_location={"country": "GB"},
+        )
+        await tool.handler(query="q")
+
+    params = mock_client.get.await_args.kwargs["params"]
+    assert params["country_code"] == "GB"
+
+
+@pytest.mark.asyncio
+async def test_web_search_cala_posts_natural_language_query():
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {"answer": "..."}
+
+    mock_client = MagicMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    with patch("httpx.AsyncClient", return_value=_mock_httpx_context(mock_client)):
+        tool = WebSearch(provider="cala", api_key=SecretStr("cala-key"))
+        out = await tool.handler(query="what is the capital of Mali")
+
+    assert out == {"answer": "..."}
+    mock_client.post.assert_awaited_once()
+    url = mock_client.post.await_args[0][0]
+    assert url.endswith("/knowledge/search")
+    headers = mock_client.post.await_args.kwargs["headers"]
+    assert headers["x-api-key"] == "cala-key"
+    body = mock_client.post.await_args.kwargs["json"]
+    assert body == {"input": "what is the capital of Mali"}
+
+
+# ---------------------------------------------------------------------------
+# Schema-mode branching: provider-less vs provider-set
+# ---------------------------------------------------------------------------
+
+
+def test_websearch_native_mode_anthropic_schema_has_no_function_shape():
+    tool = WebSearch()
+    schema = tool.anthropic_schema
+    assert schema["type"] == "web_search_20250305"
+    assert "input_schema" not in schema
+
+
+def test_websearch_native_mode_openai_chat_completions_schema_raises():
+    tool = WebSearch()
+    with pytest.raises(ValueError, match="not compatible"):
+        _ = tool.openai_chat_completions_schema
+
+
+def test_websearch_provider_mode_anthropic_schema_is_function_shape():
+    tool = WebSearch(provider="tavily", api_key=SecretStr("k"))
+    schema = tool.anthropic_schema
+    assert schema["name"] == "web_search"
+    assert "input_schema" in schema
+    assert "type" not in schema or schema.get("type") != "web_search_20250305"
+
+
+def test_websearch_provider_mode_openai_chat_completions_schema_is_function_shape():
+    tool = WebSearch(provider="tavily", api_key=SecretStr("k"))
+    schema = tool.openai_chat_completions_schema
+    assert schema["type"] == "function"
+    assert schema["function"]["name"] == "web_search"
+    assert "parameters" in schema["function"]
+
+
+def test_websearch_provider_mode_openai_responses_schema_is_function_shape():
+    tool = WebSearch(provider="firecrawl", api_key=SecretStr("k"))
+    schema = tool.openai_responses_schema
+    assert schema["type"] == "function"
+    assert schema["name"] == "web_search"
+    assert "parameters" in schema
