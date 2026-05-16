@@ -326,6 +326,13 @@ class WebSearch(Tool):
         if provider is not None and "description" not in kwargs:
             kwargs["description"] = "Search the web for information."
 
+        # Default to a provider-scoped name so multiple `WebSearch(provider=...)`
+        # instances can coexist in the same Agent without colliding. Native mode
+        # (provider=None) must keep `name="web_search"` because Anthropic's
+        # `web_search_20250305` server tool requires that exact identifier.
+        if provider is not None and "name" not in kwargs:
+            kwargs["name"] = f"{provider}_web_search"
+
         if "handler" not in kwargs:
             if provider == "tavily":
                 kwargs["handler"] = _make_tavily_handler(
@@ -382,6 +389,7 @@ class WebSearch(Tool):
                     "integration": self.integration,
                     "api_key": self.api_key,
                     "cx": self.cx,
+                    "enable_image_understanding": self.enable_image_understanding,
                 }
             ),
         }

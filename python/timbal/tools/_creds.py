@@ -25,11 +25,11 @@ async def resolve_api_key(
     api_key: SecretStr | None = None,
 ) -> str:
     """Resolve a provider API key from explicit arg, Integration, or env var (in that order)."""
+    if api_key is not None:
+        return api_key.get_secret_value()
     if isinstance(integration, Integration):
         credentials = await integration.resolve()
         return credentials["api_key"]
-    if api_key is not None:
-        return api_key.get_secret_value()
     env_key = os.getenv(env_var)
     if env_key:
         return env_key
