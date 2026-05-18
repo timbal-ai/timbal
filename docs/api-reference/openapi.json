@@ -823,7 +823,7 @@
             }
           },
           "403": {
-            "description": "Caller is not an org admin",
+            "description": "Caller cannot manage billing for this organization",
             "content": {
               "application/json": {
                 "schema": {
@@ -7285,6 +7285,59 @@
             "bearer_auth": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "roles"
+        ],
+        "description": "Create a custom role scoped to the organization.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRoleReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Role created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "description": "A role with that name already exists in the organization"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/orgs/{org_id}/roles/{role_id}": {
@@ -7328,6 +7381,132 @@
           },
           "404": {
             "description": "Role not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "roles"
+        ],
+        "description": "Delete a custom role. Fails with 409 if any member currently holds the role unless `force: true`, in which case those members are demoted to the system `user` role before the delete proceeds. System roles cannot be deleted.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional — omit entirely or send `{}` for default (non-force) behavior.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteRoleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Role deleted"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Role not found"
+          },
+          "409": {
+            "description": "Role is still assigned to one or more members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleInUseConflict"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "roles"
+        ],
+        "description": "Partially update a custom role. System roles cannot be modified.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditRoleReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Role updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Role not found"
+          },
+          "409": {
+            "description": "A role with that name already exists in the organization"
           }
         },
         "security": [
@@ -7645,10 +7824,20 @@
         "description": "A domain action a role can grant. Action keys follow\n`\u003Cscope\u003E.\u003Cresource\u003E.\u003Cverb\u003E` (e.g. `org.project.create`).",
         "enum": [
           "org.project.create",
+          "org.user.view",
           "org.user.invite",
           "org.user.remove",
           "org.user.role.update",
-          "org.billing.manage"
+          "org.billing.manage",
+          "org.domain.view",
+          "org.domain.manage",
+          "org.kb.create",
+          "org.profile.update",
+          "org.role.manage",
+          "org.notification.channel.view",
+          "org.notification.channel.manage",
+          "org.notification.rule.view",
+          "org.notification.rule.manage"
         ]
       },
       "AddProjectUserReqBody": {
@@ -8227,6 +8416,32 @@
           }
         }
       },
+      "CreateRoleReqBody": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Action"
+            },
+            "description": "Domain actions this role grants. Unknown action keys fail\ndeserialization (400). Empty list is allowed."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable description."
+          },
+          "name": {
+            "type": "string",
+            "description": "Role name. Must be unique within the organization."
+          }
+        }
+      },
       "CreateVarReqBody": {
         "type": "object",
         "required": [
@@ -8388,6 +8603,18 @@
               "null"
             ],
             "description": "When `true`, delete even if rules reference this channel (cascading unlink)."
+          }
+        }
+      },
+      "DeleteRoleBody": {
+        "type": "object",
+        "properties": {
+          "force": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "When `true`, demote any members currently holding this role to the\nsystem `user` role and proceed with the delete."
           }
         }
       },
@@ -8752,6 +8979,35 @@
         "properties": {
           "role": {
             "type": "string"
+          }
+        }
+      },
+      "EditRoleReqBody": {
+        "type": "object",
+        "properties": {
+          "actions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Action"
+            },
+            "description": "Replace the full action grant set. Omitted fields are left unchanged."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable description. Pass `null` to clear."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Role name. Must remain unique within the organization."
           }
         }
       },
@@ -11647,6 +11903,39 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "RoleInUseConflict": {
+        "type": "object",
+        "description": "Returned when `DELETE /orgs/{org_id}/roles/{role_id}` is called while the\nrole is still assigned and `force` is not set.",
+        "required": [
+          "code",
+          "message",
+          "user_ids",
+          "pending_invite_count"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Machine-readable error code."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable description."
+          },
+          "pending_invite_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Pending invites (`user_id` not yet set) still pointing at this role.",
+            "minimum": 0
+          },
+          "user_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Accepted members currently holding this role."
           }
         }
       },

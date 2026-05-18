@@ -207,7 +207,10 @@
                 "group": "Roles",
                 "pages": [
                   "api-reference/orgs/roles/list",
-                  "api-reference/orgs/roles/get"
+                  "api-reference/orgs/roles/create",
+                  "api-reference/orgs/roles/get",
+                  "api-reference/orgs/roles/update",
+                  "api-reference/orgs/roles/delete"
                 ]
               },
               {
