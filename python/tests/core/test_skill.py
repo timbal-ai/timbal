@@ -1,8 +1,7 @@
 import pytest
 from timbal import Agent, Tool
-from timbal.core.test_model import TestModel
 from timbal.core.skill import ReadSkill, Skill
-from timbal.state import get_or_create_run_context
+from timbal.core.test_model import TestModel
 
 
 @pytest.fixture
@@ -339,6 +338,192 @@ class TestAgentWithSkills:
         assert "<skills>" in system_prompt
 
 
+class TestAgentSkillsFilter:
+    """Test the `skills_include` whitelist and `skills_exclude` blacklist filters."""
+
+    def test_whitelist_loads_only_selected(self, skills_dir):
+        """Test that `skills_include=[...]` loads only the listed skill directories."""
+        agent = Agent(name="agent", model=TestModel(), skills_path=skills_dir, skills_include=["cars"])
+
+        loaded = {t.name for t in agent.tools if isinstance(t, Skill)}
+        assert loaded == {"cars"}
+
+    def test_whitelist_empty_loads_none(self, skills_dir):
+        """Test that `skills_include=[]` loads no skills."""
+        agent = Agent(name="agent", model=TestModel(), skills_path=skills_dir, skills_include=[])
+
+        loaded = {t.name for t in agent.tools if isinstance(t, Skill)}
+        assert loaded == set()
+
+    def test_whitelist_unknown_name_raises(self, skills_dir):
+        """Test that referencing a non-existent skill in `skills_include=[...]` raises ValueError."""
+        with pytest.raises(ValueError, match="Skills not found.*nonexistent"):
+            Agent(name="agent", model=TestModel(), skills_path=skills_dir, skills_include=["cars", "nonexistent"])
+
+    def test_exclude_skips_listed_skills(self, skills_dir):
+        """Test that `skills_exclude=[...]` loads all but the listed skill directories."""
+        agent = Agent(name="agent", model=TestModel(), skills_path=skills_dir, skills_exclude=["bikes"])
+
+        loaded = {t.name for t in agent.tools if isinstance(t, Skill)}
+        assert loaded == {"cars"}
+
+    def test_exclude_unknown_name_is_silent(self, skills_dir):
+        """Test that unknown names in `skills_exclude` are ignored (no error)."""
+        agent = Agent(name="agent", model=TestModel(), skills_path=skills_dir, skills_exclude=["nonexistent"])
+
+        loaded = {t.name for t in agent.tools if isinstance(t, Skill)}
+        assert loaded == {"cars", "bikes"}
+
+    def test_whitelist_and_exclude_are_mutually_exclusive(self, skills_dir):
+        """Test that passing both `skills_include` and `skills_exclude` raises ValueError."""
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            Agent(
+                name="agent",
+                model=TestModel(),
+                skills_path=skills_dir,
+                skills_include=["cars"],
+                skills_exclude=["bikes"],
+            )
+
+    def test_whitelist_without_skills_path_raises(self):
+        """Test that `skills_include=[...]` requires `skills_path` to be set."""
+        with pytest.raises(ValueError, match="skills_path"):
+            Agent(name="agent", model=TestModel(), skills_include=["cars"])
+
+    def test_exclude_without_skills_path_raises(self):
+        """Test that `skills_exclude=[...]` requires `skills_path` to be set."""
+        with pytest.raises(ValueError, match="skills_path"):
+            Agent(name="agent", model=TestModel(), skills_exclude=["bikes"])
+
+
+class TestAgentWithSkillInTools:
+    """Test passing Skill instances directly via `tools=[...]` instead of `skills_path`."""
+
+    def test_skill_in_tools_wires_agent_path(self, skills_dir):
+        """Test that a Skill passed in `tools` gets `_agent_path` wired to the agent."""
+        skill = Skill(path=skills_dir / "cars")
+        agent = Agent(name="car_agent", model=TestModel(), tools=[skill])
+
+        loaded = [t for t in agent.tools if isinstance(t, Skill)]
+        assert len(loaded) == 1
+        assert loaded[0].name == "cars"
+        assert loaded[0]._agent_path == "car_agent"
+
+    def test_skill_in_tools_adds_read_skill_tool(self, skills_dir):
+        """Test that a Skill passed in `tools` triggers the `read_skill` tool to be added."""
+        skill = Skill(path=skills_dir / "cars")
+        agent = Agent(name="agent", model=TestModel(), tools=[skill])
+
+        assert any(isinstance(t, ReadSkill) for t in agent.tools)
+
+    @pytest.mark.asyncio
+    async def test_skill_in_tools_appears_in_system_prompt(self, skills_dir):
+        """Test that a Skill passed in `tools` is documented in the system prompt."""
+        skill = Skill(path=skills_dir / "cars")
+        agent = Agent(name="agent", model=TestModel(), tools=[skill])
+
+        system_prompt = await agent._resolve_system_prompt()
+        assert "<skills>" in system_prompt
+        assert "cars" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_multiple_skills_in_tools(self, skills_dir):
+        """Test that multiple Skills passed in `tools` are all wired and documented."""
+        cars = Skill(path=skills_dir / "cars")
+        bikes = Skill(path=skills_dir / "bikes")
+        agent = Agent(name="agent", model=TestModel(), tools=[cars, bikes])
+
+        loaded = {t.name for t in agent.tools if isinstance(t, Skill)}
+        assert loaded == {"cars", "bikes"}
+
+        # Exactly one ReadSkill aggregator, aware of both skills
+        read_skill_tools = [t for t in agent.tools if isinstance(t, ReadSkill)]
+        assert len(read_skill_tools) == 1
+
+        system_prompt = await agent._resolve_system_prompt()
+        assert "cars" in system_prompt
+        assert "bikes" in system_prompt
+
+    def test_skill_mixed_with_function_and_tool(self, skills_dir):
+        """Test that the normalization loop handles interleaved Skill / function / Tool correctly."""
+
+        def plain_handler(x: int) -> int:
+            """A plain function tool."""
+            return x + 1
+
+        explicit_tool = Tool(name="explicit", description="Explicit", handler=lambda y: y * 2)
+        skill = Skill(path=skills_dir / "cars")
+
+        agent = Agent(name="agent", model=TestModel(), tools=[skill, plain_handler, explicit_tool])
+
+        skills = [t for t in agent.tools if isinstance(t, Skill)]
+        assert len(skills) == 1
+        assert skills[0].name == "cars"
+        assert skills[0]._agent_path == "agent"
+
+        tool_names = {getattr(t, "name", None) for t in agent.tools if not isinstance(t, Skill)}
+        assert "plain_handler" in tool_names
+        assert "explicit" in tool_names
+        assert "read_skill" in tool_names
+
+    def test_duplicate_skill_in_tools_raises(self, skills_dir):
+        """Test that two Skill instances with the same name passed in `tools` raise an error."""
+        with pytest.raises(ValueError, match="Skill 'cars' already exists"):
+            Agent(
+                name="agent",
+                model=TestModel(),
+                tools=[Skill(path=skills_dir / "cars"), Skill(path=skills_dir / "cars")],
+            )
+
+    def test_skills_path_combined_with_tools_skill(self, tmp_path, skills_dir):
+        """Test that `skills_path` and `tools=[Skill(...)]` form a union of available skills."""
+        # Build an additional skills directory with one new skill not in `skills_dir`.
+        other_root = tmp_path / "other_skills"
+        other_root.mkdir()
+        inventory_dir = other_root / "inventory"
+        inventory_dir.mkdir()
+        (inventory_dir / "SKILL.md").write_text(
+            "---\nname: inventory\ndescription: Inventory management\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+
+        agent = Agent(
+            name="agent",
+            model=TestModel(),
+            skills_path=skills_dir,
+            tools=[Skill(path=inventory_dir)],
+        )
+
+        loaded = {t.name for t in agent.tools if isinstance(t, Skill)}
+        assert loaded == {"cars", "bikes", "inventory"}
+
+    @pytest.mark.asyncio
+    async def test_skill_in_tools_resolves_when_in_context(self, skills_dir):
+        """End-to-end: a Skill passed in `tools` resolves its tools at runtime when marked in context.
+
+        Mirrors `TestSkillIntegration.test_skill_tools_resolve_when_in_context` but loads the skill
+        via `tools=[Skill(...)]` instead of `skills_path`. This proves `_agent_path` wiring on the
+        direct-tools path actually unlocks runtime resolution, not just sets an attribute.
+        """
+        from timbal.state import RunContext, get_or_create_run_context, set_run_context
+
+        skill = Skill(path=skills_dir / "cars")
+        agent = Agent(name="agent", model=TestModel(), tools=[skill])
+
+        # Bind a fresh RunContext so the skill can reach a session.
+        set_run_context(RunContext(tracing_provider=None))
+        session = await get_or_create_run_context().get_session()
+
+        # Not in context yet → resolve returns no tools.
+        assert await skill.resolve() == []
+
+        # Mark cars as in-context for this agent, mirroring what `ReadSkill` does.
+        session["__in_context_skills"] = {agent._path: ["cars"]}
+        resolved = await skill.resolve()
+        resolved_names = {t.name for t in resolved}
+        assert "search_cars" in resolved_names
+
+
 class TestReadSkillTool:
     """Test the ReadSkill tool functionality."""
 
@@ -474,10 +659,10 @@ class TestSkillIntegration:
 
             # After reading (if read_skill was called): search_cars should be available
             if read_skill_events:
-                # Check if search_cars appeared in any subsequent call
-                has_search_cars_later = any("search_cars" in tools for tools in tool_calls[1:])
-                # This might not always be true depending on LLM behavior
-                # So we just verify the structure works
+                # Check if search_cars appeared in any subsequent call.
+                # This might not always be true depending on LLM behavior,
+                # so we just verify the structure works.
+                any("search_cars" in tools for tools in tool_calls[1:])
 
     @pytest.mark.asyncio
     async def test_skill_tools_resolve_when_in_context(self, skills_dir):

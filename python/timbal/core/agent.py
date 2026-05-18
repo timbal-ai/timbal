@@ -170,6 +170,12 @@ class Agent(Runnable):
     """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
     skills_path: str | Path | None = None
     """Path to the skills directory."""
+    skills_include: list[str] | None = None
+    """Whitelist of skill directory names to load from skills_path. If None, all are loaded.
+    Mutually exclusive with skills_exclude. Unknown names raise ValueError."""
+    skills_exclude: list[str] | None = None
+    """Blacklist of skill directory names to skip from skills_path.
+    Mutually exclusive with skills_include."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
     max_tokens: int | None = None
@@ -273,16 +279,7 @@ class Agent(Runnable):
         )
         self._llm.nest(self._path)
 
-        if self.skills_path is not None:
-            self.skills_path = Path(self.skills_path).expanduser().resolve()
-            if not self.skills_path.exists() or not self.skills_path.is_dir():
-                raise ValueError(
-                    f"Skills directory {self.skills_path} does not exist or is not a directory. Skipping..."
-                )
-            for skill_path in self.skills_path.iterdir():
-                skill = Skill(path=skill_path)
-                skill._agent_path = self._path
-                self.tools.append(skill)
+        self._init_skills()
 
         # Normalize tools and prevent duplicate names
         names: set[str] = set()
@@ -291,6 +288,7 @@ class Agent(Runnable):
             if isinstance(tool, Skill):
                 if tool.name in names:
                     raise ValueError(f"Skill '{tool.name}' already exists. You can only add a skill once.")
+                tool._agent_path = self._path
                 names.add(tool.name)
                 skills.append(tool)
                 continue
@@ -320,6 +318,35 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         self._is_coroutine = False
         self._is_gen = False
         self._is_async_gen = True
+
+    def _init_skills(self) -> None:
+        """Validate skill filter params and append filtered Skill instances from `skills_path` to `self.tools`."""
+        if self.skills_include is not None and self.skills_exclude is not None:
+            raise ValueError("'skills_include' and 'skills_exclude' are mutually exclusive. Use only one.")
+        if (self.skills_include is not None or self.skills_exclude is not None) and self.skills_path is None:
+            raise ValueError("'skills_include' and 'skills_exclude' require 'skills_path' to be set.")
+        if self.skills_path is None:
+            return
+
+        self.skills_path = Path(self.skills_path).expanduser().resolve()
+        if not self.skills_path.is_dir():
+            raise ValueError(f"Skills directory {self.skills_path} does not exist or is not a directory.")
+
+        available = {p.name: p for p in self.skills_path.iterdir() if p.is_dir()}
+
+        if self.skills_include is not None:
+            missing = set(self.skills_include) - available.keys()
+            if missing:
+                raise ValueError(f"Skills not found in {self.skills_path}: {sorted(missing)}")
+            selected = self.skills_include
+        elif self.skills_exclude is not None:
+            excluded = set(self.skills_exclude)
+            selected = [name for name in available if name not in excluded]
+        else:
+            selected = list(available)
+
+        for name in selected:
+            self.tools.append(Skill(path=available[name]))
 
     @override
     def get_config(self) -> dict[str, Any]:
