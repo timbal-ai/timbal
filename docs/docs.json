@@ -204,6 +204,13 @@
                 ]
               },
               {
+                "group": "Roles",
+                "pages": [
+                  "api-reference/orgs/roles/list",
+                  "api-reference/orgs/roles/get"
+                ]
+              },
+              {
                 "group": "Users",
                 "pages": [
                   "api-reference/orgs/users/list",
@@ -211,7 +218,7 @@
                   "api-reference/orgs/users/delete",
                   "api-reference/orgs/users/update"
                 ]
-              }              
+              }
             ]
           },
           {
