@@ -54,7 +54,7 @@ from timbal import Agent
 
 agent = Agent(
     name="my_agent",
-    model="anthropic/claude-3-5-sonnet",
+    model="anthropic/claude-sonnet-4-6",
     skills_path="./skills"
 )
 ```
@@ -118,7 +118,7 @@ In the previous example, the `fraud_detection.md` file will only be read when th
 
 ## Selecting Which Skills to Load
 
-By default, every skill under `skills_path` is loaded into the agent. When a single directory is shared across multiple agents — each needing a different subset — use `skills` (whitelist) or `skills_exclude` (blacklist) to filter by directory name.
+By default, every skill under `skills_path` is loaded into the agent. When a single directory is shared across multiple agents — each needing a different subset — use `skills_include` (whitelist) or `skills_exclude` (blacklist) to filter by directory name.
 
 ### Whitelist
 
@@ -127,9 +127,9 @@ Load only the listed skills:
 ```python
 agent = Agent(
     name="payments_agent",
-    model="anthropic/claude-3-5-sonnet",
+    model="anthropic/claude-sonnet-4-6",
     skills_path="./skills",
-    skills=["payment_processing", "fraud_detection"],
+    skills_include=["payment_processing", "fraud_detection"],
 )
 ```
 
@@ -142,7 +142,7 @@ Load every skill except the listed ones:
 ```python
 agent = Agent(
     name="support_agent",
-    model="anthropic/claude-3-5-sonnet",
+    model="anthropic/claude-sonnet-4-6",
     skills_path="./skills",
     skills_exclude=["experimental_billing"],
 )
@@ -151,7 +151,7 @@ agent = Agent(
 Unknown names in `skills_exclude` are silently ignored.
 
 <Note>
-`skills` and `skills_exclude` are mutually exclusive. Both require `skills_path` to be set.
+`skills_include` and `skills_exclude` are mutually exclusive. Both require `skills_path` to be set.
 </Note>
 
 ### Explicit Selection Without `skills_path`
@@ -164,7 +164,7 @@ from timbal.core.skill import Skill
 
 agent = Agent(
     name="refunds_agent",
-    model="anthropic/claude-3-5-sonnet",
+    model="anthropic/claude-sonnet-4-6",
     tools=[Skill(path="./skills/payment_processing")],
 )
 ```

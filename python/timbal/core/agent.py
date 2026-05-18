@@ -170,12 +170,12 @@ class Agent(Runnable):
     """List of tools available to the agent. Can be functions, dicts, or Runnable objects."""
     skills_path: str | Path | None = None
     """Path to the skills directory."""
-    skills: list[str] | None = None
+    skills_include: list[str] | None = None
     """Whitelist of skill directory names to load from skills_path. If None, all are loaded.
     Mutually exclusive with skills_exclude. Unknown names raise ValueError."""
     skills_exclude: list[str] | None = None
     """Blacklist of skill directory names to skip from skills_path.
-    Mutually exclusive with skills."""
+    Mutually exclusive with skills_include."""
     max_iter: int = 10
     """Maximum number of LLM->tool call iterations before stopping."""
     max_tokens: int | None = None
@@ -321,10 +321,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
     def _init_skills(self) -> None:
         """Validate skill filter params and append filtered Skill instances from `skills_path` to `self.tools`."""
-        if self.skills is not None and self.skills_exclude is not None:
-            raise ValueError("'skills' and 'skills_exclude' are mutually exclusive. Use only one.")
-        if (self.skills is not None or self.skills_exclude is not None) and self.skills_path is None:
-            raise ValueError("'skills' and 'skills_exclude' require 'skills_path' to be set.")
+        if self.skills_include is not None and self.skills_exclude is not None:
+            raise ValueError("'skills_include' and 'skills_exclude' are mutually exclusive. Use only one.")
+        if (self.skills_include is not None or self.skills_exclude is not None) and self.skills_path is None:
+            raise ValueError("'skills_include' and 'skills_exclude' require 'skills_path' to be set.")
         if self.skills_path is None:
             return
 
@@ -334,11 +334,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         available = {p.name: p for p in self.skills_path.iterdir() if p.is_dir()}
 
-        if self.skills is not None:
-            missing = set(self.skills) - available.keys()
+        if self.skills_include is not None:
+            missing = set(self.skills_include) - available.keys()
             if missing:
                 raise ValueError(f"Skills not found in {self.skills_path}: {sorted(missing)}")
-            selected = self.skills
+            selected = self.skills_include
         elif self.skills_exclude is not None:
             excluded = set(self.skills_exclude)
             selected = [name for name in available if name not in excluded]
