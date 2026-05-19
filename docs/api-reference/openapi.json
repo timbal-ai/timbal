@@ -607,6 +607,63 @@
         ]
       }
     },
+    "/me": {
+      "patch": {
+        "tags": [
+          "users"
+        ],
+        "description": "Patch the authenticated user's profile. Omitted fields are left untouched; null clears nullable fields.",
+        "operationId": "handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchMeReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Profile updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed or non-nullable field set to null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/me/orgs": {
       "get": {
         "tags": [
@@ -766,7 +823,7 @@
             }
           },
           "403": {
-            "description": "Caller is not an org admin",
+            "description": "Caller cannot manage billing for this organization",
             "content": {
               "application/json": {
                 "schema": {
@@ -1604,7 +1661,7 @@
         "tags": [
           "k2"
         ],
-        "description": "Upload a file to a knowledge base for parsing and embedding",
+        "description": "Add a file to a knowledge base via direct upload or remote URL fetch. Provide exactly one of `file` (raw bytes) or `url` (http/https; the server fetches it with an SSRF-hardened client).",
         "operationId": "add",
         "parameters": [
           {
@@ -1629,9 +1686,8 @@
             "multipart/form-data": {
               "schema": {
                 "type": "object",
-                "description": "Request body for uploading a file to a knowledge base.",
+                "description": "Request body for adding a file to a knowledge base.\n\nProvide **either** `file` (raw bytes via multipart) **or** `url` (http/https URL\nthe server fetches directly). Exactly one is required.",
                 "required": [
-                  "file",
                   "metadata"
                 ],
                 "properties": {
@@ -1643,18 +1699,28 @@
                     "description": "Optional subdirectory path to organize the file within the knowledge base."
                   },
                   "file": {
-                    "type": "array",
+                    "type": [
+                      "array",
+                      "null"
+                    ],
                     "items": {
                       "type": "integer",
                       "format": "int32",
                       "minimum": 0
                     },
-                    "description": "The file to upload.",
+                    "description": "File bytes (multipart `file` field). Mutually exclusive with `url`.",
                     "contentMediaType": "application/octet-stream"
                   },
                   "metadata": {
                     "type": "object",
                     "description": "Optional JSON metadata to attach to the file."
+                  },
+                  "url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Public http/https URL the server fetches and ingests directly.\nSSRF-hardened (internal hosts blocked). Mutually exclusive with `file`."
                   }
                 }
               }
@@ -1665,6 +1731,44 @@
         "responses": {
           "201": {
             "description": "File uploaded",
+            "headers": {
+              "RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Max requests per window for this user."
+              },
+              "RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Requests left in the current window."
+              },
+              "RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds until the current window resets."
+              },
+              "X-RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Limit`."
+              },
+              "X-RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Remaining`."
+              },
+              "X-RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Reset`."
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1675,6 +1779,60 @@
           },
           "409": {
             "description": "A file with the same name already exists in this directory",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "headers": {
+              "RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Max requests per window for this user."
+              },
+              "RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Requests left in the current window."
+              },
+              "RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds until the current window resets."
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds the client should wait before retrying."
+              },
+              "X-RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Limit`."
+              },
+              "X-RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Remaining`."
+              },
+              "X-RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Reset`."
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2536,7 +2694,7 @@
         "tags": [
           "k2"
         ],
-        "description": "Upload a data file (CSV, Parquet, JSON) into the knowledge base",
+        "description": "Upload a data file into the knowledge base via direct upload or remote URL fetch",
         "operationId": "handler",
         "parameters": [
           {
@@ -2557,7 +2715,7 @@
           }
         ],
         "requestBody": {
-          "description": "File upload with optional table_name and mode fields",
+          "description": "Multipart form with either a `file` field (raw bytes) OR a `url` field (http/https; the server fetches it). Optional `table_name` overrides the auto-derived table name; optional `mode` is `create` (default), `replace`, or `append`.",
           "content": {
             "multipart/form-data": {
 
@@ -2567,9 +2725,101 @@
         "responses": {
           "200": {
             "description": "Upload result",
+            "headers": {
+              "RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Max requests per window for this user."
+              },
+              "RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Requests left in the current window."
+              },
+              "RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds until the current window resets."
+              },
+              "X-RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Limit`."
+              },
+              "X-RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Remaining`."
+              },
+              "X-RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Reset`."
+              }
+            },
             "content": {
               "application/json": {
 
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "headers": {
+              "RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Max requests per window for this user."
+              },
+              "RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Requests left in the current window."
+              },
+              "RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds until the current window resets."
+              },
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds the client should wait before retrying."
+              },
+              "X-RateLimit-Limit": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Limit`."
+              },
+              "X-RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Remaining`."
+              },
+              "X-RateLimit-Reset": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Legacy alias of `RateLimit-Reset`."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
               }
             }
           }
@@ -3566,9 +3816,9 @@
     "/orgs/{org_id}/projects/{project_id}/compose": {
       "post": {
         "tags": [
-          "compose"
+          "composer"
         ],
-        "description": "Send a prompt to the Timbal Composer agent. The `prompt` field accepts a plain string, an array of content blocks, or a full Message object. Content blocks can be text or files (base64, URL, or server-side path). Supported file types: images (png/jpg/gif/webp/svg), PDFs, and text-readable formats (json, csv, md, yaml, py, rs, etc.).",
+        "description": "Send a prompt to the Timbal Composer agent. The `prompt` field accepts a plain string, an array of content blocks, or a full Message object. File blocks (`base64` or `url` source) are staged server-side under the session inbox and replaced with a path-reference text block before reaching the model — bytes never enter the conversation context. The agent can then either `Read` the staged file for inspection, `import_kb_table` it to create queryable DuckDB tables (csv/xlsx/parquet/json), or `add_kb_file` to parse + embed it for semantic/keyword search (pdf/docx/md/txt/audio). Legacy `.xls` is not accepted for tabular ingest; save as `.xlsx` first.",
         "operationId": "handler",
         "parameters": [
           {
@@ -3595,6 +3845,24 @@
                 "$ref": "#/components/schemas/ComposeRequest"
               },
               "examples": {
+                "CSV for KB ingestion": {
+                  "value": {
+                    "rev": "main",
+                    "prompt": [
+                      "Load this into the knowledge base as table 'sales' (append mode)",
+                      {
+                        "type": "file",
+                        "file": {
+                          "name": "sales.csv",
+                          "source": {
+                            "type": "base64",
+                            "data": "Y3VzdG9tZXIsYW1vdW50CkFsaWNlLDEwMAo="
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
                 "File from URL": {
                   "value": {
                     "rev": "main",
@@ -3607,24 +3875,6 @@
                           "source": {
                             "type": "url",
                             "url": "https://example.com/config.json"
-                          }
-                        }
-                      }
-                    ]
-                  }
-                },
-                "File from server path": {
-                  "value": {
-                    "rev": "main",
-                    "prompt": [
-                      "Analyze this log file",
-                      {
-                        "type": "file",
-                        "file": {
-                          "name": "app.log",
-                          "source": {
-                            "type": "path",
-                            "path": "/mnt/efs/uploads/app.log"
                           }
                         }
                       }
@@ -3719,9 +3969,9 @@
     "/orgs/{org_id}/projects/{project_id}/compose/plans": {
       "get": {
         "tags": [
-          "compose"
+          "composer"
         ],
-        "description": "List plan files produced by compose plan-mode sessions, most recently modified first",
+        "description": "List plan files produced by Composer plan-mode sessions, most recently modified first",
         "operationId": "list",
         "parameters": [
           {
@@ -3766,7 +4016,7 @@
     "/orgs/{org_id}/projects/{project_id}/compose/plans/{plan_id}": {
       "get": {
         "tags": [
-          "compose"
+          "composer"
         ],
         "description": "Get a plan's metadata and full markdown body",
         "operationId": "single",
@@ -3823,7 +4073,7 @@
     "/orgs/{org_id}/projects/{project_id}/compose/sessions": {
       "get": {
         "tags": [
-          "compose"
+          "composer"
         ],
         "description": "List sessions for a project, most recent first",
         "operationId": "list",
@@ -3894,7 +4144,7 @@
     "/orgs/{org_id}/projects/{project_id}/compose/sessions/{session_id}": {
       "get": {
         "tags": [
-          "compose"
+          "composer"
         ],
         "description": "Get session details including token usage, cost, and message history",
         "operationId": "single",
@@ -3949,9 +4199,9 @@
     "/orgs/{org_id}/projects/{project_id}/compose/sessions/{session_id}/stop": {
       "post": {
         "tags": [
-          "compose"
+          "composer"
         ],
-        "description": "Stop a running compose session by sending SIGTERM to the Claude process",
+        "description": "Stop a running Composer session by sending SIGTERM to the Claude process",
         "operationId": "handler",
         "parameters": [
           {
@@ -6636,7 +6886,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). For non-serverless deployments, the method and most headers pass through; JSON bodies on paths ending in `/run` or `/stream` get `context.platform_config` merged in (same shape as serverless / `timbal.server.http` + `RunContext`). For `type = serverless`, the request is handled like `timbal codegen test`. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. Responses include `X-Timbal-Workforce-Deployment-Type` (`serverless` | `ecs` | `on-premise`). WebSocket upgrades are not supported on this route.",
+        "description": "Proxy HTTP to a **running** workforce deployment (agent or workflow). Non-serverless: method and headers pass through; JSON on `/run` or `/stream` may get `context.platform_config` merged for SDK auth-back. Serverless: no upstream URL — the platform runs the workforce for this request. Pass `workforce` as id, manifest UUID, or name; `rev` is the git branch. Response header `X-Timbal-Workforce-Deployment-Type` is `serverless`, `ecs`, or `on-premise`. WebSocket upgrades are not supported.",
         "operationId": "workforce_proxy_get",
         "parameters": [
           {
@@ -6693,7 +6943,10 @@
             "description": "No running deployment found for this component on this branch"
           },
           "502": {
-            "description": "The deployment did not return a successful HTTP response"
+            "description": "The deployment was unreachable, dropped the connection, or returned an invalid response"
+          },
+          "504": {
+            "description": "The deployment did not respond within the proxy timeout"
           }
         },
         "security": [
@@ -6706,7 +6959,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). For non-serverless deployments, the method and most headers pass through; JSON bodies on paths ending in `/run` or `/stream` get `context.platform_config` merged in (same shape as serverless / `timbal.server.http` + `RunContext`). For `type = serverless`, the request is handled like `timbal codegen test`. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. Responses include `X-Timbal-Workforce-Deployment-Type` (`serverless` | `ecs` | `on-premise`). WebSocket upgrades are not supported on this route.",
+        "description": "Proxy HTTP to a **running** workforce deployment (agent or workflow). Non-serverless: method and headers pass through; JSON on `/run` or `/stream` may get `context.platform_config` merged for SDK auth-back. Serverless: no upstream URL — the platform runs the workforce for this request. Pass `workforce` as id, manifest UUID, or name; `rev` is the git branch. Response header `X-Timbal-Workforce-Deployment-Type` is `serverless`, `ecs`, or `on-premise`. WebSocket upgrades are not supported.",
         "operationId": "workforce_proxy_put",
         "parameters": [
           {
@@ -6763,7 +7016,10 @@
             "description": "No running deployment found for this component on this branch"
           },
           "502": {
-            "description": "The deployment did not return a successful HTTP response"
+            "description": "The deployment was unreachable, dropped the connection, or returned an invalid response"
+          },
+          "504": {
+            "description": "The deployment did not respond within the proxy timeout"
           }
         },
         "security": [
@@ -6776,7 +7032,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). For non-serverless deployments, the method and most headers pass through; JSON bodies on paths ending in `/run` or `/stream` get `context.platform_config` merged in (same shape as serverless / `timbal.server.http` + `RunContext`). For `type = serverless`, the request is handled like `timbal codegen test`. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. Responses include `X-Timbal-Workforce-Deployment-Type` (`serverless` | `ecs` | `on-premise`). WebSocket upgrades are not supported on this route.",
+        "description": "Proxy HTTP to a **running** workforce deployment (agent or workflow). Non-serverless: method and headers pass through; JSON on `/run` or `/stream` may get `context.platform_config` merged for SDK auth-back. Serverless: no upstream URL — the platform runs the workforce for this request. Pass `workforce` as id, manifest UUID, or name; `rev` is the git branch. Response header `X-Timbal-Workforce-Deployment-Type` is `serverless`, `ecs`, or `on-premise`. WebSocket upgrades are not supported.",
         "operationId": "workforce_proxy_post",
         "parameters": [
           {
@@ -6833,7 +7089,10 @@
             "description": "No running deployment found for this component on this branch"
           },
           "502": {
-            "description": "The deployment did not return a successful HTTP response"
+            "description": "The deployment was unreachable, dropped the connection, or returned an invalid response"
+          },
+          "504": {
+            "description": "The deployment did not respond within the proxy timeout"
           }
         },
         "security": [
@@ -6846,7 +7105,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). For non-serverless deployments, the method and most headers pass through; JSON bodies on paths ending in `/run` or `/stream` get `context.platform_config` merged in (same shape as serverless / `timbal.server.http` + `RunContext`). For `type = serverless`, the request is handled like `timbal codegen test`. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. Responses include `X-Timbal-Workforce-Deployment-Type` (`serverless` | `ecs` | `on-premise`). WebSocket upgrades are not supported on this route.",
+        "description": "Proxy HTTP to a **running** workforce deployment (agent or workflow). Non-serverless: method and headers pass through; JSON on `/run` or `/stream` may get `context.platform_config` merged for SDK auth-back. Serverless: no upstream URL — the platform runs the workforce for this request. Pass `workforce` as id, manifest UUID, or name; `rev` is the git branch. Response header `X-Timbal-Workforce-Deployment-Type` is `serverless`, `ecs`, or `on-premise`. WebSocket upgrades are not supported.",
         "operationId": "workforce_proxy_delete",
         "parameters": [
           {
@@ -6903,7 +7162,10 @@
             "description": "No running deployment found for this component on this branch"
           },
           "502": {
-            "description": "The deployment did not return a successful HTTP response"
+            "description": "The deployment was unreachable, dropped the connection, or returned an invalid response"
+          },
+          "504": {
+            "description": "The deployment did not respond within the proxy timeout"
           }
         },
         "security": [
@@ -6916,7 +7178,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Proxy an HTTP request to a **running** workforce deployment (agent or workflow). For non-serverless deployments, the method and most headers pass through; JSON bodies on paths ending in `/run` or `/stream` get `context.platform_config` merged in (same shape as serverless / `timbal.server.http` + `RunContext`). For `type = serverless`, the request is handled like `timbal codegen test`. Identify the component with `workforce` (numeric id, manifest UUID, or name) and the git **branch** with `rev`. Responses include `X-Timbal-Workforce-Deployment-Type` (`serverless` | `ecs` | `on-premise`). WebSocket upgrades are not supported on this route.",
+        "description": "Proxy HTTP to a **running** workforce deployment (agent or workflow). Non-serverless: method and headers pass through; JSON on `/run` or `/stream` may get `context.platform_config` merged for SDK auth-back. Serverless: no upstream URL — the platform runs the workforce for this request. Pass `workforce` as id, manifest UUID, or name; `rev` is the git branch. Response header `X-Timbal-Workforce-Deployment-Type` is `serverless`, `ecs`, or `on-premise`. WebSocket upgrades are not supported.",
         "operationId": "workforce_proxy_patch",
         "parameters": [
           {
@@ -6973,7 +7235,278 @@
             "description": "No running deployment found for this component on this branch"
           },
           "502": {
-            "description": "The deployment did not return a successful HTTP response"
+            "description": "The deployment was unreachable, dropped the connection, or returned an invalid response"
+          },
+          "504": {
+            "description": "The deployment did not respond within the proxy timeout"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/roles": {
+      "get": {
+        "tags": [
+          "roles"
+        ],
+        "description": "List roles available to an organization. Includes both system roles and any custom roles defined by the organization.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Roles for the organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgRolesResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "roles"
+        ],
+        "description": "Create a custom role scoped to the organization.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRoleReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Role created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "description": "A role with that name already exists in the organization"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/roles/{role_id}": {
+      "get": {
+        "tags": [
+          "roles"
+        ],
+        "description": "Retrieve a role and the full set of actions it grants.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Role for the organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Role not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "roles"
+        ],
+        "description": "Delete a custom role. Fails with 409 if any member currently holds the role unless `force: true`, in which case those members are demoted to the system `user` role before the delete proceeds. System roles cannot be deleted.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional — omit entirely or send `{}` for default (non-force) behavior.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteRoleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Role deleted"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Role not found"
+          },
+          "409": {
+            "description": "Role is still assigned to one or more members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleInUseConflict"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "roles"
+        ],
+        "description": "Partially update a custom role. System roles cannot be modified.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditRoleReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Role updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Role not found"
+          },
+          "409": {
+            "description": "A role with that name already exists in the organization"
           }
         },
         "security": [
@@ -7286,6 +7819,27 @@
           }
         }
       },
+      "Action": {
+        "type": "string",
+        "description": "A domain action a role can grant. Action keys follow\n`\u003Cscope\u003E.\u003Cresource\u003E.\u003Cverb\u003E` (e.g. `org.project.create`).",
+        "enum": [
+          "org.project.create",
+          "org.user.view",
+          "org.user.invite",
+          "org.user.remove",
+          "org.user.role.update",
+          "org.billing.manage",
+          "org.domain.view",
+          "org.domain.manage",
+          "org.kb.create",
+          "org.profile.update",
+          "org.role.manage",
+          "org.notification.channel.view",
+          "org.notification.channel.manage",
+          "org.notification.rule.view",
+          "org.notification.rule.manage"
+        ]
+      },
       "AddProjectUserReqBody": {
         "type": "object",
         "required": [
@@ -7300,10 +7854,19 @@
       },
       "AppType": {
         "type": "string",
+        "description": "Read/output enum for a workforce component's type.\n\nTolerant on deserialization (`#[serde(other)]`) because this type is reconstructed\nfrom DB rows via two paths that both must not fail on unknown values:\n  1. [`AppType::try_from`] — used by `FromRow` impls reading `OrgsApps.type` directly.\n  2. `serde_json::from_value` — used by handlers that build workforce JSON via\n     `json_build_object('type', oa.type, ...)` (runs list, deployments, etc.) and\n     then deserialize into `WorkforcePreview` / `RunPreview`.\n\nNew workforce types written by `on_push` (or older ones removed from this enum) must\nnot break list/get endpoints, hence `Unknown` as a catch-all.\n\n**Do not use this for API request bodies** — see [`AppTypeInput`] for the strict\ninput variant that rejects unknowns at the deserialization boundary.",
         "enum": [
           "agent",
           "workflow",
           "unknown"
+        ]
+      },
+      "AppTypeInput": {
+        "type": "string",
+        "description": "Strict input variant of [`AppType`] for API request bodies (e.g. `ProjectOrigin::Scratch`).\nRejects unknown strings and the literal `\"unknown\"` at deserialization (→ 400).",
+        "enum": [
+          "agent",
+          "workflow"
         ]
       },
       "BatchCreateVarsReqBody": {
@@ -7378,7 +7941,7 @@
       },
       "ComposeMode": {
         "type": "string",
-        "description": "Compose session behavior.",
+        "description": "Composer session behavior.",
         "enum": [
           "default",
           "plan"
@@ -7853,6 +8416,32 @@
           }
         }
       },
+      "CreateRoleReqBody": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Action"
+            },
+            "description": "Domain actions this role grants. Unknown action keys fail\ndeserialization (400). Empty list is allowed."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable description."
+          },
+          "name": {
+            "type": "string",
+            "description": "Role name. Must be unique within the organization."
+          }
+        }
+      },
       "CreateVarReqBody": {
         "type": "object",
         "required": [
@@ -7942,6 +8531,7 @@
           "source",
           "source_metadata",
           "amount_credits",
+          "consumed_credits",
           "starts_at",
           "created_at"
         ],
@@ -7950,6 +8540,11 @@
             "type": "integer",
             "format": "int64",
             "description": "Credits awarded by this grant. Always positive; corrections ship as a\nseparate grant rather than a negative amount."
+          },
+          "consumed_credits": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credits already drawn from this grant by attributed costs. Bounded by\n`amount_credits`; remaining headroom is `amount_credits - consumed_credits`."
           },
           "created_at": {
             "type": "string",
@@ -8008,6 +8603,18 @@
               "null"
             ],
             "description": "When `true`, delete even if rules reference this channel (cascading unlink)."
+          }
+        }
+      },
+      "DeleteRoleBody": {
+        "type": "object",
+        "properties": {
+          "force": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "When `true`, demote any members currently holding this role to the\nsystem `user` role and proceed with the delete."
           }
         }
       },
@@ -8181,6 +8788,13 @@
       "EditK2Request": {
         "type": "object",
         "properties": {
+          "auto_processing_enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Toggle the automatic parsing, chunking, and embedding pipeline for new file uploads. When false, uploads are stored as-is. Existing files are not affected."
+          },
           "backup_enabled": {
             "type": [
               "boolean",
@@ -8291,8 +8905,7 @@
       "EditOrgUserReqBody": {
         "type": "object",
         "required": [
-          "email",
-          "role"
+          "email"
         ],
         "properties": {
           "email": {
@@ -8300,9 +8913,20 @@
             "description": "User's email address"
           },
           "role": {
-            "type": "string",
-            "description": "User's role in the organization. Standard values are `admin` and `user`. Custom roles are available — contact sales for more information",
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "System role name. Standard values are `admin`, `developer`,\n`billing`, and `user`. Mutually exclusive with `role_id`.",
             "example": "user"
+          },
+          "role_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Role identifier — either a system role or a custom role defined\nin this organization. Mutually exclusive with `role`."
           }
         }
       },
@@ -8355,6 +8979,35 @@
         "properties": {
           "role": {
             "type": "string"
+          }
+        }
+      },
+      "EditRoleReqBody": {
+        "type": "object",
+        "properties": {
+          "actions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Action"
+            },
+            "description": "Replace the full action grant set. Omitted fields are left unchanged."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable description. Pass `null` to clear."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Role name. Must remain unique within the organization."
           }
         }
       },
@@ -8448,7 +9101,7 @@
               "string",
               "null"
             ],
-            "description": "Filename (e.g. \"screenshot.png\"). Used for display and media-type inference.\nOptional — when omitted, `media_type` must be provided explicitly."
+            "description": "Filename (e.g. \"screenshot.png\"). Used for the staged file name on disk\nand for media-type inference. Optional — when omitted, `media_type` must\nbe provided explicitly and a generic name is generated."
           },
           "source": {
             "$ref": "#/components/schemas/FileSource",
@@ -8473,25 +9126,6 @@
                 "type": "string",
                 "enum": [
                   "base64"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Local filesystem path (server-side).",
-            "required": [
-              "path",
-              "type"
-            ],
-            "properties": {
-              "path": {
-                "type": "string"
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "path"
                 ]
               }
             }
@@ -8881,11 +9515,16 @@
           "row_count",
           "vector_count",
           "index_count",
+          "auto_processing_enabled",
           "backup_enabled",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "auto_processing_enabled": {
+            "type": "boolean",
+            "description": "When false, file uploads to this knowledge base are stored as-is and skipped by the automatic parsing, chunking, and embedding pipeline."
+          },
           "backup_enabled": {
             "type": "boolean"
           },
@@ -9773,6 +10412,21 @@
           }
         }
       },
+      "ListOrgRolesResBody": {
+        "type": "object",
+        "required": [
+          "roles"
+        ],
+        "properties": {
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RolePreview"
+            },
+            "description": "Roles available to this organization, system roles first."
+          }
+        }
+      },
       "ListOrgUsersResBody": {
         "type": "object",
         "required": [
@@ -10443,6 +11097,42 @@
           }
         }
       },
+      "PatchMeReqBody": {
+        "type": "object",
+        "properties": {
+          "access_request_data": {
+            "description": "Free-form access-request metadata. Merged (shallow) into the existing\nstored object server-side."
+          },
+          "lang": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Preferred language (ISO 639-1, e.g. `en`)."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Display name. 1–64 characters. Cannot be set to null."
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Phone number. Pass null to clear."
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Profile photo URL. Pass null to clear."
+          }
+        }
+      },
       "PlanDetail": {
         "allOf": [
           {
@@ -10890,7 +11580,7 @@
             ],
             "properties": {
               "app_type": {
-                "$ref": "#/components/schemas/AppType"
+                "$ref": "#/components/schemas/AppTypeInput"
               },
               "has_ui": {
                 "type": "boolean"
@@ -11167,6 +11857,133 @@
           "system",
           "user",
           "assistant"
+        ]
+      },
+      "RoleDetail": {
+        "type": "object",
+        "description": "A role with its full set of granted actions.",
+        "required": [
+          "id",
+          "name",
+          "source",
+          "actions",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Action"
+            },
+            "description": "Domain actions this role grants. May be empty."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable description."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable role identifier. Pass as `role_id` to\n`PATCH /orgs/{org_id}/users` to assign this role to a member."
+          },
+          "name": {
+            "type": "string",
+            "description": "Role name. Unique within the organization (and globally for system roles)."
+          },
+          "source": {
+            "$ref": "#/components/schemas/RoleSource"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RoleInUseConflict": {
+        "type": "object",
+        "description": "Returned when `DELETE /orgs/{org_id}/roles/{role_id}` is called while the\nrole is still assigned and `force` is not set.",
+        "required": [
+          "code",
+          "message",
+          "user_ids",
+          "pending_invite_count"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Machine-readable error code."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable description."
+          },
+          "pending_invite_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Pending invites (`user_id` not yet set) still pointing at this role.",
+            "minimum": 0
+          },
+          "user_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Accepted members currently holding this role."
+          }
+        }
+      },
+      "RolePreview": {
+        "type": "object",
+        "description": "Compact role record returned by listing endpoints. Fetch a single\nrole to retrieve the full action grant set.",
+        "required": [
+          "id",
+          "name",
+          "source",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable description."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable role identifier. Pass as `role_id` to\n`PATCH /orgs/{org_id}/users` to assign this role to a member."
+          },
+          "name": {
+            "type": "string",
+            "description": "Role name. Unique within the organization (and globally for system roles)."
+          },
+          "source": {
+            "$ref": "#/components/schemas/RoleSource"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RoleSource": {
+        "type": "string",
+        "description": "Whether a role is a built-in preset or defined by the organization.\n`system` roles are read-only; `custom` roles can be edited or deleted\nby an organization admin.",
+        "enum": [
+          "system",
+          "custom"
         ]
       },
       "RunDetail": {
@@ -11938,8 +12755,8 @@
       "description": "Subscriptions, usage, and payment-related operations"
     },
     {
-      "name": "compose",
-      "description": "Compose — AI coding agent sessions"
+      "name": "composer",
+      "description": "Composer — AI coding agent sessions"
     },
     {
       "name": "files",
@@ -11962,8 +12779,16 @@
       "description": "Project operations"
     },
     {
+      "name": "roles",
+      "description": "Roles and the actions they grant"
+    },
+    {
       "name": "runs",
       "description": "Execution operations"
+    },
+    {
+      "name": "users",
+      "description": "Authenticated user profile"
     }
   ]
 }
