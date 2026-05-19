@@ -618,7 +618,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ReqBody"
+                "$ref": "#/components/schemas/PatchMeReqBody"
               }
             }
           },
@@ -11097,6 +11097,42 @@
           }
         }
       },
+      "PatchMeReqBody": {
+        "type": "object",
+        "properties": {
+          "access_request_data": {
+            "description": "Free-form access-request metadata. Merged (shallow) into the existing\nstored object server-side."
+          },
+          "lang": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Preferred language (ISO 639-1, e.g. `en`)."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Display name. 1–64 characters. Cannot be set to null."
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Phone number. Pass null to clear."
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Profile photo URL. Pass null to clear."
+          }
+        }
+      },
       "PlanDetail": {
         "allOf": [
           {
@@ -11812,42 +11848,6 @@
           "email": {
             "type": "string",
             "description": "Email address of the user to remove from the organization"
-          }
-        }
-      },
-      "ReqBody": {
-        "type": "object",
-        "properties": {
-          "access_request_data": {
-            "description": "Free-form access-request metadata. Merged (shallow) into the existing\nstored object server-side."
-          },
-          "lang": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Preferred language (ISO 639-1, e.g. `en`)."
-          },
-          "name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Display name. 1–64 characters. Cannot be set to null."
-          },
-          "phone": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Phone number. Pass null to clear."
-          },
-          "photo_url": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Profile photo URL. Pass null to clear."
           }
         }
       },
