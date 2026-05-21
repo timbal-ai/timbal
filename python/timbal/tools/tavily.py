@@ -1,4 +1,3 @@
-import os
 from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
@@ -9,19 +8,14 @@ from ..platform.integrations import Integration
 _BASE_URL = "https://api.tavily.com"
 
 
-async def _resolve_api_key(tool: Any) -> str:
+async def _resolve_api_key(*, integration: Any = None, api_key: SecretStr | None = None) -> str:
     """Resolve Tavily API key from integration, explicit field, or env var."""
-    if isinstance(tool.integration, Integration):
-        credentials = await tool.integration.resolve()
-        return credentials["api_key"]
-    if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("TAVILY_API_KEY")
-    if env_key:
-        return env_key
-    raise ValueError(
-        "Tavily API key not found. Set TAVILY_API_KEY environment variable, "
-        "pass api_key in config, or configure an integration."
+    from ._creds import resolve_api_key
+    return await resolve_api_key(
+        env_var="TAVILY_API_KEY",
+        provider_name="Tavily",
+        integration=integration,
+        api_key=api_key,
     )
 
 
@@ -51,7 +45,7 @@ class TavilySearch(Tool):
             include_raw_content: bool = Field(False, description="Include cleaned page content in results"),
             include_images: bool = Field(False, description="Include image search results"),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
             payload: dict[str, Any] = {
@@ -103,7 +97,7 @@ class TavilyExtract(Tool):
             include_images: bool = Field(False, description="Include images extracted from pages"),
             format: str = Field("markdown", description='"markdown" or "text"'),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
             payload: dict[str, Any] = {
@@ -156,7 +150,7 @@ class TavilyCrawl(Tool):
             allow_external: bool = Field(True, description="Follow links to external domains"),
             include_images: bool = Field(False, description="Extract images from pages"),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
             payload: dict[str, Any] = {
@@ -216,7 +210,7 @@ class TavilyMap(Tool):
             exclude_paths: list[str] | None = Field(None, description="Regex patterns for paths to exclude"),
             allow_external: bool = Field(True, description="Include links to external domains"),
         ) -> dict:
-            api_key = await _resolve_api_key(self)
+            api_key = await _resolve_api_key(integration=self.integration, api_key=self.api_key)
             import httpx
 
             payload: dict[str, Any] = {
