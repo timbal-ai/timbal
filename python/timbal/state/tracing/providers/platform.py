@@ -103,7 +103,6 @@ class PlatformTracingProvider(TracingProvider):
         payload = {"parent_id": run_context.parent_id, "trace": run_context._trace.model_dump()}
         if subject.app_id:
             subject_path = f"apps/{subject.app_id}"
-            payload["version_id"] = subject.version_id
         else:
             raise ValueError("Cannot use platform tracing provider without an app or project subject")
         if subject.rev is not None:

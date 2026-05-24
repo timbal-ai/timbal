@@ -18,7 +18,7 @@ def _ctx(monkeypatch):
     cfg = PlatformConfig(
         host="api.timbal.ai",
         auth=PlatformAuth(type=PlatformAuthType.BEARER, token="t"),
-        subject=PlatformSubject(org_id="org_1", app_id="400", version_id="v1"),
+        subject=PlatformSubject(org_id="org_1", app_id="400"),
     )
     set_run_context(RunContext(platform_config=cfg, tracing_provider=None))
     yield
