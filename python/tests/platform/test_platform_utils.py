@@ -21,12 +21,11 @@ def _make_platform_config(
     host: str = "api.timbal.ai",
     org_id: str = "org_123",
     app_id: str = "app_456",
-    version_id: str = "v1",
 ) -> PlatformConfig:
     return PlatformConfig(
         host=host,
         auth=PlatformAuth(type=PlatformAuthType.BEARER, token="token"),
-        subject=PlatformSubject(org_id=org_id, app_id=app_id, version_id=version_id),
+        subject=PlatformSubject(org_id=org_id, app_id=app_id),
     )
 
 

@@ -7,7 +7,6 @@ These tests run live against the Timbal API and require a populated
     TIMBAL_API_KEY=<your key>
     TIMBAL_ORG_ID=<your org id>
     TIMBAL_APP_ID=<app id to record traces under>
-    TIMBAL_VERSION_ID=<version id>   # optional
 
 All tests are skipped automatically if the file is absent.
 Run with:  uv run pytest python/tests/core/test_platform_tracing_provider.py -v
