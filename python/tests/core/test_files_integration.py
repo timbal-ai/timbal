@@ -12,7 +12,7 @@ pytestmark = pytest.mark.integration
     params=[
         "openai/gpt-4o-mini",
         "openai/gpt-4o-mini-responses",
-        "google/gemini-3.1-flash-lite-preview",
+        "google/gemini-3.1-flash-lite",
         "anthropic/claude-sonnet-4-6",
         # ? Add more tests for other models.
     ]

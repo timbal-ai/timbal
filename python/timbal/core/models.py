@@ -110,7 +110,7 @@ Model = Literal[
     "togetherai/deepcogito/cogito-v2-1-671b",
     "togetherai/mistralai/Mistral-Small-24B-Instruct-2501",
     "google/gemini-3.1-pro-preview",
-    "google/gemini-3.1-flash-lite-preview",
+    "google/gemini-3.1-flash-lite",
     "google/gemini-3-flash-preview",
     "google/gemini-2.5-pro",
     "google/gemini-2.5-pro-preview-tts",
