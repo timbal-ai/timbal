@@ -1,13 +1,8 @@
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema, core_schema
-
-_EXPIRY_BUFFER = timedelta(seconds=60)
-
-_credential_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 
 class Integration:
@@ -19,7 +14,15 @@ class Integration:
             integration: Annotated[str, Integration("gmail")]
 
         credential = await config.integration.resolve()
-        token = credential.token
+        token = credential["token"]
+
+    Every ``resolve()`` call round-trips to the platform. We deliberately do
+    NOT cache here: the platform endpoint already serves the stored access
+    token until it actually expires (refresh happens server-side), so the
+    only thing a client cache would save is the HTTP hop. In exchange it
+    would introduce subtle cross-user collisions in shared SDK processes
+    and stale-token windows after re-consent / revocation. Re-add a cache
+    only if measurements show the round-trip is actually the bottleneck.
     """
 
     def __init__(self, provider: str, org_integration_id: str | None = None) -> None:
@@ -57,25 +60,11 @@ class Integration:
         if not subject:
             raise ValueError("Platform config must have a subject with org_id to fetch integration credentials.")
 
-        cache_key = (platform_config.host, subject.org_id, self._org_integration_id)
-        cached = _credential_cache.get(cache_key)
-        if cached is not None:
-            expires_at = cached.get("expires_at")
-            if expires_at is None:
-                return cached
-            if isinstance(expires_at, str):
-                expires_at = datetime.fromisoformat(expires_at)
-            if expires_at > datetime.now(UTC) + _EXPIRY_BUFFER:
-                return cached
-
         path = f"orgs/{subject.org_id}/integrations/{self._org_integration_id}"
         from .utils import _request
 
         response = await _request("GET", path)
-        credential = response.json()
-
-        _credential_cache[cache_key] = credential
-        return credential
+        return response.json()
 
     def __repr__(self) -> str:
         return f"Integration(provider={self.provider!r}, id={self._org_integration_id!r})"
