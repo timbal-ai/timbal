@@ -25,7 +25,7 @@ if TYPE_CHECKING:
         AsanaUpdateTask,
     )
     from .bash import Bash
-    from .cala import CalaSearch
+    from .cala import CalaQuery, CalaSearch
     from .cloudflare import (
         CloudflareCrawlCancel,
         CloudflareCrawlGet,
@@ -947,6 +947,7 @@ if TYPE_CHECKING:
     )
 __all__ = [
     "Bash",
+    "CalaQuery",
     "CalaSearch",
     "Edit",
     "FirecrawlCrawl",
@@ -1831,6 +1832,7 @@ __all__ = [
 
 _LAZY_IMPORTS = {
     "Bash": ".bash",
+    "CalaQuery": ".cala",
     "CalaSearch": ".cala",
     "Edit": ".edit",
     "FirecrawlCrawl": ".firecrawl",

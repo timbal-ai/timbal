@@ -203,7 +203,11 @@ async def test_web_search_cala_posts_natural_language_query():
     headers = mock_client.post.await_args.kwargs["headers"]
     assert headers["x-api-key"] == "cala-key"
     body = mock_client.post.await_args.kwargs["json"]
-    assert body == {"input": "what is the capital of Mali"}
+    assert body == {
+        "input": "what is the capital of Mali",
+        "explainability": True,
+        "return_entities": True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +360,11 @@ async def test_agent_invokes_cala_web_search_via_tool_use():
     assert result.status.code == "success"
     mock_client.post.assert_awaited_once()
     assert mock_client.post.await_args[0][0].endswith("/knowledge/search")
-    assert mock_client.post.await_args.kwargs["json"] == {"input": "capital of Mali"}
+    assert mock_client.post.await_args.kwargs["json"] == {
+        "input": "capital of Mali",
+        "explainability": True,
+        "return_entities": True,
+    }
 
 
 @pytest.mark.asyncio
