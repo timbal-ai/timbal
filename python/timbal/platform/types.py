@@ -34,5 +34,7 @@ class UploadFileResponse(BaseModel):
     created_at: datetime
     expires_at: datetime | None
     name: str
-    id: str | int
+    # Optional: POST /files (no org scope) returns a temporary upload without an id.
+    # POST /orgs/{org_id}/files returns a permanent upload with an id.
+    id: str | int | None = None
     url: str
