@@ -74,7 +74,7 @@ python -m timbal.codegen add-tool --type WebSearch --step agent_a
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `--type` | yes | `Bash`, `CalaSearch`, `Edit`, `Read`, `WebSearch`, `Write`, or `Custom` |
+| `--type` | yes | `Bash`, `CalaQuery`, `CalaSearch`, `Edit`, `Read`, `WebSearch`, `Write`, or `Custom` |
 | `--definition` | Custom only | Full function definition as a string |
 | `--name` | no | Override the default tool name |
 | `--config` | no | Constructor kwargs as JSON. Validated against the tool's schema. Use `null` to remove a key. |
@@ -136,7 +136,7 @@ python -m timbal.codegen set-config --config '{"system_prompt": null}'
 python -m timbal.codegen set-config --name web_search --config '{"timeout": 30}'
 ```
 
-Config fields are validated against the tool's schema. Supported configurable tools: `WebSearch`, `CalaSearch`, `Tool` (custom).
+Config fields are validated against the tool's schema. Supported configurable tools: `WebSearch`, `CalaSearch`, `CalaQuery`, `Tool` (custom).
 
 #### Configure a workflow step's constructor
 
@@ -170,7 +170,7 @@ python -m timbal.codegen add-step --type Custom \
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `--type` | yes | `Agent`, `Custom`, or a framework tool (`Bash`, `CalaSearch`, `Edit`, `Read`, `WebSearch`, `Write`) |
+| `--type` | yes | `Agent`, `Custom`, or a framework tool (`Bash`, `CalaQuery`, `CalaSearch`, `Edit`, `Read`, `WebSearch`, `Write`) |
 | `--config` | Agent only | JSON with Agent constructor params (must include `name`) |
 | `--definition` | Custom only | Full function definition |
 | `--name` | no | Override the step name |

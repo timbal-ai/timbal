@@ -12,7 +12,7 @@ os.environ["PYTHONWARNINGS"] = "ignore::DeprecationWarning"
 def pytest_configure(config):
     """Configure pytest with global settings."""
     # Load environment variables
-    load_dotenv()
+    load_dotenv(override=True)
 
 
 @pytest.fixture(autouse=True)

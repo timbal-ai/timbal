@@ -36,8 +36,10 @@ from pydantic import Field, SecretStr, computed_field
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
-from ..tools.cala import _BASE_URL as _CALA_BASE_URL
+from ..tools.cala import _normalize_base_url as _normalize_cala_base_url
+from ..tools.cala import _post_cala as _cala_post
 from ..tools.cala import _resolve_api_key as _resolve_cala_key
+from ..tools.cala import _search_request_body as _cala_search_request_body
 from ..tools.firecrawl import _BASE_URL as _FIRECRAWL_BASE_URL
 from ..tools.firecrawl import _resolve_api_key as _resolve_firecrawl_key
 from ..tools.scraperapi import _STRUCTURED_URL as _SCRAPERAPI_STRUCTURED_URL
@@ -144,24 +146,25 @@ def _make_scraperapi_handler(*, integration=None, api_key=None, user_location=No
     return web_search
 
 
-def _make_cala_handler(*, integration=None, api_key=None):
-    """Return an async handler that searches via Cala."""
+def _make_cala_handler(*, integration=None, api_key=None, base_url=None):
+    """Return an async handler that searches via Cala knowledge/search."""
 
     async def web_search(
-        query: str = Field(..., description="Natural language search query"),
+        query: str = Field(..., description="Cala QL expression or natural-language question"),
+        explainability: bool = True,
+        return_entities: bool = True,
     ) -> dict:
         resolved_key = await _resolve_cala_key(integration=integration, api_key=api_key)
-        import httpx
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{_CALA_BASE_URL}/knowledge/search",
-                headers={"x-api-key": resolved_key, "Content-Type": "application/json"},
-                json={"input": query},
-                timeout=httpx.Timeout(10.0, read=None),
-            )
-            response.raise_for_status()
-            return response.json()
+        return await _cala_post(
+            path="/knowledge/search",
+            api_key=resolved_key,
+            base_url=_normalize_cala_base_url(base_url),
+            body=_cala_search_request_body(
+                input=query,
+                explainability=explainability,
+                return_entities=return_entities,
+            ),
+        )
 
     return web_search
 
@@ -352,6 +355,7 @@ class WebSearch(Tool):
                 kwargs["handler"] = _make_cala_handler(
                     integration=kwargs.get("integration"),
                     api_key=kwargs.get("api_key"),
+                    base_url=kwargs.get("base_url"),
                 )
             elif provider == "firecrawl":
                 kwargs["handler"] = _make_firecrawl_handler(
