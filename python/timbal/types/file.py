@@ -397,8 +397,10 @@ class File(io.IOBase):
         from ..platform.utils import _request
         res = await _request("POST", path, files=files)
         upload_response = UploadFileResponse.model_validate(res.json())
-        # Encode simply the name of the url (the remaining is will be always safe
-        url = upload_response.url.rstrip(upload_response.name)
+        # Re-encode only the filename segment; the rest of the URL is already safe.
+        # NOTE: str.rstrip() takes a *set of chars*, not a suffix, so it would chew
+        # arbitrary trailing chars from the URL when they happen to be in the name.
+        url = upload_response.url.removesuffix(upload_response.name)
         url = f"{url}{quote(upload_response.name)}"
         object.__setattr__(self, "__persisted__", url)
         return url
