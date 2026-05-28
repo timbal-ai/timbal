@@ -1,6 +1,9 @@
 import asyncio
+import errno
 import json
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from timbal.state.context import RunContext
@@ -8,6 +11,62 @@ from timbal.state.tracing.providers.base import Exporter, TracingProvider
 from timbal.state.tracing.providers.jsonl import JsonlTracingProvider
 from timbal.state.tracing.span import Span
 from timbal.state.tracing.trace import Trace
+
+
+class TestWindowsFileLock:
+    def test_is_windows_lock_contention_error(self):
+        from timbal.state.tracing.providers import jsonl as jsonl_mod
+
+        is_contention = jsonl_mod._is_windows_lock_contention_error
+        assert is_contention(OSError(errno.EACCES, "locked"))
+        lock_violation = OSError(0, "locked")
+        lock_violation.winerror = 33
+        assert is_contention(lock_violation)
+        assert not is_contention(OSError(errno.EBADF, "bad fd"))
+        assert not is_contention(OSError(errno.EINVAL, "invalid"))
+
+    def test_file_lock_reraises_non_contention_oserror(self):
+        jsonl = pytest.importorskip("timbal.state.tracing.providers.jsonl")
+        if sys.platform != "win32":
+            pytest.skip("Windows-only msvcrt locking")
+
+        class FakeFile:
+            def fileno(self):
+                return 0
+
+            def seek(self, _offset):
+                return None
+
+        with patch.object(jsonl.msvcrt, "locking", side_effect=OSError(errno.EBADF, "bad fd")):
+            with pytest.raises(OSError, match="bad fd"):
+                with jsonl._file_lock(FakeFile()):
+                    pass
+
+    def test_file_lock_retries_contention_then_succeeds(self):
+        jsonl = pytest.importorskip("timbal.state.tracing.providers.jsonl")
+        if sys.platform != "win32":
+            pytest.skip("Windows-only msvcrt locking")
+
+        class FakeFile:
+            def fileno(self):
+                return 0
+
+            def seek(self, _offset):
+                return None
+
+        calls = {"n": 0}
+
+        def locking(_fd, _mode, _nbytes):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(errno.EACCES, "locked")
+            return None
+
+        with patch.object(jsonl.msvcrt, "locking", side_effect=locking):
+            with jsonl._file_lock(FakeFile()):
+                pass
+
+        assert calls["n"] == 2
 
 
 def _make_run_context(provider, run_id: str, parent_id: str | None = None) -> RunContext:

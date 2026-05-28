@@ -18,6 +18,18 @@ if TYPE_CHECKING:
     from ...context import RunContext
 
 
+def _is_windows_lock_contention_error(exc: OSError) -> bool:
+    """True when ``msvcrt.locking`` failed because the region is held elsewhere."""
+    import errno
+
+    contention_errnos = {errno.EACCES}
+    if edeadlock := getattr(errno, "EDEADLOCK", None):
+        contention_errnos.add(edeadlock)
+    if exc.errno in contention_errnos:
+        return True
+    return getattr(exc, "winerror", None) == 33  # ERROR_LOCK_VIOLATION
+
+
 # Cross-platform advisory file lock. fcntl is Unix-only; msvcrt provides the
 # equivalent primitive on Windows. We expose a single context manager so the
 # rest of the module stays platform-agnostic.
@@ -35,8 +47,10 @@ if sys.platform == "win32":
             try:
                 msvcrt.locking(fileobj.fileno(), msvcrt.LK_LOCK, 1)
                 break
-            except OSError:
-                continue
+            except OSError as exc:
+                if not _is_windows_lock_contention_error(exc):
+                    raise
+                time.sleep(0.05)
         try:
             yield
         finally:
