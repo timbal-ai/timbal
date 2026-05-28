@@ -2,8 +2,12 @@ import base64
 import email.mime.multipart
 import email.mime.text
 import io
+import json
+import os
 import pathlib
+import struct
 import sys
+import zlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +18,36 @@ from timbal.types.content.file import (
     _extract_email_attachments,
     _extract_email_body,
 )
+
+
+def _make_solid_png(size: int = 32, rgb: tuple[int, int, int] = (255, 128, 64)) -> bytes:
+    """Generate a valid solid-color RGB PNG without external deps.
+
+    Anthropic rejects images below a few pixels with ``Could not process image``,
+    so use 32x32 as the minimum for cross-provider tests.
+    """
+    sig = b"\x89PNG\r\n\x1a\n"
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+    pixel = bytes(rgb)
+    raw = b"".join(b"\x00" + pixel * size for _ in range(size))
+    idat = _chunk(b"IDAT", zlib.compress(raw, 9))
+    iend = _chunk(b"IEND", b"")
+    return sig + ihdr + idat + iend
+
+
+_PNG_BYTES = _make_solid_png()
+
+# Real-API integration test matrix: (model, max_tokens, env_key)
+# Mirrors the pattern used in test_output_model.py so the same models get coverage.
+_REAL_LLM_MATRIX = [
+    pytest.param("openai/gpt-4o-mini", None, "OPENAI_API_KEY", id="openai"),
+    pytest.param("anthropic/claude-haiku-4-5", 1024, "ANTHROPIC_API_KEY", id="anthropic"),
+    pytest.param("google/gemini-2.5-flash-lite", None, "GEMINI_API_KEY", id="google"),
+]
 
 
 def test_basic_file_content_validation(tmp_path: pathlib.Path) -> None:
@@ -301,6 +335,34 @@ class TestFileContentOpenAIResponses:
             result = fc.to_openai_responses_input()
         assert result["type"] == "input_file"
         assert "file_data" in result
+        assert result["filename"] == "test.pdf"
+
+    def test_pdf_anonymous_bytes_filename_is_string(self):
+        """Regression: anonymous bytes PDFs must still send a string filename.
+
+        ``_safe_file_name`` returns None for bytes without a name attr and for
+        data URLs, but the OpenAI Responses API rejects null filenames.
+        """
+        fc = _make_fc(b"%PDF-1.4 stub", ".pdf")
+        assert fc.name is None
+        with patch("timbal.types.content.file.validate_pdf"):
+            result = fc.to_openai_responses_input()
+        assert result["type"] == "input_file"
+        assert isinstance(result["filename"], str) and result["filename"], (
+            "filename must be a non-empty string even when display name is unknown"
+        )
+        assert result["filename"].endswith(".pdf")
+
+    def test_pdf_data_url_filename_is_string(self):
+        """Regression: data-URL PDFs must still send a string filename."""
+        data_url = "data:application/pdf;base64," + base64.b64encode(b"%PDF-1.4 stub").decode()
+        fc = FileContent(file=File(data_url))
+        assert fc.name is None
+        with patch("timbal.types.content.file.validate_pdf"):
+            result = fc.to_openai_responses_input()
+        assert result["type"] == "input_file"
+        assert isinstance(result["filename"], str) and result["filename"]
+        assert result["filename"].endswith(".pdf")
 
     def test_pdf_invalid_returns_error_text(self):
         fc = _make_fc(b"bad-pdf", ".pdf")
@@ -427,3 +489,457 @@ class TestFileContentAnthropic:
         first = fc.to_anthropic_input()
         second = fc.to_anthropic_input()
         assert first is second
+
+
+# ---------------------------------------------------------------------------
+# TestFileContentName — name defaulting must not trigger File I/O
+# ---------------------------------------------------------------------------
+
+class TestFileContentName:
+    def test_name_defaults_from_local_path(self, tmp_path: pathlib.Path) -> None:
+        test_file = tmp_path / "Q3 Report.pdf"
+        test_file.write_bytes(b"%PDF-1.4 stub")
+        fc = FileContent(file=File.validate(str(test_file)))
+        assert fc.name == "Q3 Report.pdf"
+
+    def test_name_defaults_from_url_basename(self) -> None:
+        fc = FileContent(file=File("https://content.timbal.ai/tmp/abc/Q3_Report.pdf"))
+        assert fc.name == "Q3_Report.pdf"
+
+    def test_name_url_basename_is_url_decoded(self) -> None:
+        fc = FileContent(file=File("https://example.com/files/Q3%20Report.pdf"))
+        assert fc.name == "Q3 Report.pdf"
+
+    def test_explicit_name_wins_over_file_name(self, tmp_path: pathlib.Path) -> None:
+        test_file = tmp_path / "raw_uuid.pdf"
+        test_file.write_bytes(b"%PDF-1.4 stub")
+        fc = FileContent(file=File.validate(str(test_file)), name="Display Name.pdf")
+        assert fc.name == "Display Name.pdf"
+
+    def test_name_none_for_anonymous_bytes(self) -> None:
+        fc = FileContent(file=File.validate(b"hello", {"extension": ".txt"}))
+        assert fc.name is None
+
+    def test_name_from_named_bytes(self) -> None:
+        bio = io.BytesIO(b"hello")
+        bio.name = "greeting.txt"
+        fc = FileContent(file=File(bio, extension=".txt"))
+        assert fc.name == "greeting.txt"
+
+    def test_name_none_for_data_url(self) -> None:
+        data_url = "data:text/plain;base64," + base64.b64encode(b"hi").decode()
+        fc = FileContent(file=File(data_url))
+        assert fc.name is None
+
+    def test_construction_does_not_trigger_fetcher_for_local_path(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Regression: building FileContent must NOT read the file from disk.
+
+        Reading ``self.file.name`` proxies through File.__wrapped__ which calls
+        the fetcher and slurps the entire file. For URLs that means a sync
+        network round-trip. The validator must extract the name from source
+        metadata instead.
+        """
+        test_file = tmp_path / "big.bin"
+        test_file.write_bytes(b"\x00" * 1024)
+        file_obj = File.validate(str(test_file))
+
+        assert object.__getattribute__(file_obj, "__fileobj__") is None
+        _ = FileContent(file=file_obj)
+        assert object.__getattribute__(file_obj, "__fileobj__") is None, (
+            "FileContent construction must not load the file"
+        )
+
+    def test_construction_does_not_trigger_fetcher_for_url(self) -> None:
+        file_obj = File("https://example.com/some/file.pdf")
+        assert object.__getattribute__(file_obj, "__fileobj__") is None
+        _ = FileContent(file=file_obj)
+        assert object.__getattribute__(file_obj, "__fileobj__") is None, (
+            "FileContent construction must not fetch the URL"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestFileContentSerialization — dump shape + round-trip via content_factory
+# ---------------------------------------------------------------------------
+
+class TestFileContentSerialization:
+    async def test_dump_shape_includes_name(self, tmp_path: pathlib.Path) -> None:
+        from timbal.utils.serialization import dump
+
+        test_file = tmp_path / "Q3 Report.pdf"
+        test_file.write_bytes(b"%PDF-1.4 stub")
+        fc = FileContent(file=File.validate(str(test_file)))
+
+        dumped = await dump(fc)
+        assert dumped["type"] == "file"
+        assert dumped["name"] == "Q3 Report.pdf"
+        assert isinstance(dumped["file"], str)
+        assert set(dumped.keys()) == {"type", "name", "file"}, (
+            "dump must not leak private attrs like _cached_*"
+        )
+
+    async def test_dump_omits_name_when_none(self) -> None:
+        from timbal.utils.serialization import dump
+
+        fc = FileContent(file=File.validate(b"hello", {"extension": ".txt"}))
+        assert fc.name is None
+
+        dumped = await dump(fc)
+        assert "name" not in dumped
+        assert dumped["type"] == "file"
+        assert isinstance(dumped["file"], str)
+
+    async def test_dump_explicit_name_preserved(self) -> None:
+        from timbal.utils.serialization import dump
+
+        fc = FileContent(
+            file=File.validate(b"hello", {"extension": ".txt"}),
+            name="hello.txt",
+        )
+        dumped = await dump(fc)
+        assert dumped["name"] == "hello.txt"
+
+    async def test_dump_does_not_leak_cached_attrs(self) -> None:
+        """Calling to_*_input populates the _cached_* private attrs.
+
+        Those must not appear in dump output regardless of cache state.
+        """
+        from timbal.utils.serialization import dump
+
+        fc = FileContent(
+            file=File.validate(b"hello world", {"extension": ".txt"}),
+            name="hello.txt",
+        )
+        _ = fc.to_anthropic_input()
+        _ = fc.to_openai_responses_input()
+        _ = fc.to_openai_chat_completions_input()
+        assert fc._cached_anthropic_input is not None
+        assert fc._cached_openai_responses_input is not None
+        assert fc._cached_openai_chat_completions_input is not None
+
+        dumped = await dump(fc)
+        assert set(dumped.keys()) == {"type", "name", "file"}
+
+    async def test_round_trip_preserves_name(self, tmp_path: pathlib.Path) -> None:
+        from timbal.utils.serialization import dump
+
+        test_file = tmp_path / "Q3 Report.pdf"
+        test_file.write_bytes(b"%PDF-1.4 stub")
+        fc = FileContent(
+            file=File.validate(str(test_file)),
+            name="Quarterly Report Q3.pdf",
+        )
+
+        dumped = await dump(fc)
+        restored = content_factory(dumped)
+        assert isinstance(restored, FileContent)
+        assert restored.name == "Quarterly Report Q3.pdf"
+
+    def test_content_factory_accepts_name_field(self) -> None:
+        restored = content_factory({
+            "type": "file",
+            "name": "Display.pdf",
+            "file": "https://example.com/x/y.pdf",
+        })
+        assert isinstance(restored, FileContent)
+        assert restored.name == "Display.pdf"
+
+    def test_content_factory_backward_compat_old_traces(self) -> None:
+        """Old traces written before the name field exists must still load.
+
+        Name defaults from the URL basename via the validator.
+        """
+        restored = content_factory({
+            "type": "file",
+            "file": "https://example.com/files/legacy.pdf",
+        })
+        assert isinstance(restored, FileContent)
+        assert restored.name == "legacy.pdf"
+
+    async def test_dump_inside_message(self) -> None:
+        """End-to-end: FileContent inside a Message round-trips with name."""
+        from timbal.types.message import Message
+        from timbal.utils.serialization import dump
+
+        fc = FileContent(
+            file=File.validate(b"data", {"extension": ".pdf"}),
+            name="Q3.pdf",
+        )
+        msg = Message(role="user", content=[fc])
+
+        dumped = await dump(msg)
+        assert dumped["role"] == "user"
+        assert len(dumped["content"]) == 1
+        assert dumped["content"][0]["type"] == "file"
+        assert dumped["content"][0]["name"] == "Q3.pdf"
+        assert "_cached_anthropic_input" not in dumped["content"][0]
+
+        restored = Message.validate(dumped)
+        assert isinstance(restored.content[0], FileContent)
+        assert restored.content[0].name == "Q3.pdf"
+
+
+# ---------------------------------------------------------------------------
+# TestFileContentSessionChainIntegration
+# Full prod-like pipeline: Agent → JSONL trace → reload → next turn.
+# Exercises every layer that can drop the `name` field: serialization,
+# JSONL round-trip, content_factory, Message rebuild, second LLM call.
+# ---------------------------------------------------------------------------
+
+class TestFileContentSessionChainIntegration:
+    async def test_files_persist_through_jsonl_session_chain(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Turn 1 sends text + 3 files of different source schemes, gets persisted
+        to a JSONL trace, then turn 2 reloads from disk via ``parent_id`` and the
+        LLM sees the original FileContent objects (with names) in its memory.
+
+        Catches regressions in:
+          - serialization.dump() for FileContent (name + no cache leakage)
+          - JSONL write/read of nested file metadata
+          - content_factory accepting the new shape on reload
+          - Message validation preserving FileContent.name
+          - Agent memory chain across runs not stripping content metadata
+        """
+        from timbal import Agent
+        from timbal.core.test_model import TestModel
+        from timbal.state.tracing.providers import JsonlTracingProvider
+        from timbal.types.content import TextContent
+        from timbal.types.message import Message
+
+        local_pdf = tmp_path / "Q3 Report.pdf"
+        local_pdf.write_bytes(b"%PDF-1.4 stub")
+
+        captured_turns: list[list[Message]] = []
+
+        def handler(messages: list[Message]) -> str:
+            captured_turns.append(list(messages))
+            return f"acknowledged turn {len(captured_turns)}"
+
+        traces_path = tmp_path / "traces.jsonl"
+        provider = JsonlTracingProvider.configured(_path=traces_path)
+
+        agent = Agent(
+            name="file_agent",
+            model=TestModel(handler=handler),
+            tracing_provider=provider,
+        )
+
+        turn1_msg = Message(
+            role="user",
+            content=[
+                TextContent(text="Please review these documents."),
+                # local path — name auto-defaults to file basename
+                FileContent(file=File.validate(str(local_pdf))),
+                # anonymous bytes with explicit display name (the platform upload case)
+                FileContent(
+                    file=File.validate(b"raw bytes", {"extension": ".txt"}),
+                    name="user_uploaded_notes.txt",
+                ),
+                # URL — name auto-defaults from (decoded) URL basename
+                FileContent(file=File("https://example.com/files/spec%20v2.pdf")),
+            ],
+        )
+        out1 = await agent(messages=[turn1_msg]).collect()
+        assert out1.status.code == "success", out1.error
+
+        # ----- inspect the on-disk JSONL trace after turn 1 -----
+        assert traces_path.exists()
+        records = [
+            json.loads(line) for line in traces_path.read_text().splitlines() if line.strip()
+        ]
+        assert len(records) == 1
+        agent_span = next(s for s in records[0]["spans"] if s["path"] == "file_agent")
+        stored_memory = agent_span["memory"]
+
+        stored_user = stored_memory[0]
+        assert stored_user["role"] == "user"
+        file_blocks = [c for c in stored_user["content"] if c["type"] == "file"]
+        assert len(file_blocks) == 3
+
+        assert sorted(b.get("name") for b in file_blocks) == [
+            "Q3 Report.pdf",
+            "spec v2.pdf",
+            "user_uploaded_notes.txt",
+        ]
+        for b in file_blocks:
+            assert set(b.keys()) == {"type", "name", "file"}, (
+                f"unexpected keys leaked to JSONL (private attrs?): {sorted(b.keys())}"
+            )
+            assert isinstance(b["file"], str) and b["file"], (
+                "file ref must serialize to a non-empty string"
+            )
+
+        # ----- turn 2: provider reloads turn 1 from disk via parent_id -----
+        out2 = await agent(
+            prompt="Anything else I should know?",
+            parent_id=out1.run_id,
+        ).collect()
+        assert out2.status.code == "success", out2.error
+        assert out2.error is None
+
+        # Two LLM invocations
+        assert len(captured_turns) == 2
+
+        # Turn 2 messages: [reloaded turn-1 user, reloaded turn-1 assistant, new turn-2 user]
+        turn2_messages = captured_turns[1]
+        assert len(turn2_messages) == 3
+        reloaded_user = turn2_messages[0]
+        assert reloaded_user.role == "user"
+
+        reloaded_files = [c for c in reloaded_user.content if isinstance(c, FileContent)]
+        assert len(reloaded_files) == 3
+        assert sorted(fc.name for fc in reloaded_files) == [
+            "Q3 Report.pdf",
+            "spec v2.pdf",
+            "user_uploaded_notes.txt",
+        ], "filename metadata lost across JSONL reload"
+
+        # Reloaded FileContent must be usable downstream — to_*_input must not raise.
+        # The bytes file was persisted to a temp path on dump; the local pdf likewise
+        # round-trips as a local path. Skip the URL one (would trigger fetch).
+        local_fc = next(fc for fc in reloaded_files if fc.name == "Q3 Report.pdf")
+        bytes_fc = next(fc for fc in reloaded_files if fc.name == "user_uploaded_notes.txt")
+
+        with patch("timbal.types.content.file.validate_pdf"):
+            local_res = local_fc.to_openai_responses_input()
+        assert local_res["filename"] == "Q3 Report.pdf", (
+            "explicit name on reloaded FileContent must flow into provider input"
+        )
+
+        bytes_res = bytes_fc.to_anthropic_input()
+        assert bytes_res["type"] == "text"
+
+        # ----- verify turn 2 disk record still has all the file metadata -----
+        records = [
+            json.loads(line) for line in traces_path.read_text().splitlines() if line.strip()
+        ]
+        turn2_record = next(r for r in records if r["run_id"] == out2.run_id)
+        turn2_agent_span = next(s for s in turn2_record["spans"] if s["path"] == "file_agent")
+        turn2_memory = turn2_agent_span["memory"]
+        assert len(turn2_memory) == 4, (
+            f"expected 4 messages (turn1 u/a, turn2 u/a), got {len(turn2_memory)}"
+        )
+
+        turn2_files = [c for c in turn2_memory[0]["content"] if c["type"] == "file"]
+        assert len(turn2_files) == 3
+        assert sorted(b["name"] for b in turn2_files) == [
+            "Q3 Report.pdf",
+            "spec v2.pdf",
+            "user_uploaded_notes.txt",
+        ]
+        for b in turn2_files:
+            assert set(b.keys()) == {"type", "name", "file"}
+
+
+# ---------------------------------------------------------------------------
+# TestFileContentRealLLMIntegration
+# Hits real OpenAI / Anthropic / Gemini APIs. Skipped when API keys are absent.
+# Run explicitly with:  uv run pytest -m integration python/tests/types/content/test_file.py
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+class TestFileContentRealLLMIntegration:
+    @pytest.mark.parametrize("model,max_tokens,env_key", _REAL_LLM_MATRIX)
+    async def test_image_persists_through_jsonl_session_chain_real_llm(
+        self,
+        tmp_path: pathlib.Path,
+        model: str,
+        max_tokens: int | None,
+        env_key: str,
+    ) -> None:
+        """End-to-end with a real LLM provider.
+
+        Sends an image with an explicit display name, persists to JSONL, then
+        runs a second turn that forces the provider to reload turn 1 from disk
+        and convert the reloaded ``FileContent`` back into provider-native input.
+        If serialization, ``content_factory``, or the agent memory chain ever
+        loses the file ref or its ``name``, turn 2 will fail (provider error or
+        missing-key crash) and this test will catch it.
+        """
+        if not os.getenv(env_key):
+            pytest.skip(f"{env_key} not set")
+
+        from timbal import Agent
+        from timbal.state.tracing.providers import JsonlTracingProvider
+        from timbal.types.content import TextContent
+        from timbal.types.message import Message
+
+        traces_path = tmp_path / "traces.jsonl"
+        provider = JsonlTracingProvider.configured(_path=traces_path)
+
+        agent_kwargs: dict = {
+            "name": "real_llm_file_agent",
+            "model": model,
+            "tracing_provider": provider,
+        }
+        if max_tokens is not None:
+            agent_kwargs["max_tokens"] = max_tokens
+
+        agent = Agent(**agent_kwargs)
+
+        display_name = "company_logo.png"
+        turn1_msg = Message(
+            role="user",
+            content=[
+                TextContent(
+                    text="I'm attaching an image. Reply with one short sentence acknowledging it."
+                ),
+                FileContent(
+                    file=File.validate(_PNG_BYTES, {"extension": ".png"}),
+                    name=display_name,
+                ),
+            ],
+        )
+        out1 = await agent(messages=[turn1_msg]).collect()
+        assert out1.status.code == "success", out1.error
+        assert out1.error is None
+
+        # JSONL: the image block must have the display name and no leaked attrs.
+        records = [
+            json.loads(line) for line in traces_path.read_text().splitlines() if line.strip()
+        ]
+        agent_span = next(
+            s for s in records[-1]["spans"] if s["path"] == "real_llm_file_agent"
+        )
+        user_msg = agent_span["memory"][0]
+        file_blocks = [c for c in user_msg["content"] if c["type"] == "file"]
+        assert len(file_blocks) == 1
+        assert file_blocks[0]["name"] == display_name
+        assert set(file_blocks[0].keys()) == {"type", "name", "file"}, (
+            f"private attrs leaked into trace: {sorted(file_blocks[0].keys())}"
+        )
+
+        # Turn 2: forces JSONL reload + real provider re-ingestion of the file.
+        out2 = await agent(
+            prompt="Just say 'ok'.",
+            parent_id=out1.run_id,
+        ).collect()
+        assert out2.status.code == "success", out2.error
+        assert out2.error is None, (
+            f"second turn failed — file ref likely broken across reload: {out2.error}"
+        )
+
+        # JSONL after turn 2: original file metadata must still be intact.
+        records = [
+            json.loads(line) for line in traces_path.read_text().splitlines() if line.strip()
+        ]
+        turn2_record = next(r for r in records if r["run_id"] == out2.run_id)
+        turn2_agent_span = next(
+            s for s in turn2_record["spans"] if s["path"] == "real_llm_file_agent"
+        )
+        turn2_memory = turn2_agent_span["memory"]
+        assert len(turn2_memory) >= 4, (
+            f"expected turn1 u/a + turn2 u/a in memory, got {len(turn2_memory)}"
+        )
+
+        reloaded_file_blocks = [
+            c for c in turn2_memory[0]["content"] if c["type"] == "file"
+        ]
+        assert len(reloaded_file_blocks) == 1
+        assert reloaded_file_blocks[0]["name"] == display_name, (
+            "display name lost across two-turn JSONL round-trip"
+        )
+        assert set(reloaded_file_blocks[0].keys()) == {"type", "name", "file"}

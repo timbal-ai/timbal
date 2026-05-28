@@ -1,13 +1,17 @@
 import base64
 import email
 import io
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any, Literal, Self
+from urllib.parse import unquote, urlparse
 
 # `override` was introduced in Python 3.12; use `typing_extensions` for compatibility with older versions
 try:
     from typing import override
 except ImportError:
     from typing_extensions import override
+
+from pydantic import PrivateAttr, model_validator
 
 from ...errors import ImageProcessingError, PDFProcessingError
 from ..file import File
@@ -266,15 +270,45 @@ def _extract_email_attachments(raw_email_content: str) -> list[dict[str, Any]]:
     return attachments
 
 
+def _safe_file_name(file: File) -> str | None:
+    """Best-effort filename extraction from a File without triggering the fetcher.
+
+    Reading ``file.name`` directly goes through ``File.__wrapped__``, which loads
+    the file (disk read for local paths, network round-trip for URLs). This walks
+    the source metadata instead so construction stays cheap.
+    """
+    scheme = object.__getattribute__(file, "__source_scheme__")
+    source = object.__getattribute__(file, "__source__")
+
+    if scheme == "local_path":
+        return Path(source).name or None
+
+    if scheme == "url":
+        path = urlparse(source).path
+        name = path.rsplit("/", 1)[-1] if "/" in path else path
+        return unquote(name) or None
+
+    if scheme == "bytes":
+        fileobj = object.__getattribute__(file, "__fileobj__")
+        return getattr(fileobj, "name", None)
+
+    return None
+
+
 class FileContent(BaseContent):
     """File content type for chat messages."""
     type: Literal["file"] = "file"
     file: File
-    # TODO Change this to cached properties
-    # Cached openai and anthropic inputs (some conversions are costly, e.g. audio transcriptions).
-    _cached_openai_responses_input: Any | None = None
-    _cached_openai_chat_completions_input: Any | None = None
-    _cached_anthropic_input: Any | None = None
+    name: str | None = None
+    _cached_openai_responses_input: Any | None = PrivateAttr(default=None)
+    _cached_openai_chat_completions_input: Any | None = PrivateAttr(default=None)
+    _cached_anthropic_input: Any | None = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def _default_name(self) -> Self:
+        if self.name is None:
+            self.name = _safe_file_name(self.file)
+        return self
 
     @override
     def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any] | list[dict[str, Any]]:
@@ -354,7 +388,10 @@ class FileContent(BaseContent):
             url = self.file.to_data_url()
             openai_responses_input = {
                 "type": "input_file",
-                "filename": self.file.name,
+                # OpenAI requires a string filename. _safe_file_name() returns
+                # None for data URLs and anonymous BytesIO, so fall back to a
+                # deterministic generic name based on the source extension.
+                "filename": self.name or f"document{self.file.__source_extension__ or '.pdf'}",
                 "file_data": url,
             }
             self._cached_openai_responses_input = openai_responses_input
@@ -522,7 +559,9 @@ class FileContent(BaseContent):
                                 attachment_file.name = attachment['filename']
                                 extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
                                 file_obj = File(attachment_file, extension=extension)
-                                converted = FileContent(file=file_obj).to_openai_chat_completions_input()
+                                converted = FileContent(
+                                    file=file_obj, name=attachment["filename"]
+                                ).to_openai_chat_completions_input()
                                 if isinstance(converted, list):
                                     openai_input.extend(converted)
                                 else:
@@ -542,7 +581,9 @@ class FileContent(BaseContent):
                     attachment_file.name = attachment['filename']
                     extension = f".{attachment['filename'].split('.')[-1]}" if '.' in attachment['filename'] else None
                     file_obj = File(attachment_file, extension=extension)
-                    converted = FileContent(file=file_obj).to_openai_chat_completions_input()
+                    converted = FileContent(
+                        file=file_obj, name=attachment["filename"]
+                    ).to_openai_chat_completions_input()
                     if isinstance(converted, list):
                         openai_input.extend(converted)
                     else:
@@ -550,7 +591,7 @@ class FileContent(BaseContent):
                     processed_attachments.add(i)
                     attachment_counter += 1
             openai_input.append(TextContent(text=body_content).to_openai_chat_completions_input())
-            self._cached_openai_input = openai_input
+            self._cached_openai_chat_completions_input = openai_input
             return openai_input
 
         elif mime and mime.startswith("audio/"):
@@ -719,7 +760,9 @@ class FileContent(BaseContent):
                                 if extension and not attachment['filename'].endswith(extension):
                                     attachment_file.name = attachment['filename'] + extension
                                 file_obj = File(attachment_file, extension=extension)
-                                converted = FileContent(file=file_obj).to_anthropic_input()
+                                converted = FileContent(
+                                    file=file_obj, name=attachment["filename"]
+                                ).to_anthropic_input()
                                 if isinstance(converted, list):
                                     anthropic_input.extend(converted)
                                 else:
@@ -743,7 +786,9 @@ class FileContent(BaseContent):
                     if extension and not attachment['filename'].endswith(extension):
                         attachment_file.name = attachment['filename'] + extension
                     file_obj = File(attachment_file, extension=extension)
-                    converted = FileContent(file=file_obj).to_anthropic_input()
+                    converted = FileContent(
+                        file=file_obj, name=attachment["filename"]
+                    ).to_anthropic_input()
                     if isinstance(converted, list):
                         anthropic_input.extend(converted)
                     else:
