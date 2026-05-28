@@ -360,7 +360,8 @@ class TestControlFlow:
             .step(sync_handler, x="output", when=lambda: True)
         )
         _ = await wf().collect()
-        assert get_run_context()._trace.as_records()[0].output == "async:output"
+        outputs = {r.output for r in get_run_context()._trace.as_records()}
+        assert outputs >= {"async:output", "sync:output"}
 
     async def test_when_false(self):
         wf = (Workflow(name="parallel_workflow")

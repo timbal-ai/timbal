@@ -34,19 +34,19 @@ class TestHttpScript:
 
     def test_no_import_spec_error(self):
         """Test error when no import spec is provided."""
-        with pytest.MonkeyPatch().context() as m:
-            m.delenv("TIMBAL_RUNNABLE", raising=False)
-            m.delenv("TIMBAL_FLOW", raising=False)
-            result = subprocess.run(
-                [sys.executable, "-m", "timbal.server.http"],
-                capture_output=True,
-                text=True,
-                cwd=Path(__file__).parent.parent.parent,
-                env={},
-            )
+        env = os.environ.copy()
+        env.pop("TIMBAL_RUNNABLE", None)
+        env.pop("TIMBAL_FLOW", None)
+        result = subprocess.run(
+            [sys.executable, "-m", "timbal.server.http"],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent.parent.parent,
+            env=env,
+        )
 
-            assert result.returncode == 1
-            assert "No import spec provided" in result.stderr
+        assert result.returncode == 1
+        assert "No import spec provided" in result.stderr
 
     def test_invalid_import_spec_format(self):
         """Test error with invalid import spec format."""
