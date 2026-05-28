@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import codegen_cmd
+
 WORKFLOW_YAML = 'fqn: "workflow.py::workflow"\n'
 
 
@@ -26,7 +28,7 @@ def wf_workspace(tmp_path):
 def _run_dry(workspace_path: Path, operation: str, *cli_args: str) -> str:
     """Run a codegen operation with --dry-run and return stdout."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", operation, *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", operation, *cli_args),
         capture_output=True,
         text=True,
     )
@@ -36,7 +38,7 @@ def _run_dry(workspace_path: Path, operation: str, *cli_args: str) -> str:
 
 def _run_dry_fail(workspace_path: Path, operation: str, *cli_args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", operation, *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", operation, *cli_args),
         capture_output=True,
         text=True,
     )

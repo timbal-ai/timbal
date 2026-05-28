@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import codegen_cmd
+
 TIMBAL_YAML = 'fqn: "agent.py::agent"\n'
 
 
@@ -22,7 +24,7 @@ def workspace(tmp_path):
 def _run_dry(workspace_path: Path, tool_name: str) -> str:
     """Run codegen remove-tool with --dry-run and return stdout."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "remove-tool", "--name", tool_name],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "remove-tool", "--name", tool_name),
         capture_output=True,
         text=True,
     )
@@ -207,7 +209,7 @@ class TestRemoveEdgeCases:
         """)
         # First remove WebSearch.
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-tool", "--name", "web_search"],
+            codegen_cmd("--path", str(ws), "remove-tool", "--name", "web_search"),
             capture_output=True,
             text=True,
         )
@@ -215,7 +217,7 @@ class TestRemoveEdgeCases:
 
         # Then add it back with --dry-run to inspect.
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run", "add-tool", "--type", "WebSearch"],
+            codegen_cmd("--path", str(ws), "--dry-run", "add-tool", "--type", "WebSearch"),
             capture_output=True,
             text=True,
         )
@@ -239,7 +241,7 @@ class TestRemoveEdgeCases:
 
         # Remove WebSearch (writes to file).
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-tool", "--name", "web_search"],
+            codegen_cmd("--path", str(ws), "remove-tool", "--name", "web_search"),
             capture_output=True,
             text=True,
         )
@@ -247,7 +249,7 @@ class TestRemoveEdgeCases:
 
         # Remove custom (writes to file).
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-tool", "--name", "custom"],
+            codegen_cmd("--path", str(ws), "remove-tool", "--name", "custom"),
             capture_output=True,
             text=True,
         )
@@ -255,7 +257,7 @@ class TestRemoveEdgeCases:
 
         # Dry-run to inspect final state.
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run", "remove-tool", "--name", "nonexistent"],
+            codegen_cmd("--path", str(ws), "--dry-run", "remove-tool", "--name", "nonexistent"),
             capture_output=True,
             text=True,
         )
@@ -287,10 +289,9 @@ def wf_workspace(tmp_path):
 def _run_dry_wf(workspace_path: Path, tool_name: str, *extra_args: str) -> str:
     """Run codegen remove-tool with --dry-run on a workflow workspace."""
     result = subprocess.run(
-        [
-            "python", "-m", "timbal.codegen", "--path", str(workspace_path),
+        codegen_cmd("--path", str(workspace_path),
             "--dry-run", "remove-tool", "--name", tool_name, *extra_args,
-        ],
+        ),
         capture_output=True,
         text=True,
     )
@@ -339,10 +340,9 @@ class TestRemoveToolStep:
         agent = Agent(name="a", model="openai/gpt-4o-mini")
         """)
         result = subprocess.run(
-            [
-                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+            codegen_cmd("--path", str(ws), "--dry-run",
                 "remove-tool", "--name", "web_search", "--step", "agent_a",
-            ],
+            ),
             capture_output=True,
             text=True,
         )

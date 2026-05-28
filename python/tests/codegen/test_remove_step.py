@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import codegen_cmd
+
 TIMBAL_YAML = 'fqn: "workflow.py::workflow"\n'
 
 
@@ -22,7 +24,7 @@ def workspace(tmp_path):
 def _run_dry(workspace_path: Path, step_name: str) -> str:
     """Run codegen remove-step with --dry-run and return stdout."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "remove-step", "--name", step_name],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "remove-step", "--name", step_name),
         capture_output=True,
         text=True,
     )
@@ -33,7 +35,7 @@ def _run_dry(workspace_path: Path, step_name: str) -> str:
 def _run_dry_expect_error(workspace_path: Path, step_name: str) -> str:
     """Run codegen remove-step with --dry-run, expecting failure. Returns stderr."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "remove-step", "--name", step_name],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "remove-step", "--name", step_name),
         capture_output=True,
         text=True,
     )
@@ -406,7 +408,7 @@ class TestRemoveEdgeCases:
         """)
         # Remove agent_b (writes to file)
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "remove-step", "--name", "agent_b"],
+            codegen_cmd("--path", str(ws), "remove-step", "--name", "agent_b"),
             capture_output=True,
             text=True,
         )
@@ -414,11 +416,10 @@ class TestRemoveEdgeCases:
 
         # Add it back with --dry-run
         result = subprocess.run(
-            [
-                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+            codegen_cmd("--path", str(ws), "--dry-run",
                 "add-step", "--type", "Agent",
                 "--config", '{"name": "agent_b", "model": "openai/gpt-4o-mini"}',
-            ],
+            ),
             capture_output=True,
             text=True,
         )

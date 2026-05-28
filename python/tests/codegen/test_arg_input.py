@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import codegen_cmd
+
 TIMBAL_YAML = 'fqn: "agent.py::agent"\n'
 
 
@@ -22,7 +24,7 @@ def workspace(tmp_path):
 
 def _run(workspace_path: Path, *cli_args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", *cli_args),
         input=stdin,
         capture_output=True,
         text=True,

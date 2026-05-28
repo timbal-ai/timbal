@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import codegen_cmd
+
 TIMBAL_YAML = 'fqn: "agent.py::agent"\n'
 
 
@@ -34,7 +36,7 @@ def workspace(tmp_path):
 def _run_dry(workspace_path: Path, *cli_args: str) -> str:
     """Run codegen set-config with --dry-run and return stdout."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "set-config", *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "set-config", *cli_args),
         capture_output=True,
         text=True,
     )
@@ -45,7 +47,7 @@ def _run_dry(workspace_path: Path, *cli_args: str) -> str:
 def _run_dry_fail(workspace_path: Path, *cli_args: str) -> subprocess.CompletedProcess:
     """Run codegen set-config with --dry-run and expect failure."""
     return subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "set-config", *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "set-config", *cli_args),
         capture_output=True,
         text=True,
     )
@@ -54,7 +56,7 @@ def _run_dry_fail(workspace_path: Path, *cli_args: str) -> subprocess.CompletedP
 def _run(workspace_path: Path, operation: str, *cli_args: str) -> None:
     """Run a codegen operation that writes to disk. Asserts success."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), operation, *cli_args],
+        codegen_cmd("--path", str(workspace_path), operation, *cli_args),
         capture_output=True,
         text=True,
     )
