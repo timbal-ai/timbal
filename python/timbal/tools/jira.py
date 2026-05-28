@@ -23,8 +23,8 @@ from typing import Annotated, Any
 
 from pydantic import Field, SecretStr
 
-from timbal.core import Tool
-
+from ..core.tool import Tool
+from ..platform.integrations import Integration
 
 
 def _env_strip(key: str, default: str = "") -> str:
@@ -84,12 +84,6 @@ async def _jira_connection(
     tok = await _resolve_token(tool)
     return _jira_api_root(cid), {"Authorization": f"Bearer {tok}", "Accept": "application/json"}
 
-
-class Integration:
-    """Metadata stub for `Annotated[..., Integration("jira")]`; platform may supply a real object."""
-
-    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-        pass
 
 _ACCESSIBLE_RESOURCES = "https://api.atlassian.com/oauth/token/accessible-resources"
 
