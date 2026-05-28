@@ -28,16 +28,19 @@ def safe_is_nan(value: Any) -> bool:
 # ---------------------------------------------------------------------------
 _File = None
 _Message = None
+_FileContent = None
 
 
 def _ensure_types():
-    global _File, _Message
+    global _File, _Message, _FileContent
     if _File is None:
+        from ..types.content.file import FileContent
         from ..types.file import File
         from ..types.message import Message
 
         _File = File
         _Message = Message
+        _FileContent = FileContent
 
 
 # Pre-allocated singleton to avoid creating exception objects on every File hit
@@ -78,6 +81,9 @@ def _dump_sync(value: Any) -> Any:
     _ensure_types()
 
     if isinstance(value, _File):
+        raise _NEEDS_ASYNC
+
+    if isinstance(value, _FileContent):
         raise _NEEDS_ASYNC
 
     if isinstance(value, _Message):
@@ -140,6 +146,15 @@ async def _dump_async(value: Any) -> Any:
 
     if isinstance(value, _File):
         return await value.persist()
+
+    if isinstance(value, _FileContent):
+        result: dict[str, Any] = {
+            "type": value.type,
+            "file": await _dump_async(value.file),
+        }
+        if value.name is not None:
+            result["name"] = value.name
+        return result
 
     if isinstance(value, _Message):
         result = {
