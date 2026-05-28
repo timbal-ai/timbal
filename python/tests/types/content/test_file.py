@@ -31,11 +31,11 @@ def _make_solid_png(size: int = 32, rgb: tuple[int, int, int] = (255, 128, 64)) 
     def _chunk(tag: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
 
-    ihdr = _chunk("IHDR".encode(), struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+    ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
     pixel = bytes(rgb)
     raw = b"".join(b"\x00" + pixel * size for _ in range(size))
-    idat = _chunk("IDAT".encode(), zlib.compress(raw, 9))
-    iend = _chunk("IEND".encode(), b"")
+    idat = _chunk(b"IDAT", zlib.compress(raw, 9))
+    iend = _chunk(b"IEND", b"")
     return sig + ihdr + idat + iend
 
 
@@ -335,6 +335,34 @@ class TestFileContentOpenAIResponses:
             result = fc.to_openai_responses_input()
         assert result["type"] == "input_file"
         assert "file_data" in result
+        assert result["filename"] == "test.pdf"
+
+    def test_pdf_anonymous_bytes_filename_is_string(self):
+        """Regression: anonymous bytes PDFs must still send a string filename.
+
+        ``_safe_file_name`` returns None for bytes without a name attr and for
+        data URLs, but the OpenAI Responses API rejects null filenames.
+        """
+        fc = _make_fc(b"%PDF-1.4 stub", ".pdf")
+        assert fc.name is None
+        with patch("timbal.types.content.file.validate_pdf"):
+            result = fc.to_openai_responses_input()
+        assert result["type"] == "input_file"
+        assert isinstance(result["filename"], str) and result["filename"], (
+            "filename must be a non-empty string even when display name is unknown"
+        )
+        assert result["filename"].endswith(".pdf")
+
+    def test_pdf_data_url_filename_is_string(self):
+        """Regression: data-URL PDFs must still send a string filename."""
+        data_url = "data:application/pdf;base64," + base64.b64encode(b"%PDF-1.4 stub").decode()
+        fc = FileContent(file=File(data_url))
+        assert fc.name is None
+        with patch("timbal.types.content.file.validate_pdf"):
+            result = fc.to_openai_responses_input()
+        assert result["type"] == "input_file"
+        assert isinstance(result["filename"], str) and result["filename"]
+        assert result["filename"].endswith(".pdf")
 
     def test_pdf_invalid_returns_error_text(self):
         fc = _make_fc(b"bad-pdf", ".pdf")

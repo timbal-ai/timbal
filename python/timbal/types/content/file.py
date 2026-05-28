@@ -388,7 +388,10 @@ class FileContent(BaseContent):
             url = self.file.to_data_url()
             openai_responses_input = {
                 "type": "input_file",
-                "filename": self.name,
+                # OpenAI requires a string filename. _safe_file_name() returns
+                # None for data URLs and anonymous BytesIO, so fall back to a
+                # deterministic generic name based on the source extension.
+                "filename": self.name or f"document{self.file.__source_extension__ or '.pdf'}",
                 "file_data": url,
             }
             self._cached_openai_responses_input = openai_responses_input
