@@ -1,7 +1,8 @@
 import asyncio
-import fcntl
 import json
+import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,42 @@ from .base import TracingProvider
 
 if TYPE_CHECKING:
     from ...context import RunContext
+
+
+# Cross-platform advisory file lock. fcntl is Unix-only; msvcrt provides the
+# equivalent primitive on Windows. We expose a single context manager so the
+# rest of the module stays platform-agnostic.
+if sys.platform == "win32":
+    import msvcrt
+
+    @contextmanager
+    def _file_lock(fileobj):
+        # msvcrt.locking locks `nbytes` from the current file offset. Lock a
+        # single byte at offset 0; Windows allows locking past EOF so this
+        # works on empty files. LK_LOCK retries ~10x at 1s intervals before
+        # raising OSError, so we loop to mimic flock's blocking semantics.
+        fileobj.seek(0)
+        while True:
+            try:
+                msvcrt.locking(fileobj.fileno(), msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                continue
+        try:
+            yield
+        finally:
+            fileobj.seek(0)
+            msvcrt.locking(fileobj.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    @contextmanager
+    def _file_lock(fileobj):
+        fcntl.flock(fileobj.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fileobj.fileno(), fcntl.LOCK_UN)
 
 
 class JsonlTracingProvider(TracingProvider):
@@ -119,7 +156,8 @@ class JsonlTracingProvider(TracingProvider):
         JSONL itself stores one record per run, so mutating the parent record
         for a tiny approval-claim row would be awkward and race-prone. A
         sidecar file keeps the trace format unchanged while still giving local
-        development and tests a durable cross-process lock via ``fcntl``.
+        development and tests a durable cross-process lock (``fcntl`` on Unix,
+        ``msvcrt.locking`` on Windows).
         """
         if parent_id is None:
             return True
@@ -135,31 +173,27 @@ class JsonlTracingProvider(TracingProvider):
             claims_path.parent.mkdir(parents=True, exist_ok=True)
             lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-            with lock_path.open("a+", encoding="utf-8") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            with lock_path.open("a+", encoding="utf-8") as lock_file, _file_lock(lock_file):
                 try:
-                    try:
-                        claims = json.loads(claims_path.read_text(encoding="utf-8")) if claims_path.exists() else {}
-                    except json.JSONDecodeError:
-                        claims = {}
+                    claims = json.loads(claims_path.read_text(encoding="utf-8")) if claims_path.exists() else {}
+                except json.JSONDecodeError:
+                    claims = {}
 
-                    key = f"{parent_id}:{approval_id}"
-                    existing = claims.get(key)
-                    if existing is not None:
-                        return existing.get("claimed_by_run_id") == run_id
+                key = f"{parent_id}:{approval_id}"
+                existing = claims.get(key)
+                if existing is not None:
+                    return existing.get("claimed_by_run_id") == run_id
 
-                    claims[key] = {
-                        "parent_id": parent_id,
-                        "approval_id": approval_id,
-                        "claimed_by_run_id": run_id,
-                        "claimed_at": int(time.time() * 1000),
-                    }
-                    tmp_path = claims_path.with_suffix(claims_path.suffix + ".tmp")
-                    tmp_path.write_text(json.dumps(claims, sort_keys=True), encoding="utf-8")
-                    tmp_path.replace(claims_path)
-                    return True
-                finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                claims[key] = {
+                    "parent_id": parent_id,
+                    "approval_id": approval_id,
+                    "claimed_by_run_id": run_id,
+                    "claimed_at": int(time.time() * 1000),
+                }
+                tmp_path = claims_path.with_suffix(claims_path.suffix + ".tmp")
+                tmp_path.write_text(json.dumps(claims, sort_keys=True), encoding="utf-8")
+                tmp_path.replace(claims_path)
+                return True
 
         return await asyncio.to_thread(_claim)
 
