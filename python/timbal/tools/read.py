@@ -15,6 +15,11 @@ from ..state import get_run_context
 from ..types.file import File
 
 
+def _normalize_text_newlines(text: str) -> str:
+    """Normalize Windows CRLF to LF for text tool output."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 class Read(Tool):
     def __init__(self, **kwargs):
         async def _read(path: str, start_line: int | None = None, end_line: int | None = None) -> File | str:
@@ -67,7 +72,7 @@ class Read(Tool):
 
             # ? Enable multiple encodings
             if start_line is None and end_line is None:
-                return file.read().decode("utf-8")
+                return _normalize_text_newlines(file.read().decode("utf-8"))
 
             # Read the specified line range efficiently
             with open(path, encoding="utf-8") as f:
@@ -86,7 +91,7 @@ class Read(Tool):
                 lines = list(islice(f, start_idx, start_idx + num_lines if num_lines else None))
 
             # Return empty string if no lines found (out of range)
-            content = "".join(lines)
+            content = _normalize_text_newlines("".join(lines))
             return content if content else ""
 
         super().__init__(

@@ -323,44 +323,46 @@ class Runnable(ABC, BaseModel):
         dependencies = []
         try:
             source_file = inspect.getsourcefile(fn)
-            if not source_file:
-                raise ValueError("Could not determine source file for runtime callable.")
-            with open(source_file, encoding="utf-8") as f:
-                full_file_source = f.read()
+        except TypeError:
+            source_file = None
+        if source_file and source_file != "<string>":
+            try:
+                with open(source_file, encoding="utf-8") as f:
+                    full_file_source = f.read()
 
-            tree = ast.parse(full_file_source)
-            func_name = fn.__name__
+                tree = ast.parse(full_file_source)
+                func_name = fn.__name__
 
-            # Collect all named function nodes matching func_name in one pass.
-            candidates = [
-                node
-                for node in ast.walk(tree)
-                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == func_name
-            ]
+                # Collect all named function nodes matching func_name in one pass.
+                candidates = [
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == func_name
+                ]
 
-            if len(candidates) == 1:
-                target_node = candidates[0]
-            elif len(candidates) > 1:
-                # Narrow by source line range when multiple definitions share the same name.
-                source_lines, start_line = inspect.getsourcelines(fn)
-                target_node = next(
-                    (n for n in candidates if start_line <= n.lineno <= start_line + len(source_lines)),
-                    candidates[0],
-                )
-            else:
-                # Fallback for lambdas: match by first line number.
-                first_line = fn.__code__.co_firstlineno
-                target_node = next(
-                    (n for n in ast.walk(tree) if isinstance(n, ast.Lambda) and n.lineno == first_line),
-                    None,
-                )
+                if len(candidates) == 1:
+                    target_node = candidates[0]
+                elif len(candidates) > 1:
+                    # Narrow by source line range when multiple definitions share the same name.
+                    source_lines, start_line = inspect.getsourcelines(fn)
+                    target_node = next(
+                        (n for n in candidates if start_line <= n.lineno <= start_line + len(source_lines)),
+                        candidates[0],
+                    )
+                else:
+                    # Fallback for lambdas: match by first line number.
+                    first_line = fn.__code__.co_firstlineno
+                    target_node = next(
+                        (n for n in ast.walk(tree) if isinstance(n, ast.Lambda) and n.lineno == first_line),
+                        None,
+                    )
 
-            if target_node:
-                analyzer = RunContextDependencyAnalyzer()
-                analyzer.visit(target_node)
-                dependencies = analyzer.dependencies
-        except Exception as e:
-            _get_logger().error("Could not determine step dependencies for runtime callable.", exc_info=e)
+                if target_node:
+                    analyzer = RunContextDependencyAnalyzer()
+                    analyzer.visit(target_node)
+                    dependencies = analyzer.dependencies
+            except Exception:
+                _get_logger().debug("Could not determine step dependencies for runtime callable.")
 
         return {
             "is_coroutine": is_coroutine,

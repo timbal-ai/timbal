@@ -110,7 +110,7 @@ class Edit(Tool):
 
             # Update file state tracking with new hash
             if run_context:
-                new_hash = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+                new_hash = hashlib.sha256(path.read_bytes()).hexdigest()
                 if "fs_state" not in session:
                     session["fs_state"] = {}
                 session["fs_state"][str(path)] = new_hash
