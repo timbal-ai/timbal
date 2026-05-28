@@ -310,12 +310,6 @@ class FileContent(BaseContent):
             self.name = _safe_file_name(self.file)
         return self
 
-    @property
-    def _display_name(self) -> str | None:
-        if self.name is not None:
-            return self.name
-        return _safe_file_name(self.file)
-
     @override
     def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any] | list[dict[str, Any]]:
         """See base class."""
@@ -394,7 +388,7 @@ class FileContent(BaseContent):
             url = self.file.to_data_url()
             openai_responses_input = {
                 "type": "input_file",
-                "filename": self._display_name,
+                "filename": self.name,
                 "file_data": url,
             }
             self._cached_openai_responses_input = openai_responses_input
