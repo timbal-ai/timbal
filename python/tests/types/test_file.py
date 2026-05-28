@@ -1,3 +1,4 @@
+import io
 import pathlib
 from io import BytesIO
 
@@ -245,7 +246,8 @@ class TestFileMagicMethods:
         from timbal.types.file import File as _File
 
         # Manually construct a File with no fileobj and no fetcher
-        f = object.__new__(_File)
+        # File subclasses io.IOBase; Python 3.11+ requires IOBase.__new__ for bypass init.
+        f = io.IOBase.__new__(_File)
         object.__setattr__(f, "__source__", "fake")
         object.__setattr__(f, "__source_scheme__", "url")
         object.__setattr__(f, "__source_extension__", None)
