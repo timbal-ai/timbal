@@ -1269,7 +1269,7 @@ class TestCompactionIntegrationFakeContextWindow:
 
         agent = Agent(
             name="compact_agent",
-            model="openai/gpt-4.1-nano",
+            model="openai/gpt-5.4-nano",
             memory_compaction=[
                 compact_tool_results(),
                 keep_last_n_turns(1),
@@ -1322,10 +1322,10 @@ class TestCompactionIntegrationLowRatio:
 
         agent = Agent(
             name="summarize_agent",
-            model="openai/gpt-4.1-nano",
+            model="openai/gpt-5.4-nano",
             memory_compaction=summarize(
                 threshold=2,
-                model="openai/gpt-4.1-nano",
+                model="openai/gpt-5.4-nano",
                 keep_last_n=2,
                 max_summary_tokens=200,
             ),

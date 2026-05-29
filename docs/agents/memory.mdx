@@ -34,12 +34,12 @@ When agents call other agents, memory flows seamlessly between them. Child agent
 ```python
 # Parent agent
 class SupportAgent(Agent):
-    model = "anthropic/claude-3-sonnet"
+    model = "anthropic/claude-sonnet-4-6"
     tools = [billing_agent, technical_agent]
 
 # Child agents automatically inherit conversation context
 class BillingAgent(Agent):
-    model = "anthropic/claude-3-haiku"
+    model = "anthropic/claude-haiku-4-5"
     # Receives full conversation history from parent
 ```
 

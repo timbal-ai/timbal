@@ -252,7 +252,7 @@ openai/gpt-5.5-2026-04-23
 openai/gpt-4o
 openai/gpt-4o-mini
 openai/o3
-openai/o1-mini
+openai/gpt-5.4-nano
 google/gemini-2.5-flash
 google/gemini-2.5-pro-preview
 groq/llama-3.3-70b-versatile
