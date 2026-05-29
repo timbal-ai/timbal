@@ -202,10 +202,26 @@ class TestEditToolWithFsState:
         await edit_tool(path=str(test_file), old_string="Original", new_string="Modified").collect()
 
         new_hash = (await get_fs_state(ctx))[str(test_file)]
-        new_content = "Modified content"
-        expected_new_hash = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+        expected_new_hash = hashlib.sha256(test_file.read_bytes()).hexdigest()
         assert new_hash != original_hash
         assert new_hash == expected_new_hash
+
+    @pytest.mark.asyncio
+    async def test_write_then_edit_multiline_without_read(self, tmp_path: Path):
+        """Write stores a disk-accurate hash so edit can run without a prior read."""
+        ctx = RunContext()
+        set_run_context(ctx)
+        set_parent_call_id("test_write_then_edit_multiline_without_read")
+
+        test_file = tmp_path / "test.txt"
+        write_tool = Write()
+        await write_tool(path=str(test_file), content="Line 1\nLine 2\n").collect()
+
+        edit_tool = Edit()
+        result = await edit_tool(path=str(test_file), old_string="Line 1", new_string="Row 1").collect()
+
+        assert result.error is None
+        assert "Row 1\nLine 2\n" == test_file.read_text(encoding="utf-8")
 
     @pytest.mark.asyncio
     async def test_multiple_edits_in_sequence(self, tmp_path: Path):
@@ -278,7 +294,7 @@ class TestWriteToolWithFsState:
         assert test_file.exists()
         fs_state = await get_fs_state(ctx)
         assert str(test_file) in fs_state
-        expected_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        expected_hash = hashlib.sha256(test_file.read_bytes()).hexdigest()
         assert fs_state[str(test_file)] == expected_hash
 
     @pytest.mark.asyncio
@@ -302,7 +318,7 @@ class TestWriteToolWithFsState:
         await write_tool(path=str(test_file), content=new_content).collect()
 
         new_hash = (await get_fs_state(ctx))[str(test_file)]
-        expected_new_hash = hashlib.sha256(new_content.encode("utf-8")).hexdigest()
+        expected_new_hash = hashlib.sha256(test_file.read_bytes()).hexdigest()
         assert new_hash != original_hash
         assert new_hash == expected_new_hash
 

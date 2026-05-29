@@ -54,11 +54,13 @@ class TestWindowsFileLock:
             def seek(self, _offset):
                 return None
 
-        calls = {"n": 0}
+        lock_attempts = {"n": 0}
 
-        def locking(_fd, _mode, _nbytes):
-            calls["n"] += 1
-            if calls["n"] == 1:
+        def locking(_fd, mode, _nbytes):
+            if mode == jsonl.msvcrt.LK_UNLCK:
+                return None
+            lock_attempts["n"] += 1
+            if lock_attempts["n"] == 1:
                 raise OSError(errno.EACCES, "locked")
             return None
 
@@ -66,7 +68,7 @@ class TestWindowsFileLock:
             with jsonl._file_lock(FakeFile()):
                 pass
 
-        assert calls["n"] == 2
+        assert lock_attempts["n"] == 2
 
 
 def _make_run_context(provider, run_id: str, parent_id: str | None = None) -> RunContext:
