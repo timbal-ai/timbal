@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    paths:
+      - "python/**"
   workflow_dispatch:
     inputs:
       os:
