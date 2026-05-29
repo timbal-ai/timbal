@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import codegen_cmd
+
 TIMBAL_YAML = 'fqn: "workflow.py::workflow"\n'
 
 
@@ -22,7 +24,7 @@ def workspace(tmp_path):
 def _run_dry(workspace_path: Path, *cli_args: str) -> str:
     """Run codegen add-step with --dry-run and return stdout."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "add-step", *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "add-step", *cli_args),
         capture_output=True,
         text=True,
     )
@@ -33,7 +35,7 @@ def _run_dry(workspace_path: Path, *cli_args: str) -> str:
 def _run_dry_expect_error(workspace_path: Path, *cli_args: str) -> str:
     """Run codegen add-step with --dry-run, expecting failure. Returns stderr."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "add-step", *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "add-step", *cli_args),
         capture_output=True,
         text=True,
     )

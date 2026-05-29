@@ -87,7 +87,7 @@ class Bash(Tool):
             for i, part in enumerate(parts):
                 if "*" in part:
                     # Wildcard: replace with argument pattern
-                    arg_pattern = r"""(?:(['"]).*?\1|[\w\/\\\-\.\,\*]+)(?:\s+(?:(['"]).*?\2|[\w\/\\\-\.\,\*]+))*"""
+                    arg_pattern = r"""(?:(['"]).*?\1|[\w\/\\\-\.\,\*~:]+)(?:\s+(?:(['"]).*?\2|[\w\/\\\-\.\,\*~:]+))*"""
                     # If this is not the first part, require space before it, but make the whole thing optional
                     if i > 0:
                         regex_parts.append(r"(?:\s+" + arg_pattern + r")?")

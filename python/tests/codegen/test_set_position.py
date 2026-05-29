@@ -1,9 +1,10 @@
-import json
 import subprocess
 import textwrap
 from pathlib import Path
 
 import pytest
+
+from .conftest import codegen_cmd
 
 TIMBAL_YAML = 'fqn: "agent.py::agent"\n'
 WORKFLOW_YAML = 'fqn: "workflow.py::workflow"\n'
@@ -31,7 +32,7 @@ def wf_workspace(tmp_path):
 
 def _run_dry(workspace_path: Path, *cli_args: str) -> str:
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "set-position", *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "set-position", *cli_args),
         capture_output=True,
         text=True,
     )
@@ -41,7 +42,7 @@ def _run_dry(workspace_path: Path, *cli_args: str) -> str:
 
 def _run_dry_fail(workspace_path: Path, *cli_args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "set-position", *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "set-position", *cli_args),
         capture_output=True,
         text=True,
     )

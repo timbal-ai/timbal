@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -199,7 +201,13 @@ class TestCreateAppVoiceIntegration:
             assert r.status_code == 200
             assert "voice_demo" in r.text
             assert "Agent" in r.text
-            assert str(mod.resolve()) in r.text
+            meta_match = re.search(
+                r'id="timbal-voice-runnable-meta">([^<]+)</script>',
+                r.text,
+            )
+            assert meta_match is not None
+            meta = json.loads(meta_match.group(1))
+            assert Path(meta["import_spec"].split("::")[0]).resolve() == mod.resolve()
             assert timbal_version in r.text
 
 

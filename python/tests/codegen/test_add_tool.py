@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import codegen_cmd
+
 TIMBAL_YAML = 'fqn: "agent.py::agent"\n'
 
 
@@ -22,7 +24,7 @@ def workspace(tmp_path):
 def _run_dry(workspace_path: Path, *cli_args: str) -> str:
     """Run codegen add-tool with --dry-run and return stdout."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "add-tool", *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "add-tool", *cli_args),
         capture_output=True,
         text=True,
     )
@@ -160,7 +162,7 @@ class TestCustomTool:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
         """)
         result = subprocess.run(
-            ["python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run", "add-tool", "--type", "Custom"],
+            codegen_cmd("--path", str(ws), "--dry-run", "add-tool", "--type", "Custom"),
             capture_output=True,
             text=True,
         )
@@ -270,7 +272,7 @@ def wf_workspace(tmp_path):
 def _run_dry_wf(workspace_path: Path, *cli_args: str) -> str:
     """Run codegen add-tool with --dry-run on a workflow workspace."""
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "--path", str(workspace_path), "--dry-run", "add-tool", *cli_args],
+        codegen_cmd("--path", str(workspace_path), "--dry-run", "add-tool", *cli_args),
         capture_output=True,
         text=True,
     )
@@ -332,10 +334,9 @@ class TestStepFlag:
         agent = Agent(name="a", model="openai/gpt-4o-mini")
         """)
         result = subprocess.run(
-            [
-                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+            codegen_cmd("--path", str(ws), "--dry-run",
                 "add-tool", "--type", "WebSearch", "--step", "agent_a",
-            ],
+            ),
             capture_output=True,
             text=True,
         )
@@ -388,10 +389,9 @@ class TestConfigFlag:
         """)
         config = json.dumps({"not_a_real_field": 1})
         result = subprocess.run(
-            [
-                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+            codegen_cmd("--path", str(ws), "--dry-run",
                 "add-tool", "--type", "WebSearch", "--config", config,
-            ],
+            ),
             capture_output=True,
             text=True,
         )
@@ -405,10 +405,9 @@ class TestConfigFlag:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
         """)
         result = subprocess.run(
-            [
-                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+            codegen_cmd("--path", str(ws), "--dry-run",
                 "add-tool", "--type", "WebSearch", "--config", "{not json",
-            ],
+            ),
             capture_output=True,
             text=True,
         )
@@ -492,11 +491,10 @@ class TestConfigFlag:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
         """)
         result = subprocess.run(
-            [
-                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+            codegen_cmd("--path", str(ws), "--dry-run",
                 "add-tool", "--type", "WebSearch", "--name", "explicit",
                 "--config", json.dumps({"name": "from_config"}),
-            ],
+            ),
             capture_output=True,
             text=True,
         )
@@ -514,12 +512,11 @@ class TestConfigFlag:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
         """)
         result = subprocess.run(
-            [
-                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+            codegen_cmd("--path", str(ws), "--dry-run",
                 "add-tool", "--type", "Custom",
                 "--definition", "def foo() -> int:\n    return 1",
                 "--config", json.dumps({"handler": "anything"}),
-            ],
+            ),
             capture_output=True,
             text=True,
         )
@@ -548,10 +545,9 @@ class TestConfigFlag:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
         """)
         result = subprocess.run(
-            [
-                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+            codegen_cmd("--path", str(ws), "--dry-run",
                 "add-tool", "--type", "WebSearch", "--name", "",
-            ],
+            ),
             capture_output=True,
             text=True,
         )
@@ -574,10 +570,9 @@ class TestConfigFlag:
         agent = Agent(name="a", model="openai/gpt-4o-mini", tools=[web_search])
         """)
         result = subprocess.run(
-            [
-                "python", "-m", "timbal.codegen", "--path", str(ws), "--dry-run",
+            codegen_cmd("--path", str(ws), "--dry-run",
                 "add-tool", "--type", "WebSearch", "--name", "",
-            ],
+            ),
             capture_output=True,
             text=True,
         )

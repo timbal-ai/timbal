@@ -4,8 +4,6 @@ import subprocess
 import pytest
 from timbal.codegen.tool_discovery import (
     FrameworkTool,
-    _CACHE_DIR,
-    _CACHE_FILE,
     _load_cache,
     _save_cache,
     _tools_fingerprint,
@@ -14,6 +12,7 @@ from timbal.codegen.tool_discovery import (
     invalidate_cache,
 )
 
+from .conftest import codegen_cmd
 
 # ---------------------------------------------------------------------------
 # get_provider_summaries() unit tests
@@ -235,7 +234,7 @@ class TestGetFrameworkToolsCache:
 
 def _run(*cli_args: str) -> dict:
     result = subprocess.run(
-        ["python", "-m", "timbal.codegen", "get-tools", *cli_args],
+        codegen_cmd("get-tools", *cli_args),
         capture_output=True,
         text=True,
     )

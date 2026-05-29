@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 from datetime import datetime
 
@@ -354,25 +355,35 @@ class TestDefaultParamsPerformance:
     async def test_parallel_callable_execution(self):
         """Test that multiple callable params are executed in parallel."""
 
-        def slow_func1() -> str:
-            time.sleep(0.1)  # Simulate work
-            return "func1"
+        state = {"active": 0, "overlap": False}
+        lock = threading.Lock()
 
-        def slow_func2() -> str:
-            time.sleep(0.1)  # Simulate work
-            return "func2"
+        def make_probe(name: str):
+            def fn() -> str:
+                with lock:
+                    state["active"] += 1
+                    if state["active"] == 2:
+                        state["overlap"] = True
+                # Yield the thread so the sibling callable can enter while we're still active.
+                time.sleep(0.05)
+                with lock:
+                    state["active"] -= 1
+                return name
+
+            return fn
 
         def handler(message: str, val1: str, val2: str) -> str:
             return f"{message}:{val1}:{val2}"
 
-        tool = Tool(name="parallel_tool", handler=handler, default_params={"val1": slow_func1, "val2": slow_func2})
+        tool = Tool(
+            name="parallel_tool",
+            handler=handler,
+            default_params={"val1": make_probe("func1"), "val2": make_probe("func2")},
+        )
 
-        start_time = time.time()
         resolved_params = await tool._resolve_input_params()
-        end_time = time.time()
 
-        # Should be faster than sequential execution (less than 0.15s vs 0.2s)
-        assert end_time - start_time < 0.15
+        assert state["overlap"], "callables did not run concurrently"
         assert resolved_params["val1"] == "func1"
         assert resolved_params["val2"] == "func2"
 

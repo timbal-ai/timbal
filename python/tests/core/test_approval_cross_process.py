@@ -85,7 +85,7 @@ def _make_jsonl_backend(tmp_path: Path) -> _Backend:
         f"""
         from pathlib import Path
         from timbal.state.tracing.providers.jsonl import JsonlTracingProvider
-        TRACE_PATH = Path(r"{path}")
+        TRACE_PATH = Path(r"{path.as_posix()}")
         provider = JsonlTracingProvider.configured(_path=TRACE_PATH)
         """
     ).strip()
@@ -117,7 +117,7 @@ def _make_sqlite_backend(tmp_path: Path) -> _Backend:
         f"""
         from pathlib import Path
         from timbal.state.tracing.providers.sqlite import SqliteTracingProvider
-        TRACE_PATH = Path(r"{path}")
+        TRACE_PATH = Path(r"{path.as_posix()}")
         provider = SqliteTracingProvider.configured(_path=TRACE_PATH)
         """
     ).strip()
@@ -548,11 +548,11 @@ class TestRealSubprocessResume:
 
         gate = subprocess.run(  # noqa: S603
             [sys.executable, "-c", gate_script, str(side_effect)],
-            check=True,
             capture_output=True,
             text=True,
             timeout=60,
         )
+        assert gate.returncode == 0, f"gate failed:\nstdout={gate.stdout}\nstderr={gate.stderr}"
         payload = json.loads(_extract_result(gate.stdout))
         assert payload["approval_id"], gate.stderr
         assert payload["run_id"], gate.stderr
@@ -565,10 +565,10 @@ class TestRealSubprocessResume:
                 str(side_effect),
                 payload["run_id"], payload["approval_id"],
             ],
-            check=True,
             capture_output=True,
             text=True,
             timeout=60,
         )
+        assert resume.returncode == 0, f"resume failed:\nstdout={resume.stdout}\nstderr={resume.stderr}"
         assert _extract_result(resume.stdout) == "success", resume.stderr
         assert side_effect.read_text() == "wired 42", "tool must run after cross-process resume"

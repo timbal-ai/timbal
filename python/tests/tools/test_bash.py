@@ -1,5 +1,3 @@
-import tempfile
-
 import pytest
 from timbal import Agent
 from timbal.tools.bash import Bash
@@ -370,18 +368,13 @@ class TestBashSecurity:
                 assert result.error["type"] == "ValueError"
 
     @pytest.mark.asyncio
-    async def test_redirection_with_patterns(self):
+    async def test_redirection_with_patterns(self, tmp_path):
         """Test commands with redirection operators."""
         tool = Bash(["echo * > *", "cat *"])
 
-        # This should work if pattern allows redirection
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            result = await tool(command=f"echo test > {tmp.name}").collect()
-            assert result.error is None
-
-            # Clean up
-            import os
-            os.unlink(tmp.name)
+        target = tmp_path / "out.txt"
+        result = await tool(command=f"echo test > {target}").collect()
+        assert result.error is None
 
     @pytest.mark.asyncio
     async def test_pattern_with_special_chars(self):

@@ -62,11 +62,11 @@ class Write(Tool):
 
             # Create parent directories if they don't exist
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            path.write_text(content, encoding="utf-8", newline="\n")
 
             # Update file state tracking with new hash
             if run_context:
-                new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                new_hash = hashlib.sha256(path.read_bytes()).hexdigest()
                 session = await run_context.get_session()
                 if "fs_state" not in session:
                     session["fs_state"] = {}

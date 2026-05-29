@@ -23,6 +23,19 @@ from ..platform.types import UploadFileResponse
 from ..state import get_or_create_run_context
 
 
+def _is_local_path(source: str) -> bool:
+    """True when ``source`` is a filesystem path rather than a URL.
+
+    ``urlparse`` treats ``C:\\foo`` and ``C:/foo`` as scheme ``c``, so drive-letter
+    paths must be detected before URL parsing.
+    """
+    if source.startswith(("/", "./", "../", "~")):
+        return True
+    return len(source) >= 2 and source[0].isalpha() and source[1] == ":" and (
+        len(source) == 2 or source[2] in ("\\", "/")
+    )
+
+
 def _extract_filename(headers: dict, url: str) -> str:
     """Extract filename from Content-Disposition header, falling back to URL path."""
     filename = None
@@ -112,6 +125,16 @@ class File(io.IOBase):
 
         if not isinstance(source, str):
             raise ValueError("File must be a string, path, or file-like object.")
+
+        if _is_local_path(source):
+            path = Path(source).expanduser().resolve()
+            if not path.exists() or not path.is_file():
+                raise ValueError("Invalid file path.")
+            self._setup(
+                source, "local_path", path.suffix,
+                fetcher=lambda: self._fetch_local_file(path=path),
+            )
+            return
 
         parsed_url = urlparse(source)
 
