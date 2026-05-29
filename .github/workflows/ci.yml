@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "python/**"
+      - "pyproject.toml"
+      - "uv.lock"
   workflow_dispatch:
     inputs:
       os:
