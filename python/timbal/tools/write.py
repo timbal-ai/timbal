@@ -62,7 +62,7 @@ class Write(Tool):
 
             # Create parent directories if they don't exist
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            path.write_text(content, encoding="utf-8", newline="\n")
 
             # Update file state tracking with new hash
             if run_context:

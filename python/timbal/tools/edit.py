@@ -106,7 +106,7 @@ class Edit(Tool):
                 )
             )
 
-            path.write_text(new_content, encoding="utf-8")
+            path.write_text(new_content, encoding="utf-8", newline="\n")
 
             # Update file state tracking with new hash
             if run_context:
