@@ -167,7 +167,7 @@ def _resolve_usage_key(usage: dict[str, int], key: str) -> int | None:
         usage = {"anthropic/claude-haiku-4-5:input_tokens": 100, "anthropic/claude-haiku-4-5:output_tokens": 50}
         _resolve_usage_key(usage, "input_tokens") -> 100 (single model, returns its value)
 
-        usage = {"openai/gpt-4o:input_text_tokens": 100, "anthropic/claude-3-5-haiku-latest:input_tokens": 200}
+        usage = {"openai/gpt-4o:input_text_tokens": 100, "anthropic/claude-haiku-4-5:input_tokens": 200}
         _resolve_usage_key(usage, "input_text_tokens") -> 100
         _resolve_usage_key(usage, "input_tokens") -> 200
 

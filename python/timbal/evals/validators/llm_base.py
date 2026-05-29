@@ -31,7 +31,7 @@ class LLMValidator(BaseValidator):
     """
 
     system_prompt: str  # Must be set in subclass or YAML
-    model: str = "openai/gpt-4.1-nano"  # Can be overridden in YAML
+    model: str = "openai/gpt-5.4-nano"  # Can be overridden in YAML
 
     @abstractmethod
     def get_user_prompt(self, actual_value: Any) -> str:

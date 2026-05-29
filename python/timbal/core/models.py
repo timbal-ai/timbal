@@ -28,7 +28,7 @@ def get_context_window(model_id: str) -> int | None:
     """Get the context window size (in tokens) for a model.
 
     Args:
-        model_id: Model identifier (e.g., 'openai/gpt-4.1-nano').
+        model_id: Model identifier (e.g., 'openai/gpt-5.4-nano').
 
     Returns:
         Context window in tokens, or None if unknown.
@@ -43,19 +43,14 @@ def get_context_window(model_id: str) -> int | None:
 # ---------------------------------------------------------------------------
 # Model type with provider prefixes
 Model = Literal[
+    "anthropic/claude-opus-4-8",
     "anthropic/claude-opus-4-7",
     "anthropic/claude-opus-4-6",
     "anthropic/claude-opus-4-5",
     "anthropic/claude-opus-4-1",
-    "anthropic/claude-opus-4-0",
     "anthropic/claude-sonnet-4-6",
     "anthropic/claude-sonnet-4-5",
-    "anthropic/claude-sonnet-4-0",
     "anthropic/claude-haiku-4-5",
-    "anthropic/claude-3-7-sonnet-latest",
-    "anthropic/claude-3-5-haiku-latest",
-    "anthropic/claude-3-opus-latest",
-    "anthropic/claude-3-haiku-20240307",
     "openai/gpt-5.5",
     "openai/gpt-5.4",
     "openai/gpt-5.4-mini",
@@ -80,7 +75,6 @@ Model = Literal[
     "openai/o3-pro",
     "openai/o3-deep-research",
     "openai/o1",
-    "openai/o1-mini",
     "openai/gpt-5.5-2026-04-23",
     "togetherai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
     "togetherai/meta-llama/Llama-3.3-70B-Instruct-Turbo",

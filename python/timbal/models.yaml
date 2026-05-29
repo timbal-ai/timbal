@@ -7,6 +7,15 @@ models:
 
   # ── Anthropic ────────────────────────────────────────────────────────────────
 
+  - id: "anthropic/claude-opus-4-8"
+    provider: anthropic
+    display_name: "Claude Opus 4.8"
+    description: "Anthropic's latest Opus — improved coding, agents, and long-context reasoning."
+    input_price: 5.00
+    output_price: 25.00
+    context_window: 1000000
+    capabilities: [vision, tools, reasoning]
+
   - id: "anthropic/claude-opus-4-7"
     provider: anthropic
     display_name: "Claude Opus 4.7"
@@ -43,15 +52,6 @@ models:
     context_window: 200000
     capabilities: [vision, tools, reasoning]
 
-  - id: "anthropic/claude-opus-4-0"
-    provider: anthropic
-    display_name: "Claude Opus 4.0"
-    description: "Earlier Opus generation model for demanding reasoning and analysis tasks."
-    input_price: 15.00
-    output_price: 75.00
-    context_window: 200000
-    capabilities: [vision, tools, reasoning]
-
   - id: "anthropic/claude-sonnet-4-6"
     provider: anthropic
     display_name: "Claude Sonnet 4.6"
@@ -70,57 +70,12 @@ models:
     context_window: 200000
     capabilities: [vision, tools, reasoning]
 
-  - id: "anthropic/claude-sonnet-4-0"
-    provider: anthropic
-    display_name: "Claude Sonnet 4.0"
-    description: "Balanced speed and intelligence for a wide range of tasks."
-    input_price: 3.00
-    output_price: 15.00
-    context_window: 200000
-    capabilities: [vision, tools]
-
   - id: "anthropic/claude-haiku-4-5"
     provider: anthropic
     display_name: "Claude Haiku 4.5"
     description: "Fastest Claude model, designed for office document processing and high-volume business analysis."
     input_price: 1.00
     output_price: 5.00
-    context_window: 200000
-    capabilities: [vision, tools]
-
-  - id: "anthropic/claude-3-7-sonnet-latest"
-    provider: anthropic
-    display_name: "Claude 3.7 Sonnet"
-    description: "Claude 3.7 Sonnet with extended thinking for complex reasoning tasks."
-    input_price: 3.00
-    output_price: 15.00
-    context_window: 200000
-    capabilities: [vision, tools, reasoning]
-
-  - id: "anthropic/claude-3-5-haiku-latest"
-    provider: anthropic
-    display_name: "Claude 3.5 Haiku"
-    description: "Fast and affordable legacy model for everyday tasks."
-    input_price: 0.80
-    output_price: 4.00
-    context_window: 200000
-    capabilities: [vision, tools]
-
-  - id: "anthropic/claude-3-opus-latest"
-    provider: anthropic
-    display_name: "Claude 3 Opus"
-    description: "Legacy flagship Claude 3 Opus for highly complex tasks."
-    input_price: 15.00
-    output_price: 75.00
-    context_window: 200000
-    capabilities: [vision, tools]
-
-  - id: "anthropic/claude-3-haiku-20240307"
-    provider: anthropic
-    display_name: "Claude 3 Haiku"
-    description: "Fast and compact legacy model for lightweight, high-volume workloads."
-    input_price: 0.25
-    output_price: 1.25
     context_window: 200000
     capabilities: [vision, tools]
 
@@ -340,15 +295,6 @@ models:
     input_price: 15.00
     output_price: 60.00
     context_window: 200000
-    capabilities: [tools, reasoning]
-
-  - id: "openai/o1-mini"
-    provider: openai
-    display_name: "o1 Mini"
-    description: "Compact o1 reasoning model for cost-efficient deep thinking."
-    input_price: 1.10
-    output_price: 4.40
-    context_window: 128000
     capabilities: [tools, reasoning]
 
   - id: "openai/gpt-5.5-2026-04-23"
