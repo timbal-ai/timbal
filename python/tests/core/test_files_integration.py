@@ -4,8 +4,40 @@ from pathlib import Path
 import pytest
 from timbal import Agent
 from timbal.types import File
+from timbal.types.events import OutputEvent
 
 pytestmark = pytest.mark.integration
+
+_MODEL_ENV_KEYS = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GEMINI_API_KEY",
+}
+
+
+def _provider_api_key_env(model: str) -> str | None:
+    provider = model.split("/", 1)[0]
+    return _MODEL_ENV_KEYS.get(provider)
+
+
+def _llm_credentials_available(model: str) -> bool:
+    env_key = _provider_api_key_env(model)
+    if env_key and os.getenv(env_key):
+        return True
+    try:
+        from timbal.state.config_loader import resolve_platform_config
+
+        cfg = resolve_platform_config()
+    except Exception:
+        return False
+    return cfg is not None and cfg.auth is not None
+
+
+def _assert_agent_answer(res: OutputEvent, expected: str) -> None:
+    assert res.status.code == "success", res.error
+    assert res.error is None, res.error
+    assert res.output is not None, res.error
+    assert expected in res.output.content[0].text
 
 
 @pytest.fixture(
@@ -18,15 +50,19 @@ pytestmark = pytest.mark.integration
     ]
 )
 def model(request):
-    if request.param.startswith("openai"):
-        if request.param.endswith("-responses"):
+    model_name = request.param
+    if not _llm_credentials_available(model_name):
+        env_key = _provider_api_key_env(model_name) or "provider API key"
+        pytest.skip(f"{env_key} not set and no platform credentials available for {model_name}")
+    if model_name.startswith("openai"):
+        if model_name.endswith("-responses"):
             # Responses API is now the default, so remove any disable flag
             os.environ.pop("TIMBAL_DISABLE_OPENAI_RESPONSES_API", None)
-            return request.param.replace("-responses", "")
+            return model_name.replace("-responses", "")
         else:
             # Disable responses API for non-responses tests
             os.environ["TIMBAL_DISABLE_OPENAI_RESPONSES_API"] = "true"
-    return request.param
+    return model_name
 
 
 @pytest.fixture(
@@ -46,8 +82,7 @@ async def test_png(model, png) -> None:
     prompt = [File.validate(png), "What's Bob's score?"]
 
     res = await agent(prompt=prompt).collect()
-    print(res)
-    assert "87" in res.output.content[0].text
+    _assert_agent_answer(res, "87")
 
 
 @pytest.fixture(
@@ -67,8 +102,7 @@ async def test_pdf(model, pdf) -> None:
     prompt = [File.validate(pdf), "What's Bob's score?"]
 
     res = await agent(prompt=prompt).collect()
-    print(res)
-    assert "87.2" in res.output.content[0].text
+    _assert_agent_answer(res, "87.2")
 
 
 @pytest.fixture(
@@ -88,7 +122,7 @@ async def test_md(model, md) -> None:
     prompt = [File.validate(md), "What's Alice's age?"]
 
     res = await agent(prompt=prompt).collect()
-    assert "28" in res.output.content[0].text
+    _assert_agent_answer(res, "28")
 
 
 @pytest.fixture(
@@ -108,6 +142,8 @@ async def test_csv(model, csv) -> None:
     prompt = [File.validate(csv), "What's Bob's full name?"]
 
     res = await agent(prompt=prompt).collect()
+    assert res.status.code == "success", res.error
+    assert res.output is not None, res.error
     assert "bob johnson" in res.output.content[0].text.lower()
 
 
@@ -128,6 +164,8 @@ async def test_tsv(model, tsv) -> None:
     prompt = [File.validate(tsv), "What's Bob's full name?"]
 
     res = await agent(prompt=prompt).collect()
+    assert res.status.code == "success", res.error
+    assert res.output is not None, res.error
     assert "bob johnson" in res.output.content[0].text.lower()
 
 
@@ -148,7 +186,7 @@ async def test_jsonl(model, jsonl) -> None:
     prompt = [File.validate(jsonl), "What's Alice's score?"]
 
     res = await agent(prompt=prompt).collect()
-    assert "95.5" in res.output.content[0].text
+    _assert_agent_answer(res, "95.5")
 
 
 @pytest.fixture(
@@ -168,6 +206,8 @@ async def test_json(model, json) -> None:
     prompt = [File.validate(json), "Is Bob still active?"]
 
     res = await agent(prompt=prompt).collect()
+    assert res.status.code == "success", res.error
+    assert res.output is not None, res.error
     assert "no" in res.output.content[0].text.lower()
 
 
@@ -188,7 +228,7 @@ async def test_xlsx(model, xlsx) -> None:
     prompt = [File.validate(xlsx), "What's Alice's score?"]
 
     res = await agent(prompt=prompt).collect()
-    assert "95.5" in res.output.content[0].text
+    _assert_agent_answer(res, "95.5")
 
 
 @pytest.fixture(
@@ -208,4 +248,6 @@ async def test_docx(model, docx) -> None:
     prompt = [File.validate(docx), "What's Bob's full name?"]
 
     res = await agent(prompt=prompt).collect()
+    assert res.status.code == "success", res.error
+    assert res.output is not None, res.error
     assert "bob johnson" in res.output.content[0].text.lower()

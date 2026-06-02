@@ -97,6 +97,20 @@ class FallbackExhausted(TimbalError):
         super().__init__(f"All {len(errors)} fallback models failed: {models}")
 
 
+class WorkflowStepError(TimbalError):
+    """Raised when a workflow step fails and the workflow should report error status.
+
+    Carries the original step error dict (when available) so orchestrators can
+    surface it on the workflow span without losing the child traceback.
+    """
+
+    def __init__(self, step_name: str, step_error: dict[str, Any] | None = None) -> None:
+        self.step_name = step_name
+        self.step_error = step_error
+        message = step_error.get("message") if step_error else f"Step '{step_name}' failed"
+        super().__init__(message or f"Step '{step_name}' failed")
+
+
 class SpanNotFound(TimbalError):
     """Error raised when trying to access a span that doesn't exist in the trace.
 

@@ -16,16 +16,28 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def reset_platform_config_cache():
-    """Force platform config to resolve as None for every non-integration test.
+def reset_platform_config_cache(request):
+    """Force platform config to resolve as None for unit tests only.
 
     Setting _default_config_resolved=True with _cached_default_config=None tells
     resolve_platform_config() "already resolved — there is no platform config".
     Any RunContext() without an explicit tracing_provider then falls back to
     InMemoryTracingProvider instead of PlatformTracingProvider, preventing HTTP
     calls on every _save_trace() / get_session() across the suite.
+
+    Integration tests opt out so they can use ~/.timbal credentials and the
+    platform LLM proxy when provider API keys are not in the environment.
     """
     import timbal.state.config_loader as _cl
+
+    is_integration = request.node.get_closest_marker("integration") is not None
+    if is_integration:
+        _cl._cached_default_config = None
+        _cl._default_config_resolved = False
+        yield
+        _cl._cached_default_config = None
+        _cl._default_config_resolved = False
+        return
 
     _cl._cached_default_config = None
     _cl._default_config_resolved = True
