@@ -1,4 +1,5 @@
 import asyncio
+import traceback
 from collections.abc import AsyncGenerator, Callable
 from enum import Enum
 from functools import cached_property
@@ -13,7 +14,7 @@ except ImportError:
 import structlog
 from pydantic import BaseModel, ConfigDict, PrivateAttr, computed_field, create_model
 
-from ..errors import ApprovalRequired, InterruptError, SpanNotFound
+from ..errors import ApprovalRequired, InterruptError, SpanNotFound, WorkflowStepError
 from ..state import get_call_id, get_parent_call_id, set_parent_call_id
 from ..types.events.output import OutputEvent
 from .runnable import Runnable, RunnableLike
@@ -29,11 +30,12 @@ class StepState(Enum):
 
 
 class StepStatus:
-    __slots__ = ("state", "done")
+    __slots__ = ("state", "done", "error")
 
     def __init__(self) -> None:
         self.state: StepState = StepState.PENDING
         self.done: asyncio.Event = asyncio.Event()
+        self.error: dict[str, Any] | None = None
 
 
 logger = structlog.get_logger("timbal.core.workflow")
@@ -231,6 +233,11 @@ class Workflow(Runnable):
             except Exception as e:
                 logger.info(f"Failing {step.name} due to error during evaluation: {e}")
                 status.state = StepState.FAILED
+                status.error = {
+                    "type": type(e).__name__,
+                    "message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
                 status.done.set()
                 return
 
@@ -253,11 +260,17 @@ class Workflow(Runnable):
                     if isinstance(event, OutputEvent) and event.error is not None:
                         logger.info(f"Step {step.name} completed with error.")
                         status.state = StepState.FAILED
+                        status.error = event.error
                         status.done.set()
                         return
                 status.state = StepState.COMPLETED
             except Exception as e:
                 status.state = StepState.FAILED
+                status.error = {
+                    "type": type(e).__name__,
+                    "message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
                 sentinel = e
                 return
             finally:
@@ -334,6 +347,14 @@ class Workflow(Runnable):
                 raise first_pending_approval
             if first_pending_exception is not None:
                 raise first_pending_exception
+            failed_steps = sorted(
+                (name, step_status)
+                for name, step_status in statuses.items()
+                if step_status.state == StepState.FAILED
+            )
+            if failed_steps:
+                step_name, step_status = failed_steps[0]
+                raise WorkflowStepError(step_name, step_status.error)
         except (asyncio.CancelledError, InterruptError):
             raise
         finally:

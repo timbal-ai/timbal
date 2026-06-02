@@ -502,6 +502,56 @@ class TestWorkflowIntegration:
         assert anthropic_schema["name"] == "simple_workflow"
 
 
+class TestWorkflowErrorStatus:
+    """Workflow final output must reflect step failures."""
+
+    @pytest.mark.asyncio
+    async def test_single_step_error_marks_workflow_as_error(self, error_step_tool):
+        wf = Workflow(name="error_workflow").step(error_step_tool, x="boom")
+        result = await wf().collect()
+        assert result.status.code == "error"
+        assert result.status.reason == "step_failed"
+        assert result.status.message is not None
+        assert "boom" in result.status.message
+        assert result.error is not None
+        assert result.error["type"] == "ValueError"
+        assert "boom" in result.error["message"]
+
+    @pytest.mark.asyncio
+    async def test_single_step_error_via_callable(self):
+        wf = Workflow(name="error_workflow").step(error_step_handler, x="boom")
+        result = await wf().collect()
+        assert result.status.code == "error"
+        assert result.error is not None
+
+    @pytest.mark.asyncio
+    async def test_parallel_step_error_marks_workflow_as_error(self):
+        """Even if another parallel step succeeds, workflow must report error."""
+        wf = (
+            Workflow(name="parallel_error_workflow")
+            .step(error_step_handler, x="boom")
+            .step(step3_handler, x="ok")
+        )
+        result = await wf().collect()
+        assert result.status.code == "error"
+        assert result.error is not None
+
+    @pytest.mark.asyncio
+    async def test_dependent_step_error_marks_workflow_as_error(self):
+        wf = (
+            Workflow(name="dependent_error_workflow")
+            .step(error_step_handler, x="boom")
+            .step(
+                step2_handler,
+                x="after",
+                step1_result=lambda: get_run_context().step_span("error_step_handler").output,
+            )
+        )
+        result = await wf().collect()
+        assert result.status.code == "error"
+        assert result.error is not None
+
+
 class TestWorkflowSentinelStarvation:
     """Regression tests: paths through `_enqueue_step_events` that previously
     leaked an exception past `except Exception` (e.g. a BaseException raised

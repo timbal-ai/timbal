@@ -27,7 +27,7 @@ from pydantic import (
 from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
-from ..errors import ApprovalPolicyError, ApprovalRequired, EarlyExit, InterruptError
+from ..errors import ApprovalPolicyError, ApprovalRequired, EarlyExit, InterruptError, WorkflowStepError
 from ..state import (
     get_call_id,
     get_parent_call_id,
@@ -1332,8 +1332,10 @@ class Runnable(ABC, BaseModel):
             # to avoid nesting an output event inside another output event
             status_already_set = False
             if isinstance(output, OutputEvent):
-                if output.status.code == "cancelled":
+                if output.status.code in {"cancelled", "error"}:
                     span.status = output.status
+                    if output.error is not None:
+                        span.error = output.error
                     status_already_set = True
                 output = output.output
 
@@ -1421,6 +1423,23 @@ class Runnable(ABC, BaseModel):
                     output = _collector_output_on_interrupt(collector)
                     span.output = output
                     span._output_dump = await dump(output)
+
+        except WorkflowStepError as workflow_step_err:
+            step_error = workflow_step_err.step_error
+            span.status = RunStatus(
+                code="error",
+                reason="step_failed",
+                message=step_error.get("message") if step_error else str(workflow_step_err),
+            )
+            if step_error is not None:
+                span.error = step_error
+            else:
+                span.error = {
+                    "type": type(workflow_step_err).__name__,
+                    "message": str(workflow_step_err),
+                    "traceback": traceback.format_exc(),
+                    "step_name": workflow_step_err.step_name,
+                }
 
         except Exception as err:
             # Set status FIRST before any operations that could raise (str(err),
