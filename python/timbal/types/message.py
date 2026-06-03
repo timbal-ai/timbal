@@ -13,6 +13,17 @@ from pydantic_core import CoreSchema, core_schema
 from .content import TextContent, ToolResultContent, ToolUseContent, content_factory
 
 
+def _append_anthropic_content_blocks(target: list[dict[str, Any]], anthropic_input: dict[str, Any] | list[dict[str, Any]]) -> None:
+    """Append Anthropic content blocks, dropping empty text (API rejects text: '')."""
+    if isinstance(anthropic_input, list):
+        for block in anthropic_input:
+            _append_anthropic_content_blocks(target, block)
+        return
+    if anthropic_input.get("type") == "text" and not anthropic_input.get("text"):
+        return
+    target.append(anthropic_input)
+
+
 class Message:
     """A class representing a message in a conversation with an LLM.
 
@@ -95,14 +106,9 @@ class Message:
 
     def to_anthropic_input(self) -> dict[str, Any]:
         """Convert the message to Anthropic's expected input format."""
-        content = []
+        content: list[dict[str, Any]] = []
         for content_item in self.content:
-            anthropic_input = content_item.to_anthropic_input()
-            # Enabling splitting files into multiple pages or chunks.
-            if isinstance(anthropic_input, list):
-                content.extend(anthropic_input)
-            else:
-                content.append(anthropic_input)
+            _append_anthropic_content_blocks(content, content_item.to_anthropic_input())
         # Anthropic doesn't accept the tool role. We must send this under the user role.
         role = self.role
         if role == "tool":
@@ -142,6 +148,15 @@ class Message:
             if isinstance(content, TextContent):
                 message_text += content.text + "\n\n"
         return message_text.strip()
+
+    def without_empty_text_blocks(self) -> "Message | None":
+        """Drop ``TextContent`` with empty text (invalid for Anthropic; see DEBUG2)."""
+        kept = [c for c in self.content if not (isinstance(c, TextContent) and c.text == "")]
+        if not kept:
+            return None
+        if len(kept) == len(self.content):
+            return self
+        return Message(role=self.role, content=kept, stop_reason=self.stop_reason)
 
     @classmethod
     def validate(cls, value: ValidatorFunctionWrapHandler, _info: dict | ValidationInfo | None = None) -> "Message":

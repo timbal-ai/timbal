@@ -538,7 +538,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # User can override the message list
         input_messages = current_span.input.get("messages", [])
         if input_messages:
-            current_span.memory = [Message.validate(m) for m in input_messages]
+            loaded: list[Message] = []
+            for raw in input_messages:
+                msg = Message.validate(raw).without_empty_text_blocks()
+                if msg is not None:
+                    loaded.append(msg)
+            current_span.memory = loaded
             return
 
         if not run_context.parent_id:
@@ -586,18 +591,15 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         is_approval_resume = prev_code == "cancelled" and prev_reason == "approval_required"
         if not is_approval_resume:
             self._synthesize_missing_tool_results(memory)
-        current_span.memory = memory + current_span.memory
+        merged: list[Message] = []
+        for msg in memory + current_span.memory:
+            cleaned = msg.without_empty_text_blocks()
+            if cleaned is not None:
+                merged.append(cleaned)
+        current_span.memory = merged
 
-        # Cache the already-serialized previous memory so handler() can skip re-dumping.
-        # Two cases:
-        #   InMemory provider  — previous_span is the live Span object; _memory_dump
-        #                        is set and contains dicts (serialized in prior handler()).
-        #   JSONL/disk reload  — previous_span was reconstructed from JSON; _memory_dump
-        #                        is not set, but span.memory holds the dicts from the file.
-        if hasattr(previous_span, "_memory_dump"):
-            current_span._prev_memory_dump = list(previous_span._memory_dump)
-        else:
-            current_span._prev_memory_dump = list(previous_span.memory)
+        # Re-dump prior turns so stored memory matches sanitized messages (no empty text blocks).
+        current_span._prev_memory_dump = await dump(merged[:-1])
 
         # Apply memory compaction if configured and context window utilization warrants it
         if self.memory_compaction is not None:
@@ -839,7 +841,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         llm_path = f"{self._path}.llm"
         for span in reversed(run_context._trace.as_records()):
             if span.path == llm_path and isinstance(span.output, Message):
-                current_span.memory.append(span.output)
+                cleaned = span.output.without_empty_text_blocks()
+                if cleaned is not None:
+                    current_span.memory.append(cleaned)
                 break
 
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
@@ -872,6 +876,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
 
         async def _append_memory(message: Message, dump_value: Any = None) -> None:
             """Append a message to both memory and its serialized dump in lockstep."""
+            message = message.without_empty_text_blocks()
+            if message is None:
+                return
             current_span.memory.append(message)
             current_span._memory_dump.append(dump_value if dump_value is not None else await dump(message))
 
