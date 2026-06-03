@@ -31,6 +31,18 @@ def test_message_text_to_anthropic_input() -> None:
     assert message.to_anthropic_input() == {"role": "assistant", "content": [{"type": "text", "text": "Hello, World!"}]}
 
 
+def test_message_to_anthropic_input_omits_empty_text() -> None:
+    message = Message(
+        role="assistant",
+        content=[
+            TextContent(text=""),
+            TextContent(text="visible"),
+        ],
+    )
+    payload = message.to_anthropic_input()
+    assert payload["content"] == [{"type": "text", "text": "visible"}]
+
+
 def test_message_file_validation(tmp_path: pathlib.Path) -> None:
     test_file = tmp_path / "image.png"
     png_content = bytes.fromhex(

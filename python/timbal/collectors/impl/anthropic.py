@@ -191,7 +191,7 @@ class AnthropicCollector(BaseCollector):
                 {
                     "type": "text",
                     "citations": [],
-                    "text": "",
+                    "text": event.content_block.text or "",
                     "block_id": content_block_id,
                 }
             )
@@ -313,6 +313,8 @@ class AnthropicCollector(BaseCollector):
                     domain = urlparse(citation.url).netloc
                     domain = domain.removeprefix("www.")
                     text += f" [[{domain}]({citation.url})]"
+                if not text:
+                    continue
                 if len(content) > 0 and isinstance(content[-1], TextContent):
                     content[-1].text += text
                 else:

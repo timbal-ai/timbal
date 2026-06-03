@@ -41,8 +41,14 @@ class ToolResultContent(BaseContent):
     @override
     def to_anthropic_input(self, **kwargs: Any) -> dict[str, Any]:
         """See base class."""
+        nested: list[dict[str, Any]] = []
+        for item in self.content:
+            block = item.to_anthropic_input()
+            if block.get("type") == "text" and not block.get("text"):
+                continue
+            nested.append(block)
         return {
             "type": "tool_result",
             "tool_use_id": self.id,
-            "content": [item.to_anthropic_input() for item in self.content],
+            "content": nested,
         }
