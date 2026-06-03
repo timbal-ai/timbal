@@ -248,6 +248,27 @@ class TestDebug2LlmRouterFix:
 
 class TestDebug2AgentSessionFix:
     @pytest.mark.asyncio
+    async def test_memory_dump_matches_sanitized_memory_not_raw_output_dump(self):
+        """event._output_dump can retain empty text; persisted trace must use re-dump."""
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.utils import dump
+
+        provider = InMemoryTracingProvider.configured()
+        agent = Agent(
+            name="Benito_AI",
+            model=TestModel(responses=[_debug2_poison_assistant_message()]),
+            tools=[],
+            tracing_provider=provider,
+        )
+        out = await agent(prompt="Ruta Vallès Oriental").collect()
+        trace = provider._storage.get(out.run_id)
+        agent_span = next(s for s in trace.values() if s.path == "Benito_AI")
+
+        expected = await dump([Message.validate(m) for m in agent_span.memory])
+        assert agent_span._memory_dump == expected
+        assert not _anthropic_messages_have_empty_text_block(agent_span._memory_dump)
+
+    @pytest.mark.asyncio
     async def test_chained_turn_succeeds_after_poison_stripped_from_memory(self):
         agent1 = Agent(
             name="Benito_AI",

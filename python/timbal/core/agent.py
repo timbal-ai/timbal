@@ -874,13 +874,13 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         kwargs.pop("prompt", None)
         kwargs.pop("messages", None)
 
-        async def _append_memory(message: Message, dump_value: Any = None) -> None:
+        async def _append_memory(message: Message) -> None:
             """Append a message to both memory and its serialized dump in lockstep."""
             message = message.without_empty_text_blocks()
             if message is None:
                 return
             current_span.memory.append(message)
-            current_span._memory_dump.append(dump_value if dump_value is not None else await dump(message))
+            current_span._memory_dump.append(await dump(message))
 
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
@@ -1035,7 +1035,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         )
 
                         # Add LLM response to conversation for next iteration
-                        await _append_memory(event.output, dump_value=event._output_dump)
+                        await _append_memory(event.output)
                         _llm_memory_saved = True
 
                         if self.output_model is not None:
