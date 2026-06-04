@@ -9,26 +9,56 @@ from ..platform.integrations import Integration
 _FATHOM_BASE = "https://api.fathom.ai/external/v1"
 
 
-async def _resolve_api_key(tool: Any) -> str:
+def _fathom_headers(*, kind: Literal["api_key", "bearer"], credential: str) -> dict[str, str]:
+    if kind == "bearer":
+        return {"Authorization": f"Bearer {credential}"}
+    return {"X-Api-Key": credential}
+
+
+def _integration_bearer(credentials: dict[str, Any]) -> str | None:
+    for key in ("token", "access_token", "bearer_auth"):
+        value = credentials.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _env_api_key() -> str | None:
+    return os.getenv("FATHOM_API_KEY_AUTH") or os.getenv("FATHOM_API_KEY")
+
+
+def _env_bearer() -> str | None:
+    return os.getenv("FATHOM_BEARER_AUTH")
+
+
+async def _resolve_auth(tool: Any) -> tuple[Literal["api_key", "bearer"], str]:
+    """Return (auth_kind, credential) for Fathom API requests.
+
+    API keys use X-Api-Key; OAuth uses Authorization: Bearer (see developers.fathom.ai).
+    """
     if isinstance(tool.integration, Integration):
         credentials = await tool.integration.resolve()
-        if "api_key" in credentials and credentials["api_key"]:
-            return str(credentials["api_key"])
-        if "token" in credentials and credentials["token"]:
-            return str(credentials["token"])
-        raise ValueError("Fathom integration credentials must include api_key or token.")
+        if credentials.get("api_key"):
+            return "api_key", str(credentials["api_key"])
+        bearer = _integration_bearer(credentials)
+        if bearer:
+            return "bearer", bearer
+        raise ValueError("Fathom integration credentials must include api_key, token, or access_token.")
     if tool.api_key is not None:
-        return tool.api_key.get_secret_value()
-    env_key = os.getenv("FATHOM_API_KEY")
+        return "api_key", tool.api_key.get_secret_value()
+    access_token = getattr(tool, "access_token", None)
+    if access_token is not None:
+        return "bearer", access_token.get_secret_value()
+    env_key = _env_api_key()
     if env_key:
-        return env_key
+        return "api_key", env_key
+    env_bearer = _env_bearer()
+    if env_bearer:
+        return "bearer", env_bearer
     raise ValueError(
-        "Fathom API key not found. Set FATHOM_API_KEY, pass api_key in config, or configure an integration."
+        "Fathom credentials not found. Set FATHOM_API_KEY_AUTH or FATHOM_API_KEY, "
+        "FATHOM_BEARER_AUTH, pass api_key/access_token in config, or configure an integration."
     )
-
-
-def _fathom_headers(api_key: str) -> dict[str, str]:
-    return {"X-Api-Key": api_key}
 
 
 class FathomListMeetings(Tool):
@@ -39,11 +69,14 @@ class FathomListMeetings(Tool):
     )
     integration: Annotated[str, Integration("fathom")] | None = None
     api_key: SecretStr | None = None
+    access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key, "access_token": self.access_token},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -80,7 +113,7 @@ class FathomListMeetings(Tool):
             include_action_items: bool = Field(False, description="Include action items per meeting."),
             include_crm_matches: bool = Field(False, description="Include CRM matches per meeting."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            auth_kind, credential = await _resolve_auth(self)
             import httpx
 
             params: list[tuple[str, str]] = []
@@ -101,10 +134,12 @@ class FathomListMeetings(Tool):
             if calendar_invitees_domains:
                 for d in calendar_invitees_domains:
                     params.append(("calendar_invitees_domains[]", d))
-            if include_summary:
-                params.append(("include_summary", "true"))
-            if include_transcript:
-                params.append(("include_transcript", "true"))
+            # include_summary / include_transcript are API-key-only per Fathom OpenAPI.
+            if auth_kind == "api_key":
+                if include_summary:
+                    params.append(("include_summary", "true"))
+                if include_transcript:
+                    params.append(("include_transcript", "true"))
             if include_action_items:
                 params.append(("include_action_items", "true"))
             if include_crm_matches:
@@ -113,7 +148,7 @@ class FathomListMeetings(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_FATHOM_BASE}/meetings",
-                    headers=_fathom_headers(api_key),
+                    headers=_fathom_headers(kind=auth_kind, credential=credential),
                     params=params,
                     timeout=httpx.Timeout(30.0),
                 )
@@ -128,11 +163,14 @@ class FathomGetRecordingSummary(Tool):
     description: str | None = "Get the AI-generated markdown summary for a Fathom meeting recording."
     integration: Annotated[str, Integration("fathom")] | None = None
     api_key: SecretStr | None = None
+    access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key, "access_token": self.access_token},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -143,7 +181,7 @@ class FathomGetRecordingSummary(Tool):
                 description="If set, Fathom POSTs the summary asynchronously to this URL instead of returning it.",
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            auth_kind, credential = await _resolve_auth(self)
             import httpx
 
             params: dict[str, str] = {}
@@ -153,7 +191,7 @@ class FathomGetRecordingSummary(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_FATHOM_BASE}/recordings/{recording_id}/summary",
-                    headers=_fathom_headers(api_key),
+                    headers=_fathom_headers(kind=auth_kind, credential=credential),
                     params=params or None,
                     timeout=httpx.Timeout(60.0),
                 )
@@ -170,11 +208,14 @@ class FathomGetRecordingTranscript(Tool):
     )
     integration: Annotated[str, Integration("fathom")] | None = None
     api_key: SecretStr | None = None
+    access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key, "access_token": self.access_token},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -185,7 +226,7 @@ class FathomGetRecordingTranscript(Tool):
                 description="If set, Fathom POSTs the transcript asynchronously to this URL instead of returning it.",
             ),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            auth_kind, credential = await _resolve_auth(self)
             import httpx
 
             params: dict[str, str] = {}
@@ -195,7 +236,7 @@ class FathomGetRecordingTranscript(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_FATHOM_BASE}/recordings/{recording_id}/transcript",
-                    headers=_fathom_headers(api_key),
+                    headers=_fathom_headers(kind=auth_kind, credential=credential),
                     params=params or None,
                     timeout=httpx.Timeout(120.0),
                 )
@@ -210,18 +251,21 @@ class FathomListTeams(Tool):
     description: str | None = "List all teams in the Fathom organization with cursor-based pagination."
     integration: Annotated[str, Integration("fathom")] | None = None
     api_key: SecretStr | None = None
+    access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key, "access_token": self.access_token},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_teams(
             cursor: str | None = Field(None, description="Pagination cursor from a previous response's next_cursor."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            auth_kind, credential = await _resolve_auth(self)
             import httpx
 
             params: dict[str, str] = {}
@@ -231,7 +275,7 @@ class FathomListTeams(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_FATHOM_BASE}/teams",
-                    headers=_fathom_headers(api_key),
+                    headers=_fathom_headers(kind=auth_kind, credential=credential),
                     params=params or None,
                     timeout=httpx.Timeout(30.0),
                 )
@@ -246,11 +290,14 @@ class FathomListTeamMembers(Tool):
     description: str | None = "List Fathom team members with optional filter by team name and cursor-based pagination."
     integration: Annotated[str, Integration("fathom")] | None = None
     api_key: SecretStr | None = None
+    access_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **self._annotate_config({"integration": self.integration, "api_key": self.api_key}),
+            **self._annotate_config(
+                {"integration": self.integration, "api_key": self.api_key, "access_token": self.access_token},
+            ),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -258,7 +305,7 @@ class FathomListTeamMembers(Tool):
             cursor: str | None = Field(None, description="Pagination cursor from a previous response's next_cursor."),
             team: str | None = Field(None, description="Filter to members of this team name."),
         ) -> Any:
-            api_key = await _resolve_api_key(self)
+            auth_kind, credential = await _resolve_auth(self)
             import httpx
 
             params: dict[str, str] = {}
@@ -270,7 +317,7 @@ class FathomListTeamMembers(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_FATHOM_BASE}/team_members",
-                    headers=_fathom_headers(api_key),
+                    headers=_fathom_headers(kind=auth_kind, credential=credential),
                     params=params or None,
                     timeout=httpx.Timeout(30.0),
                 )
