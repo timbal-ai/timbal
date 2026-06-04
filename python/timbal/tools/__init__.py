@@ -134,6 +134,13 @@ if TYPE_CHECKING:
         FalQueueStatus,
         FalQueueSubmit,
     )
+    from .fathom import (
+        FathomGetRecordingSummary,
+        FathomGetRecordingTranscript,
+        FathomListMeetings,
+        FathomListTeamMembers,
+        FathomListTeams,
+    )
     from .firecrawl import FirecrawlCrawl, FirecrawlExtract, FirecrawlMap, FirecrawlScrape, FirecrawlSearch
     from .gemini_images import (
         GeminiImagesAnalyzeImage,
@@ -1780,6 +1787,11 @@ __all__ = [
     "FalQueueStatus",
     "FalQueueResult",
     "FalQueueCancel",
+    "FathomListMeetings",
+    "FathomGetRecordingSummary",
+    "FathomGetRecordingTranscript",
+    "FathomListTeams",
+    "FathomListTeamMembers",
     "ElasticsearchIngestAttachment",
     "ElasticsearchBulkOperations",
     "ElasticsearchDeleteDocument",
@@ -2730,6 +2742,11 @@ _LAZY_IMPORTS = {
     "FalQueueStatus": ".fal",
     "FalQueueResult": ".fal",
     "FalQueueCancel": ".fal",
+    "FathomListMeetings": ".fathom",
+    "FathomGetRecordingSummary": ".fathom",
+    "FathomGetRecordingTranscript": ".fathom",
+    "FathomListTeams": ".fathom",
+    "FathomListTeamMembers": ".fathom",
     "ElasticsearchIngestAttachment": ".elasticsearch",
     "ElasticsearchBulkOperations": ".elasticsearch",
     "ElasticsearchDeleteDocument": ".elasticsearch",
