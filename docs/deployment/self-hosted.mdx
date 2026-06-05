@@ -1,82 +1,110 @@
 ---
 title: "Self-Hosted"
-description: "Deploy your Timbal AI applications to your own infrastructure"
+description: "Run Timbal projects on your own infrastructure"
 ---
 
-Deploy your Timbal applications on your own infrastructure using Docker containers. This approach gives you full control over your deployment environment while leveraging the same containerized approach used by the Timbal Platform.
+Self-hosting means you run the same three layers a `timbal create` project contains — **UI**, **API**, and **workforce** — without `timbal start` managing them. You own process lifecycle, port allocation, env wiring, restarts, and log aggregation.
+
+There is no `timbal build` or CLI-generated Docker image. You bring your own process manager (systemd, supervisord, Kubernetes, etc.) and production build pipeline.
 
 ## Prerequisites
 
-Before self-hosting your Timbal application, ensure you have:
+- A project created with [`timbal create`](/quickstart#create-a-timbal-project)
+- [Bun](https://bun.sh) for `api/` and `ui/`
+- [uv](https://docs.astral.sh/uv/) for workforce Python deps
+- `timbal[server]` installed in each workforce member's venv
 
-- [Timbal CLI](/installation) installed and configured
-- A Timbal project initialized with `timbal init`
-- Your application tested locally
-- Docker installed on your target infrastructure
+## What `timbal start` does (that you must replicate)
 
-## Deployment Process
+`timbal start` is the reference implementation. When self-hosting, reproduce the same wiring:
 
-The first two steps are identical to the [Timbal Platform deployment](/deployment/platform#deployment-process):
+### 1. Workforce members
 
-<Steps>
-  <Step title="Prepare your environment">
-    Configure your `.dockerignore` and `timbal.yaml` files.
-  </Step>
-  <Step title="Build your application">
-    Create your Docker container with `timbal build`.
-  </Step>
-  <Step title="Launch your container">
-    Run your containerized Timbal application using Docker:
-    ```bash
-    docker run -d -p <port>:<port> <image_tag> \
-      uv run -m timbal.server.http --port <port> --import_spec <fqn>
-    ```
+For each `workforce/<name>/` with a `timbal.yaml`:
 
-    This command starts the Timbal HTTP server directly with your specified agent or workflow. The `--import_spec` parameter should match the `fqn` from your `timbal.yaml` configuration file, defining which component to execute.
-
-    <Note>
-    You can add as many environment variables as needed with the `-e` docker flag.
-    </Note>
-    <Info>
-    A `timbal serve` command will be available soon to simplify this process.
-    </Info>
-  </Step>
-</Steps>
-
-## Accessing Your Application
-
-Once running, your Timbal application exposes a REST API accessible at:
-
-```http
-POST http://localhost:<port>/collect
+```bash
+cd workforce/<name>
+uv sync
+uv run -m timbal.server.http --port <port> --import_spec <fqn>
 ```
 
-For streaming responses:
+`<fqn>` comes from `timbal.yaml` (e.g. `agent.py::agent`). The HTTP server exposes:
 
 ```http
-POST http://localhost:<port>/stream
+POST http://localhost:<port>/run      # collect (returns final OutputEvent)
+POST http://localhost:<port>/stream   # SSE event stream
+GET  http://localhost:<port>/healthcheck
 ```
 
-For complete API documentation, including request/response formats, visit the [API Reference](/api-reference/introduction).
+### 2. API
 
-## Production Considerations
+```bash
+cd api
+bun install
+PORT=<api_port> bun run dev    # dev; use your production start command in prod
+```
 
-### Container Orchestration
-For production deployments, consider using:
-- **Docker Compose** for multi-container applications
-- **Kubernetes** for scalable, managed deployments
-- **Docker Swarm** for simpler orchestration needs
+### 3. UI (if present)
 
-### Monitoring and Logging
-- Configure log aggregation to collect container logs
-- Set up health checks for container monitoring
-- Implement metrics collection for performance monitoring
+```bash
+cd ui
+bun install
+bun run dev --port <ui_port>   # dev; use your production build/serve in prod
+```
 
-<Note>
-Even with self-hosted deployments, you can still use Timbal Platform for tracing, monitoring, and observability by [configuring your application](/core-concepts/tracing) to connect to the platform services.
-</Note>
+### 4. Cross-service env vars
 
-### Security
-- Run containers with non-root users when possible
-- Use secrets management systems instead of environment variables for sensitive data
-- Keep base images updated for security patches
+The API and UI need to know where workforce members live. `timbal start` injects these — set them yourself when self-hosting:
+
+| Variable | Example | Purpose |
+|----------|---------|---------|
+| `TIMBAL_START_WORKFORCE` | `a1b2c3d4-...:4455,b5c6d7e8-...:4456` | Manifest `_id` → port map (comma-separated) |
+| `TIMBAL_START_API_PORT` | `3000` | API port (for services that call back to API) |
+| `TIMBAL_START_UI_PORT` | `3737` | UI port |
+| `PORT` | per-service | Port each Bun service binds to |
+
+`TIMBAL_START_WORKFORCE` uses the `_id` from each member's `timbal.yaml`, not the directory name.
+
+Also pass through model keys and integration secrets (`OPENAI_API_KEY`, etc.) — same `.env` files you'd use locally.
+
+<Warning>
+If any of `TIMBAL_START_*` are missing, platform SDK helpers that resolve service URLs will fail. Mirror what `timbal start` sets before debugging routing issues.
+</Warning>
+
+## Production considerations
+
+### Process management
+
+Run each component under a supervisor that restarts on crash:
+
+- One process per workforce member
+- One for API
+- One for UI (if used)
+
+Use health checks against `/healthcheck` on workforce HTTP servers.
+
+### Logging
+
+`timbal start` multiplexes stdout/stderr into one terminal with per-service prefixes and `f`/`m` focus controls. Self-hosted, you need your own approach:
+
+- Separate log files or streams per component
+- Structured logging if shipping to Datadog / CloudWatch / etc.
+- Correlate by request ID if the API fans out to multiple workforce members
+
+### Networking
+
+- Put a reverse proxy (nginx, Caddy, etc.) in front of UI and API for TLS
+- Workforce members can stay internal — only the API needs to reach them
+- Lock down ports so workforce HTTP servers aren't exposed publicly
+
+### Builds
+
+The scaffold uses `bun run dev` for API/UI. For production, use whatever production build your scaffolded `api/` and `ui/` packages define (static UI build + API server, etc.). The workforce side stays `uv run -m timbal.server.http` with a pinned `uv sync` environment.
+
+### Observability
+
+Platform tracing still works from self-hosted runtimes — configure a [tracing provider](/core-concepts/tracing) to export spans to Timbal or your own OTLP endpoint.
+
+## When to self-host
+
+Self-hosting makes sense when you need full control over networking, data residency, or custom orchestration. For most teams, the [Timbal Platform](/deployment/platform) is less operational overhead — same project layout, no component wiring to maintain.

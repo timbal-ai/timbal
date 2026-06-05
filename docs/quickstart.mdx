@@ -43,13 +43,26 @@ my-project/
 | **workforce/\<name\>/timbal.yaml** | Timbal deployment configuration and settings |
 | **ui/** | React + Vite + TypeScript + shadcn running on Bun (only if UI is selected) |
 
+## Run locally
+
+From the project directory, start the full stack — API, workforce (your Python agents/workflows), and UI if you included one:
+
+```bash
+cd my-project
+timbal start
+```
+
+`timbal start` prints the local URLs and keeps services running until you quit (`q`). While it's running you can press `o` to open the UI in your browser, or `h` for other commands.
+
 <Tip>
-You have your project structure set up. Next, you only need to edit the `agent.py` file (or `workflow.py` for workflows) in the `workforce/<name>/` directory to customize your agent's behavior and capabilities.
+To test a workforce member in isolation, you can also run its Python file directly: `uv run python workforce/<name>/agent.py` (the scaffold includes a small terminal REPL).
 </Tip>
 
-## Build a simple Agent
+## Customize your agent
 
-Let's create a simple agent with the `Agent` class:
+`timbal create` scaffolds a starter `agent.py` (or `workflow.py`) under `workforce/<name>/`. Open that file and edit the `Agent` definition.
+
+A minimal agent needs only a **name** and **model**:
 
 ```python agent.py icon="python"
 from timbal import Agent
@@ -64,27 +77,9 @@ agent = Agent(
 You'll need to set the appropriate environment variables for your chosen model (e.g., `OPENAI_API_KEY`). Store these in a `.env` file and never commit them to version control.
 </Info>
 
-We can add the following boilerplate to our script to interact with the agent in the terminal:
-
-```python
-async def main():
-    while True:
-        prompt = input("User: ")
-        if prompt == "q":
-            break
-        agent_output_event = await agent(prompt=prompt).collect()
-        print(f"Agent: {agent_output_event.output}") # noqa: T201
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
-```
+The scaffold already includes a terminal REPL (`main()` at the bottom of `agent.py`). After editing, restart with `timbal start` to pick up changes in the full app, or run the file directly for a quick loop.
 
 You can learn more about the Agent class and all the available options in the [Agents](/agents) section.
-
-<Tip>
-You've just created your first Timbal agent. Next, you can add any type of tools to it to make it more powerful.
-</Tip>
 
 ## Adding Tools
 
