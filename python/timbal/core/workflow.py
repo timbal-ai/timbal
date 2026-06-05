@@ -14,7 +14,7 @@ except ImportError:
 import structlog
 from pydantic import BaseModel, ConfigDict, PrivateAttr, computed_field, create_model
 
-from ..errors import InterruptError, PauseRequired, SpanNotFound, WorkflowStepError
+from ..errors import InterruptError, PauseRequired, RunCancelled, SpanNotFound, WorkflowStepError
 from ..state import get_call_id, get_parent_call_id, set_parent_call_id
 from ..types.events.output import OutputEvent
 from .runnable import Runnable, RunnableLike
@@ -256,6 +256,17 @@ class Workflow(Runnable):
                         logger.info(f"Step {step.name} paused ({event.status.reason}).")
                         status.state = StepState.FAILED
                         sentinel = PauseRequired(event)
+                        return
+                    if (
+                        isinstance(event, OutputEvent)
+                        and event.status.code == "cancelled"
+                        and event.status.reason == "cancelled"
+                    ):
+                        # A human cancelled this step via Cancel(); terminate the
+                        # whole workflow run rather than continuing other steps.
+                        logger.info(f"Step {step.name} cancelled by user.")
+                        status.state = StepState.FAILED
+                        sentinel = RunCancelled(event.status.message or "Run cancelled by user.")
                         return
                     if isinstance(event, OutputEvent) and event.error is not None:
                         logger.info(f"Step {step.name} completed with error.")

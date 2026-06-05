@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -43,6 +43,15 @@ class ApprovalResolution(BaseModel):
 
     approved: bool
     reason: str | None = None
+    override_input: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Edit-on-approve: when approved, these key/value pairs are merged over the "
+            "originally-proposed input (override wins) and re-validated before the handler "
+            "runs. Lets a human tweak the proposal (e.g. fix a recipient) without rejecting it. "
+            "Ignored when approved is False. The resulting input is recorded in the trace audit."
+        ),
+    )
     expires_at: int | None = Field(
         default=None,
         description=(
@@ -76,3 +85,42 @@ class ApprovalResolution(BaseModel):
         if now_ms is None:
             now_ms = int(time.time() * 1000)
         return now_ms >= self.expires_at
+
+
+# Discriminator used to recognize a cancel sent as plain JSON over the wire
+# (HTTP clients can't ship a Cancel instance). A resume value shaped like
+# ``{"type": "timbal.cancel", "reason": "..."}`` is coerced to ``Cancel``.
+CANCEL_TYPE = "timbal.cancel"
+
+
+class Cancel(BaseModel):
+    """Universal resume value that *aborts the whole run*.
+
+    Pass it on the ``resume=`` channel keyed by any pending approval or
+    suspension id — ``resume={pending_id: Cancel("user closed the dialog")}``.
+    When that gate/suspension is reached the run terminates with status
+    ``cancelled`` / reason ``cancelled`` and the handler never executes.
+
+    This is distinct from a *decline*:
+
+    - **decline** (approval ``approved=False`` / a handler-interpreted suspend
+      value) feeds a result back to the model so the agent keeps going on a
+      different path.
+    - **cancel** stops the entire run. Nothing is fed back to the model.
+
+    Over HTTP/JSON (where you can't pass a Python object) send the equivalent
+    tagged dict: ``{"type": "timbal.cancel", "reason": "..."}``.
+    """
+
+    type: Literal["timbal.cancel"] = CANCEL_TYPE
+    reason: str | None = Field(
+        default=None,
+        description="Optional human-readable reason, surfaced on the cancelled span/status.",
+    )
+
+    @classmethod
+    def matches(cls, value: Any) -> bool:
+        """Return True if a raw resume value is a cancel (instance or tagged dict)."""
+        if isinstance(value, cls):
+            return True
+        return isinstance(value, dict) and value.get("type") == CANCEL_TYPE

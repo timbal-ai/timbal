@@ -357,7 +357,7 @@ class TestApprovalUsageCounters:
 class TestResolutionSnapshotCompleteness:
     @pytest.mark.asyncio
     async def test_full_resolution_snapshot_shape(self):
-        """All seven keys must land on the snapshot — anything missing
+        """All audit keys must land on the snapshot — anything missing
         means a downstream consumer can't reconstruct the audit row."""
         tool = Tool(name="op", handler=lambda x: "ok", requires_approval=True)
 
@@ -391,6 +391,7 @@ class TestResolutionSnapshotCompleteness:
             "comment": "vetted via SSO",
             "decided_at": 42,
             "expires_at": future,
+            "override_input": None,
             "metadata": {"sso_provider": "google", "ip": "10.0.0.1"},
         }
 

@@ -127,6 +127,7 @@ class RunContext(BaseModel):
                         "approval_id": approval["id"],
                         "path": span.path,
                         "call_id": span.call_id,
+                        "tool_call_id": approval.get("tool_call_id"),
                         "prompt": approval.get("prompt"),
                         "description": approval.get("description"),
                         "kind": approval.get("kind"),
@@ -166,7 +167,9 @@ class RunContext(BaseModel):
                         "kind": suspension.get("kind", "suspend"),
                         "path": span.path,
                         "call_id": span.call_id,
+                        "tool_call_id": suspension.get("tool_call_id"),
                         "payload": suspension.get("payload", {}),
+                        "response_schema": suspension.get("response_schema"),
                     })
         return pending
 

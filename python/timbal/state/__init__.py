@@ -95,7 +95,12 @@ def _suspension_id_for(path: str, payload: Any) -> str:
     return hashlib.sha256(json.dumps(keyed, sort_keys=True, default=str).encode()).hexdigest()[:32]
 
 
-def suspend(payload: dict[str, Any], *, kind: str = "suspend") -> Any:
+def suspend(
+    payload: dict[str, Any],
+    *,
+    kind: str = "suspend",
+    response_schema: dict[str, Any] | None = None,
+) -> Any:
     """Pause the current run and wait for an externally-supplied resume value.
 
     Call this from inside any handler (e.g. an ``ask_user`` tool). On the first
@@ -107,6 +112,10 @@ def suspend(payload: dict[str, Any], *, kind: str = "suspend") -> Any:
     and ``resume={suspension_id: value}``. The handler re-executes from the top
     and this call returns ``value``.
 
+    To cancel instead of answering, resume with ``Cancel(reason=...)``: the run
+    terminates (status ``cancelled`` / reason ``cancelled``) and this call never
+    returns.
+
     IMPORTANT: because the handler re-runs on resume, ``suspend()`` must come
     before any non-idempotent side-effect in the handler (same caveat as
     LangGraph's ``interrupt()``).
@@ -116,15 +125,20 @@ def suspend(payload: dict[str, Any], *, kind: str = "suspend") -> Any:
             (e.g. ``{"question": "...", "options": [...]}``).
         kind: Discriminator the frontend uses to pick a renderer
             (e.g. ``"ask_user"``, ``"confirm"``).
+        response_schema: Optional JSON Schema describing the shape the resume
+            value must match. Surfaced on the ``InteractionEvent`` so the
+            frontend can validate the user's input before resuming.
 
     Returns:
         The value supplied on resume.
 
     Raises:
         Suspend: on the first (un-resumed) pass.
+        RunCancelled: if resumed with a ``Cancel`` value.
         RuntimeError: if called outside a run context.
     """
-    from ..errors import Suspend
+    from ..errors import RunCancelled, Suspend
+    from ..types.approval import Cancel
 
     run_context = get_run_context()
     if run_context is None:
@@ -133,8 +147,11 @@ def suspend(payload: dict[str, Any], *, kind: str = "suspend") -> Any:
     suspension_id = _suspension_id_for(span.path, payload)
     if suspension_id in run_context._resume_values:
         run_context._used_resume_ids.add(suspension_id)
-        return run_context._resume_values[suspension_id]
-    raise Suspend(suspension_id, payload, kind)
+        value = run_context._resume_values[suspension_id]
+        if isinstance(value, Cancel):
+            raise RunCancelled(value.reason or "Run cancelled by user.")
+        return value
+    raise Suspend(suspension_id, payload, kind, response_schema)
 
 
 def _normalize_tool_request_kind(kind: str) -> str:

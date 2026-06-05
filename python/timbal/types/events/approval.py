@@ -20,6 +20,10 @@ class ApprovalEvent(BaseEvent):
     """Runnable name that requires approval."""
     runnable_type: str
     """Runnable class/type that requires approval."""
+    tool_call_id: str | None = None
+    """The LLM tool_call id that triggered this gate, when the approval happened
+    inside an agent tool. Lets the frontend correlate the approval card with the
+    exact tool_use block in the chat transcript. ``None`` for direct calls."""
     input: Any
     """Validated (redacted, if configured) input that would be passed to the runnable.
     The *values* for a structured approval card. Pair with ``input_schema`` to render

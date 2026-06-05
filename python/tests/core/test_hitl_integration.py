@@ -24,7 +24,7 @@ nondeterministic. A couple of soft text checks are kept loose on purpose.
 import pytest
 from timbal import Agent
 from timbal.state import suspend
-from timbal.types.approval import ApprovalResolution
+from timbal.types.approval import ApprovalResolution, Cancel
 from timbal.types.events import ApprovalEvent, InteractionEvent, OutputEvent
 from timbal.types.message import Message
 
@@ -351,3 +351,148 @@ class TestSuspendRealModel:
         # The model adapted to the dismissal and produced a closing turn.
         assert isinstance(out.output, Message)
         assert out.output.collect_text().strip(), "model should produce a closing message after dismissal"
+
+
+# ---------------------------------------------------------------------------
+# Edit-on-approve + tool_call_id correlation (real model)
+# ---------------------------------------------------------------------------
+
+
+class TestEditAndCorrelateRealModel:
+    @pytest.mark.integration
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_approve_with_override_runs_corrected_input(self, model, max_tokens):
+        """Real model proposes a transfer; the human approves but edits the
+        recipient. The handler must run once with the *corrected* input, not the
+        model's original proposal."""
+        calls: list[dict] = []
+
+        def transfer_funds(amount: int, recipient: str) -> str:
+            """Transfer money to a recipient."""
+            calls.append({"amount": amount, "recipient": recipient})
+            return f"Transferred ${amount} to {recipient}."
+
+        from timbal.core.tool import Tool
+
+        tool = Tool(
+            handler=transfer_funds,
+            requires_approval=True,
+            approval_prompt=lambda amount, recipient: f"Approve transfer of ${amount} to {recipient}?",
+        )
+        agent = Agent(
+            name="banker",
+            model=model,
+            max_tokens=max_tokens,
+            tools=[tool],
+            system_prompt="You are a banking assistant. To move money you MUST call the transfer_funds tool.",
+        )
+
+        prompt = "Please transfer $500 to Alice."
+        events1 = [e async for e in agent(prompt=prompt)]
+        approval = _first(events1, ApprovalEvent)
+        out1 = _final_output(events1)
+        assert approval is not None, "real model did not call the gated tool"
+
+        # tool_call_id must correlate the gate with the LLM's tool_use block.
+        assert isinstance(approval.tool_call_id, str) and approval.tool_call_id, (
+            "gate fired inside an agent tool call but carries no tool_call_id"
+        )
+
+        out2 = await agent(
+            prompt=prompt,
+            parent_id=out1.run_id,
+            resume={
+                approval.approval_id: ApprovalResolution(
+                    approved=True,
+                    override_input={"recipient": "Bob"},  # human redirects the transfer
+                )
+            },
+        ).collect()
+
+        assert out2.status.code == "success", out2.error
+        assert len(calls) == 1, "approved handler must execute exactly once"
+        assert calls[0]["recipient"] == "Bob", "handler must run with the edited recipient"
+        assert calls[0]["amount"] == 500, "non-overridden fields are kept from the proposal"
+
+
+# ---------------------------------------------------------------------------
+# Cancel — aborts the whole run (real model)
+# ---------------------------------------------------------------------------
+
+
+class TestCancelRealModel:
+    @pytest.mark.integration
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_cancel_at_gate_aborts_run(self, model, max_tokens):
+        calls: list[dict] = []
+
+        def delete_account(user_id: str) -> str:
+            """Permanently delete a user account."""
+            calls.append({"user_id": user_id})
+            return f"Deleted account {user_id}."
+
+        from timbal.core.tool import Tool
+
+        tool = Tool(handler=delete_account, requires_approval=True, approval_prompt="Approve deletion?")
+        agent = Agent(
+            name="admin",
+            model=model,
+            max_tokens=max_tokens,
+            tools=[tool],
+            system_prompt="You are an admin assistant. To delete an account you MUST call the delete_account tool.",
+        )
+
+        prompt = "Delete the account for user_id 'u_123'."
+        events1 = [e async for e in agent(prompt=prompt)]
+        approval = _first(events1, ApprovalEvent)
+        out1 = _final_output(events1)
+        assert approval is not None, "real model did not call the gated tool"
+
+        out2 = await agent(
+            prompt=prompt,
+            parent_id=out1.run_id,
+            resume={approval.approval_id: Cancel(reason="user navigated away")},
+        ).collect()
+
+        # Unlike a denial (which the model would see and respond to), cancel aborts.
+        assert out2.status.code == "cancelled"
+        assert out2.status.reason == "cancelled"
+        assert calls == [], "cancelled handler must never execute"
+
+    @pytest.mark.integration
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_cancel_at_suspend_aborts_run(self, model, max_tokens):
+        received: list[str] = []
+
+        def ask_user(question: str) -> str:
+            """Ask the user a clarifying question. Use ONLY when blocked on a needed detail."""
+            answer = suspend({"question": question}, kind="ask_user")
+            received.append(answer)
+            return answer
+
+        agent = Agent(
+            name="assistant",
+            model=model,
+            max_tokens=max_tokens,
+            tools=[ask_user],
+            system_prompt=(
+                "You help set up databases. The user has NOT said which engine to use, so you "
+                "MUST call the ask_user tool to ask (never ask in plain text)."
+            ),
+        )
+
+        prompt = "Set up a database for my new app."
+        events1 = [e async for e in agent(prompt=prompt)]
+        interaction = _first(events1, InteractionEvent)
+        out1 = _final_output(events1)
+        assert interaction is not None, "real model did not call ask_user"
+
+        out2 = await agent(
+            prompt=prompt,
+            parent_id=out1.run_id,
+            resume={interaction.interaction_id: Cancel()},
+        ).collect()
+
+        assert out2.status.code == "cancelled"
+        assert out2.status.reason == "cancelled"
+        assert received == [], "post-suspend handler body must not run on cancel"

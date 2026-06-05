@@ -32,6 +32,7 @@ from ..errors import (
     EarlyExit,
     InterruptError,
     PauseRequired,
+    RunCancelled,
     Suspend,
     WorkflowStepError,
 )
@@ -47,7 +48,7 @@ from ..state.context import RunContext
 from ..state.dependency_analyzer import RunContextDependencyAnalyzer
 from ..state.tracing.providers import TRACING_UNSET
 from ..state.tracing.span import Span
-from ..types.approval import ApprovalPolicyDecision, ApprovalResolution
+from ..types.approval import ApprovalPolicyDecision, ApprovalResolution, Cancel
 from ..types.events import (
     ApprovalEvent,
     BaseEvent,
@@ -145,7 +146,15 @@ def _normalize_resume_values(raw: Any) -> dict[str, Any]:
         return {}
     if not isinstance(raw, dict):
         raise ValueError("resume must be a mapping of id to a resume value.")
-    return {str(k): v for k, v in raw.items()}
+    # A cancel may arrive as a Cancel instance or, over HTTP/JSON, as the tagged
+    # dict {"type": "timbal.cancel", ...}. Normalize the wire form to a Cancel so
+    # both the approval gate and suspend() see a real instance.
+    normalized: dict[str, Any] = {}
+    for k, v in raw.items():
+        if not isinstance(v, Cancel) and Cancel.matches(v):
+            v = Cancel.model_validate(v)
+        normalized[str(k)] = v
+    return normalized
 
 
 def _coerce_approval_resolution(value: Any) -> ApprovalResolution:
@@ -1179,6 +1188,9 @@ class Runnable(ABC, BaseModel):
                     input_schema = self.format_params_model_schema()
                 except Exception:
                     input_schema = None
+                # Set by the agent on the START event when this gate fires inside a
+                # tool call (see Agent._safe_tool_dispatch). None for direct calls.
+                tool_call_id = span.metadata.get("tool_call_id")
                 span.metadata["approval"] = {
                     "id": approval_id,
                     "required": True,
@@ -1187,13 +1199,24 @@ class Runnable(ABC, BaseModel):
                     "kind": approval_decision.kind,
                     "ui": approval_decision.ui,
                     "input_schema": input_schema,
+                    "tool_call_id": tool_call_id,
                     "metadata": approval_decision.metadata,
                     "input": redacted_input,
                 }
                 approval_resolution = None
+                approval_cancel: Cancel | None = None
                 if approval_id in run_context._resume_values:
                     run_context._used_resume_ids.add(approval_id)
-                    approval_resolution = _coerce_approval_resolution(run_context._resume_values[approval_id])
+                    raw_resume = run_context._resume_values[approval_id]
+                    # A Cancel value aborts the whole run rather than approving or
+                    # denying. It is not a valid ApprovalResolution input, so it
+                    # routes around coercion — but still flows through the durable
+                    # claim below so a cancel and an approve racing on two workers
+                    # can't both win.
+                    if isinstance(raw_resume, Cancel):
+                        approval_cancel = raw_resume
+                    else:
+                        approval_resolution = _coerce_approval_resolution(raw_resume)
                 if approval_resolution is not None and approval_resolution.is_expired():
                     span.metadata["approval"]["expired"] = True
                     span.metadata["approval"]["expired_at"] = approval_resolution.expires_at
@@ -1202,7 +1225,11 @@ class Runnable(ABC, BaseModel):
                     run_context.update_usage("approvals:expired", 1)
                     approval_resolution = None
 
-                if approval_resolution is not None and run_context._tracing_provider is not None:
+                # A decision OR a cancel claims the gate; the first claimer wins and
+                # any later duplicate (resolve or cancel) stops here.
+                if (approval_resolution is not None or approval_cancel is not None) and (
+                    run_context._tracing_provider is not None
+                ):
                     claimed = await run_context._tracing_provider.claim_approval(
                         str(run_context.parent_id) if run_context.parent_id else None,
                         approval_id,
@@ -1224,6 +1251,15 @@ class Runnable(ABC, BaseModel):
                         }
                         span._output_dump = await dump(span.output)
                         return
+
+                if approval_cancel is not None:
+                    run_context.update_usage("approvals:cancelled", 1)
+                    message = approval_cancel.reason or "Run cancelled by user."
+                    span.metadata["approval"]["cancelled"] = True
+                    span.status = RunStatus(code="cancelled", reason="cancelled", message=message)
+                    span.output = {"approval_id": approval_id, "status": "cancelled", "reason": message}
+                    span._output_dump = await dump(span.output)
+                    return
 
                 if approval_resolution is None:
                     # Status/output MUST be set BEFORE the yield. If the
@@ -1253,6 +1289,7 @@ class Runnable(ABC, BaseModel):
                         runnable_path=span.path,
                         runnable_name=self.name,
                         runnable_type=self.metadata.get("type", self.__class__.__name__),
+                        tool_call_id=tool_call_id,
                         input=redacted_input,
                         input_schema=input_schema,
                         prompt=approval_decision.prompt,
@@ -1279,6 +1316,7 @@ class Runnable(ABC, BaseModel):
                     "comment": approval_resolution.comment,
                     "decided_at": approval_resolution.decided_at,
                     "expires_at": approval_resolution.expires_at,
+                    "override_input": approval_resolution.override_input,
                     "metadata": approval_resolution.metadata,
                 }
                 if not approval_resolution.approved:
@@ -1297,6 +1335,18 @@ class Runnable(ABC, BaseModel):
                     return
 
                 run_context.update_usage("approvals:approved", 1)
+
+                # Edit-on-approve: merge the human's overrides over the proposed
+                # input (override wins) and re-validate so the handler runs with
+                # the corrected, type-checked values. The audit snapshot above
+                # already recorded what was overridden.
+                if approval_resolution.override_input:
+                    merged_input = {**validated_input, **approval_resolution.override_input}
+                    validated_input = dict(self.params_model.model_validate(merged_input))
+                    # Reflect what actually runs on the public input surface (redacted).
+                    span.input = self._redact_validated_input(validated_input)
+                    span._input_dump = await dump(span.input)
+                    span.metadata["approval"]["effective_input"] = span.input
 
             # pre_hook runs only when we're actually going to execute the
             # handler. We deliberately defer it past the approval gate so
@@ -1396,10 +1446,15 @@ class Runnable(ABC, BaseModel):
                     "payload": suspend_signal.payload,
                 }
                 span._output_dump = await dump(span.output)
+                # Set by the agent on the START event when this suspension fires
+                # inside a tool call. None for direct (non-agent) calls.
+                tool_call_id = span.metadata.get("tool_call_id")
                 span.metadata["suspension"] = {
                     "id": suspend_signal.suspension_id,
                     "kind": suspend_signal.kind,
                     "payload": suspend_signal.payload,
+                    "response_schema": suspend_signal.response_schema,
+                    "tool_call_id": tool_call_id,
                 }
                 run_context.update_usage("suspends:required", 1)
                 interaction_event = InteractionEvent(
@@ -1414,7 +1469,9 @@ class Runnable(ABC, BaseModel):
                     runnable_path=span.path,
                     runnable_name=self.name,
                     runnable_type=self.metadata.get("type", self.__class__.__name__),
+                    tool_call_id=tool_call_id,
                     payload=suspend_signal.payload,
+                    response_schema=suspend_signal.response_schema,
                 )
                 if interaction_event.type in self._log_events:
                     _get_logger().info(interaction_event.type, **interaction_event.model_dump())
@@ -1460,6 +1517,14 @@ class Runnable(ABC, BaseModel):
                 if collector is not None:
                     span.output = _collector_output_on_interrupt(collector)
             raise
+
+        except RunCancelled as cancelled:
+            # A human supplied a Cancel on the resume channel (approval or
+            # suspend). Terminal: the whole run ends cancelled and nothing is
+            # fed back to the model. Distinct from a denial (approval_denied).
+            span.status = RunStatus(code="cancelled", reason="cancelled", message=cancelled.message)
+            span.output = {"status": "cancelled", "reason": cancelled.message}
+            span._output_dump = await dump(span.output)
 
         except EarlyExit as early_exit:
             reason = "early_exit" if early_exit.propagate else "early_exit_local"

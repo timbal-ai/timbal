@@ -21,7 +21,7 @@ Both pause the run, persist it, emit a structured event, and resume when you cal
 | Cancel reason | `approval_required` | `input_required` |
 
 <Note>
-`resume={id: value}` is the single channel for continuing **any** paused run. For an approval gate the value is a decision (`True`/`False` or an `ApprovalResolution`); for a `suspend()` call it's the arbitrary value the handler asked for. The id-spaces are disjoint, so one `resume` dict can settle a mix of pending approvals and suspensions in a single call. Unrecognized ids are ignored with a warning.
+`resume={id: value}` is the single channel for continuing **any** paused run. For an approval gate the value is a decision (`True`/`False` or an `ApprovalResolution`); for a `suspend()` call it's the arbitrary value the handler asked for. A [`Cancel`](#cancelling-instead-of-answering) value works for either and aborts the whole run. The id-spaces are disjoint, so one `resume` dict can settle a mix of pending approvals and suspensions in a single call. Unrecognized ids are ignored with a warning.
 </Note>
 
 ## Approval gates
@@ -66,7 +66,9 @@ When a gate fires, the run ends with `status.code == "cancelled"` and `status.re
 
 - `approval_id` — stable id used to resolve the gate
 - `runnable_path`, `runnable_name`, `runnable_type` — what was about to execute
+- `tool_call_id` — when the gate fired inside an agent tool call, the LLM `tool_use` id that triggered it, so the frontend can pin the approval card to the exact tool_use block in the transcript. `None` for direct calls.
 - `input` — validated handler input (after redaction, if configured)
+- `input_schema` — JSON Schema of the handler params, so the UI can render a typed form
 - `prompt`, `description` — human-facing strings
 - `t0` — Unix-ms timestamp of when approval was requested (useful for SLA timers)
 
@@ -111,6 +113,27 @@ Audit fields are first-class (not free-form metadata) and persist under `span.me
 - `comment` — free-form reasoning
 - `decided_at` — Unix-ms timestamp; defaults to construction time. Pass an explicit value if you replay decisions and need idempotency
 - `metadata` — org-specific extras
+
+#### Edit on approve (`override_input`)
+
+A reviewer often wants to approve *with a tweak* — fix a typo'd recipient, lower an amount — rather than reject and round-trip back to the model. Set `override_input` on the resolution: the keys are merged over the originally-proposed input (override wins), **re-validated through the handler's params model**, and the handler runs with the corrected values.
+
+```python
+from timbal.types.approval import ApprovalResolution
+
+result = await agent(
+    prompt="email the customer",
+    parent_id=paused_run_id,
+    resume={
+        approval_id: ApprovalResolution(
+            approved=True,
+            override_input={"to": "correct@example.com"},  # fix just this field
+        )
+    },
+).collect()
+```
+
+Only the listed keys change; everything else from the proposal is kept. The edit is audited under `span.metadata["approval"]["resolution"]["override_input"]`, and the effective (redacted) input the handler ran with is recorded at `span.metadata["approval"]["effective_input"]`. `override_input` is ignored on denial. Re-validation means a bad override (wrong type, missing required field) fails the run with a normal validation error instead of silently running garbage.
 
 #### Tool denial vs Agent denial
 
@@ -266,20 +289,69 @@ Because the handler **re-executes from the top** on resume, `suspend()` must com
 ```python
 class InteractionEvent(BaseEvent):
     type: Literal["INTERACTION"]
-    t0: int                  # Unix-ms timestamp at which the run suspended
-    interaction_id: str      # pass back as the resume key
-    kind: str                # frontend renderer discriminator (e.g. "ask_user")
+    t0: int                       # Unix-ms timestamp at which the run suspended
+    interaction_id: str           # pass back as the resume key
+    kind: str                     # frontend renderer discriminator (e.g. "ask_user")
     runnable_path: str
     runnable_name: str
     runnable_type: str
-    payload: dict            # what the frontend renders
+    tool_call_id: str | None      # originating LLM tool_use id (None for direct calls)
+    payload: dict                 # what the frontend renders
+    response_schema: dict | None  # optional JSON Schema for the resume value
 ```
 
-The `interaction_id` is a deterministic hash of the handler path + payload — stable across the pause/resume round-trip, so the client always sends back the id it received.
+The `interaction_id` is a deterministic hash of the handler path + payload — stable across the pause/resume round-trip, so the client always sends back the id it received. `tool_call_id` lets the client correlate the interaction with the exact tool_use block in the chat transcript when the agent triggered it.
+
+#### Declaring a response schema
+
+Pass `response_schema` to `suspend()` to tell the client what shape the resume value must be. It rides on the `InteractionEvent` so the frontend can validate the user's input *before* resuming — no extra round-trip to discover a bad value.
+
+```python
+from timbal import suspend
+
+def ask_age() -> int:
+    """Ask the user for their age."""
+    return suspend(
+        {"question": "How old are you?"},
+        kind="ask_user",
+        response_schema={"type": "integer", "minimum": 0, "maximum": 130},
+    )
+```
+
+The schema is advisory metadata for the client — `None` (the default) means any value is accepted.
+
+<Warning>
+`response_schema` is **not enforced server-side**. Timbal hands the resume value to the handler verbatim — it does not validate it against the schema. Treat the schema as a contract for *your* client to validate against before resuming; if you need server-side guarantees, validate inside the handler after `suspend()` returns.
+</Warning>
 
 ## Resuming a paused run
 
 You resume any paused run — gate or suspension — by calling the runnable again with `parent_id` (the paused run id) and `resume={...}`. In-process this works out of the box; across processes you need a durable provider; and you can enumerate what's pending either way.
+
+### Cancelling instead of answering
+
+A human won't always say yes or no — sometimes they close the dialog, hit Escape, or abandon the task. That's a **cancel**, and it's different from a deny:
+
+- **Deny / decline** continues the run. An approval `approved=False` is fed back to the model as a tool result so the agent can apologize or try another path; a `suspend()` decline is just a value your handler interprets.
+- **Cancel** aborts the *entire* run. Nothing is fed back to the model.
+
+Resume with `Cancel` (works on either an approval or a suspension id) to abort:
+
+```python
+from timbal.types.approval import Cancel
+
+result = await agent(
+    prompt="...",
+    parent_id=paused_run_id,
+    resume={pending_id: Cancel(reason="user closed the dialog")},
+).collect()
+
+# result.status.code == "cancelled"
+# result.status.reason == "cancelled"      # distinct from approval_denied / input_required
+# result.status.message == "user closed the dialog"
+```
+
+The handler never runs. The cancel reason lands on the cancelled span/status so it's queryable in traces, and a `Cancel` keyed to any pending id in a batch tears down the whole run.
 
 ### Across processes (durable providers)
 
@@ -421,9 +493,13 @@ The response is an SSE stream (`text/event-stream`), one `data:` line per event.
   "kind": "ask_user",
   "runnable_name": "ask_user",
   "runnable_type": "Tool",
-  "payload": { "question": "Which database should I use?", "options": ["postgres", "mysql", "sqlite"] }
+  "tool_call_id": "toolu_01abc...",
+  "payload": { "question": "Which database should I use?", "options": ["postgres", "mysql", "sqlite"] },
+  "response_schema": { "type": "string", "enum": ["postgres", "mysql", "sqlite"] }
 }
 ```
+
+`tool_call_id` (when present) is the LLM tool_use id, so you can pin the prompt next to the matching message in the transcript. `response_schema` (when the tool declared one) is the JSON Schema the answer must satisfy — validate the user's input against it before resuming. An `APPROVAL` event additionally carries `input_schema` (the handler's params schema, for rendering a typed form).
 
 Immediately followed by the final **`OUTPUT`** event for the run, which marks it as paused:
 
@@ -472,6 +548,20 @@ The run replays, `ask_user` returns `"postgres"`, and the stream ends with a nor
 
 That's the whole loop. If a turn opens **multiple** pauses (parallel tools/steps, even a mix of approvals and interactions), the client receives one event per pause and sends every answer in a single `resume` map: `{ "<id1>": ..., "<id2>": true }`. The id you send back is always the one you received — approval ids resume with `true`/`false`, interaction ids with the value the handler asked for.
 
+### Cancelling over HTTP
+
+To abort instead of answering (user closed the dialog, navigated away), resume the id with the tagged cancel object — the JSON equivalent of `Cancel`:
+
+```json
+{
+  "prompt": "set up my database",
+  "parent_id": "06a22e62b85d7b558000db9caf2790b2",
+  "resume": { "bfd231bf5760d201b31382e168c339d4": { "type": "timbal.cancel", "reason": "user closed the dialog" } }
+}
+```
+
+The run ends with a terminal `OUTPUT` of `status.reason == "cancelled"` (not `input_required`/`approval_denied`), and nothing is sent back to the model. An edit-on-approve over HTTP is the same idea on an approval id: `{ "<approval_id>": { "approved": true, "override_input": { "to": "fixed@example.com" } } }`.
+
 ## Observability
 
 ### Status reasons
@@ -483,6 +573,7 @@ When the run cancels, `OutputEvent.status.reason` carries one of:
 - `approval_already_claimed` — durable claim said another worker already resumed this gate
 - `approval_policy_error` — a `requires_approval` / `approval_prompt` callable raised
 - `input_required` — a `suspend()` call emitted an `InteractionEvent` and is waiting on a value
+- `cancelled` — a `Cancel` was supplied on resume (approval or suspension); the whole run aborted and nothing was fed back to the model
 
 ### Usage counters
 
@@ -492,6 +583,7 @@ When the run cancels, `OutputEvent.status.reason` carries one of:
 - `approvals:approved` — a valid approved resolution was consumed
 - `approvals:denied` — a valid denied resolution was consumed
 - `approvals:expired` — an expired resolution was ignored and the gate re-emitted
+- `approvals:cancelled` — a `Cancel` aborted the run at a gate
 - `suspends:required` — a `suspend()` call paused the run
 
 These propagate through the usage merge tree just like token counts, so a parent agent run aggregates pause counts from every nested tool/workflow gate or suspension.
@@ -521,6 +613,14 @@ The default `approval_id` is stable across retries of the same `(path, input)`. 
 
 <Accordion title="Hide secrets from reviewers">
 Use `approval_redact_keys=["api_key", "password"]` for the simple case. Use `approval_redactor=lambda input: {...}` for partial masking (e.g. mask the local-part of an email but keep the domain). The handler still receives the unredacted input.
+</Accordion>
+
+<Accordion title="Approve with a correction (edit on approve)">
+The model proposed a slightly-wrong argument (a typo'd email, an amount that should be lower). Instead of denying and round-tripping, approve with `ApprovalResolution(approved=True, override_input={"to": "fixed@example.com"})`. The override merges over the proposal, re-validates through the params model, and the handler runs with the corrected input. Over HTTP send `{"approved": true, "override_input": {...}}`.
+</Accordion>
+
+<Accordion title="Cancel a task the user abandoned">
+When the user closes the dialog or navigates away rather than deciding, resume with `Cancel(reason=...)` (HTTP: `{"type": "timbal.cancel", "reason": "..."}`) keyed to any pending id. The run ends `status.reason == "cancelled"` and nothing is fed back to the model — distinct from a denial, which the agent would see and react to.
 </Accordion>
 </AccordionGroup>
 

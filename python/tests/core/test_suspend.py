@@ -230,3 +230,106 @@ class TestBuiltinInteractionTools:
         result = await tool(action="delete prod", parent_id=first.run_id, resume={interaction_id: True}).collect()
         assert result.status.code == "success"
         assert result.output is True
+
+
+# --- response_schema (client-side validation of the resume value) -----------
+
+
+def ask_typed() -> dict:
+    """Ask with a declared response schema."""
+    return suspend(
+        {"question": "how old?"},
+        kind="ask_user",
+        response_schema={"type": "integer", "minimum": 0},
+    )
+
+
+class TestInteractionResponseSchema:
+    async def test_schema_surfaces_on_event_and_pending(self):
+        tool = Tool(handler=ask_typed)
+        events = [e async for e in tool()]
+        ev = next(e for e in events if isinstance(e, InteractionEvent))
+        assert ev.response_schema == {"type": "integer", "minimum": 0}
+
+        ctx = get_run_context()
+        pending = ctx.pending_interactions()
+        assert pending[0]["response_schema"] == {"type": "integer", "minimum": 0}
+
+    async def test_schema_defaults_to_none(self):
+        tool = Tool(handler=ask_color)
+        events = [e async for e in tool()]
+        ev = next(e for e in events if isinstance(e, InteractionEvent))
+        assert ev.response_schema is None
+
+
+# --- tool_call_id correlation ----------------------------------------------
+
+
+class TestInteractionToolCallId:
+    async def test_interaction_carries_originating_tool_call_id(self):
+        tool_call = Message.validate({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_abc123",
+                "name": "ask_user",
+                "input": {"question": "name?"},
+            }],
+        })
+        model = TestModel(responses=[tool_call, "hi"])
+        agent = Agent(name="assistant", model=model, tools=[ask_user])
+
+        pending: list[InteractionEvent] = []
+        async for event in agent(prompt="hi"):
+            if isinstance(event, InteractionEvent):
+                pending.append(event)
+        assert pending[0].tool_call_id == "toolu_abc123"
+
+    async def test_direct_call_has_no_tool_call_id(self):
+        tool = Tool(handler=ask_color)
+        events = [e async for e in tool()]
+        ev = next(e for e in events if isinstance(e, InteractionEvent))
+        assert ev.tool_call_id is None
+
+
+# --- Cancel on the resume channel aborts the run ----------------------------
+
+
+class TestSuspendCancel:
+    async def test_cancel_terminates_tool_run(self):
+        from timbal.types.approval import Cancel
+
+        tool = Tool(handler=ask_color)
+        first = await tool().collect()
+        interaction_id = first.output["suspension_id"]
+
+        result = await tool(
+            parent_id=first.run_id,
+            resume={interaction_id: Cancel(reason="user closed dialog")},
+        ).collect()
+        assert result.status.code == "cancelled"
+        assert result.status.reason == "cancelled"
+        assert result.status.message == "user closed dialog"
+
+    async def test_cancel_terminates_agent_run_without_feedback(self):
+        from timbal.types.approval import Cancel
+
+        tool_call = Message.validate({
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "call_1", "name": "ask_user", "input": {"question": "name?"}}],
+        })
+        # Second response would only be reached if the agent kept going; cancel
+        # must stop the run before it is consumed.
+        model = TestModel(responses=[tool_call, "should never be returned"])
+        agent = Agent(name="assistant", model=model, tools=[ask_user])
+
+        first = await agent(prompt="hi").collect()
+        interaction_id = first.metadata["pending_interactions"][0]["interaction_id"]
+
+        result = await agent(
+            prompt="hi",
+            parent_id=first.run_id,
+            resume={interaction_id: Cancel()},
+        ).collect()
+        assert result.status.code == "cancelled"
+        assert result.status.reason == "cancelled"

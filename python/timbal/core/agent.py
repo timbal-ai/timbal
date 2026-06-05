@@ -29,7 +29,7 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
-from ..errors import InterruptError, PauseRequired, bail
+from ..errors import InterruptError, PauseRequired, RunCancelled, bail
 from ..state import get_run_context
 from ..types.content import CustomContent, FileContent, TextContent, ToolResultContent, ToolUseContent
 from ..types.events import BaseEvent, OutputEvent
@@ -907,6 +907,11 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 return
             if event.status.code == "cancelled" and event.status.reason == "early_exit":
                 bail(event.status.message)
+            if event.status.code == "cancelled" and event.status.reason == "cancelled":
+                # A human cancelled via Cancel() on the resume channel. Terminal:
+                # leave the tool_use unresolved (no tool_result) and let the caller
+                # yield the event before raising RunCancelled to stop the run.
+                return
             content = None
             if event.status.code == "cancelled" and event.status.reason == "approval_denied":
                 msg = event.status.message or "The tool call was denied."
@@ -991,6 +996,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                         ):
                                             yield event
                                             raise PauseRequired(event)
+                                        if (
+                                            event.status.code == "cancelled"
+                                            and event.status.reason == "cancelled"
+                                        ):
+                                            yield event
+                                            raise RunCancelled(event.status.message or "Run cancelled by user.")
                                         current_span.memory.append(
                                             Message.validate(
                                                 {
@@ -1016,6 +1027,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     async for tool_call, event in self._multiplex_tools(tools, tool_calls):
                         await _process_tool_event(event, tool_call.id, append_to_messages=True)
                         yield event
+                        if (
+                            isinstance(event, OutputEvent)
+                            and event.status.code == "cancelled"
+                            and event.status.reason == "cancelled"
+                        ):
+                            raise RunCancelled(event.status.message or "Run cancelled by user.")
                         if (
                             isinstance(event, OutputEvent)
                             and event.status.code == "cancelled"
@@ -1119,6 +1136,12 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 async for tool_call, event in self._multiplex_tools(tools, tool_calls):
                     await _process_tool_event(event, tool_call.id, append_to_messages=True)
                     yield event
+                    if (
+                        isinstance(event, OutputEvent)
+                        and event.status.code == "cancelled"
+                        and event.status.reason == "cancelled"
+                    ):
+                        raise RunCancelled(event.status.message or "Run cancelled by user.")
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"

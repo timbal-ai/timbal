@@ -29,5 +29,13 @@ class InteractionEvent(BaseEvent):
     """Runnable name that suspended."""
     runnable_type: str
     """Runnable class/type that suspended."""
+    tool_call_id: str | None = None
+    """The LLM tool_call id that triggered this suspension, when it happened inside
+    an agent tool. Lets the frontend correlate the interaction with the exact
+    tool_use block in the chat transcript. ``None`` for direct (non-agent) calls."""
     payload: dict[str, Any] = Field(default_factory=dict)
     """JSON-serializable data describing what the caller must supply."""
+    response_schema: dict[str, Any] | None = None
+    """Optional JSON Schema describing the shape the resume value must match.
+    The frontend can validate the user's input client-side before resuming with
+    ``resume={interaction_id: value}``. ``None`` means any value is accepted."""

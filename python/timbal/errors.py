@@ -84,11 +84,32 @@ class Suspend(TimbalError):
     ``bool``, ``suspend`` resumes with an arbitrary value.
     """
 
-    def __init__(self, suspension_id: str, payload: dict[str, Any], kind: str = "suspend") -> None:
+    def __init__(
+        self,
+        suspension_id: str,
+        payload: dict[str, Any],
+        kind: str = "suspend",
+        response_schema: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__("Suspended")
         self.suspension_id = suspension_id
         self.payload = payload
         self.kind = kind
+        self.response_schema = response_schema
+
+
+class RunCancelled(TimbalError):
+    """Control-flow signal: a human cancelled the run while resolving a pause.
+
+    Raised when a ``Cancel`` value is supplied on the ``resume=`` channel for a
+    pending approval gate or ``suspend()`` call. Unwinds the handler and marks
+    the run ``cancelled`` / reason ``cancelled``. Unlike a denial, nothing is
+    fed back to the model — the whole run stops.
+    """
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message or "Run cancelled.")
+        self.message = message or "Run cancelled."
 
 
 class ApprovalPolicyError(TimbalError):
