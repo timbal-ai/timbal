@@ -38,7 +38,7 @@ Events are the communication mechanism that Runnables use to stream information 
 
 Events are designed to be lightweight. For comprehensive execution data, see [Traces](./tracing.mdx).
 
-Every execution produces at least a **Start** event (when it begins) and an **Output** event (when it finishes). LLMs and streaming operations also produce **Chunk** or **Delta** events for intermediate results.
+Every execution produces at least a **Start** event (when it begins) and an **Output** event (when it finishes). LLMs and streaming operations also produce **Delta** events for intermediate results. Runs that pause for human input emit **Approval** or **Interaction** events.
 
 The following examples show what these events look like for an LLM interaction:
 
@@ -62,38 +62,9 @@ start_event = StartEvent(
 These fields are present in all events to identify their source - **the framework handles this automatically**. We'll explore this in greater detail in advanced sections.
 </Note>
 
-### Chunk Event
-
-Contains streaming or intermediate results during execution. The `chunk` property contains each piece of the response as it's generated during streaming.
-
-```python
-from timbal.types.events import ChunkEvent
-
-chunk_event = ChunkEvent(
-    run_id="068c4458382e79bb80006dc019ac3039",
-    parent_run_id=None,
-    path="agent.llm", 
-    call_id="068c4458383678be800031537a8df42e",
-    parent_call_id="068c4458382e708f8000cc0f9b19d970",
-    chunk="Hello"
-)
-```
-
-<Warning>
-**Deprecation Notice:** ChunkEvents are simple and untyped, and will be deprecated in a future release in favor of [Delta Events](#delta-events). Delta Events provide structured, typed streaming with semantic information about different content types (text, tool calls, thinking) and better observability. **We recommend migrating to Delta Events for new projects.**
-</Warning>
-
 ### Delta Events
 
-For advanced use cases requiring fine-grained control over streaming content, Timbal provides **Delta Events**. Unlike simple ChunkEvents, DeltaEvents provide typed, structured information about different types of streaming content.
-
-<Note>
-Delta events are opt-in via the environment variable:
-
-```bash
-export TIMBAL_DELTA_EVENTS=true
-```
-</Note>
+Streaming content is emitted as typed **Delta Events** — structured, semantic updates about text, tool calls, thinking, and other content types.
 
 #### Delta Event Structure
 
@@ -207,7 +178,7 @@ from timbal.types.events.delta import (
     Thinking, ThinkingDelta, Custom, ContentBlockStop
 )
 
-async for event in agent(input="Hello"):
+async for event in agent(prompt="Hello"):
     if isinstance(event, DeltaEvent):
         item = event.item
         # Type-safe handling of different content types
@@ -239,21 +210,14 @@ async for event in agent(input="Hello"):
 - **UI Flexibility**: Render different content types with appropriate components
 - **Structured Logging**: Monitor different content types independently
 
-#### Backward Compatibility
+### Approval and Interaction Events
 
-<Warning>
-**Delta Events are opt-in.** 
+When a run pauses for human input, the framework emits structured events before the final `OutputEvent`:
 
-When `TIMBAL_DELTA_EVENTS` is disabled (default):
-- Text content is emitted as `ChunkEvent` for backward compatibility
-- Other delta types (tool calls, thinking) are filtered out
-- Existing code continues to work unchanged
+- **`ApprovalEvent`** — a `requires_approval` gate fired before a runnable executed. Resume with `resume={approval_id: True}` (or an `ApprovalResolution`).
+- **`InteractionEvent`** — a handler called `suspend()` to ask the user for input. Resume with `resume={suspension_id: value}`.
 
-When enabled:
-- All content is emitted as structured `DeltaEvent` instances
-- No `ChunkEvent` instances for LLM text output
-- Full observability into all streaming content types
-</Warning>
+See [Human in the Loop](/agents/human-in-the-loop) for the full reference.
 
 ### Output Event
 
