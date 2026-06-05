@@ -219,6 +219,59 @@ def ask_user(question: str) -> str:
     return suspend({"question": question}, kind="ask_user")
 
 
+def ask_typed() -> int:
+    """Suspend with a declared response schema."""
+    return suspend(
+        {"question": "how old?"},
+        kind="ask_user",
+        response_schema={"type": "integer", "minimum": 0},
+    )
+
+
+class TestNewFieldsDurable:
+    @pytest.mark.asyncio
+    async def test_response_schema_survives_and_is_recoverable_from_storage(self, provider):
+        prov, path = provider
+        tool = Tool(handler=ask_typed, tracing_provider=prov)
+
+        out = await tool().collect()
+        assert out.status.reason == "input_required"
+
+        # Rebuild the trace from disk and enumerate — response_schema must round-trip.
+        record = next(r for r in _load_records(path) if r["run_id"] == out.run_id)
+        ctx = RunContext(id="worker-run")
+        ctx._trace = Trace(record["spans"])
+        pending = ctx.pending_interactions()
+        assert len(pending) == 1
+        assert pending[0]["response_schema"] == {"type": "integer", "minimum": 0}
+        assert pending[0]["tool_call_id"] is None  # direct call
+
+    @pytest.mark.asyncio
+    async def test_tool_call_id_survives_for_agent_interaction(self, provider):
+        prov, path = provider
+        tool_call = Message(
+            role="assistant",
+            content=[ToolUseContent(id="toolu_persist", name="ask_user", input={"question": "name?"})],
+            stop_reason="tool_use",
+        )
+        agent = Agent(
+            name="assistant",
+            model=TestModel(responses=[tool_call, "hi"]),
+            tools=[ask_user],
+            tracing_provider=prov,
+        )
+
+        out = await agent(prompt="hi").collect()
+        assert out.status.reason == "input_required"
+
+        record = next(r for r in _load_records(path) if r["run_id"] == out.run_id)
+        ctx = RunContext(id="worker-run")
+        ctx._trace = Trace(record["spans"])
+        pending = ctx.pending_interactions()
+        assert len(pending) == 1
+        assert pending[0]["tool_call_id"] == "toolu_persist"
+
+
 class TestAgentSuspendDurable:
     @pytest.mark.asyncio
     async def test_agent_suspends_persists_then_resumes(self, provider):

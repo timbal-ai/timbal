@@ -1015,6 +1015,121 @@ class TestApprovalOverrideInput:
         assert denied.status.reason == "approval_denied"
         assert calls == []
 
+    @pytest.mark.asyncio
+    async def test_override_with_uncoercible_value_fails_and_skips_handler(self):
+        """A bad override must fail re-validation (not silently run garbage)."""
+        calls: list[int] = []
+
+        def charge(amount: int) -> str:
+            calls.append(amount)
+            return "ran"
+
+        tool = Tool(name="charge", handler=charge, requires_approval=True)
+        events = [e async for e in tool(amount=100)]
+        approval = _approval_event(events)
+
+        bad = await tool(
+            amount=100,
+            resume={approval.approval_id: {"approved": True, "override_input": {"amount": "not-a-number"}}},
+        ).collect()
+        assert bad.status.code == "error"
+        assert calls == [], "handler must not run when the override fails validation"
+
+    @pytest.mark.asyncio
+    async def test_override_through_agent_runs_corrected_input(self):
+        """Edit-on-approve must work through the agent tool-call path, not just direct calls."""
+        seen: list[dict] = []
+
+        def transfer(amount: int, recipient: str) -> str:
+            seen.append({"amount": amount, "recipient": recipient})
+            return f"sent ${amount} to {recipient}"
+
+        tool = Tool(name="transfer", handler=transfer, requires_approval=True)
+        agent = Agent(
+            name="bank",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="c1", name="transfer", input={"amount": 500, "recipient": "Alice"})],
+                        stop_reason="tool_use",
+                    ),
+                    "done",
+                ]
+            ),
+            tools=[tool],
+        )
+
+        events = [e async for e in agent(prompt="pay Alice")]
+        approval = _approval_event(events)
+
+        out = await agent(
+            prompt="pay Alice",
+            resume={approval.approval_id: ApprovalResolution(approved=True, override_input={"recipient": "Bob"})},
+        ).collect()
+
+        assert out.status.code == "success", out.error
+        assert seen == [{"amount": 500, "recipient": "Bob"}], "override applies on the agent path too"
+
+    @pytest.mark.asyncio
+    async def test_override_of_redacted_key_keeps_public_snapshot_redacted(self):
+        """Overriding a redacted field must run the handler with the real value
+        while the public effective_input stays masked."""
+        seen: list[str] = []
+
+        def wire(amount: int, account_number: str) -> str:
+            seen.append(account_number)
+            return "ok"
+
+        tool = Tool(
+            name="wire",
+            handler=wire,
+            requires_approval=True,
+            approval_redact_keys=["account_number"],
+        )
+        events = [e async for e in tool(amount=10, account_number="111")]
+        approval = _approval_event(events)
+
+        out = await tool(
+            amount=10,
+            account_number="111",
+            resume={approval.approval_id: {"approved": True, "override_input": {"account_number": "999"}}},
+        ).collect()
+
+        assert out.status.code == "success"
+        assert seen == ["999"], "handler must receive the real overridden secret"
+
+        ctx = get_run_context()
+        span = next(s for s in ctx._trace.values() if s.path.endswith("wire"))
+        assert span.metadata["approval"]["effective_input"]["account_number"] == "***", (
+            "the public snapshot of the edited input must stay redacted"
+        )
+
+    @pytest.mark.asyncio
+    async def test_override_in_workflow_step(self):
+        """Edit-on-approve must work on a gated workflow step."""
+        seen: list[str] = []
+
+        def deploy(env: str) -> str:
+            seen.append(env)
+            return f"deployed to {env}"
+
+        step = Tool(name="deploy", handler=deploy, requires_approval=True)
+        wf = Workflow(name="release").step(step)
+
+        events = [e async for e in wf(env="staging")]
+        approval = _approval_event(events)
+        assert _final_output(events).status.reason == "approval_required"
+
+        out = await wf(
+            env="staging",
+            parent_id=_final_output(events).run_id,
+            resume={approval.approval_id: {"approved": True, "override_input": {"env": "production"}}},
+        ).collect()
+
+        assert out.status.code == "success", out.error
+        assert seen == ["production"], "override must redirect the gated workflow step"
+
 
 # ---------------------------------------------------------------------------
 # tool_call_id correlation
@@ -1049,6 +1164,13 @@ class TestApprovalToolCallId:
         ctx = get_run_context()
         entry = next(e for e in ctx.pending_approvals() if e["approval_id"] == approval.approval_id)
         assert entry["tool_call_id"] == "toolu_xyz"
+
+        # The collector also surfaces it in OutputEvent.metadata for HTTP-less clients.
+        collected = await agent(prompt="wire 500").collect()
+        meta_entry = next(
+            e for e in collected.metadata["pending_approvals"] if e["approval_id"] == approval.approval_id
+        )
+        assert meta_entry["tool_call_id"] == "toolu_xyz"
 
     @pytest.mark.asyncio
     async def test_direct_call_has_no_tool_call_id(self):
@@ -1085,6 +1207,28 @@ class TestApprovalCancel:
         assert result.status.code == "cancelled"
         assert result.status.reason == "cancelled"
         assert result.status.message == "nope"
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_via_json_tagged_dict(self):
+        """The HTTP/JSON cancel form must be coerced and abort the gate."""
+        calls: list[int] = []
+
+        def op(x: int) -> str:
+            calls.append(x)
+            return "ran"
+
+        tool = Tool(name="op", handler=op, requires_approval=True)
+        events = [e async for e in tool(x=1)]
+        approval = _approval_event(events)
+
+        result = await tool(
+            x=1,
+            resume={approval.approval_id: {"type": "timbal.cancel", "reason": "bye"}},
+        ).collect()
+        assert result.status.code == "cancelled"
+        assert result.status.reason == "cancelled"
+        assert result.status.message == "bye"
         assert calls == []
 
     @pytest.mark.asyncio
@@ -1128,3 +1272,55 @@ class TestApprovalCancel:
             and e.status.reason == "cancelled"
         )
         assert tool_cancel.output["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_cancel_propagates_through_nested_subagent(self):
+        """Cancel at a deeply-nested gate (outer agent -> sub-agent -> tool) must
+        tear down the *entire* outer run, not just the sub-agent."""
+        from timbal.types.approval import Cancel
+
+        calls: list[int] = []
+
+        def wire_money(amount: int) -> str:
+            calls.append(amount)
+            return f"wired {amount}"
+
+        money_tool = Tool(name="wire_money", handler=wire_money, requires_approval=True)
+        inner = Agent(
+            name="finance_subagent",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="ic1", name="wire_money", input={"amount": 999})],
+                        stop_reason="tool_use",
+                    ),
+                    "wire complete",
+                ]
+            ),
+            tools=[money_tool],
+        )
+        outer = Agent(
+            name="orchestrator",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="oc1", name="finance_subagent", input={"prompt": "wire 999"})],
+                        stop_reason="tool_use",
+                    ),
+                    "all done (should not be reached on cancel)",
+                ]
+            ),
+            tools=[inner],
+        )
+
+        events = [e async for e in outer(prompt="run finance flow")]
+        approval = _approval_event(events)
+        assert approval.runnable_path == "orchestrator.finance_subagent.wire_money"
+
+        result = await outer(prompt="run finance flow", resume={approval.approval_id: Cancel()}).collect()
+        assert result.path == "orchestrator"
+        assert result.status.code == "cancelled"
+        assert result.status.reason == "cancelled"
+        assert calls == [], "cancel must abort before the gated handler runs, at any nesting depth"

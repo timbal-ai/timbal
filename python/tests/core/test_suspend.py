@@ -138,6 +138,35 @@ class TestWorkflowSuspend:
         assert result.status.code == "success"
         assert result.output == "got: hello"
 
+    async def test_workflow_step_cancel_aborts_run(self):
+        from timbal.types.approval import Cancel
+
+        ran: list[str] = []
+
+        def downstream(value: str) -> str:
+            ran.append(value)
+            return f"got: {value}"
+
+        workflow = (
+            Workflow(name="wf")
+            .step(needs_input)
+            .step(downstream, value=lambda: get_run_context().step_span("needs_input").output)
+        )
+
+        first = await workflow().collect()
+        interaction_id = first.output["suspension_id"] if isinstance(first.output, dict) else None
+        if interaction_id is None:
+            # Workflow output wraps step outputs; pull the pending id from metadata.
+            interaction_id = first.metadata["pending_interactions"][0]["interaction_id"]
+
+        result = await workflow(
+            parent_id=first.run_id,
+            resume={interaction_id: Cancel(reason="abort the pipeline")},
+        ).collect()
+        assert result.status.code == "cancelled"
+        assert result.status.reason == "cancelled"
+        assert ran == [], "downstream step must not run after a cancelled step"
+
 
 # --- coexistence with approvals --------------------------------------------
 
@@ -175,6 +204,9 @@ class TestPendingInteractionsDX:
         assert pending[0]["interaction_id"] == result.output["suspension_id"]
         assert pending[0]["kind"] == "ask_user"
         assert pending[0]["payload"] == {"question": "favorite color?"}
+        # tool_call_id/response_schema must be surfaced in collect() metadata too.
+        assert pending[0]["tool_call_id"] is None  # direct call, no LLM tool_use
+        assert "response_schema" in pending[0]
 
     async def test_run_context_enumerates_pending_interactions(self):
         captured: dict = {}
@@ -310,6 +342,20 @@ class TestSuspendCancel:
         assert result.status.code == "cancelled"
         assert result.status.reason == "cancelled"
         assert result.status.message == "user closed dialog"
+
+    async def test_cancel_via_json_tagged_dict(self):
+        """The HTTP/JSON form (no Python object) must be coerced to a Cancel."""
+        tool = Tool(handler=ask_color)
+        first = await tool().collect()
+        interaction_id = first.output["suspension_id"]
+
+        result = await tool(
+            parent_id=first.run_id,
+            resume={interaction_id: {"type": "timbal.cancel", "reason": "closed"}},
+        ).collect()
+        assert result.status.code == "cancelled"
+        assert result.status.reason == "cancelled"
+        assert result.status.message == "closed"
 
     async def test_cancel_terminates_agent_run_without_feedback(self):
         from timbal.types.approval import Cancel
