@@ -27,7 +27,14 @@ from pydantic import (
 from uuid_extensions import uuid7
 
 from ..collectors import get_collector_registry
-from ..errors import ApprovalPolicyError, ApprovalRequired, EarlyExit, InterruptError, WorkflowStepError
+from ..errors import (
+    ApprovalPolicyError,
+    EarlyExit,
+    InterruptError,
+    PauseRequired,
+    Suspend,
+    WorkflowStepError,
+)
 from ..state import (
     get_call_id,
     get_parent_call_id,
@@ -45,6 +52,7 @@ from ..types.events import (
     ApprovalEvent,
     BaseEvent,
     Event,
+    InteractionEvent,
     OutputEvent,
     StartEvent,
 )
@@ -124,25 +132,38 @@ ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, 
 ApprovalPrompt = str | Callable[..., str | None] | None
 
 
-def _normalize_approval_decisions(raw: Any) -> dict[str, ApprovalResolution]:
-    """Normalize caller-provided approval decisions keyed by approval_id."""
+def _normalize_resume_values(raw: Any) -> dict[str, Any]:
+    """Normalize caller-provided resume values keyed by id.
+
+    The id is an approval_id (for an approval gate) or a suspension_id (for a
+    ``suspend()`` call). Values are arbitrary: the approval gate normalizes its
+    value to an ``ApprovalResolution`` lazily (see ``_coerce_approval_resolution``),
+    while ``suspend()`` returns the value verbatim.
+    """
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        raise ValueError("approval_decisions must be a mapping of approval_id to approval result.")
+        raise ValueError("resume must be a mapping of id to a resume value.")
+    return {str(k): v for k, v in raw.items()}
 
-    decisions: dict[str, ApprovalResolution] = {}
-    for approval_id, value in raw.items():
-        if isinstance(value, ApprovalResolution):
-            resolution = value
-        elif isinstance(value, bool):
-            resolution = ApprovalResolution(approved=value)
-        elif isinstance(value, dict):
-            resolution = ApprovalResolution.model_validate(value)
-        else:
-            raise ValueError("approval_decisions values must be booleans, dicts, or ApprovalResolution instances.")
-        decisions[str(approval_id)] = resolution
-    return decisions
+
+def _coerce_approval_resolution(value: Any) -> ApprovalResolution:
+    """Coerce a resume value landing on an approval gate into an ``ApprovalResolution``.
+
+    Accepts ``bool``, ``dict``, or ``ApprovalResolution``. Raises ``ValueError``
+    for anything else so a misrouted resume value fails fast at the gate rather
+    than silently approving/denying.
+    """
+    if isinstance(value, ApprovalResolution):
+        return value
+    if isinstance(value, bool):
+        return ApprovalResolution(approved=value)
+    if isinstance(value, dict):
+        return ApprovalResolution.model_validate(value)
+    raise ValueError(
+        "resume value for an approval gate must be a bool, dict, or ApprovalResolution; "
+        f"got {type(value).__name__}."
+    )
 
 
 def _approval_id_for(path: str, input_dump: Any) -> str:
@@ -1016,21 +1037,9 @@ class Runnable(ABC, BaseModel):
         else:
             run_in_background = False
 
-        approval_decisions: dict[str, ApprovalResolution] = {}
-        # Process the deprecated alias FIRST so that the canonical
-        # ``approval_decisions=`` always wins on overlapping keys.
-        if "approvals" in kwargs:
-            import warnings
-
-            warnings.warn(
-                "`approvals=` is deprecated; use `approval_decisions=` instead. "
-                "Both work for now but `approvals` will be removed in a future release.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-            approval_decisions.update(_normalize_approval_decisions(kwargs.pop("approvals")))
-        if "approval_decisions" in kwargs:
-            approval_decisions.update(_normalize_approval_decisions(kwargs.pop("approval_decisions")))
+        resume_values: dict[str, Any] = {}
+        if "resume" in kwargs:
+            resume_values.update(_normalize_resume_values(kwargs.pop("resume")))
         explicit_parent_id = kwargs.pop("parent_id", None)
 
         # Generate new context or reset it if appropriate
@@ -1058,8 +1067,8 @@ class Runnable(ABC, BaseModel):
             _parent_call_id = None
             _call_id = None
         await run_context.get_session()
-        previous_approval_decisions = dict(run_context._approval_decisions)
-        run_context._approval_decisions.update(approval_decisions)
+        previous_resume_values = dict(run_context._resume_values)
+        run_context._resume_values.update(resume_values)
         set_run_context(run_context)
 
         _new_parent_call_id = _call_id
@@ -1097,6 +1106,7 @@ class Runnable(ABC, BaseModel):
         span._input_dump = None  # ? await dump(input)
         span._output_dump = None
         collector = None
+        suspend_signal: Suspend | None = None
         _generator_closed = False
         try:
             start_event = StartEvent(
@@ -1147,9 +1157,10 @@ class Runnable(ABC, BaseModel):
                     "metadata": approval_decision.metadata,
                     "input": redacted_input,
                 }
-                approval_resolution = run_context._approval_decisions.get(approval_id)
-                if approval_resolution is not None:
-                    run_context._used_approval_ids.add(approval_id)
+                approval_resolution = None
+                if approval_id in run_context._resume_values:
+                    run_context._used_resume_ids.add(approval_id)
+                    approval_resolution = _coerce_approval_resolution(run_context._resume_values[approval_id])
                 if approval_resolution is not None and approval_resolution.is_expired():
                     span.metadata["approval"]["expired"] = True
                     span.metadata["approval"]["expired_at"] = approval_resolution.expires_at
@@ -1305,57 +1316,103 @@ class Runnable(ABC, BaseModel):
                 output = {"task_id": task_id, "status": "running"}
             else:
                 # Iterate over events from handler and yield them
-                async for event, final_output, handler_collector in self._execute_handler(
-                    validated_input, run_context, span
-                ):
-                    # Update collector immediately so it's available for interruption handling
-                    if handler_collector is not None:
-                        collector = handler_collector
-                    if event is not None:
-                        # If a child gates, set our own status BEFORE the yield
-                        # so that a consumer breaking the stream right after
-                        # the ApprovalEvent doesn't end up with our span
-                        # recorded as 'interrupted' (GeneratorExit clobbers
-                        # late-set status). See test_agent_break_on_approval_event.
-                        if isinstance(event, ApprovalEvent) and span.status is None:
-                            span.status = RunStatus(
-                                code="cancelled",
-                                reason="approval_required",
-                                message="Approval required before runnable execution.",
-                            )
-                        yield event
-                        _restore_context()
-                    if final_output is not None:
-                        output = final_output
+                try:
+                    async for event, final_output, handler_collector in self._execute_handler(
+                        validated_input, run_context, span
+                    ):
+                        # Update collector immediately so it's available for interruption handling
+                        if handler_collector is not None:
+                            collector = handler_collector
+                        if event is not None:
+                            # If a child gates/suspends, set our own status BEFORE the
+                            # yield so that a consumer breaking the stream right after
+                            # the ApprovalEvent/InteractionEvent doesn't end up with our
+                            # span recorded as 'interrupted' (GeneratorExit clobbers
+                            # late-set status). See test_agent_break_on_approval_event.
+                            if span.status is None and isinstance(event, ApprovalEvent | InteractionEvent):
+                                reason, message = (
+                                    ("approval_required", "Approval required before runnable execution.")
+                                    if isinstance(event, ApprovalEvent)
+                                    else ("input_required", "Input required to resume.")
+                                )
+                                span.status = RunStatus(code="cancelled", reason=reason, message=message)
+                            yield event
+                            _restore_context()
+                        if final_output is not None:
+                            output = final_output
+                except Suspend as susp:
+                    # This runnable's own handler called suspend(). Pause: emit an
+                    # InteractionEvent and end with status input_required. The same
+                    # durable resume rails as approvals (parent_id + tracing provider)
+                    # re-fire the handler with the supplied value on resume.
+                    suspend_signal = susp
 
-            # If the output is an OutputEvent, we extract the output
-            # to avoid nesting an output event inside another output event
-            status_already_set = False
-            if isinstance(output, OutputEvent):
-                if output.status.code in {"cancelled", "error"}:
-                    span.status = output.status
-                    if output.error is not None:
-                        span.error = output.error
-                    status_already_set = True
-                output = output.output
+            if suspend_signal is not None:
+                span.status = RunStatus(
+                    code="cancelled",
+                    reason="input_required",
+                    message="Input required to resume.",
+                )
+                span.output = {
+                    "suspension_id": suspend_signal.suspension_id,
+                    "status": "input_required",
+                    "kind": suspend_signal.kind,
+                    "payload": suspend_signal.payload,
+                }
+                span._output_dump = await dump(span.output)
+                span.metadata["suspension"] = {
+                    "id": suspend_signal.suspension_id,
+                    "kind": suspend_signal.kind,
+                    "payload": suspend_signal.payload,
+                }
+                run_context.update_usage("suspends:required", 1)
+                interaction_event = InteractionEvent(
+                    run_id=run_context.id,
+                    parent_run_id=run_context.parent_id,
+                    path=span.path,
+                    call_id=span.call_id,
+                    parent_call_id=span.parent_call_id,
+                    t0=int(time.time() * 1000),
+                    interaction_id=suspend_signal.suspension_id,
+                    kind=suspend_signal.kind,
+                    runnable_path=span.path,
+                    runnable_name=self.name,
+                    runnable_type=self.metadata.get("type", self.__class__.__name__),
+                    payload=suspend_signal.payload,
+                )
+                if interaction_event.type in self._log_events:
+                    _get_logger().info(interaction_event.type, **interaction_event.model_dump())
+                yield interaction_event
+                _restore_context()
+            else:
+                # If the output is an OutputEvent, we extract the output
+                # to avoid nesting an output event inside another output event
+                status_already_set = False
+                if isinstance(output, OutputEvent):
+                    if output.status.code in {"cancelled", "error"}:
+                        span.status = output.status
+                        if output.error is not None:
+                            span.error = output.error
+                        status_already_set = True
+                    output = output.output
 
-            if not status_already_set:
-                # Determine stop_reason from Message output (LLM responses)
-                stop_reason = output.stop_reason if isinstance(output, Message) else None
-                span.status = RunStatus(code="success", reason=stop_reason, message=None)
+                if not status_already_set:
+                    # Determine stop_reason from Message output (LLM responses)
+                    stop_reason = output.stop_reason if isinstance(output, Message) else None
+                    span.status = RunStatus(code="success", reason=stop_reason, message=None)
 
-            span.output = output
+                span.output = output
 
-            if not run_in_background and span.status.code == "success":
-                _emit_default_tool_usage(self)
+                if not run_in_background and span.status.code == "success":
+                    _emit_default_tool_usage(self)
 
-            set_parent_call_id(_new_parent_call_id)
-            set_call_id(_new_call_id)
-            if self.post_hook is not None and not run_in_background:
-                await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
+                set_parent_call_id(_new_parent_call_id)
+                set_call_id(_new_call_id)
+                if self.post_hook is not None and not run_in_background:
+                    await self._execute_runtime_callable(self.post_hook, self._post_hook_is_coroutine)
 
-            # Post hook might modify the output, so we dump afterwards
-            span._output_dump = await dump(span.output)
+                # Post hook might modify the output, so we dump afterwards
+                span._output_dump = await dump(span.output)
 
         except GeneratorExit:
             _generator_closed = True
@@ -1374,8 +1431,12 @@ class Runnable(ABC, BaseModel):
             span.output = None
             span._output_dump = None
 
-        except ApprovalRequired as approval_required:
-            output_event = approval_required.output_event
+        except PauseRequired as pause_required:
+            # A child runnable paused — either on an approval gate
+            # (approval_required) or a suspend() call (input_required). It already
+            # emitted its Approval/Interaction event; we just propagate the paused
+            # status so this run also ends paused and persists for resume.
+            output_event = pause_required.output_event
             span.status = output_event.status
             span.output = output_event.output
             span._output_dump = (
@@ -1492,23 +1553,20 @@ class Runnable(ABC, BaseModel):
             output_event._input_dump = span._input_dump
             output_event._output_dump = span._output_dump
             await run_context._save_trace()
-            # Warn about decisions that didn't match any gate so callers find
-            # typos / stale IDs instead of silently dropping their decisions.
-            # Only check the IDs introduced by THIS call; nested children
+            # Warn about resume values that didn't match any gate or suspend()
+            # so callers find typos / stale IDs instead of silently dropping
+            # them. Only check the IDs introduced by THIS call; nested children
             # don't re-introduce them.
-            if approval_decisions:
-                unused = [
-                    aid for aid in approval_decisions
-                    if aid not in run_context._used_approval_ids
-                ]
+            if resume_values:
+                unused = [rid for rid in resume_values if rid not in run_context._used_resume_ids]
                 if unused:
                     _get_logger().warning(
-                        "Unrecognized approval_decisions ignored — these IDs "
-                        "did not match any gate during this run.",
-                        unused_approval_ids=unused,
+                        "Unrecognized resume values ignored — these IDs did not "
+                        "match any approval gate or suspend() during this run.",
+                        unused_resume_ids=unused,
                         runnable_path=self._path,
                     )
-            run_context._approval_decisions = previous_approval_decisions
+            run_context._resume_values = previous_resume_values
             set_parent_call_id(_parent_call_id)
             set_call_id(_call_id)
             if output_event.type in self._log_events:

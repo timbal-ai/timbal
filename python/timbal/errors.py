@@ -56,12 +56,39 @@ class InterruptError(TimbalError):
         self.message = message
 
 
-class ApprovalRequired(TimbalError):
-    """Internal signal used to propagate approval-required child runs."""
+class PauseRequired(TimbalError):
+    """Internal signal used to propagate a paused child run up the call stack.
+
+    One rail for both pause kinds: an approval gate (reason
+    ``approval_required``/``approval_denied``) and a ``suspend()`` call (reason
+    ``input_required``). Lets an agent/workflow stop its loop and bubble the
+    child's paused ``OutputEvent`` up to the top-level run, which then persists
+    for resume. The carried ``output_event.status.reason`` is the only thing
+    that distinguishes the kinds — handling is identical.
+    """
 
     def __init__(self, output_event: Any) -> None:
-        super().__init__("Approval required")
+        super().__init__("Paused")
         self.output_event = output_event
+
+
+class Suspend(TimbalError):
+    """Control-flow signal raised by ``suspend()`` from inside a handler.
+
+    Pauses the run and surfaces ``payload`` to the caller (rendered as an
+    ``InteractionEvent``). On resume — same ``parent_id`` plus a ``resume`` map
+    carrying ``{suspension_id: value}`` — the handler re-executes from the top
+    and ``suspend()`` returns the supplied value instead of raising.
+
+    This is the general form of the approval gate: approval resumes with a
+    ``bool``, ``suspend`` resumes with an arbitrary value.
+    """
+
+    def __init__(self, suspension_id: str, payload: dict[str, Any], kind: str = "suspend") -> None:
+        super().__init__("Suspended")
+        self.suspension_id = suspension_id
+        self.payload = payload
+        self.kind = kind
 
 
 class ApprovalPolicyError(TimbalError):

@@ -96,12 +96,12 @@ class TestDirectToolDoubleResume:
         first = await tool(
             amount=100,
             parent_id=parent_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         second = await tool(
             amount=100,
             parent_id=parent_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         assert first.status.code == "success"
@@ -134,7 +134,7 @@ class TestDirectToolDoubleResume:
             return await tool(
                 amount=200,
                 parent_id=parent_id,
-                approval_decisions={approval.approval_id: True},
+                resume={approval.approval_id: True},
             ).collect()
 
         out_a, out_b = await asyncio.gather(resume_once(), resume_once())
@@ -180,12 +180,12 @@ class TestAgentToolDoubleResume:
         first = await agent(
             prompt="charge 300",
             parent_id=parent_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         second = await agent(
             prompt="charge 300",
             parent_id=parent_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         assert first.status.code == "success"

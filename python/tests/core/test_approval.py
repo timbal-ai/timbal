@@ -11,7 +11,6 @@ fails the test that exercises the corresponding flow.
 """
 
 import time
-import warnings
 
 import pytest
 from timbal import Agent, Tool, Workflow
@@ -71,7 +70,7 @@ class TestToolApprovalLifecycle:
 
         approved = await tool(
             path="/tmp/a.txt",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         assert approved.status.code == "success"
@@ -93,7 +92,7 @@ class TestToolApprovalLifecycle:
 
         denied = await tool(
             amount=100,
-            approval_decisions={approval.approval_id: {"approved": False, "reason": "too much"}},
+            resume={approval.approval_id: {"approved": False, "reason": "too much"}},
         ).collect()
 
         assert denied.status.code == "cancelled"
@@ -129,7 +128,7 @@ class TestToolApprovalLifecycle:
         # Resume → handler runs with full validated input
         approved = await tool(
             amount=150,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert approved.status.code == "success"
         assert calls == [50, 150]
@@ -148,8 +147,8 @@ class TestToolApprovalLifecycle:
         first = await tool(x=1).collect()
         approval_id = first.metadata["approval"]["id"]
 
-        a = await tool(x=1, approval_decisions={approval_id: True}).collect()
-        b = await tool(x=1, approval_decisions={approval_id: True}).collect()
+        a = await tool(x=1, resume={approval_id: True}).collect()
+        b = await tool(x=1, resume={approval_id: True}).collect()
 
         assert a.status.code == "success" and b.status.code == "success"
         assert calls == [1, 1]
@@ -183,7 +182,7 @@ class TestToolApprovalLifecycle:
         retry = await tool(
             amount=500,
             idempotency_key=k2,
-            approval_decisions={first_id: True},
+            resume={first_id: True},
         ).collect()
         assert retry.status.reason == "approval_required"
         assert calls == []
@@ -231,7 +230,7 @@ class TestAgentApprovalLifecycle:
 
         approved = await agent(
             prompt="wire 500",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         assert approved.status.code == "success"
@@ -266,7 +265,7 @@ class TestAgentApprovalLifecycle:
 
         denied = await agent(
             prompt="wire 500",
-            approval_decisions={approval.approval_id: {"approved": False, "reason": "not allowed"}},
+            resume={approval.approval_id: {"approved": False, "reason": "not allowed"}},
         ).collect()
 
         assert denied.status.code == "success"
@@ -298,7 +297,7 @@ class TestAgentApprovalLifecycle:
 
         approved = await agent(
             prompt="/delete prod-db",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert approved.status.code == "success"
         assert calls == ["prod-db"]
@@ -332,7 +331,7 @@ class TestWorkflowApprovalLifecycle:
 
         approved = await workflow(
             env="prod",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert approved.status.code == "success"
         assert calls == ["prod"]
@@ -386,7 +385,7 @@ class TestParallelApprovalGates:
         assert calls == []
 
         decisions = {a.approval_id: True for a in approvals}
-        resumed = await agent(prompt="run both", approval_decisions=decisions).collect()
+        resumed = await agent(prompt="run both", resume=decisions).collect()
         assert resumed.status.code == "success"
         assert sorted(calls) == ["a=1", "b=2"], "both handlers must run after resuming with both decisions"
 
@@ -420,7 +419,7 @@ class TestParallelApprovalGates:
         assert calls == []
 
         decisions = {a.approval_id: True for a in approvals}
-        resumed = await wf(x=1, y=2, approval_decisions=decisions).collect()
+        resumed = await wf(x=1, y=2, resume=decisions).collect()
         assert resumed.status.code == "success"
         assert sorted(calls) == ["a=1", "b=2"]
 
@@ -447,7 +446,7 @@ class TestParallelApprovalGates:
         approvals = {ev.runnable_path: ev for ev in _approval_events(events)}
 
         decisions = {approvals["parallel_wf.step_a"].approval_id: True}
-        partial_events = [e async for e in wf(x=1, y=2, approval_decisions=decisions)]
+        partial_events = [e async for e in wf(x=1, y=2, resume=decisions)]
         partial_final = _final_output(partial_events)
         partial_approvals = _approval_events(partial_events)
 
@@ -512,7 +511,7 @@ class TestNestedApprovalLifecycle:
 
         resumed = await outer(
             prompt="run finance flow",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert resumed.status.code == "success"
         assert calls == [999]
@@ -552,7 +551,7 @@ class TestNestedApprovalLifecycle:
 
         resumed = await wf(
             prompt="restart prod",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert resumed.status.code == "success"
         assert calls == ["prod"]
@@ -581,7 +580,7 @@ class TestApprovalTTL:
             e
             async for e in tool(
                 path="/tmp/a.txt",
-                approval_decisions={approval.approval_id: stale},
+                resume={approval.approval_id: stale},
             )
         ]
         retry_approval = _approval_event(retry_events)
@@ -596,7 +595,7 @@ class TestApprovalTTL:
         fresh = ApprovalResolution(approved=True, expires_at=int(time.time() * 1000) + 60_000)
         resumed = await tool(
             path="/tmp/a.txt",
-            approval_decisions={approval.approval_id: fresh},
+            resume={approval.approval_id: fresh},
         ).collect()
         assert resumed.status.code == "success"
         assert calls == ["/tmp/a.txt"]
@@ -728,43 +727,6 @@ class TestApprovalPolicyErrors:
 # ---------------------------------------------------------------------------
 # Deprecation
 # ---------------------------------------------------------------------------
-
-
-class TestApprovalDeprecation:
-    @pytest.mark.asyncio
-    async def test_approvals_kwarg_emits_warning_but_still_works(self):
-        def handler() -> str:
-            return "ok"
-
-        tool = Tool(name="t", handler=handler, requires_approval=True)
-        first = await tool().collect()
-        approval_id = first.metadata["approval"]["id"]
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            out = await tool(approvals={approval_id: True}).collect()
-
-        deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-        assert deprecations, "expected DeprecationWarning for `approvals=`"
-        assert "approval_decisions" in str(deprecations[0].message)
-        assert out.status.code == "success"
-
-    @pytest.mark.asyncio
-    async def test_approval_decisions_takes_precedence_when_both_passed(self):
-        def handler() -> str:
-            return "ok"
-
-        tool = Tool(name="t", handler=handler, requires_approval=True)
-        first = await tool().collect()
-        approval_id = first.metadata["approval"]["id"]
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            out = await tool(
-                approval_decisions={approval_id: True},
-                approvals={approval_id: False},
-            ).collect()
-        assert out.status.code == "success"
 
 
 # ---------------------------------------------------------------------------

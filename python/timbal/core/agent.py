@@ -29,7 +29,7 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
-from ..errors import ApprovalRequired, InterruptError, bail
+from ..errors import InterruptError, PauseRequired, bail
 from ..state import get_run_context
 from ..types.content import CustomContent, FileContent, TextContent, ToolResultContent, ToolUseContent
 from ..types.events import BaseEvent, OutputEvent
@@ -45,6 +45,10 @@ from .tool import Tool
 from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.agent")
+
+# Status reasons that mean a child paused and must bubble up to pause the run —
+# an approval gate (approval_required) or a suspend() call (input_required).
+_PAUSE_REASONS = frozenset({"approval_required", "input_required"})
 
 
 def _content_chars(c: TextContent | ToolUseContent | ToolResultContent) -> int:
@@ -588,11 +592,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # inject synthetic "tool failed" results for them. Without this guard
         # the LLM would see fake failures and probably skip retrying the
         # gated calls, silently dropping the user's approval decisions.
-        is_approval_resume = prev_code == "cancelled" and prev_reason == "approval_required"
-        if not is_approval_resume:
+        # On approval/suspend resume the gated/suspended tool_uses will be
+        # re-executed by the agent loop (see _find_pending_tool_uses), so we must
+        # NOT inject synthetic "tool failed" results for them.
+        is_resume = prev_code == "cancelled" and prev_reason in _PAUSE_REASONS
+        if not is_resume:
             self._synthesize_missing_tool_results(memory)
+        # On resume we are continuing the paused turn, not opening a new user turn.
+        # The pending tool_uses get re-executed by the agent loop and their
+        # tool_results must come *immediately* after the assistant tool_use message
+        # (Anthropic rejects any user message in between). Since AgentParams forces a
+        # prompt/messages to be passed, drop the re-injected prompt here — the
+        # original prompt already lives in the loaded parent memory.
+        tail = [] if is_resume else current_span.memory
         merged: list[Message] = []
-        for msg in memory + current_span.memory:
+        for msg in memory + tail:
             cleaned = msg.without_empty_text_blocks()
             if cleaned is not None:
                 merged.append(cleaned)
@@ -886,7 +900,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             """Helper to process tool output events and create tool results."""
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
                 return
-            if event.status.code == "cancelled" and event.status.reason == "approval_required":
+            if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
+                # Gated (approval) or suspended (input_required) tool: leave the
+                # tool_use unresolved so it re-fires on resume. Do not synthesize
+                # a tool_result.
                 return
             if event.status.code == "cancelled" and event.status.reason == "early_exit":
                 bail(event.status.message)
@@ -970,10 +987,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     if isinstance(event, OutputEvent) and event.output is not None:
                                         if (
                                             event.status.code == "cancelled"
-                                            and event.status.reason == "approval_required"
+                                            and event.status.reason in _PAUSE_REASONS
                                         ):
                                             yield event
-                                            raise ApprovalRequired(event)
+                                            raise PauseRequired(event)
                                         current_span.memory.append(
                                             Message.validate(
                                                 {
@@ -995,19 +1012,19 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if pending_tool_uses:
                     _llm_memory_saved = True  # nothing to salvage; we never called the LLM
                     tool_calls = pending_tool_uses
-                    first_pending_approval: OutputEvent | None = None
+                    first_pending: OutputEvent | None = None
                     async for tool_call, event in self._multiplex_tools(tools, tool_calls):
                         await _process_tool_event(event, tool_call.id, append_to_messages=True)
                         yield event
                         if (
                             isinstance(event, OutputEvent)
                             and event.status.code == "cancelled"
-                            and event.status.reason == "approval_required"
-                            and first_pending_approval is None
+                            and event.status.reason in _PAUSE_REASONS
+                            and first_pending is None
                         ):
-                            first_pending_approval = event
-                    if first_pending_approval is not None:
-                        raise ApprovalRequired(first_pending_approval)
+                            first_pending = event
+                    if first_pending is not None:
+                        raise PauseRequired(first_pending)
                     i += 1
                     continue
 
@@ -1098,19 +1115,19 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if not tool_calls:
                     break
 
-                first_pending_approval: OutputEvent | None = None
+                first_pending: OutputEvent | None = None
                 async for tool_call, event in self._multiplex_tools(tools, tool_calls):
                     await _process_tool_event(event, tool_call.id, append_to_messages=True)
                     yield event
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"
-                        and event.status.reason == "approval_required"
-                        and first_pending_approval is None
+                        and event.status.reason in _PAUSE_REASONS
+                        and first_pending is None
                     ):
-                        first_pending_approval = event
-                if first_pending_approval is not None:
-                    raise ApprovalRequired(first_pending_approval)
+                        first_pending = event
+                if first_pending is not None:
+                    raise PauseRequired(first_pending)
                 i += 1
         finally:
             if not _llm_memory_saved:

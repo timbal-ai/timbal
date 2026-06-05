@@ -12,8 +12,11 @@ may need to set the context manually when creating custom execution flows.
 See the function docstrings for usage details and warnings.
 """
 
+import hashlib
+import json
 import re
 from contextvars import ContextVar
+from typing import Any
 
 from .context import RunContext
 
@@ -78,6 +81,60 @@ def set_parent_call_id(parent_call_id: str | None) -> None:
     parent call ID can lead to unexpected behavior if not handled correctly.
     """
     _parent_call_id.set(parent_call_id)
+
+
+def _suspension_id_for(path: str, payload: Any) -> str:
+    """Compute a stable suspension_id for a ``suspend()`` call.
+
+    Hashes ``(path, payload)`` so the same payload on the same runnable resumes
+    deterministically across the handler re-execution. Two identical payloads on
+    the same path share one id (mirrors approval's ``(path, input)`` semantics);
+    add a discriminator field to the payload if you need distinct ids.
+    """
+    keyed = {"path": path, "payload": payload}
+    return hashlib.sha256(json.dumps(keyed, sort_keys=True, default=str).encode()).hexdigest()[:32]
+
+
+def suspend(payload: dict[str, Any], *, kind: str = "suspend") -> Any:
+    """Pause the current run and wait for an externally-supplied resume value.
+
+    Call this from inside any handler (e.g. an ``ask_user`` tool). On the first
+    pass it raises :class:`~timbal.errors.Suspend`, ending the run with status
+    ``cancelled`` / reason ``input_required`` and emitting an ``InteractionEvent``
+    carrying ``payload`` for the frontend to render.
+
+    Resume by calling the runnable again with the original run as ``parent_id``
+    and ``resume={suspension_id: value}``. The handler re-executes from the top
+    and this call returns ``value``.
+
+    IMPORTANT: because the handler re-runs on resume, ``suspend()`` must come
+    before any non-idempotent side-effect in the handler (same caveat as
+    LangGraph's ``interrupt()``).
+
+    Args:
+        payload: JSON-serializable data describing what the caller must supply
+            (e.g. ``{"question": "...", "options": [...]}``).
+        kind: Discriminator the frontend uses to pick a renderer
+            (e.g. ``"ask_user"``, ``"confirm"``).
+
+    Returns:
+        The value supplied on resume.
+
+    Raises:
+        Suspend: on the first (un-resumed) pass.
+        RuntimeError: if called outside a run context.
+    """
+    from ..errors import Suspend
+
+    run_context = get_run_context()
+    if run_context is None:
+        raise RuntimeError("suspend() called outside of a run context.")
+    span = run_context.current_span()
+    suspension_id = _suspension_id_for(span.path, payload)
+    if suspension_id in run_context._resume_values:
+        run_context._used_resume_ids.add(suspension_id)
+        return run_context._resume_values[suspension_id]
+    raise Suspend(suspension_id, payload, kind)
 
 
 def _normalize_tool_request_kind(kind: str) -> str:

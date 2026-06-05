@@ -1,0 +1,533 @@
+---
+title: "Human in the Loop"
+description: "Pause any run for a human — gate irreversible actions for approval, or stop mid-handler to ask the user a question — then resume on the same durable rails"
+---
+
+Timbal pauses a run for a human in two ways, and resumes both through one channel:
+
+- **Approval gates** (`requires_approval`) — declarative permission checks that fire **before** a runnable executes. Use them for irreversible actions: refunds, deploys, account deletions, outbound emails, anything that costs money or moves data.
+- **`suspend()`** — a control-flow primitive a handler calls from the **inside** to ask the user for arbitrary input (a clarifying question, a picked option, a confirmation). Use it to build interaction tools like `ask_user` or `confirm`.
+
+Both pause the run, persist it, emit a structured event, and resume when you call the runnable again with `resume={...}`. They share the same durable rails (`parent_id` + tracing provider) — the only real difference is *when* they pause and *what* they resume with.
+
+| | `requires_approval` (gate) | `suspend()` (interaction) |
+| --- | --- | --- |
+| Intent | "may I do this?" | "tell me / give me" |
+| Pauses | before the handler runs | inside the handler |
+| Handler ran? | no (zero code) | yes, up to the `suspend()` call (re-runs on resume) |
+| Resumes with | `bool` / `ApprovalResolution` | arbitrary value |
+| Applied | declaratively on any runnable (even ones you don't own) | by calling `suspend()` in the handler |
+| Event | `ApprovalEvent` | `InteractionEvent` |
+| Cancel reason | `approval_required` | `input_required` |
+
+<Note>
+`resume={id: value}` is the single channel for continuing **any** paused run. For an approval gate the value is a decision (`True`/`False` or an `ApprovalResolution`); for a `suspend()` call it's the arbitrary value the handler asked for. The id-spaces are disjoint, so one `resume` dict can settle a mix of pending approvals and suspensions in a single call. Unrecognized ids are ignored with a warning.
+</Note>
+
+## Approval gates
+
+### Quick start
+
+Mark a tool as approval-required, stream events, and resume with a decision keyed by `approval_id`.
+
+```python
+from timbal import Agent, Tool
+from timbal.types.events import ApprovalEvent
+
+
+def refund_customer(amount: int) -> str:
+    return f"refunded ${amount}"
+
+
+refund = Tool(
+    handler=refund_customer,
+    requires_approval=lambda amount: amount > 100,
+    approval_prompt=lambda amount: f"Approve refunding ${amount}?",
+)
+
+agent = Agent(
+    name="support_agent",
+    model="openai/gpt-5",
+    tools=[refund],
+)
+
+approval_id = None
+async for event in agent(prompt="Refund $250"):
+    if isinstance(event, ApprovalEvent):
+        approval_id = event.approval_id
+
+result = await agent(
+    prompt="Refund $250",
+    resume={approval_id: True},
+).collect()
+```
+
+When a gate fires, the run ends with `status.code == "cancelled"` and `status.reason == "approval_required"`. The `ApprovalEvent` carries:
+
+- `approval_id` — stable id used to resolve the gate
+- `runnable_path`, `runnable_name`, `runnable_type` — what was about to execute
+- `input` — validated handler input (after redaction, if configured)
+- `prompt`, `description` — human-facing strings
+- `t0` — Unix-ms timestamp of when approval was requested (useful for SLA timers)
+
+### Configuring approval gates
+
+`requires_approval` accepts `True`, `False`, or a callable that receives the same kwargs as the handler and returns `bool`. `approval_prompt` and `approval_description` accept strings or callables and surface in the `ApprovalEvent` so the human reviewer has context.
+
+```python
+high_risk_deploy = Tool(
+    handler=deploy_handler,
+    requires_approval=lambda env, **_: env == "production",
+    approval_prompt=lambda env, **_: f"Deploy to {env}?",
+    approval_description="Deploys ship traffic to the listed environment.",
+)
+```
+
+If `requires_approval` or `approval_prompt` raises, the runnable does **not** silently approve nor execute. It ends with `status.code == "error"` and `status.reason == "approval_policy_error"` — distinct from handler errors so dashboards can surface policy bugs separately.
+
+### Resolutions: approve, deny, audit
+
+Pass either a bare `bool` (`True`/`False`) or an `ApprovalResolution` for richer audit fields:
+
+```python
+from timbal.types.approval import ApprovalResolution
+
+result = await agent(
+    prompt="Refund $250",
+    resume={
+        approval_id: ApprovalResolution(
+            approved=False,
+            reason="Refund exceeds policy limit.",
+            approver_id="user_42",
+            comment="Customer is outside the refund window.",
+        )
+    },
+).collect()
+```
+
+Audit fields are first-class (not free-form metadata) and persist under `span.metadata["approval"]["resolution"]`:
+
+- `approver_id` — who decided
+- `comment` — free-form reasoning
+- `decided_at` — Unix-ms timestamp; defaults to construction time. Pass an explicit value if you replay decisions and need idempotency
+- `metadata` — org-specific extras
+
+#### Tool denial vs Agent denial
+
+Behavior differs based on who initiated the call:
+
+- **Direct tool call** — denial returns `status.code == "cancelled"` and `status.reason == "approval_denied"`. The handler does not run.
+- **Tool called by an Agent** — denial is converted into a `ToolResultContent` so the model can see "this tool was denied" and choose another path (apologize, escalate, try an alternative). The agent does not crash.
+
+### Time-limited decisions
+
+Bound decisions with `expires_at` (Unix-ms). Expired resolutions are ignored at gate time and the gate emits a fresh `ApprovalEvent` with `metadata["approval"]["expired"] == True`:
+
+```python
+import time
+from timbal.types.approval import ApprovalResolution
+
+decision = ApprovalResolution(
+    approved=True,
+    approver_id="user_42",
+    comment="Approved from the support console.",
+    expires_at=int(time.time() * 1000) + 60_000,  # valid for 60s
+)
+```
+
+This is useful when an operator stamps a decision in a UI but a worker doesn't pick it up immediately — stale decisions force a fresh re-review instead of silently going through.
+
+### Redacting approval input
+
+Approval input is shown to humans and written to traces. If a gated runnable receives secrets or PII, redact the public approval snapshot.
+
+The simple form lists keys to mask with `"***"`:
+
+```python
+rotate_key = Tool(
+    handler=rotate_key_impl,
+    requires_approval=True,
+    approval_prompt="Rotate this API key?",
+    approval_redact_keys=["api_key", "password"],
+)
+```
+
+For custom logic, use `approval_redactor`. It receives a copy of the validated input dict and returns the public snapshot:
+
+```python
+rotate_key = Tool(
+    handler=rotate_key_impl,
+    requires_approval=True,
+    approval_redactor=lambda input: {
+        **input,
+        "api_key": "***",
+        "customer_email": input["customer_email"].split("@")[0] + "@***",
+    },
+)
+```
+
+The redacted snapshot is used everywhere the input would otherwise be visible: `ApprovalEvent.input`, `span.input` while the gate is pending, `span.metadata["approval"]["input"]`, `OutputEvent.metadata["pending_approvals"]`, and any exporter (OTel, Langfuse, etc.). The handler still receives the **original unredacted input** when the approval is resumed.
+
+<Note>
+A redactor that raises or returns a non-dict falls back to a placeholder so secrets never leak through a buggy redactor.
+</Note>
+
+### `approval_id` semantics
+
+The `approval_id` is derived from `(runnable_path, validated_input)`. The same path + input shares one decision, so a single resolution survives retries of the same call (stream resumes, transient failures, agent loops re-asking for the same tool). Treat the id as **opaque** — the derivation is an internal contract and may change across SDK versions, so don't persist ids across deploys.
+
+For irreversible operations (money movement, destructive deletes) where every call must require a fresh decision, include a unique value in the input so each call derives a distinct `approval_id` — typically an `idempotency_key: str` parameter with `default_params={"idempotency_key": lambda: str(uuid4())}`. Timbal evaluates the callable per-invocation.
+
+### Approvals in workflows
+
+Workflow steps follow the same rules as tools — `requires_approval` is a `Runnable` config, so wrap the function in a `Tool` (or use any `Runnable`) before adding it as a step. When a gated step fires, the workflow run cancels with `approval_required` and emits one `ApprovalEvent` per pending gate. **Independent gates fire in parallel** — you don't need to ping-pong one approval at a time.
+
+```python
+from timbal import Tool, Workflow
+
+deploy_prod = Tool(
+    name="deploy_prod",
+    handler=deploy_prod_impl,
+    requires_approval=True,
+    approval_prompt="Promote to prod?",
+)
+
+workflow = (
+    Workflow(name="release_pipeline")
+    .step(deploy_staging)
+    .step(deploy_prod)
+    .step(announce, depends_on=["deploy_prod"])
+)
+```
+
+When you resume with `resume={...}`, only the steps you decided on advance. Other pending gates remain pending and re-emit on the next call. This means you can approve a subset, observe what runs, and decide on the rest later.
+
+## Suspend & interaction tools
+
+`suspend()` pauses a run from inside a handler and waits for an externally-supplied value. It's the general form of the approval gate — an approval resumes with a `bool`, a suspension resumes with anything — and it's how you build tools like `ask_user`, `confirm`, or `pick_option` that let an agent explicitly stop and hand control back to the user mid-loop.
+
+### How it works
+
+1. A handler calls `suspend(payload, kind=...)`.
+2. The run ends with status `cancelled` / reason `input_required` and emits an `InteractionEvent` carrying `payload`.
+3. The frontend renders the payload (keyed by `kind`) and collects a response.
+4. You resume by calling the runnable again with the original run as `parent_id` and `resume={interaction_id: value}`. The handler re-executes and `suspend()` returns `value`.
+
+```python
+from timbal import Agent
+from timbal.tools import ask_user
+from timbal.types.events import InteractionEvent, OutputEvent
+
+agent = Agent(name="assistant", model="openai/gpt-5", tools=[ask_user])
+
+# First call — the model asks a question and the run suspends.
+pending = []
+final = None
+async for event in agent(prompt="set up my database"):
+    if isinstance(event, InteractionEvent):
+        pending.append(event)
+    if isinstance(event, OutputEvent) and event.path == "assistant":
+        final = event
+
+# pending[0].kind == "ask_user"
+# pending[0].payload == {"question": "Which database?", "options": [...]}
+
+# Resume with the user's answer.
+result = await agent(
+    prompt="set up my database",
+    parent_id=final.run_id,
+    resume={pending[0].interaction_id: "postgres"},
+).collect()
+```
+
+### Writing an interaction tool
+
+A tool is any handler that calls `suspend()`:
+
+```python
+from timbal import suspend
+
+def ask_user(question: str, options: list[str] | None = None) -> str:
+    """Ask the user a clarifying question. Use ONLY when blocked."""
+    return suspend({"question": question, "options": options}, kind="ask_user")
+
+def confirm(action: str) -> bool:
+    return bool(suspend({"action": action}, kind="confirm"))
+```
+
+`suspend` is exported at the top level (`from timbal import suspend`), and the ready-made `ask_user` / `confirm` tools ship in `timbal.tools` (`from timbal.tools import ask_user, confirm`).
+
+<Warning>
+Because the handler **re-executes from the top** on resume, `suspend()` must come before any non-idempotent side-effect in the handler (same constraint as LangGraph's `interrupt()`). Put the `suspend()` call first, or make everything before it idempotent. This is exactly why irreversible actions belong behind an [approval gate](#approval-gates) instead — the gate guarantees zero handler code runs until approved.
+</Warning>
+
+### `InteractionEvent`
+
+```python
+class InteractionEvent(BaseEvent):
+    type: Literal["INTERACTION"]
+    t0: int                  # Unix-ms timestamp at which the run suspended
+    interaction_id: str      # pass back as the resume key
+    kind: str                # frontend renderer discriminator (e.g. "ask_user")
+    runnable_path: str
+    runnable_name: str
+    runnable_type: str
+    payload: dict            # what the frontend renders
+```
+
+The `interaction_id` is a deterministic hash of the handler path + payload — stable across the pause/resume round-trip, so the client always sends back the id it received.
+
+## Resuming a paused run
+
+You resume any paused run — gate or suspension — by calling the runnable again with `parent_id` (the paused run id) and `resume={...}`. In-process this works out of the box; across processes you need a durable provider; and you can enumerate what's pending either way.
+
+### Across processes (durable providers)
+
+Everything above works in-process by default. For "pause in a UI now, resume in a worker later" — the real human-in-the-loop shape — switch off the default `InMemoryTracingProvider` (which only resumes within the same Python process) to a durable provider. This applies identically to approval gates and `suspend()`.
+
+<Tabs>
+<Tab title="JSONL (local / single host)">
+
+```python
+from pathlib import Path
+from timbal import Agent
+from timbal.state.tracing.providers import JsonlTracingProvider
+
+provider = JsonlTracingProvider.configured(_path=Path("traces.jsonl"))
+
+agent = Agent(
+    name="support_agent",
+    model="openai/gpt-5",
+    tools=[refund],
+    tracing_provider=provider,
+)
+```
+
+`JsonlTracingProvider` writes one record per run and uses a sidecar lock file (`traces.jsonl.approval_claims.json` + `.lock` via `fcntl`) for cross-process approval claims. Good for local dev and single-host deployments. Not recommended for high-throughput production — `_store()` rewrites the file on each run.
+
+</Tab>
+<Tab title="SQLite (single host, higher throughput)">
+
+```python
+from pathlib import Path
+from timbal.state.tracing.providers import SqliteTracingProvider
+
+provider = SqliteTracingProvider.configured(_path=Path("traces.db"))
+```
+
+Same API as JSONL but uses a SQLite database with row-level locking. Better for higher write rates on a single host.
+
+</Tab>
+<Tab title="Timbal Platform (multi-host)">
+
+When `TIMBAL_API_KEY` and a project subject are set, runs auto-select `PlatformTracingProvider`. Paused runs replicate across workers without extra config.
+
+</Tab>
+</Tabs>
+
+To resume from a different process, pass the original run id as `parent_id`:
+
+```python
+result = await agent(
+    prompt="Refund $250",
+    parent_id=paused_run_id,
+    resume={approval_id: True},
+).collect()
+```
+
+Timbal loads the parent trace (input messages, pending gates/suspensions, prior tool calls) before executing the resolution, so the runnable sees exactly the state it was paused at.
+
+### Duplicate worker protection
+
+When multiple workers consume the same queue, two of them might race to resume the same `(parent_id, approval_id)`. Timbal **claims** the pair before executing the resolution. The first claimer wins; later duplicates stop before handler execution with `status.reason == "approval_already_claimed"`.
+
+```python
+result = await agent(
+    prompt="Refund $250",
+    parent_id=paused_run_id,
+    resume={approval_id: True},
+).collect()
+
+if result.status.reason == "approval_already_claimed":
+    # Another worker already executed this approval. Safe to no-op.
+    return
+```
+
+This protection is implemented by `JsonlTracingProvider` and `SqliteTracingProvider` out of the box. **Custom providers must override `claim_approval(parent_id, approval_id, run_id)`** to get the same durable-lock behavior — the base class default is a no-op.
+
+### Enumerating what's pending
+
+When a run cancels and the runnable had multiple concurrent calls, each pause emits its own event. There are two ergonomic ways to enumerate them, and the same shape applies to both approvals and interactions.
+
+**During the stream**, capture every event:
+
+```python
+pending_approvals, pending_interactions = [], []
+async for event in agent(prompt="..."):
+    if isinstance(event, ApprovalEvent):
+        pending_approvals.append(event)
+    if isinstance(event, InteractionEvent):
+        pending_interactions.append(event)
+```
+
+**After `.collect()`**, read the lists the collector attaches to `OutputEvent.metadata` (the `status` only references the first pause):
+
+```python
+result = await agent(prompt="...").collect()
+
+if result.status.reason == "approval_required":
+    for entry in result.metadata["pending_approvals"]:
+        print(entry["approval_id"], entry["runnable_path"], entry["prompt"], entry["input"])
+
+if result.status.reason == "input_required":
+    for entry in result.metadata["pending_interactions"]:
+        print(entry["interaction_id"], entry["kind"], entry["payload"])
+```
+
+Resume by passing **all** the decisions/answers you want to settle in one call:
+
+```python
+resume = {entry["approval_id"]: True for entry in result.metadata["pending_approvals"]}
+result = await agent(prompt="...", parent_id=paused_run_id, resume=resume).collect()
+```
+
+For server-side traversal of a loaded trace (e.g. building a review queue from durable storage), `RunContext.pending_approvals()` and `RunContext.pending_interactions()` walk `RunContext._trace` directly. They tolerate both live `RunStatus` and dict-after-reload shapes, so they work against in-memory, JSONL, SQLite, and platform traces. Approval entries use the **redacted** input snapshot — never the raw secrets.
+
+<Note>
+`metadata["pending_*"]` is added by `.collect()`. Over the HTTP server (which streams **raw** events) the frontend reads the `APPROVAL` / `INTERACTION` events directly instead — see below.
+</Note>
+
+## Client integration (HTTP)
+
+This is the full contract for a frontend talking to `timbal serve` (the `/stream` SSE endpoint). Two phases: **pause** (server → client) and **resume** (client → server). The example uses `ask_user`; an approval gate is identical except the pause event is an `APPROVAL` event and you resume with `true`/`false`.
+
+### 1. Start the run
+
+`POST /stream` with the runnable's params:
+
+```json
+{ "prompt": "set up my database" }
+```
+
+The response is an SSE stream (`text/event-stream`), one `data:` line per event. When the agent calls `ask_user`, the client receives an **`INTERACTION`** event:
+
+```json
+{
+  "type": "INTERACTION",
+  "run_id": "06a22e62b85d7b558000db9caf2790b2",
+  "path": "assistant.ask_user",
+  "t0": 1780672043531,
+  "interaction_id": "bfd231bf5760d201b31382e168c339d4",
+  "kind": "ask_user",
+  "runnable_name": "ask_user",
+  "runnable_type": "Tool",
+  "payload": { "question": "Which database should I use?", "options": ["postgres", "mysql", "sqlite"] }
+}
+```
+
+Immediately followed by the final **`OUTPUT`** event for the run, which marks it as paused:
+
+```json
+{
+  "type": "OUTPUT",
+  "run_id": "06a22e62b85d7b558000db9caf2790b2",
+  "path": "assistant",
+  "status": { "code": "cancelled", "reason": "input_required", "message": "Input required to resume." },
+  "output": {
+    "suspension_id": "bfd231bf5760d201b31382e168c339d4",
+    "status": "input_required",
+    "kind": "ask_user",
+    "payload": { "question": "Which database should I use?", "options": ["postgres", "mysql", "sqlite"] }
+  }
+}
+```
+
+**What the frontend does:**
+- Render UI from the `INTERACTION` event's `kind` + `payload` (here: a question with three option buttons). For an `APPROVAL` event, render `prompt` + `input` and offer Approve/Deny.
+- Stash `run_id` and `interaction_id` (or `approval_id`).
+- A run is paused (not finished) whenever the terminal `OUTPUT` has `status.reason` of `input_required` or `approval_required`.
+
+### 2. Resume with the answer
+
+`POST /stream` again, echoing the original params plus two keys: `parent_id` (the paused `run_id`) and `resume` (a map of `id → value`):
+
+```json
+{
+  "prompt": "set up my database",
+  "parent_id": "06a22e62b85d7b558000db9caf2790b2",
+  "resume": { "bfd231bf5760d201b31382e168c339d4": "postgres" }
+}
+```
+
+The run replays, `ask_user` returns `"postgres"`, and the stream ends with a normal success `OUTPUT`:
+
+```json
+{
+  "type": "OUTPUT",
+  "path": "assistant",
+  "status": { "code": "success", "reason": "end_turn" },
+  "output": { "role": "assistant", "content": [{ "type": "text", "text": "Great — using postgres." }] }
+}
+```
+
+That's the whole loop. If a turn opens **multiple** pauses (parallel tools/steps, even a mix of approvals and interactions), the client receives one event per pause and sends every answer in a single `resume` map: `{ "<id1>": ..., "<id2>": true }`. The id you send back is always the one you received — approval ids resume with `true`/`false`, interaction ids with the value the handler asked for.
+
+## Observability
+
+### Status reasons
+
+When the run cancels, `OutputEvent.status.reason` carries one of:
+
+- `approval_required` — a gate emitted an `ApprovalEvent` and is waiting on a decision
+- `approval_denied` — a denying resolution was consumed (direct call only; agents convert this to a tool result)
+- `approval_already_claimed` — durable claim said another worker already resumed this gate
+- `approval_policy_error` — a `requires_approval` / `approval_prompt` callable raised
+- `input_required` — a `suspend()` call emitted an `InteractionEvent` and is waiting on a value
+
+### Usage counters
+
+`OutputEvent.usage` records pause-lifecycle counters so you can plot them in dashboards:
+
+- `approvals:required` — a gate emitted an `ApprovalEvent`
+- `approvals:approved` — a valid approved resolution was consumed
+- `approvals:denied` — a valid denied resolution was consumed
+- `approvals:expired` — an expired resolution was ignored and the gate re-emitted
+- `suspends:required` — a `suspend()` call paused the run
+
+These propagate through the usage merge tree just like token counts, so a parent agent run aggregates pause counts from every nested tool/workflow gate or suspension.
+
+## Common patterns
+
+<AccordionGroup>
+<Accordion title="Approve from a UI, resume from a worker">
+1. Configure a durable provider (`JsonlTracingProvider` / `SqliteTracingProvider` / `PlatformTracingProvider`).
+2. UI calls `agent(prompt=...)`, captures `ApprovalEvent` (or polls the trace for `pending_approvals()`), shows reviewer the prompt + redacted input.
+3. Reviewer clicks Approve/Deny. UI persists `(approval_id, ApprovalResolution)` to a queue.
+4. Worker pulls the message and calls `agent(prompt=..., parent_id=run_id, resume={approval_id: resolution})`.
+5. If `result.status.reason == "approval_already_claimed"`, no-op. Otherwise, the handler executed exactly once.
+</Accordion>
+
+<Accordion title="Ask the user a clarifying question mid-task">
+Give the agent the `ask_user` tool. When it's blocked it calls `ask_user`, the run ends `input_required` with an `InteractionEvent`, your UI renders the question, and you resume with `resume={interaction_id: answer}`. Keep everything before the `suspend()` call idempotent — the handler re-runs from the top on resume.
+</Accordion>
+
+<Accordion title="Settle a batch of pauses in one round-trip">
+The agent may call multiple gated/suspending tools in parallel. Each pause emits its own event and the run cancels once they all settle. Collect every id, present them as a checklist, and resume with the full dict in one call — approvals and interactions can be mixed freely.
+</Accordion>
+
+<Accordion title="Force a fresh decision for each call">
+The default `approval_id` is stable across retries of the same `(path, input)`. To require a fresh decision per invocation, include a per-call unique value in the input — typically an `idempotency_key=str(uuid4())` — so each call derives a distinct id.
+</Accordion>
+
+<Accordion title="Hide secrets from reviewers">
+Use `approval_redact_keys=["api_key", "password"]` for the simple case. Use `approval_redactor=lambda input: {...}` for partial masking (e.g. mask the local-part of an email but keep the domain). The handler still receives the unredacted input.
+</Accordion>
+</AccordionGroup>
+
+## See also
+
+- [Approval-Required Tools example](/examples/agents/approval-required-tools) — runnable end-to-end snippet
+- [Events & Streaming](/core-concepts/events) — the event stream
+- [Tracing](/core-concepts/tracing) — how runs are persisted and replayed
+- [Context & State Management](/core-concepts/context) — `RunContext` internals
+- [Tools](/agents/tools) — tool configuration reference

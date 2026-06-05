@@ -33,7 +33,7 @@
               "agents/memory",
               "agents/memory-compaction",
               "agents/tools",
-              "agents/approvals",
+              "agents/human-in-the-loop",
               "agents/thinking",
               "agents/background-tasks",
               "agents/skills",
@@ -112,9 +112,15 @@
                 "group": "Tools",
                 "pages": [
                   "examples/agents/search",
-                  "examples/agents/approval-required-tools",
                   "examples/agents/tts",
                   "examples/agents/image-generation"
+                ]
+              },
+              {
+                "group": "Human in the Loop",
+                "pages": [
+                  "examples/agents/ask-user",
+                  "examples/agents/approval-required-tools"
                 ]
               },
               {
@@ -168,16 +174,36 @@
             ]
           },
           {
-            "group": "Organizations",
+            "group": "Me",
             "pages": [
               "api-reference/me/list-orgs",
+              "api-reference/me/update",
+              {
+                "group": "API Tokens",
+                "pages": [
+                  "api-reference/me/tokens/list",
+                  "api-reference/me/tokens/create",
+                  "api-reference/me/tokens/revoke"
+                ]
+              }
+            ]
+          },
+          {
+            "group": "Organizations",
+            "pages": [
               "api-reference/orgs/create",
               "api-reference/orgs/get",
               "api-reference/orgs/update",
               "api-reference/orgs/contacts/list",
+              "api-reference/orgs/embedding-models/list",
               {
                 "group": "Billing",
-                "pages": ["api-reference/orgs/billing/overage"]
+                "pages": [
+                  "api-reference/orgs/billing/overage",
+                  "api-reference/orgs/billing/budgets/get",
+                  "api-reference/orgs/billing/budgets/replace",
+                  "api-reference/orgs/billing/budgets/patch"
+                ]
               },
               {
                 "group": "Credit Grants",
@@ -193,6 +219,33 @@
                 ]
               },
               {
+                "group": "IAM",
+                "pages": [
+                  "api-reference/orgs/iam/actions/list",
+                  "api-reference/orgs/iam/check",
+                  {
+                    "group": "Roles",
+                    "pages": [
+                      "api-reference/orgs/roles/list",
+                      "api-reference/orgs/roles/create",
+                      "api-reference/orgs/roles/get",
+                      "api-reference/orgs/roles/update",
+                      "api-reference/orgs/roles/delete"
+                    ]
+                  },
+                  {
+                    "group": "Users",
+                    "pages": [
+                      "api-reference/orgs/users/list",
+                      "api-reference/orgs/users/add",
+                      "api-reference/orgs/users/delete",
+                      "api-reference/orgs/users/update",
+                      "api-reference/orgs/iam/users/effective-grants"
+                    ]
+                  }
+                ]
+              },
+              {
                 "group": "Notifications",
                 "pages": [
                   "api-reference/orgs/notifications/list-rules",
@@ -202,27 +255,12 @@
                   "api-reference/orgs/notifications/create-channel",
                   "api-reference/orgs/notifications/delete-channel"
                 ]
-              },
-              {
-                "group": "Roles",
-                "pages": [
-                  "api-reference/orgs/roles/list",
-                  "api-reference/orgs/roles/create",
-                  "api-reference/orgs/roles/get",
-                  "api-reference/orgs/roles/update",
-                  "api-reference/orgs/roles/delete"
-                ]
-              },
-              {
-                "group": "Users",
-                "pages": [
-                  "api-reference/orgs/users/list",
-                  "api-reference/orgs/users/add",
-                  "api-reference/orgs/users/delete",
-                  "api-reference/orgs/users/update"
-                ]
               }
             ]
+          },
+          {
+            "group": "Templates",
+            "pages": ["api-reference/templates/list"]
           },
           {
             "group": "Projects",
@@ -255,21 +293,6 @@
                 ]
               },
               {
-                "group": "Connections",
-                "pages": [
-                  "api-reference/projects/connections/list",
-                  "api-reference/projects/connections/create",
-                  "api-reference/projects/connections/delete"
-                ]
-              },
-              {
-                "group": "Deployments",
-                "pages": [
-                  "api-reference/projects/deployments/list",
-                  "api-reference/projects/deployments/get"
-                ]
-              },
-              {
                 "group": "Environments",
                 "pages": [
                   "api-reference/projects/environments/list",
@@ -280,7 +303,9 @@
                   "api-reference/projects/environments/deploy",
                   "api-reference/projects/environments/update-domain",
                   "api-reference/projects/environments/get-metrics",
-                  "api-reference/projects/environments/stop"
+                  "api-reference/projects/environments/stop",
+                  "api-reference/projects/environments/deployments/list",
+                  "api-reference/projects/environments/logs"
                 ]
               },
               {
@@ -309,15 +334,6 @@
                   "api-reference/projects/notifications/list-rules",
                   "api-reference/projects/notifications/create-rule",
                   "api-reference/projects/notifications/delete-rule"
-                ]
-              },
-              {
-                "group": "Users",
-                "pages": [
-                  "api-reference/projects/users/list",
-                  "api-reference/projects/users/add",
-                  "api-reference/projects/users/delete",
-                  "api-reference/projects/users/update"
                 ]
               },
               {
@@ -354,6 +370,26 @@
               "api-reference/knowledge-bases/query",
               "api-reference/knowledge-bases/schema",
               "api-reference/knowledge-bases/upload",
+              {
+                "group": "Policies",
+                "pages": [
+                  "api-reference/knowledge-bases/policies/list",
+                  "api-reference/knowledge-bases/policies/create",
+                  "api-reference/knowledge-bases/policies/get",
+                  "api-reference/knowledge-bases/policies/update",
+                  "api-reference/knowledge-bases/policies/delete",
+                  "api-reference/knowledge-bases/policies/enforcement",
+                  {
+                    "group": "Assignments",
+                    "pages": [
+                      "api-reference/knowledge-bases/policies/assignments/list",
+                      "api-reference/knowledge-bases/policies/assignments/create",
+                      "api-reference/knowledge-bases/policies/assignments/get",
+                      "api-reference/knowledge-bases/policies/assignments/delete"
+                    ]
+                  }
+                ]
+              },
               {
                 "group": "Backups",
                 "pages": [

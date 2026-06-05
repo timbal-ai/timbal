@@ -112,7 +112,7 @@ async for event in agent(prompt="Hello"):
 
 ### Approval-Required Tools
 
-Any runnable — Tool, Agent, or Workflow step — can pause for human approval before it runs. Mark it with `requires_approval`, listen for `ApprovalEvent`, and resume by calling the runnable again with `approval_decisions`:
+Any runnable — Tool, Agent, or Workflow step — can pause for human approval before it runs. Mark it with `requires_approval`, listen for `ApprovalEvent`, and resume by calling the runnable again with `resume`:
 
 ```python
 from timbal import Agent, Tool
@@ -134,11 +134,11 @@ async for event in agent(prompt="Refund $250"):
 
 result = await agent(
     prompt="Refund $250",
-    approval_decisions={approval_id: True},
+    resume={approval_id: True},
 ).collect()
 ```
 
-The full reference — durable cross-process resume, audit fields, redaction, parallel gates, `pending_approvals()`, status reasons, usage counters — lives on the dedicated [Human-in-the-Loop Approvals](/agents/approvals) page.
+The full reference — durable cross-process resume, audit fields, redaction, parallel gates, `pending_approvals()`, status reasons, usage counters, plus `suspend()` for asking the user mid-run — lives on the dedicated [Human in the Loop](/agents/human-in-the-loop) page.
 
 ## Input
 

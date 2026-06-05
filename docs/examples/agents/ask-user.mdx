@@ -1,0 +1,220 @@
+---
+title: "Asking the User"
+description: "Interaction tools built on suspend() — free text, single/multi choice, confirmation, structured forms, ratings, uploads, and generative-UI review — each with its own payload shape"
+---
+
+`suspend()` lets a tool pause the run and hand control to the user, then resume with whatever they send back. Each tool picks a `kind` (the frontend's renderer discriminator) and a `payload` (what to render). The resume value can be **any JSON type** — a string, a bool, a list, a dict — so the same primitive covers everything from a yes/no to a multi-field form.
+
+See the full reference on the [Human in the Loop](/agents/human-in-the-loop) page. This page is a catalog of shapes you can copy.
+
+## A catalog of interaction tools
+
+```python
+from timbal import suspend
+
+
+def ask_text(question: str) -> str:
+    """Ask the user an open-ended question. Resumes with their typed answer."""
+    return suspend({"question": question}, kind="ask_text")
+
+
+def ask_choice(question: str, options: list[str]) -> str:
+    """Ask the user to pick exactly one option. Renders as a single-select."""
+    return suspend({"question": question, "options": options}, kind="ask_choice")
+
+
+def ask_multi_choice(question: str, options: list[str]) -> list[str]:
+    """Ask the user to pick any number of options. Resumes with a list."""
+    return suspend({"question": question, "options": options}, kind="ask_multi_choice")
+
+
+def confirm(action: str) -> bool:
+    """Ask the user to confirm before proceeding. Resumes with a bool."""
+    return bool(suspend({"action": action}, kind="confirm"))
+
+
+def ask_form(title: str, fields: list[dict]) -> dict:
+    """Collect several values at once. Resumes with a {field_name: value} dict."""
+    return suspend({"title": title, "fields": fields}, kind="ask_form")
+
+
+def ask_rating(question: str, scale: int = 5) -> int:
+    """Ask for a rating on a 1..scale scale. Resumes with an int."""
+    return int(suspend({"question": question, "scale": scale}, kind="ask_rating"))
+
+
+def request_upload(prompt: str, accept: list[str]) -> str:
+    """Ask the user to upload a file. Resumes with a URL or file id."""
+    return suspend({"prompt": prompt, "accept": accept}, kind="request_upload")
+
+
+def review_chart(title: str, series: list[dict]) -> dict:
+    """Generative UI: render a chart for the user and wait for their tweaks.
+    Resumes with {"approved": bool, "edits": {...}}."""
+    return suspend({"title": title, "series": series}, kind="review_chart")
+```
+
+`suspend` is exported at the top level (`from timbal import suspend`). Ready-made `ask_user` and `confirm` also ship in `timbal.tools` (`from timbal.tools import ask_user, confirm`).
+
+<Warning>
+The handler **re-executes from the top** on resume, so put `suspend()` before any non-idempotent side-effect (or make everything before it idempotent). For irreversible actions, gate them with [`requires_approval`](/agents/human-in-the-loop#approval-gates) instead — that pauses *before* any handler code runs.
+</Warning>
+
+## Payload shapes at a glance
+
+This is the contract your frontend renders against. Switch your UI on `kind`, render `payload`, and send the matching resume value back keyed by `interaction_id`.
+
+| `kind` | `payload` shape | resume value |
+| --- | --- | --- |
+| `ask_text` | `{ "question": str }` | `str` |
+| `ask_choice` | `{ "question": str, "options": [str] }` | `str` (one option) |
+| `ask_multi_choice` | `{ "question": str, "options": [str] }` | `[str]` |
+| `confirm` | `{ "action": str }` | `bool` |
+| `ask_form` | `{ "title": str, "fields": [{name, label, type}] }` | `{ name: value }` |
+| `ask_rating` | `{ "question": str, "scale": int }` | `int` |
+| `request_upload` | `{ "prompt": str, "accept": [str] }` | `str` (url / file id) |
+| `review_chart` | `{ "title": str, "series": [...] }` | `{ "approved": bool, "edits": {...} }` |
+
+## Driving the loop
+
+Give an agent whichever interaction tools fit your product, then run the pause/resume loop. The agent decides which tool to call; you render the payload and resume with the value.
+
+```python
+import asyncio
+from timbal import Agent
+from timbal.types.events import InteractionEvent, OutputEvent
+
+agent = Agent(
+    name="onboarding_assistant",
+    model="openai/gpt-5",
+    tools=[ask_text, ask_choice, ask_multi_choice, confirm, ask_form, ask_rating],
+    system_prompt=(
+        "You onboard new users. Gather what you need by calling the interaction "
+        "tools — never guess a value the user hasn't given you."
+    ),
+)
+
+
+def render_and_collect(kind: str, payload: dict):
+    """Your UI. Return the value matching the kind (see the table above)."""
+    if kind == "confirm":
+        return True
+    if kind == "ask_choice":
+        return payload["options"][0]
+    if kind == "ask_multi_choice":
+        return payload["options"][:2]
+    if kind == "ask_form":
+        return {f["name"]: "..." for f in payload["fields"]}
+    if kind == "ask_rating":
+        return payload["scale"]
+    return "Acme Inc."  # ask_text / request_upload / ...
+
+
+async def main() -> None:
+    prompt = "Help me set up my workspace."
+
+    while True:
+        pending: list[InteractionEvent] = []
+        final: OutputEvent | None = None
+        async for event in agent(prompt=prompt, parent_id=getattr(main, "_run_id", None)):
+            if isinstance(event, InteractionEvent):
+                pending.append(event)
+            if isinstance(event, OutputEvent) and event.path == "onboarding_assistant":
+                final = event
+
+        # Finished — no more questions.
+        if final.status.reason != "input_required":
+            print(final.output.collect_text())
+            return
+
+        # Answer every pending question and resume from this run.
+        main._run_id = final.run_id
+        resume = {
+            it.interaction_id: render_and_collect(it.kind, it.payload)
+            for it in pending
+        }
+        result = await agent(prompt=prompt, parent_id=final.run_id, resume=resume).collect()
+        if result.status.reason != "input_required":
+            print(result.output.collect_text())
+            return
+        main._run_id = result.run_id
+
+
+asyncio.run(main())
+```
+
+<Note>
+A single turn can open **multiple** interactions at once (the model calls several tools in parallel). You receive one `InteractionEvent` per question and send all answers back in one `resume` map: `{ "<id1>": ..., "<id2>": ... }`. Approval gates ride the same channel — mix freely.
+</Note>
+
+## Structured form example
+
+`ask_form` is the workhorse for collecting several values in one round-trip instead of a chain of questions:
+
+```python
+def collect_company_profile() -> dict:
+    return ask_form(
+        title="Company profile",
+        fields=[
+            {"name": "company_name", "label": "Company name", "type": "text"},
+            {"name": "team_size", "label": "Team size", "type": "number"},
+            {"name": "industry", "label": "Industry", "type": "select",
+             "options": ["SaaS", "Fintech", "Healthcare", "Other"]},
+            {"name": "wants_newsletter", "label": "Subscribe to updates?", "type": "boolean"},
+        ],
+    )
+```
+
+The emitted `InteractionEvent.payload` is exactly the dict you passed; resume with the filled values:
+
+```python
+resume = {
+    interaction_id: {
+        "company_name": "Acme Inc.",
+        "team_size": 25,
+        "industry": "SaaS",
+        "wants_newsletter": True,
+    }
+}
+```
+
+## Generative UI: render, then continue
+
+`review_chart` shows how the same mechanism powers "render something, let the user tweak it, then keep going". The tool emits the data to draw; the resume value carries the user's edits back into the run:
+
+```python
+def propose_dashboard(metric: str) -> dict:
+    decision = review_chart(
+        title=f"{metric} over the last 30 days",
+        series=[{"label": metric, "points": fetch_points(metric)}],
+    )
+    # decision == {"approved": True, "edits": {"range": "90d"}}
+    return decision
+```
+
+If the user changes the range, you get `{"approved": True, "edits": {"range": "90d"}}` back and the handler continues with their choice — no separate "apply" endpoint needed.
+
+## Resuming across processes
+
+Everything above works in-process. To pause in a browser now and resume in a worker later, configure a durable provider and pass `parent_id` on resume:
+
+```python
+from pathlib import Path
+from timbal.state.tracing.providers import JsonlTracingProvider
+
+agent = Agent(
+    name="onboarding_assistant",
+    model="openai/gpt-5",
+    tools=[ask_text, ask_form, confirm],
+    tracing_provider=JsonlTracingProvider.configured(_path=Path("traces.jsonl")),
+)
+
+# Later, in any process:
+result = await agent(
+    prompt="Help me set up my workspace.",
+    parent_id=paused_run_id,
+    resume={interaction_id: "Acme Inc."},
+).collect()
+```
+
+See [Human in the Loop → Resuming a paused run](/agents/human-in-the-loop#resuming-a-paused-run) for the durable providers and the HTTP `/stream` wire contract your frontend talks to.

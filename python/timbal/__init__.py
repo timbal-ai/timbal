@@ -6,13 +6,14 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .core import Agent, FallbackModel, ModelEntry, Tool, Workflow
+    from .state import suspend
 
 try:
     from ._version import __version__  # type: ignore
 except ImportError:
     __version__ = "0.0.0.dev0"
 
-__all__ = ["Agent", "FallbackModel", "ModelEntry", "Tool", "Workflow"]
+__all__ = ["Agent", "FallbackModel", "ModelEntry", "Tool", "Workflow", "suspend"]
 
 _LAZY_IMPORTS = {
     "Agent": ".core",
@@ -20,6 +21,7 @@ _LAZY_IMPORTS = {
     "ModelEntry": ".core",
     "Tool": ".core",
     "Workflow": ".core",
+    "suspend": ".state",
 }
 
 

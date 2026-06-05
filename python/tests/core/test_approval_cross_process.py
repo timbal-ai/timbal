@@ -7,7 +7,7 @@ Real HITL is:
     2. some external system (queue, DB, UI) holds the ``approval_id``.
     3. process B starts fresh, asks the trace store for pending
        approvals, then calls the runnable again with
-       ``approval_decisions=...`` and ``parent_id=...``.
+       ``resume=...`` and ``parent_id=...``.
 
 If that flow doesn't work, the whole feature is an in-memory toy.
 
@@ -192,7 +192,7 @@ class TestSingleToolGate:
         out2 = await agent(
             prompt="wire 500",
             parent_id=out1.run_id,
-            approval_decisions={approvals[0].approval_id: True},
+            resume={approvals[0].approval_id: True},
         ).collect()
 
         assert out2.status.code == "success", out2.error
@@ -228,7 +228,7 @@ class TestSingleToolGate:
         out2 = await agent(
             prompt="charge 999",
             parent_id=out1.run_id,
-            approval_decisions={
+            resume={
                 approval.approval_id: {"approved": False, "reason": "policy"},
             },
         ).collect()
@@ -320,7 +320,7 @@ class TestExpiredResolution:
             e async for e in agent(
                 prompt="transfer 50",
                 parent_id=out1.run_id,
-                approval_decisions={approval.approval_id: already_expired},
+                resume={approval.approval_id: already_expired},
             )
         ]
         approvals2 = _approval_events(events2)
@@ -375,7 +375,7 @@ class TestParallelGatesResume:
         out2 = await wf(
             x=1, y=2,
             parent_id=out1.run_id,
-            approval_decisions=decisions,
+            resume=decisions,
         ).collect()
 
         assert out2.status.code == "success", out2.error
@@ -405,7 +405,7 @@ class TestParallelGatesResume:
             e async for e in wf(
                 x=1, y=2,
                 parent_id=out1.run_id,
-                approval_decisions={approvals["parallel_wf.step_a"].approval_id: True},
+                resume={approvals["parallel_wf.step_a"].approval_id: True},
             )
         ]
         out2 = _final_output(events2)
@@ -519,7 +519,7 @@ _RESUME_BODY = textwrap.dedent(
         out = await agent(
             prompt="wire 42",
             parent_id=RUN_ID,
-            approval_decisions={APPROVAL_ID: True},
+            resume={APPROVAL_ID: True},
         ).collect()
         sys.stdout.write("<<<RESULT>>>" + out.status.code + "<<<END>>>")
 
