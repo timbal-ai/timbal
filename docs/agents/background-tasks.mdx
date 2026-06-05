@@ -3,27 +3,26 @@ title: "Background Tasks"
 description: "Execute long-running operations asynchronously"
 ---
 
-Background tasks enable runnables to execute asynchronously, allowing your agent to continue working on other tasks while long-running operations complete in the background. 
-A unique task ID is assigned to each background task, which can be used to check status and retrieve results.
-
+Background tasks let runnables execute asynchronously while the agent continues. When a tool runs in the background, it immediately returns a `task_id` and `status: "running"` instead of blocking until completion.
 
 ## Configuring Background Mode
-The `background_mode` parameter controls when a runnable (tool) executes asynchronously. It has three values:
-- `"never"` (default)
-- `"always"`
-- `"auto"`: The LLM decides whether to run it in the background or not.
 
+The `background_mode` parameter controls when a runnable executes asynchronously:
+
+- `"never"` (default) — always runs synchronously
+- `"always"` — always runs in the background
+- `"auto"` — the LLM decides per call by setting `run_in_background=True` on the tool input
 
 ```python
 from timbal import Tool
 
 long_running_tool = Tool(
     handler=slow_operation,
-    background_mode="always"
+    background_mode="always",
 )
 ```
 
-The built-in `Bash` tool is an example of a background task. When configured with `background_mode="auto"`, the Agent determines whether to run the shell command in the background or synchronously.
+The built-in `Bash` tool uses `background_mode="auto"` by default. The model can run a shell command in the background by passing `run_in_background=True`.
 
 ```python
 from timbal import Agent
@@ -32,12 +31,30 @@ from timbal.tools import Bash
 agent = Agent(
     name="task_manager",
     model="openai/gpt-4o-mini",
-    tools=[Bash("*")]
+    tools=[Bash("*")],
 )
 
-# Start a background task
+# Agent starts the command in the background and returns immediately
 result = await agent(prompt="Install project dependencies in the background").collect()
-
-# Check status later
-status_result = await agent(prompt="What is the status of the task?").collect()
 ```
+
+## Checking Task Status
+
+Background tools return immediately with a task handle:
+
+```python
+{"task_id": "a3k9f2", "status": "running"}
+```
+
+Once at least one background task is running, the agent automatically exposes a `get_background_task` tool. Call it with the `task_id` to poll status and drain queued events:
+
+```python
+from timbal.state import get_run_context
+
+# After starting a background task...
+span = get_run_context().current_span()
+status = span.runnable.get_background_task("a3k9f2")
+# {"status": "running" | "completed" | "error" | "cancelled" | "not_found", "events": [...], ...}
+```
+
+Or let the agent poll for you on a follow-up turn — it will see `get_background_task` in its tool list and can call it with the `task_id` from the earlier tool result.

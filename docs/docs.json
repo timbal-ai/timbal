@@ -30,16 +30,15 @@
             "group": "Agents",
             "pages": [
               "agents/index",
+              "agents/tools",
+              "agents/structured-output",
               "agents/memory",
               "agents/memory-compaction",
-              "agents/tools",
-              "agents/human-in-the-loop",
-              "agents/thinking",
-              "agents/background-tasks",
               "agents/skills",
-              "agents/structured-output",
-              "agents/voice",
-              "agents/dynamic"
+              "agents/dynamic",
+              "agents/background-tasks",
+              "agents/commands",
+              "agents/human-in-the-loop"
             ]
           },
           {

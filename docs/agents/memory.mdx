@@ -32,15 +32,19 @@ Memory storage depends on your deployment environment:
 When agents call other agents, memory flows seamlessly between them. Child agents automatically receive conversation context from their parent, enabling sophisticated multi-agent workflows while maintaining conversation continuity.
 
 ```python
-# Parent agent
-class SupportAgent(Agent):
-    model = "anthropic/claude-sonnet-4-6"
-    tools = [billing_agent, technical_agent]
+from timbal import Agent
 
-# Child agents automatically inherit conversation context
-class BillingAgent(Agent):
-    model = "anthropic/claude-haiku-4-5"
-    # Receives full conversation history from parent
+billing_agent = Agent(
+    name="billing_agent",
+    model="anthropic/claude-haiku-4-5",
+    # Receives full conversation history from parent when used as a tool
+)
+
+support_agent = Agent(
+    name="support_agent",
+    model="anthropic/claude-sonnet-4-6",
+    tools=[billing_agent],  # add more specialist agents as needed
+)
 ```
 
 ## Configuration

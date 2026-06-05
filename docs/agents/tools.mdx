@@ -157,7 +157,7 @@ domain_search.description = "Search only within example.com domain."
 
 agent = Agent(
     name="research_agent",
-    model="anthropic/claude-opus-4-latest",
+    model="anthropic/claude-opus-4-6",
     tools=[general_search, domain_search]
 )
 ```
@@ -197,6 +197,19 @@ travel_agent = Agent(
 **Automatic Nesting:** When an agent is used as a tool within another agent (as shown above), it's automatically nested for proper tracing and context management. However, if you use an agent inside a `pre_hook` or `post_hook`, you must manually call `.nest()`. See [Using Agents in Hooks](/core-concepts/context#using-agents-in-hooks) for details.
 </Note>
 
+## Commands
+
+Register a `command` on any tool, agent, or workflow to let users invoke it directly with a `/` prefix — bypassing the LLM for that turn:
+
+```python
+Tool(handler=get_weather, command="weather")
+
+# User sends: /weather Barcelona
+# → runs get_weather(location="Barcelona") directly
+```
+
+See [Commands](/agents/commands) for argument parsing, nested agents, and workflows.
+
 ## Dynamic Tools
 
 When tool availability depends on runtime conditions (user role, permissions, input parameters), you need dynamic tool resolution.
@@ -223,6 +236,6 @@ See [Dynamic Agents](/agents/dynamic#dynamic-tools) for implementation details a
 - **Performance**: Concurrent execution and optimized patterns
 - **Robustness**: Improved error handling and tracing
 - **Tool Sets**: Dynamic tool resolution
-- **Slash Commands**: Shortcuts for direct tool invocation
+- **Commands**: Slash-command shortcuts for direct tool invocation — see [Commands](/agents/commands)
 
-For more advanced patterns, see the [Integrations](/integrations) and explore the built-in tools in the Timbal library!
+For more advanced patterns, see [Dynamic Agents](/agents/dynamic) and explore the built-in tools in the Timbal library.

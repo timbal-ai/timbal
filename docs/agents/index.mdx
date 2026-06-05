@@ -22,18 +22,30 @@ agent = Agent(
 For a full step-by-step guide, check the [quickstart section](/quickstart) or see practical examples in the [examples section](/examples).
 </Tip>
 
+## Reading guide
+
+The sidebar follows a **basics → platform → production** path. You can jump anywhere, but this order matches how most agents are built:
+
+1. **[Tools](/agents/tools)** — give the agent capabilities (the core primitive)
+2. **[Structured output](/agents/structured-output)** — constrain what comes back
+3. **[Memory](/agents/memory)** → **[Memory compaction](/agents/memory-compaction)** — multi-turn context, then keeping it within the window
+4. **[Skills](/agents/skills)** — domain packages (knowledge + tools) once the agent loop makes sense
+5. **[Dynamic agents](/agents/dynamic)** — runtime prompts and tool sets
+6. **[Background tasks](/agents/background-tasks)** · **[Commands](/agents/commands)** — utilities (async tools, slash shortcuts)
+7. **[Human in the loop](/agents/human-in-the-loop)** — approvals, `suspend()`, durable resume — usually needs a UI and tracing wired up
+
+This page covers running agents, models, and I/O. The sections below are the reference for that; the linked pages go deeper on each topic.
+
 ## Model Providers
 
 You can specify any model using the "provider/model" format. See all supported models in [Model Capabilities](../model_capabilities).
-
-Some models support advanced capabilities like [thinking/reasoning](/agents/thinking), which enables extended reasoning processes for complex problem-solving.
 
 Some models require specific parameters (like `max_tokens` for Claude). Pass it as a top-level field:
 
 ```python highlight={4}
 agent = Agent(
     name="claude_agent",
-    model="anthropic/claude-sonnet-4-latest",
+    model="anthropic/claude-sonnet-4-6",
     max_tokens=1024
 )
 ```
@@ -88,6 +100,29 @@ agent = Agent(
 ```
 
 Fallback only switches models before the first streamed chunk is emitted. If a stream fails after output has started, Timbal raises the error instead of silently switching models and risking duplicated or inconsistent output.
+
+### Thinking and reasoning
+
+Some models support extended thinking before responding. Check which models support it on [Model Capabilities](/model_capabilities).
+
+Configure at construction time via `model_params` (per-request overrides use `provider_params` — see [Overriding Model Configuration](#overriding-model-configuration) below):
+
+```python
+# Anthropic — max_tokens required; budget_tokens must be < max_tokens
+agent = Agent(
+    name="reasoning_agent",
+    model="anthropic/claude-sonnet-4-6",
+    max_tokens=20000,
+    model_params={"thinking": {"type": "enabled", "budget_tokens": 10000}},
+)
+
+# OpenAI
+agent = Agent(
+    name="reasoning_agent",
+    model="openai/gpt-5",
+    model_params={"reasoning": {"effort": "high", "summary": "auto"}},
+)
+```
 
 Define tools as Python functions - the framework handles schema generation, parameter validation, and execution orchestration.
 
@@ -154,13 +189,15 @@ response = await agent(
 
 Agents accept multiple input formats, automatically converting them to `Message` objects:
 
-```python highlight={3, 8, 13}
+```python highlight={3, 9, 14}
+from timbal.types.file import File
+
 # String
 response = await agent(
     prompt="What's the weather?"
 ).collect()
 
-# File - Timbal type 
+# File - Timbal type
 response = await agent(
     prompt=File.validate("image.png")
 ).collect()
@@ -169,7 +206,6 @@ response = await agent(
 response = await agent(
     prompt=["Describe this image", File.validate("image.png")]
 ).collect()
-```
 
 ### Passing Input Parameters
 
@@ -217,10 +253,10 @@ agent = Agent(
     max_tokens=1024  # Default max_tokens
 )
 
-# Override model: was "openai/gpt-4o-mini", now "anthropic/claude-sonnet-4-latest"
+# Override model: was "openai/gpt-4o-mini", now "anthropic/claude-sonnet-4-6"
 response = await agent(
     prompt="What is the capital of Germany?",
-    model="anthropic/claude-sonnet-4-latest"
+    model="anthropic/claude-sonnet-4-6"
 ).collect()
 
 # Override max_tokens: was 1024, now 2048
@@ -230,7 +266,8 @@ async for event in agent(
 ):
     print(event)
 
-# Override thinking via provider_params (provider-specific format)
+# Override thinking via provider_params at call time (provider-specific format).
+# At construction time, use model_params instead — same keys, same shape.
 # For OpenAI: pass "reasoning" key
 response = await agent(
     prompt="Solve this complex problem",
@@ -241,7 +278,7 @@ response = await agent(
 # For Anthropic: pass "thinking" key
 response = await agent(
     prompt="Solve this complex problem",
-    model="anthropic/claude-sonnet-4-latest",
+    model="anthropic/claude-sonnet-4-6",
     provider_params={"thinking": {"type": "enabled", "budget_tokens": 10000}}
 ).collect()
 ```
@@ -275,7 +312,7 @@ print(result.output.collect_text())
 ```
 
 <Warning>
-**Important:** When using models with [thinking/reasoning](/agents/thinking) enabled, the content array structure changes:
+**Important:** When using models with thinking enabled, the content array structure changes:
 - `content[0]` will contain the thinking/reasoning content
 - `content[1]` will contain the actual text response
 
@@ -301,20 +338,21 @@ Messages contain a **role** and **content**:
 **Content Types:**
 - **TextContent** - Plain text messages
 - **FileContent** - Files like PDFs, images, documents
-- **ToolCallContent** - Function calls to tools
+- **ToolUseContent** - Function calls to tools
 - **ToolResultContent** - Results from tool executions
 
 Messages can contain different types of content - text, files, tool calls, and tool results. The framework automatically handles complex content structures:
 
 ```python
 from timbal.types.content import FileContent, TextContent
+from timbal.types.file import File
 
 # Message with text and file
 mixed_message = Message(
     role="user",
     content=[
         TextContent(text="Analyze this document:"),
-        FileContent(path=File.validate("report.pdf"))
+        FileContent(file=File.validate("report.pdf"))
     ]
 )
 ```
@@ -322,6 +360,8 @@ mixed_message = Message(
 The same message above can be created easily using `Message.validate()`:
 
 ```python
+from timbal.types.file import File
+
 message = Message.validate([
     "Summarize this document:",
     File.validate("quarterly_report.pdf")
