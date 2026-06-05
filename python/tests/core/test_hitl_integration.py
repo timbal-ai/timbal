@@ -96,6 +96,81 @@ class TestApprovalGateRealModel:
 
     @pytest.mark.integration
     @pytest.mark.parametrize("model,max_tokens", MODELS)
+    async def test_structured_card_surfaces_on_real_gate_then_approves(self, model, max_tokens):
+        """A real model fills a typed spec and triggers the gate; the structured
+        card (kind + ui + input_schema) must surface on the ApprovalEvent, and the
+        redactor must keep secrets out of the card. Then approve and run once."""
+        calls: list[dict] = []
+
+        def create_project(name: str, needs_knowledge_base: bool, api_key: str) -> str:
+            """Create a new project. api_key is a secret credential for provisioning."""
+            calls.append({"name": name, "needs_knowledge_base": needs_knowledge_base, "api_key": api_key})
+            return f"Created project {name}."
+
+        from timbal.core.tool import Tool
+
+        tool = Tool(
+            handler=create_project,
+            requires_approval=True,
+            approval_kind="create_project",
+            approval_redact_keys=["api_key"],
+            approval_prompt=lambda name, needs_knowledge_base, api_key: f"Create project {name}?",
+            approval_ui=lambda name, needs_knowledge_base, api_key: {
+                "title": "Create project",
+                "severity": "info",
+                "fields": [
+                    {"label": "Name", "value": name},
+                    {"label": "Knowledge base", "value": needs_knowledge_base, "type": "bool"},
+                    {"label": "API key", "value": api_key},
+                ],
+            },
+        )
+        agent = Agent(
+            name="scaffolder",
+            model=model,
+            max_tokens=max_tokens,
+            tools=[tool],
+            system_prompt=(
+                "You scaffold projects. To create one you MUST call the create_project tool with "
+                "a name, whether it needs a knowledge base, and api_key='sk-secret-123'."
+            ),
+        )
+
+        prompt = "Create a project called 'support-bot' that needs a knowledge base."
+        events1 = [e async for e in agent(prompt=prompt)]
+        approval = _first(events1, ApprovalEvent)
+        out1 = _final_output(events1)
+
+        assert approval is not None, "real model did not call the gated tool"
+        assert out1.status.reason == "approval_required"
+        assert calls == [], "handler must not run before approval"
+
+        # Tier 1: structured card discriminator + payload present.
+        assert approval.kind == "create_project"
+        assert approval.ui is not None and approval.ui["title"] == "Create project"
+        # Tier 0: typed schema for generic form rendering.
+        assert approval.input_schema is not None
+        assert {"name", "needs_knowledge_base", "api_key"} <= set(
+            approval.input_schema.get("properties", {})
+        )
+        # Redaction reaches BOTH the values and the card; the secret never leaks.
+        assert approval.input["api_key"] == "***"
+        api_key_field = next(f for f in approval.ui["fields"] if f["label"] == "API key")
+        assert api_key_field["value"] == "***"
+
+        out2 = await agent(
+            prompt=prompt,
+            parent_id=out1.run_id,
+            resume={approval.approval_id: True},
+        ).collect()
+
+        assert out2.status.code == "success", out2.error
+        assert len(calls) == 1, "approved handler must execute exactly once"
+        # Handler still receives the real secret on resume, not the redacted one.
+        assert calls[0]["api_key"] == "sk-secret-123"
+
+    @pytest.mark.integration
+    @pytest.mark.parametrize("model,max_tokens", MODELS)
     async def test_deny_is_fed_back_and_agent_adapts(self, model, max_tokens):
         """The key real-model behaviour: a denial becomes a tool_result, and the
         model must continue to a normal completion rather than loop/crash."""

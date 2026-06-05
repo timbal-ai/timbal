@@ -836,3 +836,110 @@ class TestPendingApprovalsSurface:
         assert ctx is not None
         pending_ids = {entry["approval_id"] for entry in ctx.pending_approvals()}
         assert pending_ids == emitted_ids
+
+
+# ---------------------------------------------------------------------------
+# Structured approval cards (kind + ui + input_schema)
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalCardSurface:
+    """Tier 0 (input_schema) + Tier 1 (kind + ui) generative-UI surface."""
+
+    @pytest.mark.asyncio
+    async def test_input_schema_is_emitted_for_typed_form_rendering(self):
+        def create_project(name: str, needs_kb: bool = False) -> str:
+            return f"created {name}"
+
+        tool = Tool(name="create_project", handler=create_project, requires_approval=True)
+        events = [e async for e in tool(name="bot", needs_kb=True)]
+        approval = _approval_event(events)
+
+        assert approval.input == {"name": "bot", "needs_kb": True}
+        props = (approval.input_schema or {}).get("properties", {})
+        assert set(props) == {"name", "needs_kb"}, "frontend can render a typed form from this"
+
+    @pytest.mark.asyncio
+    async def test_kind_and_ui_callable_receive_input_and_surface_on_event(self):
+        def create_project(name: str, needs_kb: bool = False) -> str:
+            return f"created {name}"
+
+        tool = Tool(
+            name="create_project",
+            handler=create_project,
+            requires_approval=True,
+            approval_kind="create_project",
+            approval_prompt=lambda name, needs_kb: f"Create {name}?",
+            approval_ui=lambda name, needs_kb: {
+                "title": "Create project",
+                "severity": "info",
+                "fields": [
+                    {"label": "Name", "value": name},
+                    {"label": "Knowledge base", "value": needs_kb, "type": "bool"},
+                ],
+            },
+        )
+
+        events = [e async for e in tool(name="bot", needs_kb=True)]
+        approval = _approval_event(events)
+
+        assert approval.kind == "create_project"
+        assert approval.prompt == "Create bot?"
+        assert approval.ui["title"] == "Create project"
+        assert approval.ui["fields"][0] == {"label": "Name", "value": "bot"}
+
+        ctx = get_run_context()
+        entry = next(e for e in ctx.pending_approvals() if e["approval_id"] == approval.approval_id)
+        assert entry["kind"] == "create_project"
+        assert entry["ui"]["title"] == "Create project"
+        assert entry["input_schema"] is not None
+
+    @pytest.mark.asyncio
+    async def test_ui_callable_receives_redacted_input(self):
+        """Secrets excluded via approval_redact_keys must not reach the card."""
+
+        def wire(amount: int, account_number: str) -> str:
+            return "ok"
+
+        seen: list[str] = []
+
+        def build_ui(amount: int, account_number: str) -> dict:
+            seen.append(account_number)
+            return {"title": "Wire", "fields": [{"label": "Account", "value": account_number}]}
+
+        tool = Tool(
+            name="wire",
+            handler=wire,
+            requires_approval=True,
+            approval_redact_keys=["account_number"],
+            approval_ui=build_ui,
+        )
+
+        events = [e async for e in tool(amount=500, account_number="123456789")]
+        approval = _approval_event(events)
+
+        assert seen == ["***"], "ui builder must see the redacted value, never the secret"
+        assert approval.ui["fields"][0]["value"] == "***"
+        assert approval.input == {"amount": 500, "account_number": "***"}
+
+    @pytest.mark.asyncio
+    async def test_ui_accepts_pydantic_model(self):
+        from pydantic import BaseModel
+
+        class Card(BaseModel):
+            title: str
+            severity: str = "danger"
+
+        def nuke(target: str) -> str:
+            return "boom"
+
+        tool = Tool(
+            name="nuke",
+            handler=nuke,
+            requires_approval=True,
+            approval_ui=Card(title="Delete everything"),
+        )
+
+        events = [e async for e in tool(target="prod")]
+        approval = _approval_event(events)
+        assert approval.ui == {"title": "Delete everything", "severity": "danger"}

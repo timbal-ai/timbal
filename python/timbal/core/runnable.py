@@ -130,6 +130,7 @@ ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 ApprovalPolicy = bool | Callable[..., bool | ApprovalPolicyDecision | dict[str, Any]]
 ApprovalPrompt = str | Callable[..., str | None] | None
+ApprovalUi = dict[str, Any] | BaseModel | Callable[..., dict[str, Any] | BaseModel | None] | None
 
 
 def _normalize_resume_values(raw: Any) -> dict[str, Any]:
@@ -219,6 +220,16 @@ class Runnable(ABC, BaseModel):
     """Optional approval prompt, or a callable that receives the validated runnable input."""
     approval_description: str | None = None
     """Optional approval description shown in ApprovalEvent."""
+    approval_kind: str | None = None
+    """Optional renderer discriminator for a rich approval card. Surfaced on
+    ``ApprovalEvent.kind`` so the frontend can dispatch ``(kind, ui)`` to a
+    component, exactly like it does ``(kind, payload)`` for interactions."""
+    approval_ui: ApprovalUi = None
+    """Optional structured approval card data. A dict or pydantic ``BaseModel``,
+    or a callable receiving the (redacted) validated input by name and returning
+    one. Pydantic models are dumped to JSON. The result is surfaced on
+    ``ApprovalEvent.ui`` for the frontend to render. Presentation only — the
+    handler still receives the unredacted input on resume."""
     approval_redactor: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     """Optional callable to redact sensitive fields before they reach any
     public approval surface (``ApprovalEvent.input``, persisted ``span.input``,
@@ -843,10 +854,25 @@ class Runnable(ABC, BaseModel):
                 else:
                     prompt = self.approval_prompt
 
+            # Resolve the structured card. Callables receive the *redacted* input
+            # so a redactor/redact_keys config keeps secrets out of the card for
+            # free; static dict/BaseModel values are used as-authored.
+            ui = decision.ui
+            if decision.required and ui is None and self.approval_ui is not None:
+                if callable(self.approval_ui) and not isinstance(self.approval_ui, BaseModel):
+                    redacted = self._redact_validated_input(validated_input)
+                    ui = await self._execute_approval_callable(self.approval_ui, redacted)
+                else:
+                    ui = self.approval_ui
+            if isinstance(ui, BaseModel):
+                ui = ui.model_dump(mode="json")
+
             return ApprovalPolicyDecision(
                 required=decision.required,
                 prompt=prompt,
                 description=decision.description or self.approval_description,
+                kind=decision.kind or self.approval_kind,
+                ui=ui,
                 metadata=decision.metadata,
             )
         except ApprovalPolicyError:
@@ -1149,11 +1175,18 @@ class Runnable(ABC, BaseModel):
                     span.input = redacted_input
                     span._input_dump = await dump(redacted_input)
 
+                try:
+                    input_schema = self.format_params_model_schema()
+                except Exception:
+                    input_schema = None
                 span.metadata["approval"] = {
                     "id": approval_id,
                     "required": True,
                     "prompt": approval_decision.prompt,
                     "description": approval_decision.description,
+                    "kind": approval_decision.kind,
+                    "ui": approval_decision.ui,
+                    "input_schema": input_schema,
                     "metadata": approval_decision.metadata,
                     "input": redacted_input,
                 }
@@ -1221,8 +1254,11 @@ class Runnable(ABC, BaseModel):
                         runnable_name=self.name,
                         runnable_type=self.metadata.get("type", self.__class__.__name__),
                         input=redacted_input,
+                        input_schema=input_schema,
                         prompt=approval_decision.prompt,
                         description=approval_decision.description,
+                        kind=approval_decision.kind,
+                        ui=approval_decision.ui,
                         metadata=approval_decision.metadata,
                     )
                     run_context.update_usage("approvals:required", 1)

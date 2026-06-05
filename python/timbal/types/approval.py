@@ -19,6 +19,13 @@ class ApprovalPolicyDecision(BaseModel):
     required: bool
     prompt: str | None = None
     description: str | None = None
+    kind: str | None = None
+    """Renderer discriminator the frontend uses to pick an approval card component
+    (e.g. ``"create_project"``, ``"wire_transfer"``). Mirrors ``InteractionEvent.kind``."""
+    ui: dict[str, Any] | None = None
+    """Structured, presentation-only JSON for rendering a rich approval card
+    (title, fields, severity, ...). Built from the *redacted* input, so secrets
+    excluded via ``approval_redactor`` / ``approval_redact_keys`` never reach it."""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

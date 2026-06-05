@@ -129,6 +129,9 @@ class RunContext(BaseModel):
                         "call_id": span.call_id,
                         "prompt": approval.get("prompt"),
                         "description": approval.get("description"),
+                        "kind": approval.get("kind"),
+                        "ui": approval.get("ui"),
+                        "input_schema": approval.get("input_schema"),
                         "metadata": approval.get("metadata", {}),
                         "input": approval.get("input"),
                     }

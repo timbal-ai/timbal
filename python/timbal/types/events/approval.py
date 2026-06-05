@@ -21,10 +21,22 @@ class ApprovalEvent(BaseEvent):
     runnable_type: str
     """Runnable class/type that requires approval."""
     input: Any
-    """Validated input that would be passed to the runnable."""
+    """Validated (redacted, if configured) input that would be passed to the runnable.
+    The *values* for a structured approval card. Pair with ``input_schema`` to render
+    a typed form with zero per-tool frontend code."""
+    input_schema: dict[str, Any] | None = None
+    """JSON Schema of the runnable's parameters (titles/descriptions/types). Render
+    ``input`` against this for a generic, typed approval form — Tier 0, no custom UI."""
     prompt: str | None = None
-    """Optional human-readable prompt explaining what needs approval."""
+    """Optional human-readable summary. Text fallback for CLIs/logs/non-rich clients."""
     description: str | None = None
     """Optional runnable or policy description."""
+    kind: str | None = None
+    """Renderer discriminator for a rich approval card (mirrors ``InteractionEvent.kind``).
+    The frontend dispatches ``(kind, ui)`` exactly like it does ``(kind, payload)`` for
+    interactions. ``None`` means render generically from ``input`` + ``input_schema``."""
+    ui: dict[str, Any] | None = None
+    """Structured, presentation-only JSON for the card (title, fields, severity, ...).
+    Authored via the tool's ``approval_ui``. Already redacted; safe to render verbatim."""
     metadata: dict[str, Any] = Field(default_factory=dict)
     """Additional policy metadata for future approval engines."""
