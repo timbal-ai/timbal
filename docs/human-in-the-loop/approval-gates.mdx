@@ -1,0 +1,211 @@
+---
+title: "Approval gates"
+description: "Declarative permission checks that fire before a runnable executes — gate irreversible actions for human approval"
+---
+
+Approval gates (`requires_approval`) are declarative permission checks that fire **before** a runnable executes. Use them for irreversible actions: refunds, deploys, account deletions, outbound emails, anything that costs money or moves data. When a gate fires, zero handler code runs until a human decides.
+
+## Quick start
+
+Mark a tool as approval-required, stream events, and resume with a decision keyed by `approval_id`.
+
+```python
+from timbal import Agent, Tool
+from timbal.types.events import ApprovalEvent
+
+
+def refund_customer(amount: int) -> str:
+    return f"refunded ${amount}"
+
+
+refund = Tool(
+    handler=refund_customer,
+    requires_approval=lambda amount: amount > 100,
+    approval_prompt=lambda amount: f"Approve refunding ${amount}?",
+)
+
+agent = Agent(
+    name="support_agent",
+    model="openai/gpt-5",
+    tools=[refund],
+)
+
+approval_id = None
+async for event in agent(prompt="Refund $250"):
+    if isinstance(event, ApprovalEvent):
+        approval_id = event.approval_id
+
+result = await agent(
+    prompt="Refund $250",
+    resume={approval_id: True},
+).collect()
+```
+
+When a gate fires, the run ends with `status.code == "cancelled"` and `status.reason == "approval_required"`. The `ApprovalEvent` carries:
+
+- `approval_id` — stable id used to resolve the gate
+- `runnable_path`, `runnable_name`, `runnable_type` — what was about to execute
+- `tool_call_id` — when the gate fired inside an agent tool call, the LLM `tool_use` id that triggered it, so the frontend can pin the approval card to the exact tool_use block in the transcript. `None` for direct calls.
+- `input` — validated handler input (after redaction, if configured)
+- `input_schema` — JSON Schema of the handler params, so the UI can render a typed form
+- `prompt`, `description` — human-facing strings
+- `t0` — Unix-ms timestamp of when approval was requested (useful for SLA timers)
+
+## Configuring approval gates
+
+`requires_approval` accepts `True`, `False`, or a callable that receives the same kwargs as the handler and returns `bool`. `approval_prompt` and `approval_description` accept strings or callables and surface in the `ApprovalEvent` so the human reviewer has context.
+
+```python
+high_risk_deploy = Tool(
+    handler=deploy_handler,
+    requires_approval=lambda env, **_: env == "production",
+    approval_prompt=lambda env, **_: f"Deploy to {env}?",
+    approval_description="Deploys ship traffic to the listed environment.",
+)
+```
+
+If `requires_approval` or `approval_prompt` raises, the runnable does **not** silently approve nor execute. It ends with `status.code == "error"` and `status.reason == "approval_policy_error"`, distinct from handler errors so dashboards can surface policy bugs separately.
+
+## Resolutions: approve, deny, audit
+
+Pass either a bare `bool` (`True`/`False`) or an `ApprovalResolution` for richer audit fields:
+
+```python
+from timbal.types.approval import ApprovalResolution
+
+result = await agent(
+    prompt="Refund $250",
+    resume={
+        approval_id: ApprovalResolution(
+            approved=False,
+            reason="Refund exceeds policy limit.",
+            approver_id="user_42",
+            comment="Customer is outside the refund window.",
+        )
+    },
+).collect()
+```
+
+Audit fields are first-class (not free-form metadata) and persist under `span.metadata["approval"]["resolution"]`:
+
+- `approver_id` — who decided
+- `comment` — free-form reasoning
+- `decided_at` — Unix-ms timestamp; defaults to construction time. Pass an explicit value if you replay decisions and need idempotency
+- `metadata` — org-specific extras
+
+### Edit on approve (`override_input`)
+
+A reviewer often wants to approve *with a tweak* (fix a typo'd recipient, lower an amount) rather than reject and round-trip back to the model. Set `override_input` on the resolution: the keys are merged over the originally-proposed input (override wins), **re-validated through the handler's params model**, and the handler runs with the corrected values.
+
+```python
+from timbal.types.approval import ApprovalResolution
+
+result = await agent(
+    prompt="email the customer",
+    parent_id=paused_run_id,
+    resume={
+        approval_id: ApprovalResolution(
+            approved=True,
+            override_input={"to": "correct@example.com"},  # fix just this field
+        )
+    },
+).collect()
+```
+
+Only the listed keys change; everything else from the proposal is kept. The edit is audited under `span.metadata["approval"]["resolution"]["override_input"]`, and the effective (redacted) input the handler ran with is recorded at `span.metadata["approval"]["effective_input"]`. `override_input` is ignored on denial. Re-validation means a bad override (wrong type, missing required field) fails the run with a normal validation error instead of silently running garbage.
+
+### Tool denial vs Agent denial
+
+Behavior differs based on who initiated the call:
+
+- **Direct tool call** — denial returns `status.code == "cancelled"` and `status.reason == "approval_denied"`. The handler does not run.
+- **Tool called by an Agent** — denial is converted into a `ToolResultContent` so the model can see "this tool was denied" and choose another path (apologize, escalate, try an alternative). The agent does not crash.
+
+## Time-limited decisions
+
+Bound decisions with `expires_at` (Unix-ms). Expired resolutions are ignored at gate time and the gate emits a fresh `ApprovalEvent` with `metadata["approval"]["expired"] == True`:
+
+```python
+import time
+from timbal.types.approval import ApprovalResolution
+
+decision = ApprovalResolution(
+    approved=True,
+    approver_id="user_42",
+    comment="Approved from the support console.",
+    expires_at=int(time.time() * 1000) + 60_000,  # valid for 60s
+)
+```
+
+This is useful when an operator stamps a decision in a UI but a worker doesn't pick it up immediately. Stale decisions force a fresh re-review instead of silently going through.
+
+## Redacting approval input
+
+Approval input is shown to humans and written to traces. If a gated runnable receives secrets or PII, redact the public approval snapshot.
+
+The simple form lists keys to mask with `"***"`:
+
+```python
+rotate_key = Tool(
+    handler=rotate_key_impl,
+    requires_approval=True,
+    approval_prompt="Rotate this API key?",
+    approval_redact_keys=["api_key", "password"],
+)
+```
+
+For custom logic, use `approval_redactor`. It receives a copy of the validated input dict and returns the public snapshot:
+
+```python
+rotate_key = Tool(
+    handler=rotate_key_impl,
+    requires_approval=True,
+    approval_redactor=lambda input: {
+        **input,
+        "api_key": "***",
+        "customer_email": input["customer_email"].split("@")[0] + "@***",
+    },
+)
+```
+
+The redacted snapshot is used everywhere the input would otherwise be visible: `ApprovalEvent.input`, `span.input` while the gate is pending, `span.metadata["approval"]["input"]`, `OutputEvent.metadata["pending_approvals"]`, and any exporter (OTel, Langfuse, etc.). The handler still receives the **original unredacted input** when the approval is resumed.
+
+<Note>
+A redactor that raises or returns a non-dict falls back to a placeholder so secrets never leak through a buggy redactor.
+</Note>
+
+## `approval_id` semantics
+
+The `approval_id` is derived from `(runnable_path, validated_input)`. The same path + input shares one decision, so a single resolution survives retries of the same call (stream resumes, transient failures, agent loops re-asking for the same tool). Treat the id as **opaque**: the derivation is an internal contract and may change across SDK versions, so don't persist ids across deploys.
+
+For irreversible operations (money movement, destructive deletes) where every call must require a fresh decision, include a unique value in the input so each call derives a distinct `approval_id`, typically an `idempotency_key: str` parameter with `default_params={"idempotency_key": lambda: str(uuid4())}`. Timbal evaluates the callable per-invocation.
+
+## Approvals in workflows
+
+Workflow steps follow the same rules as tools. `requires_approval` is a `Runnable` config, so wrap the function in a `Tool` (or use any `Runnable`) before adding it as a step. When a gated step fires, the workflow run cancels with `approval_required` and emits one `ApprovalEvent` per pending gate. **Independent gates fire in parallel**, so you don't need to ping-pong one approval at a time.
+
+```python
+from timbal import Tool, Workflow
+
+deploy_prod = Tool(
+    name="deploy_prod",
+    handler=deploy_prod_impl,
+    requires_approval=True,
+    approval_prompt="Promote to prod?",
+)
+
+workflow = (
+    Workflow(name="release_pipeline")
+    .step(deploy_staging)
+    .step(deploy_prod)
+    .step(announce, depends_on=["deploy_prod"])
+)
+```
+
+When you resume with `resume={...}`, only the steps you decided on advance. Other pending gates remain pending and re-emit on the next call. This means you can approve a subset, observe what runs, and decide on the rest later.
+
+## See also
+
+- [Suspend & interaction tools](/human-in-the-loop/suspend) — ask the user for arbitrary input mid-run
+- [Resuming a paused run](/human-in-the-loop/resuming) — durable cross-process resume and cancellation
+- [Observability](/human-in-the-loop/observability) — status reasons and usage counters

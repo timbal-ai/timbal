@@ -1,0 +1,101 @@
+---
+title: "Client integration (HTTP)"
+description: "The full contract for a frontend talking to the /stream SSE endpoint: pause, render, resume"
+---
+
+This is the full contract for a frontend talking to `timbal serve` (the `/stream` SSE endpoint). Two phases: **pause** (server → client) and **resume** (client → server). The example uses `ask_user`; an approval gate is identical except the pause event is an `APPROVAL` event and you resume with `true`/`false`.
+
+## 1. Start the run
+
+`POST /stream` with the runnable's params:
+
+```json
+{ "prompt": "set up my database" }
+```
+
+The response is an SSE stream (`text/event-stream`), one `data:` line per event. When the agent calls `ask_user`, the client receives an **`INTERACTION`** event:
+
+```json
+{
+  "type": "INTERACTION",
+  "run_id": "06a22e62b85d7b558000db9caf2790b2",
+  "path": "assistant.ask_user",
+  "t0": 1780672043531,
+  "interaction_id": "bfd231bf5760d201b31382e168c339d4",
+  "kind": "ask_user",
+  "runnable_name": "ask_user",
+  "runnable_type": "Tool",
+  "tool_call_id": "toolu_01abc...",
+  "payload": { "question": "Which database should I use?", "options": ["postgres", "mysql", "sqlite"] },
+  "response_schema": { "type": "string", "enum": ["postgres", "mysql", "sqlite"] }
+}
+```
+
+`tool_call_id` (when present) is the LLM tool_use id, so you can pin the prompt next to the matching message in the transcript. `response_schema` (when the tool declared one) is the JSON Schema the answer must satisfy; validate the user's input against it before resuming. An `APPROVAL` event additionally carries `input_schema` (the handler's params schema, for rendering a typed form).
+
+Immediately followed by the final **`OUTPUT`** event for the run, which marks it as paused:
+
+```json
+{
+  "type": "OUTPUT",
+  "run_id": "06a22e62b85d7b558000db9caf2790b2",
+  "path": "assistant",
+  "status": { "code": "cancelled", "reason": "input_required", "message": "Input required to resume." },
+  "output": {
+    "suspension_id": "bfd231bf5760d201b31382e168c339d4",
+    "status": "input_required",
+    "kind": "ask_user",
+    "payload": { "question": "Which database should I use?", "options": ["postgres", "mysql", "sqlite"] }
+  }
+}
+```
+
+**What the frontend does:**
+- Render UI from the `INTERACTION` event's `kind` + `payload` (here: a question with three option buttons). For an `APPROVAL` event, render `prompt` + `input` and offer Approve/Deny.
+- Stash `run_id` and `interaction_id` (or `approval_id`).
+- A run is paused (not finished) whenever the terminal `OUTPUT` has `status.reason` of `input_required` or `approval_required`.
+
+## 2. Resume with the answer
+
+`POST /stream` again, echoing the original params plus two keys: `parent_id` (the paused `run_id`) and `resume` (a map of `id → value`):
+
+```json
+{
+  "prompt": "set up my database",
+  "parent_id": "06a22e62b85d7b558000db9caf2790b2",
+  "resume": { "bfd231bf5760d201b31382e168c339d4": "postgres" }
+}
+```
+
+The run replays, `ask_user` returns `"postgres"`, and the stream ends with a normal success `OUTPUT`:
+
+```json
+{
+  "type": "OUTPUT",
+  "path": "assistant",
+  "status": { "code": "success", "reason": "end_turn" },
+  "output": { "role": "assistant", "content": [{ "type": "text", "text": "Great, using postgres." }] }
+}
+```
+
+That's the whole loop. If a turn opens **multiple** pauses (parallel tools/steps, even a mix of approvals and interactions), the client receives one event per pause and sends every answer in a single `resume` map: `{ "<id1>": ..., "<id2>": true }`. The id you send back is always the one you received: approval ids resume with `true`/`false`, interaction ids with the value the handler asked for.
+
+## Cancelling over HTTP
+
+To abort instead of answering (user closed the dialog, navigated away), resume the id with the tagged cancel object, the JSON equivalent of `Cancel`:
+
+```json
+{
+  "prompt": "set up my database",
+  "parent_id": "06a22e62b85d7b558000db9caf2790b2",
+  "resume": { "bfd231bf5760d201b31382e168c339d4": { "type": "timbal.cancel", "reason": "user closed the dialog" } }
+}
+```
+
+The run ends with a terminal `OUTPUT` of `status.reason == "cancelled"` (not `input_required`/`approval_denied`), and nothing is sent back to the model. An edit-on-approve over HTTP is the same idea on an approval id: `{ "<approval_id>": { "approved": true, "override_input": { "to": "fixed@example.com" } } }`.
+
+## See also
+
+- [Resuming a paused run](/human-in-the-loop/resuming) — the in-process and durable-provider story
+- [Suspend & interaction tools](/human-in-the-loop/suspend) — `InteractionEvent` and response schemas
+- [Approval gates](/human-in-the-loop/approval-gates) — the `APPROVAL` event and its fields

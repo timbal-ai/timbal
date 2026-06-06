@@ -5,7 +5,7 @@ description: "Interaction tools built on suspend() — free text, single/multi c
 
 `suspend()` lets a tool pause the run and hand control to the user, then resume with whatever they send back. Each tool picks a `kind` (the frontend's renderer discriminator) and a `payload` (what to render). The resume value can be **any JSON type** — a string, a bool, a list, a dict — so the same primitive covers everything from a yes/no to a multi-field form.
 
-See the full reference on the [Human in the Loop](/agents/human-in-the-loop) page. This page is a catalog of shapes you can copy.
+See the full reference in the [Human in the Loop](/human-in-the-loop) section. This page is a catalog of shapes you can copy.
 
 ## A catalog of interaction tools
 
@@ -57,7 +57,7 @@ def review_chart(title: str, series: list[dict]) -> dict:
 `suspend` is exported at the top level (`from timbal import suspend`). Ready-made `ask_user` and `confirm` also ship in `timbal.tools` (`from timbal.tools import ask_user, confirm`).
 
 <Warning>
-The handler **re-executes from the top** on resume, so put `suspend()` before any non-idempotent side-effect (or make everything before it idempotent). For irreversible actions, gate them with [`requires_approval`](/agents/human-in-the-loop#approval-gates) instead — that pauses *before* any handler code runs.
+The handler **re-executes from the top** on resume, so put `suspend()` before any non-idempotent side-effect (or make everything before it idempotent). For irreversible actions, gate them with [`requires_approval`](/human-in-the-loop/approval-gates) instead — that pauses *before* any handler code runs.
 </Warning>
 
 ## Payload shapes at a glance
@@ -217,4 +217,4 @@ result = await agent(
 ).collect()
 ```
 
-See [Human in the Loop → Resuming a paused run](/agents/human-in-the-loop#resuming-a-paused-run) for the durable providers and the HTTP `/stream` wire contract your frontend talks to.
+See [Resuming a paused run](/human-in-the-loop/resuming) and [Client integration (HTTP)](/human-in-the-loop/client-integration) for the durable providers and the HTTP `/stream` wire contract your frontend talks to.

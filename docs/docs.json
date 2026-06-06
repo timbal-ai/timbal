@@ -37,8 +37,7 @@
               "agents/skills",
               "agents/dynamic",
               "agents/background-tasks",
-              "agents/commands",
-              "agents/human-in-the-loop"
+              "agents/commands"
             ]
           },
           {
@@ -47,6 +46,17 @@
               "workflows/index",
               "workflows/control-flow",
               "workflows/branching"
+            ]
+          },
+          {
+            "group": "Human in the Loop",
+            "pages": [
+              "human-in-the-loop/index",
+              "human-in-the-loop/approval-gates",
+              "human-in-the-loop/suspend",
+              "human-in-the-loop/resuming",
+              "human-in-the-loop/client-integration",
+              "human-in-the-loop/observability"
             ]
           },
           {

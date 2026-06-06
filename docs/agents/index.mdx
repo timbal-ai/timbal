@@ -32,7 +32,8 @@ The sidebar follows a **basics → platform → production** path. You can jump 
 4. **[Skills](/agents/skills)** — domain packages (knowledge + tools) once the agent loop makes sense
 5. **[Dynamic agents](/agents/dynamic)** — runtime prompts and tool sets
 6. **[Background tasks](/agents/background-tasks)** · **[Commands](/agents/commands)** — utilities (async tools, slash shortcuts)
-7. **[Human in the loop](/agents/human-in-the-loop)** — approvals, `suspend()`, durable resume — usually needs a UI and tracing wired up
+
+After **[Workflows](/workflows)**, see **[Human in the loop](/human-in-the-loop)** for approvals, `suspend()`, and durable resume (agents, workflow steps, and tools).
 
 This page covers running agents, models, and I/O. The sections below are the reference for that; the linked pages go deeper on each topic.
 
@@ -173,7 +174,7 @@ result = await agent(
 ).collect()
 ```
 
-The full reference — durable cross-process resume, audit fields, redaction, parallel gates, `pending_approvals()`, status reasons, usage counters, plus `suspend()` for asking the user mid-run — lives on the dedicated [Human in the Loop](/agents/human-in-the-loop) page.
+The full reference — durable cross-process resume, audit fields, redaction, parallel gates, `pending_approvals()`, status reasons, usage counters, plus `suspend()` for asking the user mid-run — lives on the dedicated [Human in the Loop](/human-in-the-loop) section.
 
 ## Input
 
