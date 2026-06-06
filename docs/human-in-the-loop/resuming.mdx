@@ -98,7 +98,9 @@ Compaction is structure-aware about this:
 This holds for every built-in strategy (`compact_tool_results`, `keep_last_n_messages`, `keep_last_n_turns`, `summarize`) and any custom compactor. You don't configure anything extra — it just works on the same `resume=` call.
 
 <Note>
-Compaction runs at **turn boundaries** (when a turn loads its memory), not between iterations within a turn. A single turn that itself balloons — many large tool results in one uninterrupted run — is not compacted mid-loop, on resume or otherwise. This is a general limitation, not specific to human-in-the-loop; size your individual tool outputs accordingly or compact across turns.
+Compaction runs at turn boundaries **and** between iterations within a turn (mid-loop), so a single turn that makes many or large tool calls is compacted as it grows once utilization crosses `memory_compaction_ratio`. Mid-loop compaction always protects the most recent (unconsumed) assistant tool batch — the results the next model call must read — so it bounds context without sending the agent back to re-plan the same step.
+
+In a `Workflow`, compaction is a per-step concern: a `Workflow` has no LLM context of its own, and an `Agent` used as a step runs with isolated context (no cross-turn memory) but still mid-loop-compacts a long tool loop inside that step. Step outputs passed between steps are not "context" and are never compacted.
 </Note>
 
 ## Duplicate worker protection

@@ -622,43 +622,53 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             else:
                 await self._compact_on_resume(current_span, prev_usage=previous_span.usage)
 
-    async def _compact_on_resume(self, current_span: Any, *, prev_usage: dict | None) -> None:
-        """Compact memory on a resume turn without eating the pending tool_use.
+    async def _compact_preserving_last_assistant(self, current_span: Any, *, prev_usage: dict | None) -> None:
+        """Compact memory while protecting the trailing assistant message (and anything after
+        it) from the compactor.
 
-        The loaded memory ends with the gated/suspended assistant message whose tool_uses
-        have no tool_result yet — exactly what _find_pending_tool_uses must see to re-execute
-        the paused call without re-calling the LLM. A naive compaction pass treats that
-        trailing unresolved tool_use as an orphan and strips it (drop mode removes the
-        tool_use; keep_last_n*/summarize run it through _remove_orphaned_tool_parts), which
-        forces a nondeterministic re-plan that silently drops the human's decision.
+        Used on two paths where the tail must survive intact:
 
-        Instead we detach that trailing assistant message, compact only the well-formed
-        history before it (so a long paused thread doesn't overflow the continuation LLM
-        call), then re-attach it untouched — mirroring how a fresh turn compacts prior
-        history while leaving the in-flight turn intact.
+        - **resume**: the loaded memory ends with the gated/suspended assistant message whose
+          tool_uses have no tool_result yet — exactly what _find_pending_tool_uses must see to
+          re-execute the paused call. A naive pass treats that unresolved tool_use as an
+          orphan and strips it, forcing a nondeterministic re-plan that silently drops the
+          human's decision.
+        - **mid-loop**: between agent iterations the trailing assistant tool_use + its (just
+          produced) tool_results are *unconsumed* — the next LLM call must read them. Dropping
+          them sends the model back to re-plan the same step, looping forever.
+
+        In both cases we detach that trailing assistant message, compact only the well-formed
+        history before it, then re-attach it untouched — mirroring how a fresh turn compacts
+        prior history while leaving the in-flight turn intact.
         """
         memory = current_span.memory
-        if not self._find_pending_tool_uses(memory):
-            # No trailing unresolved tool_use to protect (degenerate resume); nothing to do.
-            # Compacting here could strip structure we rely on, so leave memory as-is.
+        # Index of the trailing assistant message (the batch we must protect).
+        split = next((i for i in range(len(memory) - 1, -1, -1) if memory[i].role == "assistant"), None)
+        if split is None:
+            # No assistant message yet (e.g. memory is just the prompt) — nothing to protect.
+            await self._maybe_compact_memory(current_span, prev_usage=prev_usage)
             return
 
-        # Index of the trailing assistant message that carries the pending tool_uses.
-        split = next(i for i in range(len(memory) - 1, -1, -1) if memory[i].role == "assistant")
         head, tail = memory[:split], memory[split:]
         if not head:
-            return  # Pending message is the whole memory; nothing before it to compact.
+            return  # The protected tail is the whole memory; nothing before it to compact.
 
-        current_span.memory = head
+        head_slice = memory[:split]
+        current_span.memory = head_slice
         await self._maybe_compact_memory(current_span, prev_usage=prev_usage)
+        if current_span.memory is head_slice:
+            # Below the ratio — nothing compacted. Restore the original memory object so the
+            # caller's identity check sees no change (no needless dump rebuild).
+            current_span.memory = memory
+            return
         head = current_span.memory
 
-        # The message originally before the pending assistant was user/tool (assistants are
+        # The message originally before the trailing assistant was user/tool (assistants are
         # always followed by tool results or end the turn), but compaction can leave head
         # ending in an assistant message. Two consecutive assistant messages break provider
-        # alternation, so fold head's trailing assistant into the pending message — the
-        # merged message stays a single assistant block and _find_pending_tool_uses still
-        # sees the tool_uses in the last assistant message.
+        # alternation, so fold head's trailing assistant into the protected one — the merged
+        # message stays a single assistant block and _find_pending_tool_uses still sees the
+        # tool_uses in the last assistant message.
         if head and head[-1].role == "assistant" and tail and tail[0].role == "assistant":
             merged = Message(
                 role="assistant",
@@ -668,6 +678,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span.memory = [*head[:-1], merged, *tail[1:]]
         else:
             current_span.memory = [*head, *tail]
+
+    async def _compact_on_resume(self, current_span: Any, *, prev_usage: dict | None) -> None:
+        """Resume-turn compaction. Only acts when there's a genuine trailing unresolved
+        tool_use to protect; delegates the detach/compact/reattach to
+        _compact_preserving_last_assistant."""
+        if not self._find_pending_tool_uses(current_span.memory):
+            # No trailing unresolved tool_use (degenerate resume); leave memory as-is rather
+            # than risk stripping structure we rely on.
+            return
+        await self._compact_preserving_last_assistant(current_span, prev_usage=prev_usage)
 
     async def _maybe_compact_memory(self, current_span: Any, *, prev_usage: dict | None) -> None:
         """Run the configured compaction strategies on ``current_span.memory`` if the
@@ -739,10 +759,14 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     "after": len(current_span.memory),
                 }
             )
+        prior = current_span.metadata.get("compaction")
+        passes = (prior.get("passes", 1) + 1) if isinstance(prior, dict) else 1
         current_span.metadata["compaction"] = {
             "triggered": True,
             "utilization": round(utilization, 4) if utilization is not None else None,
             "steps": compaction_steps,
+            # Number of times compaction fired on this span (turn start + each mid-loop pass).
+            "passes": passes,
         }
 
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
@@ -1012,6 +1036,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         i = 0
         need_retry = False
         _llm_memory_saved = False
+        # Token usage reported by the previous LLM call this turn — the live signal for
+        # mid-loop compaction. None until the first LLM call completes.
+        last_llm_usage: dict | None = None
         try:
             while True:
                 need_retry = False
@@ -1112,6 +1139,22 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                     i += 1
                     continue
 
+                # Mid-loop compaction: a single turn that makes many (or large) tool calls
+                # grows memory unbounded between iterations. resolve_memory only compacts at
+                # turn start (and not at all on a turn with no parent), so without this a long
+                # tool-calling turn can overflow the context window mid-run. The trailing
+                # assistant batch + its tool_results are *unconsumed* — the next LLM call must
+                # read them — so we protect that tail and compact only the history before it
+                # (dropping the unconsumed batch would loop the model back to re-plan the same
+                # step). The previous LLM call's reported usage is the live context-size signal
+                # (its input tokens ≈ the size of the memory we're about to send again).
+                if self.memory_compaction is not None and last_llm_usage is not None:
+                    mem_before = current_span.memory
+                    await self._compact_preserving_last_assistant(current_span, prev_usage=last_llm_usage)
+                    if current_span.memory is not mem_before:
+                        # Compaction rewrote memory out of lockstep with the dump; rebuild it.
+                        current_span._memory_dump = await dump(current_span.memory)
+
                 async for event in self._llm(
                     model=model,
                     messages=current_span.memory,
@@ -1138,6 +1181,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # Add LLM response to conversation for next iteration
                         await _append_memory(event.output)
                         _llm_memory_saved = True
+                        # Record this call's token usage as the live signal for mid-loop
+                        # compaction before the next iteration's LLM call.
+                        last_llm_usage = event.usage
 
                         if self.output_model is not None:
                             validation_error_msg = None
