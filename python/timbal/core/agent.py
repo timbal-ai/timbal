@@ -615,68 +615,135 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Re-dump prior turns so stored memory matches sanitized messages (no empty text blocks).
         current_span._prev_memory_dump = await dump(merged[:-1])
 
-        # Apply memory compaction if configured and context window utilization warrants it
+        # Apply memory compaction if configured and context window utilization warrants it.
         if self.memory_compaction is not None:
-            should_compact = self.memory_compaction_ratio <= 0.0
-            utilization = None
-            if not should_compact:
-                context_window = get_context_window(str(self.model))
-                if context_window is None:
-                    # Unknown model — context window not in models.yaml.
-                    # Estimate token count from message content as a best effort.
-                    estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
-                    logger.warning(
-                        "Context window unknown for model; token usage estimated from message content (1 token ≈ 4 chars). Compacting as safe fallback.",
-                        model=str(self.model),
-                        estimated_tokens=estimated_tokens,
-                    )
-                    should_compact = True
-                elif previous_span.usage:
-                    prev_input_tokens = sum(v for k, v in previous_span.usage.items() if ":input" in k and "token" in k)
-                    prev_output_tokens = sum(
-                        v for k, v in previous_span.usage.items() if ":output" in k and "token" in k
-                    )
-                    utilization = (prev_input_tokens + prev_output_tokens) / context_window
-                    should_compact = utilization >= self.memory_compaction_ratio
-                else:
-                    # Known model but no usage data from previous run.
-                    # Estimate utilization from message content.
-                    estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
-                    utilization = estimated_tokens / context_window
-                    logger.warning(
-                        "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
-                        model=str(self.model),
-                        estimated_tokens=estimated_tokens,
-                        estimated_utilization=round(utilization, 4),
-                    )
-                    should_compact = utilization >= self.memory_compaction_ratio
+            if not is_resume:
+                await self._maybe_compact_memory(current_span, prev_usage=previous_span.usage)
+            else:
+                await self._compact_on_resume(current_span, prev_usage=previous_span.usage)
 
-            if should_compact:
-                compactors = (
-                    [self.memory_compaction] if not isinstance(self.memory_compaction, list) else self.memory_compaction
+    async def _compact_on_resume(self, current_span: Any, *, prev_usage: dict | None) -> None:
+        """Compact memory on a resume turn without eating the pending tool_use.
+
+        The loaded memory ends with the gated/suspended assistant message whose tool_uses
+        have no tool_result yet — exactly what _find_pending_tool_uses must see to re-execute
+        the paused call without re-calling the LLM. A naive compaction pass treats that
+        trailing unresolved tool_use as an orphan and strips it (drop mode removes the
+        tool_use; keep_last_n*/summarize run it through _remove_orphaned_tool_parts), which
+        forces a nondeterministic re-plan that silently drops the human's decision.
+
+        Instead we detach that trailing assistant message, compact only the well-formed
+        history before it (so a long paused thread doesn't overflow the continuation LLM
+        call), then re-attach it untouched — mirroring how a fresh turn compacts prior
+        history while leaving the in-flight turn intact.
+        """
+        memory = current_span.memory
+        if not self._find_pending_tool_uses(memory):
+            # No trailing unresolved tool_use to protect (degenerate resume); nothing to do.
+            # Compacting here could strip structure we rely on, so leave memory as-is.
+            return
+
+        # Index of the trailing assistant message that carries the pending tool_uses.
+        split = next(i for i in range(len(memory) - 1, -1, -1) if memory[i].role == "assistant")
+        head, tail = memory[:split], memory[split:]
+        if not head:
+            return  # Pending message is the whole memory; nothing before it to compact.
+
+        current_span.memory = head
+        await self._maybe_compact_memory(current_span, prev_usage=prev_usage)
+        head = current_span.memory
+
+        # The message originally before the pending assistant was user/tool (assistants are
+        # always followed by tool results or end the turn), but compaction can leave head
+        # ending in an assistant message. Two consecutive assistant messages break provider
+        # alternation, so fold head's trailing assistant into the pending message — the
+        # merged message stays a single assistant block and _find_pending_tool_uses still
+        # sees the tool_uses in the last assistant message.
+        if head and head[-1].role == "assistant" and tail and tail[0].role == "assistant":
+            merged = Message(
+                role="assistant",
+                content=[*head[-1].content, *tail[0].content],
+                stop_reason=tail[0].stop_reason,
+            )
+            current_span.memory = [*head[:-1], merged, *tail[1:]]
+        else:
+            current_span.memory = [*head, *tail]
+
+    async def _maybe_compact_memory(self, current_span: Any, *, prev_usage: dict | None) -> None:
+        """Run the configured compaction strategies on ``current_span.memory`` if the
+        context-window utilization warrants it.
+
+        Shared by ``resolve_memory`` (fresh turns) and the resume-continuation path in the
+        agent loop (after the gated/suspended tool_uses have been re-executed and their
+        tool_results appended — at which point the previously-unresolved tool_use is a
+        complete pair again and safe to compact).
+
+        ``prev_usage`` is the prior run's usage dict used as a token proxy; when it is
+        empty/None the estimate falls back to message content.
+        """
+        if self.memory_compaction is None:
+            return
+
+        should_compact = self.memory_compaction_ratio <= 0.0
+        utilization = None
+        if not should_compact:
+            context_window = get_context_window(str(self.model))
+            if context_window is None:
+                # Unknown model — context window not in models.yaml.
+                # Estimate token count from message content as a best effort.
+                estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
+                logger.warning(
+                    "Context window unknown for model; token usage estimated from message content (1 token ≈ 4 chars). Compacting as safe fallback.",
+                    model=str(self.model),
+                    estimated_tokens=estimated_tokens,
                 )
-                compaction_steps = []
-                for compactor in compactors:
-                    # Set the agent's model on compactors that support it (e.g. summarize)
-                    if hasattr(compactor, "_state"):
-                        compactor._state["agent_model"] = str(self.model)
-                    before = len(current_span.memory)
-                    if asyncio.iscoroutinefunction(compactor):
-                        current_span.memory = await compactor(current_span.memory)
-                    else:
-                        current_span.memory = compactor(current_span.memory)
-                    compaction_steps.append(
-                        {
-                            "compactor": getattr(compactor, "__name__", repr(compactor)),
-                            "before": before,
-                            "after": len(current_span.memory),
-                        }
-                    )
-                current_span.metadata["compaction"] = {
-                    "triggered": True,
-                    "utilization": round(utilization, 4) if utilization is not None else None,
-                    "steps": compaction_steps,
+                should_compact = True
+            elif prev_usage:
+                prev_input_tokens = sum(v for k, v in prev_usage.items() if ":input" in k and "token" in k)
+                prev_output_tokens = sum(v for k, v in prev_usage.items() if ":output" in k and "token" in k)
+                utilization = (prev_input_tokens + prev_output_tokens) / context_window
+                should_compact = utilization >= self.memory_compaction_ratio
+            else:
+                # Known model but no usage data from previous run.
+                # Estimate utilization from message content.
+                estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
+                utilization = estimated_tokens / context_window
+                logger.warning(
+                    "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
+                    model=str(self.model),
+                    estimated_tokens=estimated_tokens,
+                    estimated_utilization=round(utilization, 4),
+                )
+                should_compact = utilization >= self.memory_compaction_ratio
+
+        if not should_compact:
+            return
+
+        compactors = (
+            [self.memory_compaction] if not isinstance(self.memory_compaction, list) else self.memory_compaction
+        )
+        compaction_steps = []
+        for compactor in compactors:
+            # Set the agent's model on compactors that support it (e.g. summarize)
+            if hasattr(compactor, "_state"):
+                compactor._state["agent_model"] = str(self.model)
+            before = len(current_span.memory)
+            if asyncio.iscoroutinefunction(compactor):
+                current_span.memory = await compactor(current_span.memory)
+            else:
+                current_span.memory = compactor(current_span.memory)
+            compaction_steps.append(
+                {
+                    "compactor": getattr(compactor, "__name__", repr(compactor)),
+                    "before": before,
+                    "after": len(current_span.memory),
                 }
+            )
+        current_span.metadata["compaction"] = {
+            "triggered": True,
+            "utilization": round(utilization, 4) if utilization is not None else None,
+            "steps": compaction_steps,
+        }
 
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
