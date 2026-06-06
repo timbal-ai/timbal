@@ -45,7 +45,19 @@
             "pages": [
               "workflows/index",
               "workflows/control-flow",
-              "workflows/branching"
+              "workflows/branching",
+              "workflows/errors-and-failure",
+              "workflows/agents-and-llms",
+              "workflows/human-in-the-loop",
+              {
+                "group": "Examples",
+                "pages": [
+                  "examples/workflows/sequential-steps",
+                  "examples/workflows/parallel-fan-out",
+                  "examples/workflows/conditional-routing",
+                  "examples/workflows/workflow-composition"
+                ]
+              }
             ]
           },
           {

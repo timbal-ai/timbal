@@ -32,7 +32,7 @@ agent = Agent(
 )
 
 async def main():
-    result = await agent.collect(prompt="What's new in AI this week?")
+    result = await agent(prompt="What's new in AI this week?").collect()
     print(result.output)
 
 asyncio.run(main())

@@ -37,7 +37,7 @@ workflow = (
 )
 ```
 
-If `validate_input` returns `"invalid"`, both `process` and `save_results` are skipped — `save_results` depends on `process`, which never runs.
+If `validate_input` returns `"invalid"`, both `process` and `save_results` are skipped. `save_results` depends on `process`, which never runs.
 
 Not all dependents of a skipped step are skipped. When a step uses `depends_on`, it only waits for the referenced steps to **resolve** (either complete or be skipped) — it doesn't need their data. This is useful when you don't know which branch will run:
 
@@ -55,7 +55,7 @@ workflow = (
 )
 ```
 
-`handle_new` and `handle_existing` have inverse conditions — only one runs. `finalize` depends on both via `depends_on`, so it waits for both to resolve (one completes, the other is skipped) and then executes regardless.
+`handle_new` and `handle_existing` have inverse conditions, so only one runs. `finalize` depends on both via `depends_on`, so it waits for both to resolve (one completes, the other is skipped) and then executes regardless.
 
 ## Conditional with Agents
 
@@ -64,20 +64,23 @@ Use an LLM to make routing decisions:
 ```python
 classifier = Agent(
     name="classifier",
-    model="openai/gpt-4.1-mini",
-    system_prompt="Classify the message as 'technical' or 'billing'. Respond with one word only."
+    model="openai/gpt-5-mini",
+    system_prompt="Classify the message as 'technical' or 'billing'. Respond with one word only.",
+    max_tokens=64,
 )
 
 technical_agent = Agent(
     name="technical_agent",
-    model="openai/gpt-4.1",
-    system_prompt="You are a technical support specialist."
+    model="anthropic/claude-sonnet-4-6",
+    system_prompt="You are a technical support specialist.",
+    max_tokens=1024,
 )
 
 billing_agent = Agent(
     name="billing_agent",
-    model="openai/gpt-4.1-mini",
-    system_prompt="You are a billing support specialist."
+    model="openai/gpt-5-mini",
+    system_prompt="You are a billing support specialist.",
+    max_tokens=1024,
 )
 
 workflow = (

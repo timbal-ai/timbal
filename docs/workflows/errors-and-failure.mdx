@@ -1,0 +1,94 @@
+---
+title: "Errors & Failure"
+description: "How workflow steps fail, skip, and propagate errors"
+---
+
+Workflows run steps concurrently but respect dependencies. When something goes wrong, behavior depends on whether the step **failed** (raised an error) or was **skipped** (`when` returned false, or a dependency was missing).
+
+## Skipped vs failed
+
+| State | Cause | Dependents |
+|---|---|---|
+| **Skipped** | `when` returned `False`, or `step_span()` hit a skipped upstream step (`SpanNotFound`) | Steps that need that step's data are skipped; steps with only `depends_on` wait and may still run |
+| **Failed** | Handler raised, step returned `OutputEvent` with error, or param/`when` evaluation failed | Steps that try to read the failed step's output fail during evaluation; workflow ends with `status.code == "error"` |
+
+Skipped is intentional (branch not taken). Failed is an error you should handle or fix.
+
+## Step failure
+
+When a step handler raises, Timbal records the error on that step's span and marks the workflow failed:
+
+```python
+result = await workflow().collect()
+# result.status.code == "error"
+# result.status.reason == "step_failed"
+# result.error == {"type": "ValueError", "message": "...", "traceback": "..."}
+```
+
+If multiple steps run in parallel and one fails, the workflow still reports error even if other steps succeeded.
+
+## Dependent steps
+
+A downstream step that reads a failed step's output via `step_span()` fails during parameter resolution (before its handler runs):
+
+```python
+workflow = (
+    Workflow(name="pipeline")
+    .step(raises_error)   # fails
+    .step(
+        process,
+        data=lambda: get_run_context().step_span("raises_error").output,
+    )
+)
+```
+
+Use `step_span("name", default=None)` when a step might have been skipped (see [Control flow](/workflows/control-flow#handling-optional-steps)), not when it failed. A failed upstream step does not produce output to read.
+
+## Skipped branches
+
+When `when` is false, the step is skipped and dependents that **require its output** are skipped too:
+
+```python
+workflow = (
+    Workflow(name="pipeline")
+    .step(validate_input, data="...")
+    .step(process, when=lambda: get_run_context().step_span("validate_input").output == "valid")
+    .step(save_results, data=lambda: get_run_context().step_span("process").output)
+)
+```
+
+If validation fails, both `process` and `save_results` are skipped.
+
+Steps that only need ordering (not data) can use `depends_on` to run after a branch resolves:
+
+```python
+.step(finalize, depends_on=["handle_new", "handle_existing"])
+```
+
+See [Branching](/workflows/branching#skipped-steps) for the full pattern.
+
+## Pauses (approval / suspend)
+
+When a step hits an [approval gate](/human-in-the-loop/approval-gates) or [`suspend()`](/human-in-the-loop/suspend), the workflow pauses with `status.code == "cancelled"` and a reason like `approval_required` or `input_required`. Parallel steps that also pause emit their events before the workflow stops, so you can resume multiple pending ids in one call.
+
+Pauses are not failures. Resume with `parent_id` and `resume={...}` as documented in [Resuming a paused run](/human-in-the-loop/resuming).
+
+## Cycle detection
+
+Linking steps that would create a cycle raises immediately when you call `.step()`:
+
+```python
+# ValueError: Linking step_a -> step_b would create a cycle in the workflow.
+```
+
+Dependencies come from `depends_on`, `when` callables, and lambda parameters that call `step_span()`.
+
+## Tracing
+
+Every step gets its own span under the workflow span. Inspect per-step input, output, and errors via `get_run_context()._trace` or your [tracing provider](/core-concepts/tracing). Failed steps record `error` on their span even when the workflow's final status is `error`.
+
+## See also
+
+- [Control flow](/workflows/control-flow) — optional steps with `default=None`
+- [Branching](/workflows/branching) — conditional execution
+- [Human in the loop](/workflows/human-in-the-loop) — pauses on workflow steps

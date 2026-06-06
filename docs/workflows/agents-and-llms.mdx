@@ -1,0 +1,154 @@
+---
+title: "Agents & LLMs"
+description: "Use Agents as workflow steps and build LLM routing pipelines"
+---
+
+Any Runnable works as a workflow step, including **Agents**. Use agents inside workflows when you want LLM reasoning at specific points in an otherwise deterministic pipeline, or when a classifier agent routes to specialist agents.
+
+## Agent as a single step
+
+```python
+import asyncio
+
+from timbal import Agent, Workflow
+
+summarizer = Agent(
+    name="summarizer",
+    model="anthropic/claude-sonnet-4-6",
+    max_tokens=1024,
+)
+
+workflow = Workflow(name="summarize").step(
+    summarizer,
+    prompt="Summarize the quarterly report in three bullet points.",
+)
+
+
+async def main():
+    result = await workflow().collect()
+    print(result.output.collect_text())
+
+
+asyncio.run(main())
+```
+
+The agent's output (typically a `Message`) is the workflow output.
+
+## Passing inputs through the workflow
+
+Expose agent params as workflow-level inputs by leaving them unbound on the step:
+
+```python
+workflow = (
+    Workflow(name="support")
+    .step(support_agent, prompt="Handle this ticket")  # fixed prompt
+)
+
+# Or pass prompt at call time:
+result = await workflow(prompt="Customer cannot log in").collect()
+```
+
+Steps with fixed kwargs in `.step(...)` hide those params from the workflow schema. Steps without defaults for a param surface it on the workflow.
+
+## LLM routing (classify → specialist)
+
+Use a lightweight classifier agent, then branch with `when`:
+
+```python
+import asyncio
+
+from timbal import Agent, Workflow
+from timbal.state import get_run_context
+
+classifier = Agent(
+    name="classifier",
+    model="openai/gpt-5-mini",
+    system_prompt="Classify the message as 'technical' or 'billing'. One word only.",
+    max_tokens=64,
+)
+
+technical_agent = Agent(
+    name="technical_agent",
+    model="anthropic/claude-sonnet-4-6",
+    system_prompt="You are a technical support specialist.",
+    max_tokens=1024,
+)
+
+billing_agent = Agent(
+    name="billing_agent",
+    model="openai/gpt-5-mini",
+    system_prompt="You are a billing support specialist.",
+    max_tokens=1024,
+)
+
+workflow = (
+    Workflow(name="support_router")
+    .step(classifier)
+    .step(
+        technical_agent,
+        when=lambda: "technical"
+        in get_run_context().step_span("classifier").output.collect_text().lower(),
+    )
+    .step(
+        billing_agent,
+        when=lambda: "billing"
+        in get_run_context().step_span("classifier").output.collect_text().lower(),
+    )
+)
+
+
+async def main():
+    result = await workflow(prompt="I can't access my account after the upgrade").collect()
+    print(result.output.collect_text())
+
+
+asyncio.run(main())
+```
+
+Only the matching specialist runs. See [Conditional Routing](/examples/workflows/conditional-routing) for a function-based variant.
+
+## Agents + plain functions
+
+Mix deterministic steps with agents in one pipeline:
+
+```python
+workflow = (
+    Workflow(name="doc_pipeline")
+    .step(fetch_content, url="https://example.com/report")   # plain function
+    .step(extract_metadata, html=lambda: get_run_context().step_span("fetch_content").output)
+    .step(summarizer, prompt=lambda: f"Summarize: {get_run_context().step_span('extract_metadata').output['text']}")
+    .step(format_markdown, summary=lambda: get_run_context().step_span("summarizer").output.collect_text())
+)
+```
+
+See [Sequential Steps](/examples/workflows/sequential-steps) for a full document pipeline.
+
+## Nested workflows with agents
+
+An inner workflow can contain agents; the outer workflow treats it as one step:
+
+```python
+analysis = (
+    Workflow(name="analysis")
+    .step(fetch_sales)
+    .step(summarizer, prompt=lambda: f"Summarize: {get_run_context().step_span('fetch_sales').output}")
+)
+
+delivery = (
+    Workflow(name="delivery")
+    .step(analysis)
+    .step(send_email, body=lambda: get_run_context().step_span("analysis").output.collect_text())
+)
+```
+
+## When to use an agent vs a workflow
+
+- **One agent with tools** — the model picks tools dynamically; good for open-ended tasks.
+- **Workflow with agent steps** — you control which LLM runs when; good for staged pipelines, cost control, and auditability.
+- **Workflow without agents** — pure data/code; fastest and cheapest.
+
+## See also
+
+- [Branching](/workflows/branching) — `when` conditions and skipped dependents
+- [Agents](/agents) — agent configuration, tools, memory
+- [Sequential Steps example](/examples/workflows/sequential-steps)
