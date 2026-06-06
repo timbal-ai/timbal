@@ -86,6 +86,21 @@ result = await agent(
 
 Timbal loads the parent trace (input messages, pending gates/suspensions, prior tool calls) before executing the resolution, so the runnable sees exactly the state it was paused at.
 
+## Memory compaction on resume
+
+If the agent has `memory_compaction` configured, a resume turn is treated like a continuation of the paused turn, not a fresh one. The loaded memory ends with the gated/suspended `tool_use` that has **no `tool_result` yet** — that trailing block is exactly what Timbal re-executes to settle the pause without re-calling the model.
+
+Compaction is structure-aware about this:
+
+- The pending `tool_use` is **never** compacted away. (A naive pass would treat it as an orphaned tool call, strip it, and force the model to re-plan — which is nondeterministic and would silently drop the human's decision.)
+- The **history before** the pending call is still compacted, so resuming a long paused thread doesn't carry the full uncompacted transcript into the continuation LLM call and overflow the context window.
+
+This holds for every built-in strategy (`compact_tool_results`, `keep_last_n_messages`, `keep_last_n_turns`, `summarize`) and any custom compactor. You don't configure anything extra — it just works on the same `resume=` call.
+
+<Note>
+Compaction runs at **turn boundaries** (when a turn loads its memory), not between iterations within a turn. A single turn that itself balloons — many large tool results in one uninterrupted run — is not compacted mid-loop, on resume or otherwise. This is a general limitation, not specific to human-in-the-loop; size your individual tool outputs accordingly or compact across turns.
+</Note>
+
 ## Duplicate worker protection
 
 When multiple workers consume the same queue, two of them might race to resume the same `(parent_id, approval_id)`. Timbal **claims** the pair before executing the resolution. The first claimer wins; later duplicates stop before handler execution with `status.reason == "approval_already_claimed"`.
