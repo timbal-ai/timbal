@@ -41,6 +41,38 @@ def _collect_ids(messages: list[Message], role: str, content_type: type) -> set[
     return {c.id for msg in messages if msg.role == role for c in msg.content if isinstance(c, content_type)}
 
 
+def _collect_pinned_ids(memory: list[Message]) -> set[str]:
+    """Collect the tool_use/result ids of every pinned tool result.
+
+    A pinned result must never be dropped or truncated by compaction (see
+    ``ToolResultContent.pinned``). The id is shared by the result and its paired tool_use, so
+    this single set protects both halves."""
+    return {
+        c.id
+        for msg in memory
+        if msg.role == "tool"
+        for c in msg.content
+        if isinstance(c, ToolResultContent) and c.pinned
+    }
+
+
+def _pinned_protected_indices(memory: list[Message]) -> set[int]:
+    """Indices of messages that must be preserved verbatim by positional compactors because
+    they carry a pinned tool_result or the tool_use paired with one."""
+    pinned_ids = _collect_pinned_ids(memory)
+    if not pinned_ids:
+        return set()
+    keep: set[int] = set()
+    for i, msg in enumerate(memory):
+        if msg.role == "tool":
+            if any(isinstance(c, ToolResultContent) and c.id in pinned_ids for c in msg.content):
+                keep.add(i)
+        elif msg.role == "assistant":
+            if any(isinstance(c, ToolUseContent) and c.id in pinned_ids for c in msg.content):
+                keep.add(i)
+    return keep
+
+
 def _remove_orphaned_tool_parts(memory: list[Message]) -> list[Message]:
     """Remove tool_use without tool_result, and tool_result without tool_use."""
     tool_use_ids = _collect_ids(memory, "assistant", ToolUseContent)
@@ -264,6 +296,9 @@ def compact_tool_results(
         else:
             kept_ids = set()
 
+        # Pinned results (and their paired tool_use) are never dropped or replaced.
+        kept_ids |= _collect_pinned_ids(memory)
+
         drop_mode = replacement is None
 
         result: list[Message] = []
@@ -350,8 +385,10 @@ def keep_last_n_messages(n: int) -> Callable[[list[Message]], list[Message]]:
     def _compact(memory: list[Message]) -> list[Message]:
         if len(memory) <= n:
             return _remove_orphaned_tool_parts(memory)
-        truncated = memory[-n:]
-        return _remove_orphaned_tool_parts(truncated)
+        # Keep the last n messages, plus any pinned messages (and their paired tool_use) that
+        # fell outside the window — "last n PLUS pinned". Order is preserved.
+        keep = set(range(len(memory) - n, len(memory))) | _pinned_protected_indices(memory)
+        return _remove_orphaned_tool_parts([memory[i] for i in sorted(keep)])
 
     return _compact
 
@@ -376,7 +413,10 @@ def keep_last_n_turns(n: int) -> Callable[[list[Message]], list[Message]]:
         if len(user_indices) <= n:
             return _remove_orphaned_tool_parts(memory)
         start = user_indices[-n]
-        return _remove_orphaned_tool_parts(memory[start:])
+        # Keep the last n turns, plus any pinned messages (and their paired tool_use) from
+        # earlier turns. Order is preserved.
+        keep = set(range(start, len(memory))) | _pinned_protected_indices(memory)
+        return _remove_orphaned_tool_parts([memory[i] for i in sorted(keep)])
 
     return _compact
 
@@ -439,11 +479,17 @@ def summarize(
             start_idx = 1  # Skip the summary message itself
 
         # Determine what to keep vs. what to summarize.
-        # Apply orphan cleanup to to_keep: if the cut falls mid-tool-call-sequence,
-        # the orphaned tool result at the boundary is removed. After cleanup,
-        # to_keep[0] can only be "user" or "assistant", never "tool".
-        to_keep = _remove_orphaned_tool_parts(non_system[-keep_last_n:]) if keep_last_n > 0 else []
-        to_summarize = non_system[start_idx : len(non_system) - keep_last_n if keep_last_n > 0 else len(non_system)]
+        # Keep the last keep_last_n messages, PLUS any pinned messages (and their paired
+        # tool_use) from the older region — pinned context is preserved verbatim, like system
+        # messages, never fed to the summarizer. Apply orphan cleanup to to_keep: if the cut
+        # falls mid-tool-call-sequence, the orphaned tool result at the boundary is removed.
+        # After cleanup, to_keep[0] can only be "user" or "assistant", never "tool".
+        protected_idx = {i for i in _pinned_protected_indices(non_system) if i >= start_idx}
+        keep_idx = set(range(len(non_system) - keep_last_n, len(non_system))) if keep_last_n > 0 else set()
+        keep_idx |= protected_idx
+        keep_idx = {i for i in keep_idx if i >= start_idx}
+        to_keep = _remove_orphaned_tool_parts([non_system[i] for i in sorted(keep_idx)])
+        to_summarize = [non_system[i] for i in range(start_idx, len(non_system)) if i not in keep_idx]
 
         if not to_summarize:
             return memory  # Nothing new to summarize

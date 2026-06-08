@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from timbal import Agent, Tool
 from timbal.core.skill import ReadSkill, Skill
@@ -522,6 +524,211 @@ class TestAgentWithSkillInTools:
         resolved = await skill.resolve()
         resolved_names = {t.name for t in resolved}
         assert "search_cars" in resolved_names
+
+
+class TestSkillResultsPinnedAgainstCompaction:
+    """A skill's instructions reach the model only as the read_skill tool_result, but its
+    activation lives in the session. Memory compaction must not evict that result, or the
+    model keeps the skill's tools while losing the guidance for using them. read_skill pins
+    its results so every compaction strategy preserves them."""
+
+    @pytest.mark.asyncio
+    async def test_read_skill_result_is_pinned(self, skills_dir):
+        """Running read_skill through the agent produces a pinned tool_result carrying the
+        skill body."""
+        from timbal.state import RunContext, set_run_context
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.types.content import ToolResultContent, ToolUseContent
+        from timbal.types.message import Message
+
+        model = TestModel(responses=[
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="r1", name="read_skill", input={"name": "cars"})],
+                stop_reason="tool_use",
+            ),
+            "loaded",
+        ])
+        agent = Agent(name="agent", model=model, skills_path=skills_dir)
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx)
+        await agent(prompt="read the cars skill").collect()
+
+        memory = ctx._trace.get_path(agent._path)[0].memory
+        pinned = [
+            c for m in memory if m.role == "tool" for c in m.content
+            if isinstance(c, ToolResultContent) and c.pinned
+        ]
+        assert pinned, "read_skill result should be pinned"
+        assert any("Cars Skill" in c.content[0].text for c in pinned)
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_regular_tool_result_is_not_pinned(self, skills_dir):
+        """Only tools that opt in (pin_result=True) get pinned results — a plain tool's result
+        must stay compactable. Proves the agent stamps pinning selectively."""
+        from timbal.state import RunContext, set_run_context
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.types.content import ToolResultContent, ToolUseContent
+        from timbal.types.message import Message
+
+        def plain(x: int) -> str:
+            """A plain tool."""
+            return f"value-{x}"
+
+        model = TestModel(responses=[
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="p1", name="plain", input={"x": 1})],
+                stop_reason="tool_use",
+            ),
+            "ok",
+        ])
+        agent = Agent(name="agent", model=model, skills_path=skills_dir, tools=[Tool(handler=plain)])
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx)
+        await agent(prompt="call plain").collect()
+
+        memory = ctx._trace.get_path(agent._path)[0].memory
+        results = [
+            c for m in memory if m.role == "tool" for c in m.content
+            if isinstance(c, ToolResultContent)
+        ]
+        assert results, "expected a tool result"
+        assert all(c.pinned is False for c in results), "regular tool result must not be pinned"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_pinned_skill_body_survives_jsonl_resume_with_compaction(self, skills_dir, tmp_path):
+        """Full durability path: an agent reads a skill (pinned result), suspends via ask_user,
+        and persists to JSONL. A *fresh* agent + RunContext resumes from disk with drop-mode
+        compaction forced — so the pinned skill body must survive both serialization and
+        `_compact_on_resume` (which compacts the head while protecting the suspended tool_use)."""
+        from timbal.state import suspend
+        from timbal.state.tracing.providers.jsonl import JsonlTracingProvider
+        from timbal.types.content import ToolResultContent, ToolUseContent
+        from timbal.types.events import InteractionEvent
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.types.message import Message
+
+        def ask_user(question: str) -> str:
+            """Ask the user a question."""
+            return suspend({"question": question}, kind="ask_user")
+
+        path = tmp_path / "traces.jsonl"
+        provider = JsonlTracingProvider.configured(_path=path)
+
+        def make_agent(model):
+            return Agent(
+                name="agent",
+                model=model,
+                skills_path=skills_dir,
+                tools=[ask_user],
+                tracing_provider=provider,
+                memory_compaction=compact_tool_results(),  # drop mode
+                memory_compaction_ratio=0.0,  # force compaction on every pass, incl. resume
+                max_iter=6,
+            )
+
+        # --- process A: read skill -> pinned result, then suspend ---
+        suspend_model = TestModel(responses=[
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="r1", name="read_skill", input={"name": "cars"})],
+                stop_reason="tool_use",
+            ),
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="a1", name="ask_user", input={"question": "which model?"})],
+                stop_reason="tool_use",
+            ),
+        ])
+        events1 = [e async for e in make_agent(suspend_model)(prompt="read the cars skill then ask me")]
+        out1 = next(e for e in reversed(events1) if hasattr(e, "status"))
+        interaction = next(e for e in events1 if isinstance(e, InteractionEvent))
+        assert out1.status.reason == "input_required"
+        assert path.exists()
+
+        # --- process B: brand-new agent + context, resume purely from the JSONL trace ---
+        resume_model = TestModel(responses=["Porsche 911 it is."])
+        out2 = await make_agent(resume_model)(
+            prompt="read the cars skill then ask me",
+            parent_id=out1.run_id,
+            resume={interaction.interaction_id: "the 911"},
+        ).collect()
+        assert out2.status.code == "success", out2.error
+
+        # The pinned skill body survived serialization + compaction-on-resume. Read the resumed
+        # run's persisted memory back off disk and re-validate it into Messages.
+        record = next(
+            json.loads(line)
+            for line in path.read_text().splitlines()[::-1]
+            if line.strip() and json.loads(line).get("run_id") == out2.run_id
+        )
+        agent_span = next(s for s in record["spans"] if s["path"] == "agent")
+        memory = [Message.validate(m) for m in agent_span["memory"]]
+        bodies = [
+            c.content[0].text for m in memory if m.role == "tool" for c in m.content
+            if isinstance(c, ToolResultContent) and c.pinned
+        ]
+        assert any("Cars Skill" in b for b in bodies), "pinned skill body lost across JSONL resume + compaction"
+
+    @pytest.mark.asyncio
+    async def test_skill_body_survives_aggressive_compaction(self, skills_dir):
+        """End-to-end: with drop-mode compaction forced every iteration, the pinned skill body
+        stays in memory and its tools stay resolvable — tools and guidance don't drift apart."""
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.state import RunContext, get_or_create_run_context, set_run_context
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+        from timbal.types.content import ToolResultContent, ToolUseContent
+        from timbal.types.message import Message
+
+        # read the skill, then make an unrelated tool call (so the skill result is no longer the
+        # latest batch and a naive compactor would drop it), then finish.
+        model = TestModel(responses=[
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="r1", name="read_skill", input={"name": "cars"})],
+                stop_reason="tool_use",
+            ),
+            Message(
+                role="assistant",
+                content=[ToolUseContent(id="s1", name="search_cars", input={"query": "911"})],
+                stop_reason="tool_use",
+            ),
+            "done",
+        ])
+        agent = Agent(
+            name="agent",
+            model=model,
+            skills_path=skills_dir,
+            memory_compaction=compact_tool_results(),  # drop mode
+            memory_compaction_ratio=0.0,  # force compaction every iteration
+            max_iter=6,
+        )
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx)
+        result = await agent(prompt="read the cars skill then search").collect()
+        assert result.status.code == "success", result.error
+
+        memory = ctx._trace.get_path(agent._path)[0].memory
+        # The pinned skill body survived aggressive compaction.
+        bodies = [
+            c.content[0].text for m in memory if m.role == "tool" for c in m.content
+            if isinstance(c, ToolResultContent) and c.pinned
+        ]
+        assert any("Cars Skill" in b for b in bodies), "pinned skill body was compacted away"
+
+        # And the skill's tools are still resolvable (activation intact).
+        session = await get_or_create_run_context().get_session()
+        assert "cars" in session["__in_context_skills"][agent._path]
+
+        InMemoryTracingProvider._storage.clear()
 
 
 class TestReadSkillTool:

@@ -127,6 +127,30 @@ agent = Agent(
 Use a smaller, cheaper model for summarization to reduce cost. For example, `model="openai/gpt-5.4-nano"` works well for summarization tasks.
 </Tip>
 
+## Pinned results
+
+Some tool results are durable context the model must keep referencing — for example loaded
+[skill](/agents/skills) documentation. Those results are **pinned**: every compaction strategy
+preserves them verbatim (and never orphans their paired tool call), regardless of `keep_last_n`,
+turn windows, or drop/replacement mode. For `keep_last_n_messages` / `keep_last_n_turns` the
+effective behavior is "last N **plus** pinned"; for `summarize`, pinned results are kept verbatim
+and never fed to the summarizer (like system messages).
+
+You opt a tool in declaratively with `pin_result=True`:
+
+```python
+from timbal.core.tool import Tool
+
+tool = Tool(
+    name="load_policy",
+    handler=load_policy,
+    pin_result=True,  # results survive compaction for the life of the conversation
+)
+```
+
+The built-in `read_skill` tool sets this automatically, so skill guidance never gets compacted
+away. Pinning is durable across pause/resume — the flag is persisted with the trace.
+
 ## Composing Strategies
 
 Pass a list of compactors to apply them in order. Each compactor receives the output of the previous one.
