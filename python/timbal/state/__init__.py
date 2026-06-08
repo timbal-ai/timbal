@@ -83,15 +83,28 @@ def set_parent_call_id(parent_call_id: str | None) -> None:
     _parent_call_id.set(parent_call_id)
 
 
-def _suspension_id_for(path: str, payload: Any) -> str:
+def _suspension_id_for(path: str, payload: Any, tool_call_id: str | None = None) -> str:
     """Compute a stable suspension_id for a ``suspend()`` call.
 
-    Hashes ``(path, payload)`` so the same payload on the same runnable resumes
-    deterministically across the handler re-execution. Two identical payloads on
-    the same path share one id (mirrors approval's ``(path, input)`` semantics);
-    add a discriminator field to the payload if you need distinct ids.
+    Hashes ``(path, payload[, tool_call_id])`` so the same suspension resumes
+    deterministically across the handler re-execution.
+
+    When the suspend happens inside an agent tool, ``tool_call_id`` (the LLM's
+    ``tool_use`` block id) is folded in. This disambiguates two parallel calls to
+    the *same* tool in a single turn even when their payloads are identical — each
+    tool_use block gets its own id and can be resumed with its own answer. The id
+    is stable across re-execution because the assistant message (and thus the
+    tool_use ids) is replayed verbatim from the parent trace on resume.
+
+    Outside an agent (direct ``Tool`` calls, workflow steps) ``tool_call_id`` is
+    ``None`` and the id reduces to ``hash(path, payload)``. There, two identical
+    payloads on the same path still share one id (mirrors approval's
+    ``(path, input)`` semantics); add a discriminator field to the payload if you
+    need distinct ids.
     """
-    keyed = {"path": path, "payload": payload}
+    keyed: dict[str, Any] = {"path": path, "payload": payload}
+    if tool_call_id is not None:
+        keyed["tool_call_id"] = tool_call_id
     return hashlib.sha256(json.dumps(keyed, sort_keys=True, default=str).encode()).hexdigest()[:32]
 
 
@@ -144,7 +157,8 @@ def suspend(
     if run_context is None:
         raise RuntimeError("suspend() called outside of a run context.")
     span = run_context.current_span()
-    suspension_id = _suspension_id_for(span.path, payload)
+    tool_call_id = (span.metadata or {}).get("tool_call_id")
+    suspension_id = _suspension_id_for(span.path, payload, tool_call_id)
     if suspension_id in run_context._resume_values:
         run_context._used_resume_ids.add(suspension_id)
         value = run_context._resume_values[suspension_id]

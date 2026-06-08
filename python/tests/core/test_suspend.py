@@ -102,6 +102,126 @@ class TestAgentSuspend:
         assert result.status.code == "success"
         assert result.output.collect_text() == "Nice to meet you, Ada!"
 
+    async def test_agent_pauses_on_two_parallel_tool_suspends_then_resumes(self):
+        # Model fires two ask_user tool_uses in a single turn; the agent runs them
+        # concurrently, both suspend, and we resume with both answers at once.
+        tool_calls = Message.validate({
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_a", "name": "ask_user", "input": {"question": "first name?"}},
+                {"type": "tool_use", "id": "call_b", "name": "ask_user", "input": {"question": "last name?"}},
+            ],
+        })
+        model = TestModel(responses=[tool_calls, "Hello, Ada Lovelace!"])
+        agent = Agent(name="assistant", model=model, tools=[ask_user])
+
+        pending: list[InteractionEvent] = []
+        final = None
+        async for event in agent(prompt="hi"):
+            if isinstance(event, InteractionEvent):
+                pending.append(event)
+            if isinstance(event, OutputEvent) and event.path == "assistant":
+                final = event
+
+        # Both questions surfaced before the run paused.
+        assert len(pending) == 2
+        assert {e.payload["question"] for e in pending} == {"first name?", "last name?"}
+        # Distinct payloads -> distinct interaction ids.
+        assert len({e.interaction_id for e in pending}) == 2
+        # Each interaction correlates back to its originating LLM tool_use block.
+        assert {e.tool_call_id for e in pending} == {"call_a", "call_b"}
+
+        assert final is not None
+        assert final.status.reason == "input_required"
+
+        by_question = {e.payload["question"]: e.interaction_id for e in pending}
+        resume = {
+            by_question["first name?"]: "Ada",
+            by_question["last name?"]: "Lovelace",
+        }
+
+        result = await agent(
+            prompt="hi",
+            parent_id=final.run_id,
+            resume=resume,
+        ).collect()
+
+        assert result.status.code == "success"
+        assert result.output.collect_text() == "Hello, Ada Lovelace!"
+
+    async def test_agent_partial_resume_keeps_other_question_pending(self):
+        # Resuming only one of two parallel suspends must leave the other pending
+        # (its tool_use stays unresolved and re-fires on the next resume).
+        tool_calls = Message.validate({
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_a", "name": "ask_user", "input": {"question": "first name?"}},
+                {"type": "tool_use", "id": "call_b", "name": "ask_user", "input": {"question": "last name?"}},
+            ],
+        })
+        model = TestModel(responses=[tool_calls, "Hello, Ada Lovelace!"])
+        agent = Agent(name="assistant", model=model, tools=[ask_user])
+
+        first = await agent(prompt="hi").collect()
+        first_pending = {p["payload"]["question"]: p["interaction_id"] for p in first.metadata["pending_interactions"]}
+
+        # Resume only the first question.
+        second = await agent(
+            prompt="hi",
+            parent_id=first.run_id,
+            resume={first_pending["first name?"]: "Ada"},
+        ).collect()
+
+        assert second.status.reason == "input_required"
+        still_pending = {p["payload"]["question"] for p in second.metadata["pending_interactions"]}
+        assert still_pending == {"last name?"}
+
+        # Resume the remaining one -> run completes.
+        second_pending = {p["payload"]["question"]: p["interaction_id"] for p in second.metadata["pending_interactions"]}
+        third = await agent(
+            prompt="hi",
+            parent_id=second.run_id,
+            resume={second_pending["last name?"]: "Lovelace"},
+        ).collect()
+
+        assert third.status.code == "success"
+        assert third.output.collect_text() == "Hello, Ada Lovelace!"
+
+    async def test_agent_identical_parallel_questions_get_distinct_ids(self):
+        # Two tool_use blocks calling the same tool with the SAME payload must not
+        # collide: the LLM tool_call_id is folded into the suspension id so each
+        # gets its own answer instead of silently sharing one.
+        tool_calls = Message.validate({
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_a", "name": "ask_user", "input": {"question": "value?"}},
+                {"type": "tool_use", "id": "call_b", "name": "ask_user", "input": {"question": "value?"}},
+            ],
+        })
+        model = TestModel(responses=[tool_calls, "done"])
+        agent = Agent(name="assistant", model=model, tools=[ask_user])
+
+        pending: list[InteractionEvent] = []
+        final = None
+        async for event in agent(prompt="hi"):
+            if isinstance(event, InteractionEvent):
+                pending.append(event)
+            if isinstance(event, OutputEvent) and event.path == "assistant":
+                final = event
+
+        # Identical payloads, yet two distinct interactions keyed by tool_call_id.
+        assert len(pending) == 2
+        assert {e.payload["question"] for e in pending} == {"value?"}
+        assert len({e.interaction_id for e in pending}) == 2
+
+        by_call = {e.tool_call_id: e.interaction_id for e in pending}
+        result = await agent(
+            prompt="hi",
+            parent_id=final.run_id,
+            resume={by_call["call_a"]: "X", by_call["call_b"]: "Y"},
+        ).collect()
+        assert result.status.code == "success"
+
 
 # --- workflow step suspend/resume ------------------------------------------
 
