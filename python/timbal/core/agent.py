@@ -987,6 +987,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             current_span.memory.append(message)
             current_span._memory_dump.append(await dump(message))
 
+        # Names of tools (resolved for the current iteration) whose results must be pinned
+        # against memory compaction. Updated each iteration from the resolved tool list.
+        pinned_tool_names: set[str] = set()
+
         async def _process_tool_event(event: BaseEvent, tool_call_id: str, append_to_messages: bool = True):
             """Helper to process tool output events and create tool results."""
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
@@ -1016,6 +1020,10 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 content = [c for c in event.output.content if isinstance(c, TextContent | FileContent)]
             else:
                 content = event.output
+            # Pin the result when the originating tool opted in (e.g. read_skill), so memory
+            # compaction never strips this durable context. The tool name is the final path
+            # segment of its OutputEvent.
+            pinned = event.path.rsplit(".", 1)[-1] in pinned_tool_names
             tool_result = Message.validate(
                 {
                     "role": "tool",
@@ -1024,6 +1032,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                             "type": "tool_result",
                             "id": tool_call_id,
                             "content": content,
+                            "pinned": pinned,
                         }
                     ],
                 }
@@ -1045,6 +1054,7 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 _llm_memory_saved = False
                 # ? We could resolve the system prompt at each iteration
                 tools, commands = await self._resolve_tools(i)
+                pinned_tool_names = {t.name for t in tools if getattr(t, "pin_result", False)}
                 if commands:
                     # Commands will only be user messages with a single text content
                     if len(current_span.memory[-1].content) == 1:

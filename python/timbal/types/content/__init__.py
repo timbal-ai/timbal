@@ -47,6 +47,7 @@ def content_factory(value: Any) -> BaseContent:
                 id=value.get("id"), 
                 # TODO Change this
                 content=[content_factory(item) for item in tool_result_content],
+                pinned=value.get("pinned", False),
             )
     # By default try to convert whatever python object we have into a string.
     return TextContent(text=str(value))

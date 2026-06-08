@@ -39,6 +39,15 @@ class Tool(Runnable):
         ),
     )
 
+    pin_result: bool = Field(
+        default=False,
+        description=(
+            "If True, the agent marks this tool's results as pinned, so memory compaction never "
+            "drops or truncates them. Use for tools whose output is durable context the model must "
+            "keep referencing (e.g. loaded skill documentation)."
+        ),
+    )
+
     @model_validator(mode="before")
     @classmethod
     def validate_handler_and_name(cls, values: dict[str, Any]) -> dict[str, Any]:

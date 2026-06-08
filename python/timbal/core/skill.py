@@ -155,5 +155,10 @@ class ReadSkill(Tool):
                 "Provide the skill name to read its documentation file or provide reference to read a specific file from the skill."
             ),
             handler=_read_skill,
+            # Skill documentation is durable context: once loaded, the model must keep following
+            # it even after the conversation grows. Pin the results so memory compaction never
+            # strips the guidance while the skill's tools remain available (activation lives in
+            # the session, not memory, so the two must not drift apart).
+            pin_result=True,
             **kwargs,
         )

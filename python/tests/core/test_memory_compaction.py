@@ -51,6 +51,13 @@ def _msg_tool(uid: str, result_text: str = "ok") -> Message:
     )
 
 
+def _msg_tool_pinned(uid: str, result_text: str = "pinned-doc") -> Message:
+    return Message(
+        role="tool",
+        content=[ToolResultContent(id=uid, content=[TextContent(text=result_text)], pinned=True)],
+    )
+
+
 # ---------------------------------------------------------------------------
 # compact_tool_results — drop mode (replacement=None)
 # ---------------------------------------------------------------------------
@@ -1135,6 +1142,204 @@ class TestCompactionMetadata:
         assert meta["utilization"] is None
 
         InMemoryTracingProvider._storage.clear()
+
+
+# ---------------------------------------------------------------------------
+# Pinned results survive every compactor
+# ---------------------------------------------------------------------------
+
+
+def _has_id(memory: list[Message], uid: str, role: str, content_type: type) -> bool:
+    return any(
+        m.role == role and any(isinstance(c, content_type) and c.id == uid for c in m.content)
+        for m in memory
+    )
+
+
+class TestPinnedResults:
+    """A pinned tool_result (and its paired tool_use) must survive every compaction strategy,
+    while unpinned tool results around it are compacted as usual. This is what keeps loaded
+    skill documentation alive against compaction."""
+
+    def _memory(self) -> list[Message]:
+        # user / assistant(pin tool_use P) / tool(P, pinned) / assistant(tool_use A) / tool(A)
+        # / user / assistant(tool_use B) / tool(B) / assistant(final text)
+        return [
+            _msg_user("load the docs"),
+            _msg_assistant_tool("P", name="read_skill"),
+            _msg_tool_pinned("P", result_text="SKILL DOC BODY"),
+            _msg_assistant_tool("A", name="other"),
+            _msg_tool("A", result_text="unpinned-A"),
+            _msg_user("now do work"),
+            _msg_assistant_tool("B", name="other"),
+            _msg_tool("B", result_text="unpinned-B"),
+            _msg_assistant_text("done"),
+        ]
+
+    def _assert_pinned_pair_intact(self, result: list[Message]) -> None:
+        assert _has_id(result, "P", "tool", ToolResultContent), "pinned result dropped"
+        assert _has_id(result, "P", "assistant", ToolUseContent), "pinned tool_use orphaned/dropped"
+        # The pinned body must be verbatim, never replaced/truncated.
+        pinned = next(
+            c for m in result if m.role == "tool" for c in m.content
+            if isinstance(c, ToolResultContent) and c.id == "P"
+        )
+        assert pinned.content[0].text == "SKILL DOC BODY"
+        assert pinned.pinned is True
+
+    def test_compact_tool_results_drop_preserves_pinned(self) -> None:
+        result = compact_tool_results()(self._memory())
+        self._assert_pinned_pair_intact(result)
+        # Unpinned results are dropped.
+        assert not _has_id(result, "A", "tool", ToolResultContent)
+        assert not _has_id(result, "B", "tool", ToolResultContent)
+
+    def test_compact_tool_results_replacement_preserves_pinned(self) -> None:
+        result = compact_tool_results(replacement="[{tool_name}: {result_length} chars]")(self._memory())
+        self._assert_pinned_pair_intact(result)
+        # Unpinned results are replaced (not verbatim).
+        a = next(
+            c for m in result if m.role == "tool" for c in m.content
+            if isinstance(c, ToolResultContent) and c.id == "A"
+        )
+        assert "chars]" in a.content[0].text
+
+    def test_compact_tool_results_keep_last_n_plus_pinned(self) -> None:
+        # keep_last_n=1 keeps only batch B intact; P is older but pinned, so it survives too.
+        result = compact_tool_results(keep_last_n=1)(self._memory())
+        self._assert_pinned_pair_intact(result)
+        assert _has_id(result, "B", "tool", ToolResultContent)  # last batch kept
+        assert not _has_id(result, "A", "tool", ToolResultContent)  # middle dropped
+
+    def test_keep_last_n_messages_preserves_pinned(self) -> None:
+        # Keep only the last 2 messages; the pinned pair is far earlier but must be hoisted in.
+        result = keep_last_n_messages(2)(self._memory())
+        self._assert_pinned_pair_intact(result)
+        # Order preserved: pinned tool_use precedes its result.
+        idx_use = next(i for i, m in enumerate(result) if m.role == "assistant"
+                       and any(isinstance(c, ToolUseContent) and c.id == "P" for c in m.content))
+        idx_res = next(i for i, m in enumerate(result) if m.role == "tool"
+                       and any(isinstance(c, ToolResultContent) and c.id == "P" for c in m.content))
+        assert idx_use < idx_res
+        # No consecutive same-role messages.
+        for prev, cur in zip(result, result[1:], strict=False):
+            assert prev.role != cur.role, f"consecutive {prev.role!r}"
+
+    def test_keep_last_n_turns_preserves_pinned(self) -> None:
+        # Keep only the last turn (after the 2nd user message); pinned pair is in the 1st turn.
+        result = keep_last_n_turns(1)(self._memory())
+        self._assert_pinned_pair_intact(result)
+        assert _has_id(result, "B", "tool", ToolResultContent)  # last turn kept
+        assert not _has_id(result, "A", "tool", ToolResultContent)  # earlier turn dropped
+
+    @pytest.mark.asyncio
+    async def test_summarize_keeps_pinned_verbatim(self) -> None:
+        captured = []
+
+        def handler(messages):
+            captured.append(messages)
+            return "SUMMARY TEXT"
+
+        compactor = summarize(threshold=3, model=TestModel(handler=handler), keep_last_n=1)
+        result = await compactor(self._memory())
+
+        self._assert_pinned_pair_intact(result)
+        # The summary was produced and the pinned body was NOT fed to the summarizer.
+        assert any(m.collect_text().startswith(_SUMMARY_MARKER) for m in result)
+        summarizer_input = captured[0][0].collect_text()
+        assert "SKILL DOC BODY" not in summarizer_input
+        # No consecutive same-role messages (alternation preserved).
+        for prev, cur in zip(result, result[1:], strict=False):
+            assert prev.role != cur.role, f"consecutive {prev.role!r}"
+
+    @pytest.mark.asyncio
+    async def test_pinned_flag_survives_dump_and_reload(self) -> None:
+        """The pinned flag must persist through serialization so it still protects the result
+        after a paused run is reloaded in another process."""
+        from timbal.utils import dump
+
+        reloaded = Message.validate(await dump(_msg_tool_pinned("P", "BODY")))
+        c = reloaded.content[0]
+        assert isinstance(c, ToolResultContent)
+        assert c.pinned is True
+        assert c.content[0].text == "BODY"
+
+    # --- Parallel/mixed batch: pinned tool_use shares one assistant message with siblings ---
+
+    def _parallel_batch_memory(self) -> list[Message]:
+        # One assistant message issues two tool calls in parallel: P (pinned) and Q (not).
+        return [
+            _msg_user("do both"),
+            Message(
+                role="assistant",
+                content=[
+                    ToolUseContent(id="P", name="read_skill", input={}),
+                    ToolUseContent(id="Q", name="other", input={}),
+                ],
+            ),
+            _msg_tool_pinned("P", result_text="SKILL DOC BODY"),
+            _msg_tool("Q", result_text="unpinned-Q"),
+            _msg_user("next"),
+            _msg_assistant_tool("R", name="other"),
+            _msg_tool("R", result_text="unpinned-R"),
+            _msg_assistant_text("done"),
+        ]
+
+    def test_parallel_batch_drop_keeps_pinned_strips_sibling(self) -> None:
+        result = compact_tool_results()(self._parallel_batch_memory())
+        # Pinned half survives; sibling tool_use + result are gone, but the assistant message
+        # that carried the batch must remain (it still holds the pinned tool_use).
+        assert _has_id(result, "P", "assistant", ToolUseContent)
+        assert _has_id(result, "P", "tool", ToolResultContent)
+        assert not _has_id(result, "Q", "assistant", ToolUseContent), "sibling tool_use not stripped"
+        assert not _has_id(result, "Q", "tool", ToolResultContent)
+
+    def test_parallel_batch_keep_last_n_messages_hoists_pinned_only(self) -> None:
+        # Keep only the last message; the pinned half of the old parallel batch is hoisted back,
+        # the unpinned sibling is dropped as an orphan, and alternation holds.
+        result = keep_last_n_messages(1)(self._parallel_batch_memory())
+        assert _has_id(result, "P", "assistant", ToolUseContent)
+        assert _has_id(result, "P", "tool", ToolResultContent)
+        assert not _has_id(result, "Q", "assistant", ToolUseContent)
+        assert not _has_id(result, "Q", "tool", ToolResultContent)
+        for prev, cur in zip(result, result[1:], strict=False):
+            assert prev.role != cur.role, f"consecutive {prev.role!r}"
+
+    # --- Composed pipeline (the common real-world config) ---
+
+    def test_composed_pipeline_preserves_pinned(self) -> None:
+        memory = self._memory()
+        for compactor in (compact_tool_results(keep_last_n=1), keep_last_n_turns(1)):
+            memory = compactor(memory)
+        self._assert_pinned_pair_intact(memory)
+        assert not _has_id(memory, "A", "tool", ToolResultContent)
+
+    # --- summarize incremental path (a previous summary already exists) ---
+
+    @pytest.mark.asyncio
+    async def test_summarize_incremental_keeps_pinned_verbatim(self) -> None:
+        captured = []
+
+        def handler(messages):
+            captured.append(messages)
+            return "UPDATED SUMMARY"
+
+        compactor = summarize(threshold=3, model=TestModel(handler=handler), keep_last_n=1)
+        memory = [
+            Message(role="user", content=[TextContent(text=f"{_SUMMARY_MARKER}\nprior summary")]),
+            _msg_assistant_tool("P", name="read_skill"),
+            _msg_tool_pinned("P", result_text="SKILL DOC BODY"),
+            _msg_user("more"),
+            _msg_assistant_text("ok"),
+            _msg_user("even more"),
+            _msg_assistant_text("done"),
+        ]
+        result = await compactor(memory)
+        # Pinned pair preserved despite living in the already-summarized region.
+        assert _has_id(result, "P", "tool", ToolResultContent)
+        assert _has_id(result, "P", "assistant", ToolUseContent)
+        # The pinned body was not fed to the (incremental) summarizer.
+        assert "SKILL DOC BODY" not in captured[0][0].collect_text()
 
 
 # ---------------------------------------------------------------------------

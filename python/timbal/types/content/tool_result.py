@@ -16,6 +16,10 @@ class ToolResultContent(BaseContent):
     type: Literal["tool_result"] = "tool_result"
     id: str
     content: list[TextContent | FileContent]
+    pinned: bool = False
+    """When True, memory compaction must never drop or truncate this result (nor orphan its
+    paired tool_use). Used to keep durable context — e.g. loaded skill documentation — alive
+    for as long as the conversation lives. Internal hint only: never serialized to providers."""
 
     @override
     def to_openai_responses_input(self, **kwargs: Any) -> dict[str, Any]:

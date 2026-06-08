@@ -42,6 +42,10 @@ skills/
 
 This lazy-loading approach keeps the agent's context efficient while ensuring specialized knowledge is available when needed.
 
+<Note>
+**Skills and memory compaction.** A skill's documentation reaches the model as the result of the `read_skill` tool call. Those results are **pinned**, so [memory compaction](/agents/memory-compaction) never drops or truncates them — the guidance stays available for as long as the skill is active, even on long runs where the rest of the history is compacted. This keeps an agent's tools and the instructions for using them from drifting apart.
+</Note>
+
 
 ## Using Skills
 
