@@ -3,7 +3,7 @@ title: "Approval-Required Tools"
 description: "Pause an agent for human approval, capture the gate, and resume with a decision — including redaction and audit fields"
 ---
 
-This example wires up a refund tool that gates above $100, captures the `ApprovalEvent` mid-stream, and resumes with a decision. See the full reference on the [Human-in-the-Loop Approvals](/agents/approvals) page.
+This example wires up a refund tool that gates above $100, captures the `ApprovalEvent` mid-stream, and resumes with a decision. See the full reference in the [Human in the Loop](/human-in-the-loop) section.
 
 ```python
 import asyncio
@@ -55,7 +55,7 @@ async def main() -> None:
     }
     result = await agent(
         prompt="Refund $250 to customer C-42",
-        approval_decisions=decisions,
+        resume=decisions,
     ).collect()
 
     print(result.output.collect_text())
@@ -86,7 +86,7 @@ agent = Agent(
 result = await agent(
     prompt="Refund $250 to customer C-42",
     parent_id=paused_run_id,
-    approval_decisions={approval_id: True},
+    resume={approval_id: True},
 ).collect()
 
 if result.status.reason == "approval_already_claimed":
@@ -103,7 +103,7 @@ When the agent calls a denied tool, Timbal converts the denial into a `ToolResul
 ```python
 result = await agent(
     prompt="Refund $250 to customer C-42",
-    approval_decisions={
+    resume={
         approval_id: ApprovalResolution(
             approved=False,
             reason="Refund exceeds policy limit.",

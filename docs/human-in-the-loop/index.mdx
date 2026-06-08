@@ -1,0 +1,33 @@
+---
+title: "Overview"
+description: "Pause any run for a human: gate irreversible actions for approval, or stop mid-handler to ask the user a question, then resume on the same durable rails"
+---
+
+These patterns apply to any **Runnable**: [Agents](/agents), [Workflows](/workflows) steps, and standalone [Tools](/agents/tools). Timbal pauses a run for a human in two ways, and resumes both through one channel:
+
+- **[Approval gates](/human-in-the-loop/approval-gates)** (`requires_approval`) are declarative permission checks that fire **before** a runnable executes. Use them for irreversible actions: refunds, deploys, account deletions, outbound emails, anything that costs money or moves data.
+- **[`suspend()`](/human-in-the-loop/suspend)** is a control-flow primitive a handler calls from the **inside** to ask the user for arbitrary input (a clarifying question, a picked option, a confirmation). Use it to build interaction tools like `ask_user` or `confirm`.
+
+Both pause the run, persist it, emit a structured event, and resume when you call the runnable again with `resume={...}`. They share the same durable rails (`parent_id` + tracing provider). The only real difference is *when* they pause and *what* they resume with.
+
+| | `requires_approval` (gate) | `suspend()` (interaction) |
+| --- | --- | --- |
+| Intent | "may I do this?" | "tell me / give me" |
+| Pauses | before the handler runs | inside the handler |
+| Handler ran? | no (zero code) | yes, up to the `suspend()` call (re-runs on resume) |
+| Resumes with | `bool` / `ApprovalResolution` | arbitrary value |
+| Applied | declaratively on any runnable (even ones you don't own) | by calling `suspend()` in the handler |
+| Event | `ApprovalEvent` | `InteractionEvent` |
+| Cancel reason | `approval_required` | `input_required` |
+
+<Note>
+`resume={id: value}` is the single channel for continuing **any** paused run. For an approval gate the value is a decision (`True`/`False` or an `ApprovalResolution`); for a `suspend()` call it's the arbitrary value the handler asked for. A [`Cancel`](/human-in-the-loop/resuming#cancelling-instead-of-answering) value works for either and aborts the whole run. The id-spaces are disjoint, so one `resume` dict can settle a mix of pending approvals and suspensions in a single call. Unrecognized ids are ignored with a warning.
+</Note>
+
+## On this page group
+
+- **[Approval gates](/human-in-the-loop/approval-gates)** — `requires_approval`, resolutions, edit-on-approve, redaction, time limits, workflows
+- **[Suspend & interaction tools](/human-in-the-loop/suspend)** — `suspend()`, writing `ask_user`/`confirm`, `InteractionEvent`, response schemas
+- **[Resuming a paused run](/human-in-the-loop/resuming)** — cancel, durable cross-process resume, duplicate-worker protection, enumerating pending
+- **[Client integration (HTTP)](/human-in-the-loop/client-integration)** — the `/stream` wire contract a frontend talks to
+- **[Observability](/human-in-the-loop/observability)** — status reasons, usage counters, common patterns

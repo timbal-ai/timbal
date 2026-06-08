@@ -11,7 +11,6 @@ fails the test that exercises the corresponding flow.
 """
 
 import time
-import warnings
 
 import pytest
 from timbal import Agent, Tool, Workflow
@@ -71,7 +70,7 @@ class TestToolApprovalLifecycle:
 
         approved = await tool(
             path="/tmp/a.txt",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         assert approved.status.code == "success"
@@ -93,7 +92,7 @@ class TestToolApprovalLifecycle:
 
         denied = await tool(
             amount=100,
-            approval_decisions={approval.approval_id: {"approved": False, "reason": "too much"}},
+            resume={approval.approval_id: {"approved": False, "reason": "too much"}},
         ).collect()
 
         assert denied.status.code == "cancelled"
@@ -129,7 +128,7 @@ class TestToolApprovalLifecycle:
         # Resume → handler runs with full validated input
         approved = await tool(
             amount=150,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert approved.status.code == "success"
         assert calls == [50, 150]
@@ -148,8 +147,8 @@ class TestToolApprovalLifecycle:
         first = await tool(x=1).collect()
         approval_id = first.metadata["approval"]["id"]
 
-        a = await tool(x=1, approval_decisions={approval_id: True}).collect()
-        b = await tool(x=1, approval_decisions={approval_id: True}).collect()
+        a = await tool(x=1, resume={approval_id: True}).collect()
+        b = await tool(x=1, resume={approval_id: True}).collect()
 
         assert a.status.code == "success" and b.status.code == "success"
         assert calls == [1, 1]
@@ -183,7 +182,7 @@ class TestToolApprovalLifecycle:
         retry = await tool(
             amount=500,
             idempotency_key=k2,
-            approval_decisions={first_id: True},
+            resume={first_id: True},
         ).collect()
         assert retry.status.reason == "approval_required"
         assert calls == []
@@ -231,7 +230,7 @@ class TestAgentApprovalLifecycle:
 
         approved = await agent(
             prompt="wire 500",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         assert approved.status.code == "success"
@@ -266,7 +265,7 @@ class TestAgentApprovalLifecycle:
 
         denied = await agent(
             prompt="wire 500",
-            approval_decisions={approval.approval_id: {"approved": False, "reason": "not allowed"}},
+            resume={approval.approval_id: {"approved": False, "reason": "not allowed"}},
         ).collect()
 
         assert denied.status.code == "success"
@@ -298,7 +297,7 @@ class TestAgentApprovalLifecycle:
 
         approved = await agent(
             prompt="/delete prod-db",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert approved.status.code == "success"
         assert calls == ["prod-db"]
@@ -332,7 +331,7 @@ class TestWorkflowApprovalLifecycle:
 
         approved = await workflow(
             env="prod",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert approved.status.code == "success"
         assert calls == ["prod"]
@@ -386,7 +385,7 @@ class TestParallelApprovalGates:
         assert calls == []
 
         decisions = {a.approval_id: True for a in approvals}
-        resumed = await agent(prompt="run both", approval_decisions=decisions).collect()
+        resumed = await agent(prompt="run both", resume=decisions).collect()
         assert resumed.status.code == "success"
         assert sorted(calls) == ["a=1", "b=2"], "both handlers must run after resuming with both decisions"
 
@@ -420,7 +419,7 @@ class TestParallelApprovalGates:
         assert calls == []
 
         decisions = {a.approval_id: True for a in approvals}
-        resumed = await wf(x=1, y=2, approval_decisions=decisions).collect()
+        resumed = await wf(x=1, y=2, resume=decisions).collect()
         assert resumed.status.code == "success"
         assert sorted(calls) == ["a=1", "b=2"]
 
@@ -447,7 +446,7 @@ class TestParallelApprovalGates:
         approvals = {ev.runnable_path: ev for ev in _approval_events(events)}
 
         decisions = {approvals["parallel_wf.step_a"].approval_id: True}
-        partial_events = [e async for e in wf(x=1, y=2, approval_decisions=decisions)]
+        partial_events = [e async for e in wf(x=1, y=2, resume=decisions)]
         partial_final = _final_output(partial_events)
         partial_approvals = _approval_events(partial_events)
 
@@ -512,7 +511,7 @@ class TestNestedApprovalLifecycle:
 
         resumed = await outer(
             prompt="run finance flow",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert resumed.status.code == "success"
         assert calls == [999]
@@ -552,7 +551,7 @@ class TestNestedApprovalLifecycle:
 
         resumed = await wf(
             prompt="restart prod",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert resumed.status.code == "success"
         assert calls == ["prod"]
@@ -581,7 +580,7 @@ class TestApprovalTTL:
             e
             async for e in tool(
                 path="/tmp/a.txt",
-                approval_decisions={approval.approval_id: stale},
+                resume={approval.approval_id: stale},
             )
         ]
         retry_approval = _approval_event(retry_events)
@@ -596,7 +595,7 @@ class TestApprovalTTL:
         fresh = ApprovalResolution(approved=True, expires_at=int(time.time() * 1000) + 60_000)
         resumed = await tool(
             path="/tmp/a.txt",
-            approval_decisions={approval.approval_id: fresh},
+            resume={approval.approval_id: fresh},
         ).collect()
         assert resumed.status.code == "success"
         assert calls == ["/tmp/a.txt"]
@@ -730,43 +729,6 @@ class TestApprovalPolicyErrors:
 # ---------------------------------------------------------------------------
 
 
-class TestApprovalDeprecation:
-    @pytest.mark.asyncio
-    async def test_approvals_kwarg_emits_warning_but_still_works(self):
-        def handler() -> str:
-            return "ok"
-
-        tool = Tool(name="t", handler=handler, requires_approval=True)
-        first = await tool().collect()
-        approval_id = first.metadata["approval"]["id"]
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            out = await tool(approvals={approval_id: True}).collect()
-
-        deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-        assert deprecations, "expected DeprecationWarning for `approvals=`"
-        assert "approval_decisions" in str(deprecations[0].message)
-        assert out.status.code == "success"
-
-    @pytest.mark.asyncio
-    async def test_approval_decisions_takes_precedence_when_both_passed(self):
-        def handler() -> str:
-            return "ok"
-
-        tool = Tool(name="t", handler=handler, requires_approval=True)
-        first = await tool().collect()
-        approval_id = first.metadata["approval"]["id"]
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            out = await tool(
-                approval_decisions={approval_id: True},
-                approvals={approval_id: False},
-            ).collect()
-        assert out.status.code == "success"
-
-
 # ---------------------------------------------------------------------------
 # RunContext.pending_approvals
 # ---------------------------------------------------------------------------
@@ -874,3 +836,491 @@ class TestPendingApprovalsSurface:
         assert ctx is not None
         pending_ids = {entry["approval_id"] for entry in ctx.pending_approvals()}
         assert pending_ids == emitted_ids
+
+
+# ---------------------------------------------------------------------------
+# Structured approval cards (kind + ui + input_schema)
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalCardSurface:
+    """Tier 0 (input_schema) + Tier 1 (kind + ui) generative-UI surface."""
+
+    @pytest.mark.asyncio
+    async def test_input_schema_is_emitted_for_typed_form_rendering(self):
+        def create_project(name: str, needs_kb: bool = False) -> str:
+            return f"created {name}"
+
+        tool = Tool(name="create_project", handler=create_project, requires_approval=True)
+        events = [e async for e in tool(name="bot", needs_kb=True)]
+        approval = _approval_event(events)
+
+        assert approval.input == {"name": "bot", "needs_kb": True}
+        props = (approval.input_schema or {}).get("properties", {})
+        assert set(props) == {"name", "needs_kb"}, "frontend can render a typed form from this"
+
+    @pytest.mark.asyncio
+    async def test_kind_and_ui_callable_receive_input_and_surface_on_event(self):
+        def create_project(name: str, needs_kb: bool = False) -> str:
+            return f"created {name}"
+
+        tool = Tool(
+            name="create_project",
+            handler=create_project,
+            requires_approval=True,
+            approval_kind="create_project",
+            approval_prompt=lambda name, needs_kb: f"Create {name}?",
+            approval_ui=lambda name, needs_kb: {
+                "title": "Create project",
+                "severity": "info",
+                "fields": [
+                    {"label": "Name", "value": name},
+                    {"label": "Knowledge base", "value": needs_kb, "type": "bool"},
+                ],
+            },
+        )
+
+        events = [e async for e in tool(name="bot", needs_kb=True)]
+        approval = _approval_event(events)
+
+        assert approval.kind == "create_project"
+        assert approval.prompt == "Create bot?"
+        assert approval.ui["title"] == "Create project"
+        assert approval.ui["fields"][0] == {"label": "Name", "value": "bot"}
+
+        ctx = get_run_context()
+        entry = next(e for e in ctx.pending_approvals() if e["approval_id"] == approval.approval_id)
+        assert entry["kind"] == "create_project"
+        assert entry["ui"]["title"] == "Create project"
+        assert entry["input_schema"] is not None
+
+    @pytest.mark.asyncio
+    async def test_ui_callable_receives_redacted_input(self):
+        """Secrets excluded via approval_redact_keys must not reach the card."""
+
+        def wire(amount: int, account_number: str) -> str:
+            return "ok"
+
+        seen: list[str] = []
+
+        def build_ui(amount: int, account_number: str) -> dict:
+            seen.append(account_number)
+            return {"title": "Wire", "fields": [{"label": "Account", "value": account_number}]}
+
+        tool = Tool(
+            name="wire",
+            handler=wire,
+            requires_approval=True,
+            approval_redact_keys=["account_number"],
+            approval_ui=build_ui,
+        )
+
+        events = [e async for e in tool(amount=500, account_number="123456789")]
+        approval = _approval_event(events)
+
+        assert seen == ["***"], "ui builder must see the redacted value, never the secret"
+        assert approval.ui["fields"][0]["value"] == "***"
+        assert approval.input == {"amount": 500, "account_number": "***"}
+
+    @pytest.mark.asyncio
+    async def test_ui_accepts_pydantic_model(self):
+        from pydantic import BaseModel
+
+        class Card(BaseModel):
+            title: str
+            severity: str = "danger"
+
+        def nuke(target: str) -> str:
+            return "boom"
+
+        tool = Tool(
+            name="nuke",
+            handler=nuke,
+            requires_approval=True,
+            approval_ui=Card(title="Delete everything"),
+        )
+
+        events = [e async for e in tool(target="prod")]
+        approval = _approval_event(events)
+        assert approval.ui == {"title": "Delete everything", "severity": "danger"}
+
+
+# ---------------------------------------------------------------------------
+# Edit-on-approve (override_input)
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalOverrideInput:
+    @pytest.mark.asyncio
+    async def test_override_runs_handler_with_edited_input(self):
+        seen: list[dict] = []
+
+        def send_email(to: str, body: str) -> str:
+            seen.append({"to": to, "body": body})
+            return f"sent to {to}"
+
+        tool = Tool(name="send_email", handler=send_email, requires_approval=True)
+        events = [e async for e in tool(to="wrong@x.com", body="hi")]
+        approval = _approval_event(events)
+
+        approved = await tool(
+            to="wrong@x.com",
+            body="hi",
+            resume={approval.approval_id: {"approved": True, "override_input": {"to": "right@x.com"}}},
+        ).collect()
+
+        assert approved.status.code == "success"
+        assert approved.output == "sent to right@x.com"
+        assert seen == [{"to": "right@x.com", "body": "hi"}], "override merges over proposal"
+
+    @pytest.mark.asyncio
+    async def test_override_is_revalidated_and_recorded_in_audit(self):
+        def charge(amount: int) -> str:
+            return f"charged {amount}"
+
+        tool = Tool(name="charge", handler=charge, requires_approval=True)
+        events = [e async for e in tool(amount=1000)]
+        approval = _approval_event(events)
+
+        # "50" (str) must coerce to int 50 via the params model on re-validation.
+        approved = await tool(
+            amount=1000,
+            resume={approval.approval_id: {"approved": True, "override_input": {"amount": "50"}}},
+        ).collect()
+        assert approved.status.code == "success"
+        assert approved.output == "charged 50"
+
+        ctx = get_run_context()
+        span = next(s for s in ctx._trace.values() if s.path.endswith("charge"))
+        resolution = span.metadata["approval"]["resolution"]
+        assert resolution["override_input"] == {"amount": "50"}
+        assert span.metadata["approval"]["effective_input"] == {"amount": 50}
+
+    @pytest.mark.asyncio
+    async def test_override_ignored_when_denied(self):
+        calls: list[int] = []
+
+        def op(x: int) -> str:
+            calls.append(x)
+            return "ran"
+
+        tool = Tool(name="op", handler=op, requires_approval=True)
+        events = [e async for e in tool(x=1)]
+        approval = _approval_event(events)
+
+        denied = await tool(
+            x=1,
+            resume={approval.approval_id: {"approved": False, "override_input": {"x": 2}}},
+        ).collect()
+        assert denied.status.reason == "approval_denied"
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_override_with_uncoercible_value_fails_and_skips_handler(self):
+        """A bad override must fail re-validation (not silently run garbage)."""
+        calls: list[int] = []
+
+        def charge(amount: int) -> str:
+            calls.append(amount)
+            return "ran"
+
+        tool = Tool(name="charge", handler=charge, requires_approval=True)
+        events = [e async for e in tool(amount=100)]
+        approval = _approval_event(events)
+
+        bad = await tool(
+            amount=100,
+            resume={approval.approval_id: {"approved": True, "override_input": {"amount": "not-a-number"}}},
+        ).collect()
+        assert bad.status.code == "error"
+        assert calls == [], "handler must not run when the override fails validation"
+
+    @pytest.mark.asyncio
+    async def test_override_through_agent_runs_corrected_input(self):
+        """Edit-on-approve must work through the agent tool-call path, not just direct calls."""
+        seen: list[dict] = []
+
+        def transfer(amount: int, recipient: str) -> str:
+            seen.append({"amount": amount, "recipient": recipient})
+            return f"sent ${amount} to {recipient}"
+
+        tool = Tool(name="transfer", handler=transfer, requires_approval=True)
+        agent = Agent(
+            name="bank",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="c1", name="transfer", input={"amount": 500, "recipient": "Alice"})],
+                        stop_reason="tool_use",
+                    ),
+                    "done",
+                ]
+            ),
+            tools=[tool],
+        )
+
+        events = [e async for e in agent(prompt="pay Alice")]
+        approval = _approval_event(events)
+
+        out = await agent(
+            prompt="pay Alice",
+            resume={approval.approval_id: ApprovalResolution(approved=True, override_input={"recipient": "Bob"})},
+        ).collect()
+
+        assert out.status.code == "success", out.error
+        assert seen == [{"amount": 500, "recipient": "Bob"}], "override applies on the agent path too"
+
+    @pytest.mark.asyncio
+    async def test_override_of_redacted_key_keeps_public_snapshot_redacted(self):
+        """Overriding a redacted field must run the handler with the real value
+        while the public effective_input stays masked."""
+        seen: list[str] = []
+
+        def wire(amount: int, account_number: str) -> str:
+            seen.append(account_number)
+            return "ok"
+
+        tool = Tool(
+            name="wire",
+            handler=wire,
+            requires_approval=True,
+            approval_redact_keys=["account_number"],
+        )
+        events = [e async for e in tool(amount=10, account_number="111")]
+        approval = _approval_event(events)
+
+        out = await tool(
+            amount=10,
+            account_number="111",
+            resume={approval.approval_id: {"approved": True, "override_input": {"account_number": "999"}}},
+        ).collect()
+
+        assert out.status.code == "success"
+        assert seen == ["999"], "handler must receive the real overridden secret"
+
+        ctx = get_run_context()
+        span = next(s for s in ctx._trace.values() if s.path.endswith("wire"))
+        assert span.metadata["approval"]["effective_input"]["account_number"] == "***", (
+            "the public snapshot of the edited input must stay redacted"
+        )
+
+    @pytest.mark.asyncio
+    async def test_override_in_workflow_step(self):
+        """Edit-on-approve must work on a gated workflow step."""
+        seen: list[str] = []
+
+        def deploy(env: str) -> str:
+            seen.append(env)
+            return f"deployed to {env}"
+
+        step = Tool(name="deploy", handler=deploy, requires_approval=True)
+        wf = Workflow(name="release").step(step)
+
+        events = [e async for e in wf(env="staging")]
+        approval = _approval_event(events)
+        assert _final_output(events).status.reason == "approval_required"
+
+        out = await wf(
+            env="staging",
+            parent_id=_final_output(events).run_id,
+            resume={approval.approval_id: {"approved": True, "override_input": {"env": "production"}}},
+        ).collect()
+
+        assert out.status.code == "success", out.error
+        assert seen == ["production"], "override must redirect the gated workflow step"
+
+
+# ---------------------------------------------------------------------------
+# tool_call_id correlation
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalToolCallId:
+    @pytest.mark.asyncio
+    async def test_event_carries_originating_tool_call_id(self):
+        def wire_money(amount: int) -> str:
+            return "wired"
+
+        tool = Tool(name="wire_money", handler=wire_money, requires_approval=True)
+        agent = Agent(
+            name="approval_agent",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="toolu_xyz", name="wire_money", input={"amount": 500})],
+                        stop_reason="tool_use",
+                    ),
+                    "done",
+                ]
+            ),
+            tools=[tool],
+        )
+        events = [e async for e in agent(prompt="wire 500")]
+        approval = _approval_event(events)
+        assert approval.tool_call_id == "toolu_xyz"
+
+        ctx = get_run_context()
+        entry = next(e for e in ctx.pending_approvals() if e["approval_id"] == approval.approval_id)
+        assert entry["tool_call_id"] == "toolu_xyz"
+
+        # The collector also surfaces it in OutputEvent.metadata for HTTP-less clients.
+        collected = await agent(prompt="wire 500").collect()
+        meta_entry = next(
+            e for e in collected.metadata["pending_approvals"] if e["approval_id"] == approval.approval_id
+        )
+        assert meta_entry["tool_call_id"] == "toolu_xyz"
+
+    @pytest.mark.asyncio
+    async def test_direct_call_has_no_tool_call_id(self):
+        def op(x: int) -> str:
+            return "ok"
+
+        tool = Tool(name="op", handler=op, requires_approval=True)
+        events = [e async for e in tool(x=1)]
+        approval = _approval_event(events)
+        assert approval.tool_call_id is None
+
+
+# ---------------------------------------------------------------------------
+# Cancel (abort the run) vs decline
+# ---------------------------------------------------------------------------
+
+
+class TestApprovalCancel:
+    @pytest.mark.asyncio
+    async def test_cancel_terminates_tool_run(self):
+        from timbal.types.approval import Cancel
+
+        calls: list[int] = []
+
+        def op(x: int) -> str:
+            calls.append(x)
+            return "ran"
+
+        tool = Tool(name="op", handler=op, requires_approval=True)
+        events = [e async for e in tool(x=1)]
+        approval = _approval_event(events)
+
+        result = await tool(x=1, resume={approval.approval_id: Cancel(reason="nope")}).collect()
+        assert result.status.code == "cancelled"
+        assert result.status.reason == "cancelled"
+        assert result.status.message == "nope"
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_via_json_tagged_dict(self):
+        """The HTTP/JSON cancel form must be coerced and abort the gate."""
+        calls: list[int] = []
+
+        def op(x: int) -> str:
+            calls.append(x)
+            return "ran"
+
+        tool = Tool(name="op", handler=op, requires_approval=True)
+        events = [e async for e in tool(x=1)]
+        approval = _approval_event(events)
+
+        result = await tool(
+            x=1,
+            resume={approval.approval_id: {"type": "timbal.cancel", "reason": "bye"}},
+        ).collect()
+        assert result.status.code == "cancelled"
+        assert result.status.reason == "cancelled"
+        assert result.status.message == "bye"
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_stops_agent_run_unlike_denial(self):
+        from timbal.types.approval import Cancel
+
+        def wire_money(amount: int) -> str:
+            return "wired"
+
+        tool = Tool(name="wire_money", handler=wire_money, requires_approval=True)
+        agent = Agent(
+            name="cancel_agent",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="call_1", name="wire_money", input={"amount": 500})],
+                        stop_reason="tool_use",
+                    ),
+                    "the agent kept going (should not happen on cancel)",
+                ]
+            ),
+            tools=[tool],
+        )
+        events = [e async for e in agent(prompt="wire 500")]
+        approval = _approval_event(events)
+
+        resumed_events = [e async for e in agent(prompt="wire 500", resume={approval.approval_id: Cancel()})]
+        result = next(e for e in reversed(resumed_events) if isinstance(e, OutputEvent))
+        # Denial would be "success" (fed back to model). Cancel aborts the run.
+        assert result.status.code == "cancelled"
+        assert result.status.reason == "cancelled"
+
+        # The inner tool's cancelled OUTPUT event must be surfaced in the stream,
+        # not swallowed — frontends rely on seeing the cancelled tool span.
+        tool_cancel = next(
+            e
+            for e in resumed_events
+            if isinstance(e, OutputEvent)
+            and e.path == "cancel_agent.wire_money"
+            and e.status.reason == "cancelled"
+        )
+        assert tool_cancel.output["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_cancel_propagates_through_nested_subagent(self):
+        """Cancel at a deeply-nested gate (outer agent -> sub-agent -> tool) must
+        tear down the *entire* outer run, not just the sub-agent."""
+        from timbal.types.approval import Cancel
+
+        calls: list[int] = []
+
+        def wire_money(amount: int) -> str:
+            calls.append(amount)
+            return f"wired {amount}"
+
+        money_tool = Tool(name="wire_money", handler=wire_money, requires_approval=True)
+        inner = Agent(
+            name="finance_subagent",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="ic1", name="wire_money", input={"amount": 999})],
+                        stop_reason="tool_use",
+                    ),
+                    "wire complete",
+                ]
+            ),
+            tools=[money_tool],
+        )
+        outer = Agent(
+            name="orchestrator",
+            model=TestModel(
+                responses=[
+                    Message(
+                        role="assistant",
+                        content=[ToolUseContent(id="oc1", name="finance_subagent", input={"prompt": "wire 999"})],
+                        stop_reason="tool_use",
+                    ),
+                    "all done (should not be reached on cancel)",
+                ]
+            ),
+            tools=[inner],
+        )
+
+        events = [e async for e in outer(prompt="run finance flow")]
+        approval = _approval_event(events)
+        assert approval.runnable_path == "orchestrator.finance_subagent.wire_money"
+
+        result = await outer(prompt="run finance flow", resume={approval.approval_id: Cancel()}).collect()
+        assert result.path == "orchestrator"
+        assert result.status.code == "cancelled"
+        assert result.status.reason == "cancelled"
+        assert calls == [], "cancel must abort before the gated handler runs, at any nesting depth"

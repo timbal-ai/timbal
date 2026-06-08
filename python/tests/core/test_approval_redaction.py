@@ -94,7 +94,7 @@ class TestToolRedactor:
         approved = await tool(
             api_key="SECRET_KEY",
             env="prod",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert approved.status.code == "success"
         assert seen == [{"api_key": "SECRET_KEY", "env": "prod"}], (
@@ -318,7 +318,7 @@ class TestAgentToolRedaction:
 
         approved = await agent(
             prompt="please wire 500",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert approved.status.code == "success"
         assert seen == [{"amount": 500, "account": "A1", "api_key": "K"}]
@@ -390,7 +390,7 @@ class TestCrossProcessRedaction:
         out2 = await agent(
             prompt="rotate prod",
             parent_id=out1.run_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert out2.status.code == "success", out2.error
         assert seen == [{"api_key": "TOPSECRET", "env": "prod"}], (

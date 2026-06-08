@@ -96,12 +96,12 @@ class TestDirectToolDoubleResume:
         first = await tool(
             amount=100,
             parent_id=parent_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         second = await tool(
             amount=100,
             parent_id=parent_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         assert first.status.code == "success"
@@ -134,7 +134,7 @@ class TestDirectToolDoubleResume:
             return await tool(
                 amount=200,
                 parent_id=parent_id,
-                approval_decisions={approval.approval_id: True},
+                resume={approval.approval_id: True},
             ).collect()
 
         out_a, out_b = await asyncio.gather(resume_once(), resume_once())
@@ -144,6 +144,49 @@ class TestDirectToolDoubleResume:
         assert calls == [200]
         assert codes == ["cancelled", "success"]
         assert reasons == [None, "approval_already_claimed"]
+        assert _claim_count(backend) == 1
+
+
+class TestCancelClaim:
+    @pytest.mark.asyncio
+    async def test_cancel_claims_so_a_later_approve_cannot_run_handler(self, backend):
+        """A cancel and an approve racing on two workers must not both win:
+        the cancel claims the gate, so the later approve stops before the handler."""
+        from timbal.types.approval import Cancel
+
+        calls: list[int] = []
+
+        def charge(amount: int) -> str:
+            calls.append(amount)
+            return f"charged {amount}"
+
+        tool = Tool(
+            name="charge",
+            handler=charge,
+            requires_approval=True,
+            tracing_provider=backend.provider,
+        )
+
+        events = [e async for e in tool(amount=100)]
+        approval = _approval_event(events)
+        parent_id = _final_output(events).run_id
+
+        first = await tool(
+            amount=100,
+            parent_id=parent_id,
+            resume={approval.approval_id: Cancel(reason="user bailed")},
+        ).collect()
+        second = await tool(
+            amount=100,
+            parent_id=parent_id,
+            resume={approval.approval_id: True},
+        ).collect()
+
+        assert first.status.code == "cancelled"
+        assert first.status.reason == "cancelled"
+        assert second.status.code == "cancelled"
+        assert second.status.reason == "approval_already_claimed"
+        assert calls == [], "cancel claimed the gate; the later approve must not execute"
         assert _claim_count(backend) == 1
 
 
@@ -180,12 +223,12 @@ class TestAgentToolDoubleResume:
         first = await agent(
             prompt="charge 300",
             parent_id=parent_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         second = await agent(
             prompt="charge 300",
             parent_id=parent_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         assert first.status.code == "success"

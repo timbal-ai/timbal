@@ -104,7 +104,7 @@ agent = Agent(
 You can also pass dynamic parameters to these functions using `RunContext` data that you previously set in the context.
 
 ```python title="my_functions.py"
-from timbal.core import Tool, Agent
+from timbal import Agent, Tool
 from timbal.state import get_run_context
 
 def get_user_language():

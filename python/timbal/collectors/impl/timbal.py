@@ -11,6 +11,7 @@ import structlog
 from ...types.events.approval import ApprovalEvent as TimbalApprovalEvent
 from ...types.events.base import BaseEvent as TimbalBaseEvent
 from ...types.events.delta import DeltaEvent as TimbalDeltaEvent
+from ...types.events.interaction import InteractionEvent as TimbalInteractionEvent
 from ...types.events.output import OutputEvent as TimbalOutputEvent
 from ...types.events.start import StartEvent as TimbalStartEvent
 from .. import register_collector
@@ -31,6 +32,10 @@ class TimbalCollector(BaseCollector):
         # first one — when concurrent runnables (parallel workflow steps,
         # multiplexed tools) gate on the same iteration.
         self._pending_approvals: list[dict[str, Any]] = []
+        # Same idea for suspend()-based interactions (ask_user, confirm, ...):
+        # capture every InteractionEvent so .collect() callers can enumerate
+        # all pending interactions, not just the first.
+        self._pending_interactions: list[dict[str, Any]] = []
 
     @classmethod
     @override
@@ -50,10 +55,29 @@ class TimbalCollector(BaseCollector):
                 "runnable_path": event.runnable_path,
                 "runnable_name": event.runnable_name,
                 "runnable_type": event.runnable_type,
+                "tool_call_id": event.tool_call_id,
                 "input": event.input,
+                "input_schema": event.input_schema,
                 "prompt": event.prompt,
                 "description": event.description,
+                "kind": event.kind,
+                "ui": event.ui,
                 "metadata": event.metadata,
+                "t0": event.t0,
+                "call_id": event.call_id,
+                "parent_call_id": event.parent_call_id,
+            })
+            return event
+        elif isinstance(event, TimbalInteractionEvent):
+            self._pending_interactions.append({
+                "interaction_id": event.interaction_id,
+                "kind": event.kind,
+                "runnable_path": event.runnable_path,
+                "runnable_name": event.runnable_name,
+                "runnable_type": event.runnable_type,
+                "tool_call_id": event.tool_call_id,
+                "payload": event.payload,
+                "response_schema": event.response_schema,
                 "t0": event.t0,
                 "call_id": event.call_id,
                 "parent_call_id": event.parent_call_id,
@@ -69,16 +93,19 @@ class TimbalCollector(BaseCollector):
 
     @override
     def result(self) -> Any:
-        """Returns the final OutputEvent enriched with pending_approvals.
+        """Returns the final OutputEvent enriched with pending gates.
 
-        When concurrent runnables gate, the OutputEvent only references the
-        *first* pending approval through ``status``/``output``. We attach the
-        full list under ``metadata['pending_approvals']`` so consumers driving
-        the resume loop can see every gate from one ``.collect()`` call.
+        When concurrent runnables pause, the OutputEvent only references the
+        *first* one through ``status``/``output``. We attach the full lists
+        under ``metadata['pending_approvals']`` and
+        ``metadata['pending_interactions']`` so consumers driving the resume
+        loop can see every gate/suspension from one ``.collect()`` call.
         """
-        if self._output_event is not None and self._pending_approvals:
-            self._output_event.metadata = {
-                **(self._output_event.metadata or {}),
-                "pending_approvals": list(self._pending_approvals),
-            }
+        if self._output_event is not None and (self._pending_approvals or self._pending_interactions):
+            extra: dict[str, Any] = {}
+            if self._pending_approvals:
+                extra["pending_approvals"] = list(self._pending_approvals)
+            if self._pending_interactions:
+                extra["pending_interactions"] = list(self._pending_interactions)
+            self._output_event.metadata = {**(self._output_event.metadata or {}), **extra}
         return self._output_event

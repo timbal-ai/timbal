@@ -1,0 +1,107 @@
+---
+title: "Suspend & interaction tools"
+description: "Pause a run from inside a handler to ask the user for arbitrary input, then resume with their answer"
+---
+
+`suspend()` pauses a run from inside a handler and waits for an externally-supplied value. It's the general form of the [approval gate](/human-in-the-loop/approval-gates) (an approval resumes with a `bool`, a suspension resumes with anything) and it's how you build tools like `ask_user`, `confirm`, or `pick_option` that let an agent explicitly stop and hand control back to the user mid-loop.
+
+## How it works
+
+1. A handler calls `suspend(payload, kind=...)`.
+2. The run ends with status `cancelled` / reason `input_required` and emits an `InteractionEvent` carrying `payload`.
+3. The frontend renders the payload (keyed by `kind`) and collects a response.
+4. You resume by calling the runnable again with the original run as `parent_id` and `resume={interaction_id: value}`. The handler re-executes and `suspend()` returns `value`.
+
+```python
+from timbal import Agent
+from timbal.tools import ask_user
+from timbal.types.events import InteractionEvent, OutputEvent
+
+agent = Agent(name="assistant", model="openai/gpt-5", tools=[ask_user])
+
+# First call — the model asks a question and the run suspends.
+pending = []
+final = None
+async for event in agent(prompt="set up my database"):
+    if isinstance(event, InteractionEvent):
+        pending.append(event)
+    if isinstance(event, OutputEvent) and event.path == "assistant":
+        final = event
+
+# pending[0].kind == "ask_user"
+# pending[0].payload == {"question": "Which database?", "options": [...]}
+
+# Resume with the user's answer.
+result = await agent(
+    prompt="set up my database",
+    parent_id=final.run_id,
+    resume={pending[0].interaction_id: "postgres"},
+).collect()
+```
+
+## Writing an interaction tool
+
+A tool is any handler that calls `suspend()`:
+
+```python
+from timbal import suspend
+
+def ask_user(question: str, options: list[str] | None = None) -> str:
+    """Ask the user a clarifying question. Use ONLY when blocked."""
+    return suspend({"question": question, "options": options}, kind="ask_user")
+
+def confirm(action: str) -> bool:
+    return bool(suspend({"action": action}, kind="confirm"))
+```
+
+`suspend` is exported at the top level (`from timbal import suspend`), and the ready-made `ask_user` / `confirm` tools ship in `timbal.tools` (`from timbal.tools import ask_user, confirm`).
+
+<Warning>
+Because the handler **re-executes from the top** on resume, `suspend()` must come before any non-idempotent side-effect in the handler (same constraint as LangGraph's `interrupt()`). Put the `suspend()` call first, or make everything before it idempotent. This is exactly why irreversible actions belong behind an [approval gate](/human-in-the-loop/approval-gates) instead: the gate guarantees zero handler code runs until approved.
+</Warning>
+
+## `InteractionEvent`
+
+```python
+class InteractionEvent(BaseEvent):
+    type: Literal["INTERACTION"]
+    t0: int                       # Unix-ms timestamp at which the run suspended
+    interaction_id: str           # pass back as the resume key
+    kind: str                     # frontend renderer discriminator (e.g. "ask_user")
+    runnable_path: str
+    runnable_name: str
+    runnable_type: str
+    tool_call_id: str | None      # originating LLM tool_use id (None for direct calls)
+    payload: dict                 # what the frontend renders
+    response_schema: dict | None  # optional JSON Schema for the resume value
+```
+
+The `interaction_id` is a deterministic hash of the handler path + payload, stable across the pause/resume round-trip, so the client always sends back the id it received. `tool_call_id` lets the client correlate the interaction with the exact tool_use block in the chat transcript when the agent triggered it.
+
+### Declaring a response schema
+
+Pass `response_schema` to `suspend()` to tell the client what shape the resume value must be. It rides on the `InteractionEvent` so the frontend can validate the user's input *before* resuming, with no extra round-trip to discover a bad value.
+
+```python
+from timbal import suspend
+
+def ask_age() -> int:
+    """Ask the user for their age."""
+    return suspend(
+        {"question": "How old are you?"},
+        kind="ask_user",
+        response_schema={"type": "integer", "minimum": 0, "maximum": 130},
+    )
+```
+
+The schema is advisory metadata for the client. `None` (the default) means any value is accepted.
+
+<Warning>
+`response_schema` is **not enforced server-side**. Timbal hands the resume value to the handler verbatim and does not validate it against the schema. Treat the schema as a contract for *your* client to validate against before resuming; if you need server-side guarantees, validate inside the handler after `suspend()` returns.
+</Warning>
+
+## See also
+
+- [Approval gates](/human-in-the-loop/approval-gates) — gate irreversible actions before any handler code runs
+- [Resuming a paused run](/human-in-the-loop/resuming) — durable cross-process resume and cancellation
+- [Client integration (HTTP)](/human-in-the-loop/client-integration) — the `/stream` wire contract

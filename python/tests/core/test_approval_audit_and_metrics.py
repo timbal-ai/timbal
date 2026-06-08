@@ -113,7 +113,7 @@ class TestResolutionPersistedToSpanMetadata:
 
         out = await tool(
             x=1,
-            approval_decisions={
+            resume={
                 approval.approval_id: ApprovalResolution(
                     approved=True,
                     approver_id="user_42",
@@ -146,7 +146,7 @@ class TestResolutionPersistedToSpanMetadata:
 
         out = await tool(
             x=1,
-            approval_decisions={
+            resume={
                 approval.approval_id: ApprovalResolution(
                     approved=False,
                     reason="suspicious origin",
@@ -183,7 +183,7 @@ class TestResolutionPersistedToSpanMetadata:
         await tool(
             x=1,
             parent_id=gate_run_id,
-            approval_decisions={
+            resume={
                 approval.approval_id: ApprovalResolution(
                     approved=True,
                     approver_id="user_42",
@@ -235,7 +235,7 @@ class TestApprovalUsageCounters:
         events = [e async for e in tool(x=1)]
         approval = _approval_event(events)
 
-        out = await tool(x=1, approval_decisions={approval.approval_id: True}).collect()
+        out = await tool(x=1, resume={approval.approval_id: True}).collect()
         assert out.status.code == "success"
         assert out.usage.get("approvals:approved") == 1
         assert "approvals:required" not in out.usage
@@ -253,7 +253,7 @@ class TestApprovalUsageCounters:
 
         out = await tool(
             x=1,
-            approval_decisions={
+            resume={
                 approval.approval_id: ApprovalResolution(approved=False, reason="nope")
             },
         ).collect()
@@ -276,7 +276,7 @@ class TestApprovalUsageCounters:
         # (the new gate emitted as a result).
         out = await tool(
             x=1,
-            approval_decisions={
+            resume={
                 approval.approval_id: ApprovalResolution(
                     approved=True,
                     expires_at=int(time.time() * 1000) - 1000,
@@ -343,7 +343,7 @@ class TestApprovalUsageCounters:
 
         out = await agent(
             prompt="wire 100",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
         assert out.status.code == "success"
         assert out.usage.get("approvals:approved") == 1
@@ -357,7 +357,7 @@ class TestApprovalUsageCounters:
 class TestResolutionSnapshotCompleteness:
     @pytest.mark.asyncio
     async def test_full_resolution_snapshot_shape(self):
-        """All seven keys must land on the snapshot — anything missing
+        """All audit keys must land on the snapshot — anything missing
         means a downstream consumer can't reconstruct the audit row."""
         tool = Tool(name="op", handler=lambda x: "ok", requires_approval=True)
 
@@ -370,7 +370,7 @@ class TestResolutionSnapshotCompleteness:
         future = int(time.time() * 1000) + 10_000_000
         out = await tool(
             x=1,
-            approval_decisions={
+            resume={
                 approval.approval_id: ApprovalResolution(
                     approved=True,
                     reason="trusted source",
@@ -391,12 +391,13 @@ class TestResolutionSnapshotCompleteness:
             "comment": "vetted via SSO",
             "decided_at": 42,
             "expires_at": future,
+            "override_input": None,
             "metadata": {"sso_provider": "google", "ip": "10.0.0.1"},
         }
 
     @pytest.mark.asyncio
     async def test_bool_shorthand_produces_complete_snapshot(self):
-        """``approval_decisions={id: True}`` is the most common form. The
+        """``resume={id: True}`` is the most common form. The
         framework must still produce a fully-typed snapshot with
         ``decided_at`` defaulted (so the audit trail isn't blank)."""
         tool = Tool(name="op", handler=lambda x: "ok", requires_approval=True)
@@ -406,7 +407,7 @@ class TestResolutionSnapshotCompleteness:
 
         before = int(time.time() * 1000)
         out = await tool(
-            x=1, approval_decisions={approval.approval_id: True}
+            x=1, resume={approval.approval_id: True}
         ).collect()
         after = int(time.time() * 1000)
 
@@ -423,7 +424,7 @@ class TestResolutionSnapshotCompleteness:
 
     @pytest.mark.asyncio
     async def test_dict_shorthand_preserves_audit_fields(self):
-        """``approval_decisions={id: {"approved": True, "approver_id": ...}}``
+        """``resume={id: {"approved": True, "approver_id": ...}}``
         should round-trip every typed field; unknown keys would surface as
         a validation error from ``ApprovalResolution.model_validate``."""
         tool = Tool(name="op", handler=lambda x: "ok", requires_approval=True)
@@ -433,7 +434,7 @@ class TestResolutionSnapshotCompleteness:
 
         out = await tool(
             x=1,
-            approval_decisions={
+            resume={
                 approval.approval_id: {
                     "approved": True,
                     "approver_id": "user_42",
@@ -474,7 +475,7 @@ class TestCounterMixedStates:
 
         out = await wf(
             x=1,
-            approval_decisions={
+            resume={
                 ids["op_a"]: True,
                 ids["op_b"]: ApprovalResolution(approved=False, reason="nope"),
             },
@@ -525,7 +526,7 @@ class TestSqliteRoundtripParity:
         out = await tool(
             x=1,
             parent_id=gate_run_id,
-            approval_decisions={
+            resume={
                 approval.approval_id: ApprovalResolution(
                     approved=True,
                     approver_id="user_99",
@@ -585,7 +586,7 @@ class TestCrossProcessAuditTrail:
         await tool(
             x=1,
             parent_id=gate_run_id,
-            approval_decisions={
+            resume={
                 approval.approval_id: ApprovalResolution(
                     approved=True,
                     approver_id="user_777",

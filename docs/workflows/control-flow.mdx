@@ -99,7 +99,7 @@ Here:
 - `fetch_users` and `fetch_orders` run in parallel (no dependencies between them)
 - `merge_results` waits for **both** to complete (its parameters reference their outputs)
 
-The dependency is resolved automatically — you don't need to declare it explicitly. Even though `fetch_users` and `fetch_orders` haven't executed when `merge_results` is defined, Timbal detects the `step_span()` references and knows to wait.
+The dependency is resolved automatically. You don't need to declare it explicitly. Even though `fetch_users` and `fetch_orders` haven't executed when `merge_results` is defined, Timbal detects the `step_span()` references and knows to wait.
 
 ### Handling Optional Steps
 

@@ -12,8 +12,11 @@ may need to set the context manually when creating custom execution flows.
 See the function docstrings for usage details and warnings.
 """
 
+import hashlib
+import json
 import re
 from contextvars import ContextVar
+from typing import Any
 
 from .context import RunContext
 
@@ -78,6 +81,91 @@ def set_parent_call_id(parent_call_id: str | None) -> None:
     parent call ID can lead to unexpected behavior if not handled correctly.
     """
     _parent_call_id.set(parent_call_id)
+
+
+def _suspension_id_for(path: str, payload: Any, tool_call_id: str | None = None) -> str:
+    """Compute a stable suspension_id for a ``suspend()`` call.
+
+    Hashes ``(path, payload[, tool_call_id])`` so the same suspension resumes
+    deterministically across the handler re-execution.
+
+    When the suspend happens inside an agent tool, ``tool_call_id`` (the LLM's
+    ``tool_use`` block id) is folded in. This disambiguates two parallel calls to
+    the *same* tool in a single turn even when their payloads are identical — each
+    tool_use block gets its own id and can be resumed with its own answer. The id
+    is stable across re-execution because the assistant message (and thus the
+    tool_use ids) is replayed verbatim from the parent trace on resume.
+
+    Outside an agent (direct ``Tool`` calls, workflow steps) ``tool_call_id`` is
+    ``None`` and the id reduces to ``hash(path, payload)``. There, two identical
+    payloads on the same path still share one id (mirrors approval's
+    ``(path, input)`` semantics); add a discriminator field to the payload if you
+    need distinct ids.
+    """
+    keyed: dict[str, Any] = {"path": path, "payload": payload}
+    if tool_call_id is not None:
+        keyed["tool_call_id"] = tool_call_id
+    return hashlib.sha256(json.dumps(keyed, sort_keys=True, default=str).encode()).hexdigest()[:32]
+
+
+def suspend(
+    payload: dict[str, Any],
+    *,
+    kind: str = "suspend",
+    response_schema: dict[str, Any] | None = None,
+) -> Any:
+    """Pause the current run and wait for an externally-supplied resume value.
+
+    Call this from inside any handler (e.g. an ``ask_user`` tool). On the first
+    pass it raises :class:`~timbal.errors.Suspend`, ending the run with status
+    ``cancelled`` / reason ``input_required`` and emitting an ``InteractionEvent``
+    carrying ``payload`` for the frontend to render.
+
+    Resume by calling the runnable again with the original run as ``parent_id``
+    and ``resume={suspension_id: value}``. The handler re-executes from the top
+    and this call returns ``value``.
+
+    To cancel instead of answering, resume with ``Cancel(reason=...)``: the run
+    terminates (status ``cancelled`` / reason ``cancelled``) and this call never
+    returns.
+
+    IMPORTANT: because the handler re-runs on resume, ``suspend()`` must come
+    before any non-idempotent side-effect in the handler (same caveat as
+    LangGraph's ``interrupt()``).
+
+    Args:
+        payload: JSON-serializable data describing what the caller must supply
+            (e.g. ``{"question": "...", "options": [...]}``).
+        kind: Discriminator the frontend uses to pick a renderer
+            (e.g. ``"ask_user"``, ``"confirm"``).
+        response_schema: Optional JSON Schema describing the shape the resume
+            value must match. Surfaced on the ``InteractionEvent`` so the
+            frontend can validate the user's input before resuming.
+
+    Returns:
+        The value supplied on resume.
+
+    Raises:
+        Suspend: on the first (un-resumed) pass.
+        RunCancelled: if resumed with a ``Cancel`` value.
+        RuntimeError: if called outside a run context.
+    """
+    from ..errors import RunCancelled, Suspend
+    from ..types.approval import Cancel
+
+    run_context = get_run_context()
+    if run_context is None:
+        raise RuntimeError("suspend() called outside of a run context.")
+    span = run_context.current_span()
+    tool_call_id = (span.metadata or {}).get("tool_call_id")
+    suspension_id = _suspension_id_for(span.path, payload, tool_call_id)
+    if suspension_id in run_context._resume_values:
+        run_context._used_resume_ids.add(suspension_id)
+        value = run_context._resume_values[suspension_id]
+        if isinstance(value, Cancel):
+            raise RunCancelled(value.reason or "Run cancelled by user.")
+        return value
+    raise Suspend(suspension_id, payload, kind, response_schema)
 
 
 def _normalize_tool_request_kind(kind: str) -> str:

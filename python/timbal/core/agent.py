@@ -29,7 +29,7 @@ from pydantic import (
 )
 from uuid_extensions import uuid7
 
-from ..errors import ApprovalRequired, InterruptError, bail
+from ..errors import InterruptError, PauseRequired, RunCancelled, bail
 from ..state import get_run_context
 from ..types.content import CustomContent, FileContent, TextContent, ToolResultContent, ToolUseContent
 from ..types.events import BaseEvent, OutputEvent
@@ -45,6 +45,10 @@ from .tool import Tool
 from .tool_set import ToolSet
 
 logger = structlog.get_logger("timbal.core.agent")
+
+# Status reasons that mean a child paused and must bubble up to pause the run —
+# an approval gate (approval_required) or a suspend() call (input_required).
+_PAUSE_REASONS = frozenset({"approval_required", "input_required"})
 
 
 def _content_chars(c: TextContent | ToolUseContent | ToolResultContent) -> int:
@@ -588,11 +592,21 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # inject synthetic "tool failed" results for them. Without this guard
         # the LLM would see fake failures and probably skip retrying the
         # gated calls, silently dropping the user's approval decisions.
-        is_approval_resume = prev_code == "cancelled" and prev_reason == "approval_required"
-        if not is_approval_resume:
+        # On approval/suspend resume the gated/suspended tool_uses will be
+        # re-executed by the agent loop (see _find_pending_tool_uses), so we must
+        # NOT inject synthetic "tool failed" results for them.
+        is_resume = prev_code == "cancelled" and prev_reason in _PAUSE_REASONS
+        if not is_resume:
             self._synthesize_missing_tool_results(memory)
+        # On resume we are continuing the paused turn, not opening a new user turn.
+        # The pending tool_uses get re-executed by the agent loop and their
+        # tool_results must come *immediately* after the assistant tool_use message
+        # (Anthropic rejects any user message in between). Since AgentParams forces a
+        # prompt/messages to be passed, drop the re-injected prompt here — the
+        # original prompt already lives in the loaded parent memory.
+        tail = [] if is_resume else current_span.memory
         merged: list[Message] = []
-        for msg in memory + current_span.memory:
+        for msg in memory + tail:
             cleaned = msg.without_empty_text_blocks()
             if cleaned is not None:
                 merged.append(cleaned)
@@ -601,68 +615,159 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         # Re-dump prior turns so stored memory matches sanitized messages (no empty text blocks).
         current_span._prev_memory_dump = await dump(merged[:-1])
 
-        # Apply memory compaction if configured and context window utilization warrants it
+        # Apply memory compaction if configured and context window utilization warrants it.
         if self.memory_compaction is not None:
-            should_compact = self.memory_compaction_ratio <= 0.0
-            utilization = None
-            if not should_compact:
-                context_window = get_context_window(str(self.model))
-                if context_window is None:
-                    # Unknown model — context window not in models.yaml.
-                    # Estimate token count from message content as a best effort.
-                    estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
-                    logger.warning(
-                        "Context window unknown for model; token usage estimated from message content (1 token ≈ 4 chars). Compacting as safe fallback.",
-                        model=str(self.model),
-                        estimated_tokens=estimated_tokens,
-                    )
-                    should_compact = True
-                elif previous_span.usage:
-                    prev_input_tokens = sum(v for k, v in previous_span.usage.items() if ":input" in k and "token" in k)
-                    prev_output_tokens = sum(
-                        v for k, v in previous_span.usage.items() if ":output" in k and "token" in k
-                    )
-                    utilization = (prev_input_tokens + prev_output_tokens) / context_window
-                    should_compact = utilization >= self.memory_compaction_ratio
-                else:
-                    # Known model but no usage data from previous run.
-                    # Estimate utilization from message content.
-                    estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
-                    utilization = estimated_tokens / context_window
-                    logger.warning(
-                        "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
-                        model=str(self.model),
-                        estimated_tokens=estimated_tokens,
-                        estimated_utilization=round(utilization, 4),
-                    )
-                    should_compact = utilization >= self.memory_compaction_ratio
+            if not is_resume:
+                await self._maybe_compact_memory(current_span, prev_usage=previous_span.usage)
+            else:
+                await self._compact_on_resume(current_span, prev_usage=previous_span.usage)
 
-            if should_compact:
-                compactors = (
-                    [self.memory_compaction] if not isinstance(self.memory_compaction, list) else self.memory_compaction
+    async def _compact_preserving_last_assistant(self, current_span: Any, *, prev_usage: dict | None) -> None:
+        """Compact memory while protecting the trailing assistant message (and anything after
+        it) from the compactor.
+
+        Used on two paths where the tail must survive intact:
+
+        - **resume**: the loaded memory ends with the gated/suspended assistant message whose
+          tool_uses have no tool_result yet — exactly what _find_pending_tool_uses must see to
+          re-execute the paused call. A naive pass treats that unresolved tool_use as an
+          orphan and strips it, forcing a nondeterministic re-plan that silently drops the
+          human's decision.
+        - **mid-loop**: between agent iterations the trailing assistant tool_use + its (just
+          produced) tool_results are *unconsumed* — the next LLM call must read them. Dropping
+          them sends the model back to re-plan the same step, looping forever.
+
+        In both cases we detach that trailing assistant message, compact only the well-formed
+        history before it, then re-attach it untouched — mirroring how a fresh turn compacts
+        prior history while leaving the in-flight turn intact.
+        """
+        memory = current_span.memory
+        # Index of the trailing assistant message (the batch we must protect).
+        split = next((i for i in range(len(memory) - 1, -1, -1) if memory[i].role == "assistant"), None)
+        if split is None:
+            # No assistant message yet (e.g. memory is just the prompt) — nothing to protect.
+            await self._maybe_compact_memory(current_span, prev_usage=prev_usage)
+            return
+
+        head, tail = memory[:split], memory[split:]
+        if not head:
+            return  # The protected tail is the whole memory; nothing before it to compact.
+
+        head_slice = memory[:split]
+        current_span.memory = head_slice
+        await self._maybe_compact_memory(current_span, prev_usage=prev_usage)
+        if current_span.memory is head_slice:
+            # Below the ratio — nothing compacted. Restore the original memory object so the
+            # caller's identity check sees no change (no needless dump rebuild).
+            current_span.memory = memory
+            return
+        head = current_span.memory
+
+        # The message originally before the trailing assistant was user/tool (assistants are
+        # always followed by tool results or end the turn), but compaction can leave head
+        # ending in an assistant message. Two consecutive assistant messages break provider
+        # alternation, so fold head's trailing assistant into the protected one — the merged
+        # message stays a single assistant block and _find_pending_tool_uses still sees the
+        # tool_uses in the last assistant message.
+        if head and head[-1].role == "assistant" and tail and tail[0].role == "assistant":
+            merged = Message(
+                role="assistant",
+                content=[*head[-1].content, *tail[0].content],
+                stop_reason=tail[0].stop_reason,
+            )
+            current_span.memory = [*head[:-1], merged, *tail[1:]]
+        else:
+            current_span.memory = [*head, *tail]
+
+    async def _compact_on_resume(self, current_span: Any, *, prev_usage: dict | None) -> None:
+        """Resume-turn compaction. Only acts when there's a genuine trailing unresolved
+        tool_use to protect; delegates the detach/compact/reattach to
+        _compact_preserving_last_assistant."""
+        if not self._find_pending_tool_uses(current_span.memory):
+            # No trailing unresolved tool_use (degenerate resume); leave memory as-is rather
+            # than risk stripping structure we rely on.
+            return
+        await self._compact_preserving_last_assistant(current_span, prev_usage=prev_usage)
+
+    async def _maybe_compact_memory(self, current_span: Any, *, prev_usage: dict | None) -> None:
+        """Run the configured compaction strategies on ``current_span.memory`` if the
+        context-window utilization warrants it.
+
+        Shared by ``resolve_memory`` (fresh turns) and the resume-continuation path in the
+        agent loop (after the gated/suspended tool_uses have been re-executed and their
+        tool_results appended — at which point the previously-unresolved tool_use is a
+        complete pair again and safe to compact).
+
+        ``prev_usage`` is the prior run's usage dict used as a token proxy; when it is
+        empty/None the estimate falls back to message content.
+        """
+        if self.memory_compaction is None:
+            return
+
+        should_compact = self.memory_compaction_ratio <= 0.0
+        utilization = None
+        if not should_compact:
+            context_window = get_context_window(str(self.model))
+            if context_window is None:
+                # Unknown model — context window not in models.yaml.
+                # Estimate token count from message content as a best effort.
+                estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
+                logger.warning(
+                    "Context window unknown for model; token usage estimated from message content (1 token ≈ 4 chars). Compacting as safe fallback.",
+                    model=str(self.model),
+                    estimated_tokens=estimated_tokens,
                 )
-                compaction_steps = []
-                for compactor in compactors:
-                    # Set the agent's model on compactors that support it (e.g. summarize)
-                    if hasattr(compactor, "_state"):
-                        compactor._state["agent_model"] = str(self.model)
-                    before = len(current_span.memory)
-                    if asyncio.iscoroutinefunction(compactor):
-                        current_span.memory = await compactor(current_span.memory)
-                    else:
-                        current_span.memory = compactor(current_span.memory)
-                    compaction_steps.append(
-                        {
-                            "compactor": getattr(compactor, "__name__", repr(compactor)),
-                            "before": before,
-                            "after": len(current_span.memory),
-                        }
-                    )
-                current_span.metadata["compaction"] = {
-                    "triggered": True,
-                    "utilization": round(utilization, 4) if utilization is not None else None,
-                    "steps": compaction_steps,
+                should_compact = True
+            elif prev_usage:
+                prev_input_tokens = sum(v for k, v in prev_usage.items() if ":input" in k and "token" in k)
+                prev_output_tokens = sum(v for k, v in prev_usage.items() if ":output" in k and "token" in k)
+                utilization = (prev_input_tokens + prev_output_tokens) / context_window
+                should_compact = utilization >= self.memory_compaction_ratio
+            else:
+                # Known model but no usage data from previous run.
+                # Estimate utilization from message content.
+                estimated_tokens = _estimate_tokens_from_memory(current_span.memory)
+                utilization = estimated_tokens / context_window
+                logger.warning(
+                    "No token usage data from previous run; estimating utilization from message content (1 token ≈ 4 chars).",
+                    model=str(self.model),
+                    estimated_tokens=estimated_tokens,
+                    estimated_utilization=round(utilization, 4),
+                )
+                should_compact = utilization >= self.memory_compaction_ratio
+
+        if not should_compact:
+            return
+
+        compactors = (
+            [self.memory_compaction] if not isinstance(self.memory_compaction, list) else self.memory_compaction
+        )
+        compaction_steps = []
+        for compactor in compactors:
+            # Set the agent's model on compactors that support it (e.g. summarize)
+            if hasattr(compactor, "_state"):
+                compactor._state["agent_model"] = str(self.model)
+            before = len(current_span.memory)
+            if asyncio.iscoroutinefunction(compactor):
+                current_span.memory = await compactor(current_span.memory)
+            else:
+                current_span.memory = compactor(current_span.memory)
+            compaction_steps.append(
+                {
+                    "compactor": getattr(compactor, "__name__", repr(compactor)),
+                    "before": before,
+                    "after": len(current_span.memory),
                 }
+            )
+        prior = current_span.metadata.get("compaction")
+        passes = (prior.get("passes", 1) + 1) if isinstance(prior, dict) else 1
+        current_span.metadata["compaction"] = {
+            "triggered": True,
+            "utilization": round(utilization, 4) if utilization is not None else None,
+            "steps": compaction_steps,
+            # Number of times compaction fired on this span (turn start + each mid-loop pass).
+            "passes": passes,
+        }
 
     async def _resolve_tools(self, i: int) -> tuple[list[Tool], dict[str, Tool]]:
         """Resolve the tools to be provided to the LLM."""
@@ -886,10 +991,18 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
             """Helper to process tool output events and create tool results."""
             if not isinstance(event, OutputEvent) or event.path.count(".") != self._path.count(".") + 1:
                 return
-            if event.status.code == "cancelled" and event.status.reason == "approval_required":
+            if event.status.code == "cancelled" and event.status.reason in _PAUSE_REASONS:
+                # Gated (approval) or suspended (input_required) tool: leave the
+                # tool_use unresolved so it re-fires on resume. Do not synthesize
+                # a tool_result.
                 return
             if event.status.code == "cancelled" and event.status.reason == "early_exit":
                 bail(event.status.message)
+            if event.status.code == "cancelled" and event.status.reason == "cancelled":
+                # A human cancelled via Cancel() on the resume channel. Terminal:
+                # leave the tool_use unresolved (no tool_result) and let the caller
+                # yield the event before raising RunCancelled to stop the run.
+                return
             content = None
             if event.status.code == "cancelled" and event.status.reason == "approval_denied":
                 msg = event.status.message or "The tool call was denied."
@@ -923,6 +1036,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
         i = 0
         need_retry = False
         _llm_memory_saved = False
+        # Token usage reported by the previous LLM call this turn — the live signal for
+        # mid-loop compaction. None until the first LLM call completes.
+        last_llm_usage: dict | None = None
         try:
             while True:
                 need_retry = False
@@ -970,10 +1086,16 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                                     if isinstance(event, OutputEvent) and event.output is not None:
                                         if (
                                             event.status.code == "cancelled"
-                                            and event.status.reason == "approval_required"
+                                            and event.status.reason in _PAUSE_REASONS
                                         ):
                                             yield event
-                                            raise ApprovalRequired(event)
+                                            raise PauseRequired(event)
+                                        if (
+                                            event.status.code == "cancelled"
+                                            and event.status.reason == "cancelled"
+                                        ):
+                                            yield event
+                                            raise RunCancelled(event.status.message or "Run cancelled by user.")
                                         current_span.memory.append(
                                             Message.validate(
                                                 {
@@ -995,21 +1117,43 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if pending_tool_uses:
                     _llm_memory_saved = True  # nothing to salvage; we never called the LLM
                     tool_calls = pending_tool_uses
-                    first_pending_approval: OutputEvent | None = None
+                    first_pending: OutputEvent | None = None
                     async for tool_call, event in self._multiplex_tools(tools, tool_calls):
                         await _process_tool_event(event, tool_call.id, append_to_messages=True)
                         yield event
                         if (
                             isinstance(event, OutputEvent)
                             and event.status.code == "cancelled"
-                            and event.status.reason == "approval_required"
-                            and first_pending_approval is None
+                            and event.status.reason == "cancelled"
                         ):
-                            first_pending_approval = event
-                    if first_pending_approval is not None:
-                        raise ApprovalRequired(first_pending_approval)
+                            raise RunCancelled(event.status.message or "Run cancelled by user.")
+                        if (
+                            isinstance(event, OutputEvent)
+                            and event.status.code == "cancelled"
+                            and event.status.reason in _PAUSE_REASONS
+                            and first_pending is None
+                        ):
+                            first_pending = event
+                    if first_pending is not None:
+                        raise PauseRequired(first_pending)
                     i += 1
                     continue
+
+                # Mid-loop compaction: a single turn that makes many (or large) tool calls
+                # grows memory unbounded between iterations. resolve_memory only compacts at
+                # turn start (and not at all on a turn with no parent), so without this a long
+                # tool-calling turn can overflow the context window mid-run. The trailing
+                # assistant batch + its tool_results are *unconsumed* — the next LLM call must
+                # read them — so we protect that tail and compact only the history before it
+                # (dropping the unconsumed batch would loop the model back to re-plan the same
+                # step). The previous LLM call's reported usage is the live context-size signal
+                # (its input tokens ≈ the size of the memory we're about to send again).
+                if self.memory_compaction is not None and last_llm_usage is not None:
+                    mem_before = current_span.memory
+                    await self._compact_preserving_last_assistant(current_span, prev_usage=last_llm_usage)
+                    if current_span.memory is not mem_before:
+                        # Compaction rewrote memory out of lockstep with the dump; rebuild it.
+                        current_span._memory_dump = await dump(current_span.memory)
 
                 async for event in self._llm(
                     model=model,
@@ -1037,6 +1181,9 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                         # Add LLM response to conversation for next iteration
                         await _append_memory(event.output)
                         _llm_memory_saved = True
+                        # Record this call's token usage as the live signal for mid-loop
+                        # compaction before the next iteration's LLM call.
+                        last_llm_usage = event.usage
 
                         if self.output_model is not None:
                             validation_error_msg = None
@@ -1098,19 +1245,25 @@ If the file is relevant for the user query, USE the `read_skill` tool to get its
                 if not tool_calls:
                     break
 
-                first_pending_approval: OutputEvent | None = None
+                first_pending: OutputEvent | None = None
                 async for tool_call, event in self._multiplex_tools(tools, tool_calls):
                     await _process_tool_event(event, tool_call.id, append_to_messages=True)
                     yield event
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"
-                        and event.status.reason == "approval_required"
-                        and first_pending_approval is None
+                        and event.status.reason == "cancelled"
                     ):
-                        first_pending_approval = event
-                if first_pending_approval is not None:
-                    raise ApprovalRequired(first_pending_approval)
+                        raise RunCancelled(event.status.message or "Run cancelled by user.")
+                    if (
+                        isinstance(event, OutputEvent)
+                        and event.status.code == "cancelled"
+                        and event.status.reason in _PAUSE_REASONS
+                        and first_pending is None
+                    ):
+                        first_pending = event
+                if first_pending is not None:
+                    raise PauseRequired(first_pending)
                 i += 1
         finally:
             if not _llm_memory_saved:

@@ -5,7 +5,7 @@ from timbal import Agent, Tool
 from timbal.tools import WebSearch
 from timbal.types.content.tool_use import ToolUseContent
 from timbal.types.events import OutputEvent
-from timbal.types.events.delta import DeltaEvent
+from timbal.types.events.delta import DeltaEvent, TextDelta
 from timbal.types.message import Message
 
 from ..conftest import assert_has_output_event
@@ -117,10 +117,16 @@ class TestKeyAgentInterruptions:
             "Include extensive world-building, character backstories, multiple plot twists."
         )
 
-        # Cancel after the first streaming chunk — proves LLM is mid-generation
+        # Cancel after the first streaming chunk that actually carries text.
+        # Triggering on any DeltaEvent is racy: the first delta is often a
+        # content-block-start with no accumulated text yet, so the salvaged
+        # partial Message would be empty. Waiting for a non-empty text_delta
+        # guarantees the collector has content to salvage.
         result1 = await _collect_and_cancel_on(
             agent,
-            event_filter=lambda e: isinstance(e, DeltaEvent),
+            event_filter=lambda e: isinstance(e, DeltaEvent)
+            and isinstance(e.item, TextDelta)
+            and bool(e.item.text_delta),
             prompt=prompt1,
         )
 

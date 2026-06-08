@@ -710,6 +710,133 @@
         ]
       }
     },
+    "/me/tokens": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "description": "List the authenticated user's API credentials.",
+        "operationId": "handler",
+        "responses": {
+          "200": {
+            "description": "Credentials listed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "description": "Create an API credential for the authenticated user.",
+        "operationId": "handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Credential created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/me/tokens/{token_id}": {
+      "delete": {
+        "tags": [
+          "users"
+        ],
+        "description": "Revoke an API credential owned by the authenticated user.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Credential revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "null",
+                  "description": "Successful responses use HTTP 204 and do not include a body."
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}": {
       "get": {
         "tags": [
@@ -774,6 +901,181 @@
         "responses": {
           "204": {
             "description": "Organization updated successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/billing/budgets": {
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "description": "Read credit budgets for the organization. Filter with `project_id` or `role_id` to fetch a single target without listing the full org config.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "When set, return at most the project budget for this project (0 or 1 rows).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "role_id",
+            "in": "query",
+            "description": "When set, return at most the role budget for this role (0 or 1 rows).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Budgets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetListBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Filtered project or role not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "billing"
+        ],
+        "description": "Replace the organization's full credit budget configuration. Omitted targets are removed.",
+        "operationId": "put",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetListBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Budgets saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetListBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Project or role not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "billing"
+        ],
+        "description": "Merge credit budget changes. Each row upserts when `limit_credits` is set, or removes the budget when `limit_credits` is null. Other configured targets are left unchanged.",
+        "operationId": "patch",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetPatchBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Budgets saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetListBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Project or role not found"
           }
         },
         "security": [
@@ -851,6 +1153,208 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/composer/{*path}": {
+      "get": {
+        "tags": [
+          "composer"
+        ],
+        "description": "Proxy HTTP to the composer Python sidecar. Injects session platform_config on `/stream` and `/run`.",
+        "operationId": "composer_proxy_get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Sidecar path (for example `stream` or `healthcheck`). Leave empty for the sidecar root.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response from the composer sidecar"
+          },
+          "503": {
+            "description": "Composer sidecar unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "composer"
+        ],
+        "description": "Proxy HTTP to the composer Python sidecar. Injects session platform_config on `/stream` and `/run`.",
+        "operationId": "composer_proxy_put",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Sidecar path (for example `stream` or `healthcheck`). Leave empty for the sidecar root.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response from the composer sidecar"
+          },
+          "503": {
+            "description": "Composer sidecar unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "composer"
+        ],
+        "description": "Proxy HTTP to the composer Python sidecar. Injects session platform_config on `/stream` and `/run`.",
+        "operationId": "composer_proxy_post",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Sidecar path (for example `stream` or `healthcheck`). Leave empty for the sidecar root.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response from the composer sidecar"
+          },
+          "503": {
+            "description": "Composer sidecar unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "composer"
+        ],
+        "description": "Proxy HTTP to the composer Python sidecar. Injects session platform_config on `/stream` and `/run`.",
+        "operationId": "composer_proxy_delete",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Sidecar path (for example `stream` or `healthcheck`). Leave empty for the sidecar root.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response from the composer sidecar"
+          },
+          "503": {
+            "description": "Composer sidecar unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "composer"
+        ],
+        "description": "Proxy HTTP to the composer Python sidecar. Injects session platform_config on `/stream` and `/run`.",
+        "operationId": "composer_proxy_patch",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Sidecar path (for example `stream` or `healthcheck`). Leave empty for the sidecar root.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Response from the composer sidecar"
+          },
+          "503": {
+            "description": "Composer sidecar unavailable"
           }
         },
         "security": [
@@ -1122,6 +1626,597 @@
                 }
               }
             }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/iam/actions": {
+      "get": {
+        "tags": [
+          "iam"
+        ],
+        "description": "Catalog of every action this organization may grant on a role. Org-scoped so future plans / feature flags can enable subsets per-org; today every org sees the full catalog. Use to drive the custom-role builder UI: render a checkbox per action, and a resource picker keyed on `resource.kind` for typed actions. Cacheable per `(org_id, version)`.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Action catalog visible to this org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListActionsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Caller is not a member of this org"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/iam/check": {
+      "post": {
+        "tags": [
+          "iam"
+        ],
+        "description": "Forward authorization simulator. Evaluates one or more `(action, resource?)` checks against a user's effective grants and returns a decision per check, including the matched allow/deny grants that explain it. Mirrors the live evaluator exactly — same scope intersection, expiry filtering, and deny-beats-allow precedence. \n\nDefaults `user_id` to the caller; passing another user requires `users.read`. Cap is 50 checks per request.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Per-check decisions + matched grants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden (not a member, or asking about another user without `users.read`)"
+          },
+          "422": {
+            "description": "Invalid request (empty/too many checks, unknown action key, malformed or wildcarded resource, target user is not a member)"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/iam/roles": {
+      "get": {
+        "tags": [
+          "iam"
+        ],
+        "description": "List roles available to an organization. Returns built-in system roles + any custom roles defined by the org.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Roles for the organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgRolesResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "iam"
+        ],
+        "description": "Create a custom role for the organization.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRoleReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Role created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "409": {
+            "description": "A role with that name already exists in the organization"
+          },
+          "422": {
+            "description": "Invalid request body (unknown action, bad resource shape, reserved name, duplicate grant), or plan does not allow custom roles (`code: PLAN_REQUIRED`)"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/iam/roles/{role_id}": {
+      "get": {
+        "tags": [
+          "iam"
+        ],
+        "description": "Retrieve a role and the full set of grants it carries.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Role for the organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden"
+          },
+          "404": {
+            "description": "Role not found"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "iam"
+        ],
+        "description": "Delete a custom role. System roles cannot be deleted. Roles still attached to members return 409 with the assignee list — reassign first, then retry.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Role deleted"
+          },
+          "403": {
+            "description": "Forbidden or system role (immutable)"
+          },
+          "404": {
+            "description": "Role not found"
+          },
+          "409": {
+            "description": "Role is still attached to one or more members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleInUseConflict"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Deleting this role would lock the caller out of roles.manage, or plan does not allow custom roles (`code: PLAN_REQUIRED`)"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "iam"
+        ],
+        "description": "Partially update a custom role. System roles are immutable.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditRoleReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Role updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden or system role (immutable)"
+          },
+          "404": {
+            "description": "Role not found"
+          },
+          "409": {
+            "description": "A role with that name already exists"
+          },
+          "422": {
+            "description": "Invalid body, would lock the caller out of roles.manage, or plan does not allow custom roles (`code: PLAN_REQUIRED`)"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/iam/users": {
+      "get": {
+        "tags": [
+          "iam"
+        ],
+        "description": "List members of an organization. Requires `users.read`.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Optional case-insensitive substring filter on user name or email.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Page token for pagination. Pass back the `next_page_token` from the\nprevious response.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization members",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgUsersResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "iam"
+        ],
+        "description": "Invite one or more users to an organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteOrgUserReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "User invited successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "iam"
+        ],
+        "description": "Remove a user from an organization",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveOrgUserReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "User removed successfully"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/iam/users/{user_id}/effective-grants": {
+      "get": {
+        "tags": [
+          "iam"
+        ],
+        "description": "Dump the grants a user actually carries in this org, post-scope-intersection and expiry-filtered, with role attribution. Asking about yourself only requires membership; asking about another user requires `users.read`. Same effective grant contributed by N roles produces N rows.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Effective grants for the user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EffectiveGrantsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden (not a member, or asking about another user without `users.read`)"
+          },
+          "422": {
+            "description": "Target user is not a member of this organization"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/iam/users/{user_id}/roles": {
+      "put": {
+        "tags": [
+          "iam"
+        ],
+        "description": "Replace a member's role attachments with the provided set. Each attachment is a `(role_id, scope?)` pair — the same role may appear multiple times scoped to different resources. Requires `users.edit`.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceRolesReqBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Attachments updated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "422": {
+            "description": "Invalid attachment"
           }
         },
         "security": [
@@ -1595,7 +2690,7 @@
         "tags": [
           "k2"
         ],
-        "description": "List files and directories in a knowledge base",
+        "description": "List files and folders in a knowledge base (use directory=/ for root)",
         "operationId": "list",
         "parameters": [
           {
@@ -1629,7 +2724,7 @@
           {
             "name": "directory",
             "in": "query",
-            "description": "Filter files by directory path (e.g. \"docs/reports\")",
+            "description": "Scope listing to one folder. Use `\"/\"` for KB root (entries with no parent path).\nOmit to list every file in the knowledge base. Otherwise a normalized path such as `docs/reports`.",
             "required": false,
             "schema": {
               "type": [
@@ -1714,6 +2809,13 @@
                   "metadata": {
                     "type": "object",
                     "description": "Optional JSON metadata to attach to the file."
+                  },
+                  "parse": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ],
+                    "description": "Per-upload override for the parse/chunk/embed pipeline. Accepts\n`\"true\"`/`\"false\"` (or `\"1\"`/`\"0\"`). When omitted, the knowledge base's\nauto-processing setting and the file extension decide. `true` forces\nparsing even when the KB has auto-processing off (still credit-gated;\nunsupported extensions silently fall back to stored-as-is). `false`\nstores the file as-is and never runs the pipeline."
                   },
                   "url": {
                     "type": [
@@ -2343,6 +3445,733 @@
         ]
       }
     },
+    "/orgs/{org_id}/k2/{kb_id}/policies": {
+      "get": {
+        "tags": [
+          "k2"
+        ],
+        "description": "List access-shaping rules authored on a knowledge base.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table_name",
+            "in": "query",
+            "description": "Restrict to policies that target this exact table.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "enabled",
+            "in": "query",
+            "description": "Restrict to enabled or disabled rules. Omit for both.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "include_deleted",
+            "in": "query",
+            "description": "When true, also return soft-deleted rules. Defaults to false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Pagination cursor. Pass the previous response's `next_page_token`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policies listed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListK2PoliciesResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Author a new access-shaping rule on a knowledge base.",
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateK2PolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Policy created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K2Policy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid policy body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/policies/enforcement": {
+      "put": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Enable or disable enforcement of data-governance policies on K2 queries. Requires `k2.policies.manage`. When enabled, queries are rewritten to satisfy active policies or rejected if they cannot be safely constrained. Read the current value from `GET /orgs/{org_id}/k2/{kb_id}` (`governance_enforced` on the KB detail).",
+        "operationId": "put",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetK2GovernanceEnforcementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated enforcement status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K2GovernanceEnforcementResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/policies/{policy_id}": {
+      "get": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Fetch a single access-shaping rule by id.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K2Policy"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Policy not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Soft-delete an access-shaping rule. Requires `If-Match: \u003Crevision\u003E` from the prior GET. Assignments remain for audit; the rule no longer applies.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Policy deleted"
+          },
+          "404": {
+            "description": "Policy not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "`If-Match` revision mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Update an access-shaping rule. Requires `If-Match: \u003Crevision\u003E` from the prior GET.",
+        "operationId": "patch",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchK2PolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Policy updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K2Policy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Policy not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "`If-Match` revision mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/policies/{policy_id}/assignments": {
+      "get": {
+        "tags": [
+          "k2"
+        ],
+        "description": "List role bindings for an access-shaping rule.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role_id",
+            "in": "query",
+            "description": "Restrict to bindings for this role.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "enabled",
+            "in": "query",
+            "description": "Restrict to enabled or disabled bindings. Omit for both.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "description": "When true, include revoked bindings. Defaults to false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assignments listed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListK2PolicyAssignmentsResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Bind an access-shaping rule to a role. Re-attaches if the binding was previously revoked.",
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateK2PolicyAssignmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Assignment created or re-attached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K2PolicyAssignment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid binding body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Policy or role not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/k2/{kb_id}/policies/{policy_id}/assignments/{assignment_id}": {
+      "get": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Fetch a single role binding for an access-shaping rule.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "assignment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assignment found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/K2PolicyAssignment"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Assignment not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "k2"
+        ],
+        "description": "Revoke a role binding (soft). Clears active access without deleting the row.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kb_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "assignment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Assignment revoked"
+          },
+          "404": {
+            "description": "Assignment not found or already revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/orgs/{org_id}/k2/{kb_id}/query": {
       "post": {
         "tags": [
@@ -2400,7 +4229,7 @@
         "tags": [
           "k2"
         ],
-        "description": "Drop the knowledge base's in-memory connections so the next request opens a fresh database handle. Caller must be an org admin.",
+        "description": "Drop the knowledge base's in-memory connections so the next request opens a fresh database handle. Requires `k2.manage`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -2433,7 +4262,7 @@
             }
           },
           "403": {
-            "description": "Caller is not an admin of this knowledge base",
+            "description": "Caller lacks `k2.manage` or KB not in org",
             "content": {
               "application/json": {
                 "schema": {
@@ -3311,7 +5140,7 @@
         "tags": [
           "projects"
         ],
-        "description": "List projects for an organization",
+        "description": "List projects in an organization, filtered to those the caller has `projects.read` on. Org admins (with `projects.read` on `projects:*`) see everything; scoped users see only the projects covered by their attachments.",
         "operationId": "handler",
         "parameters": [
           {
@@ -3346,6 +5175,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Caller is not a member of the organization"
           }
         },
         "security": [
@@ -3404,7 +5236,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Get a project by ID",
+        "description": "Get a project by ID. Requires `projects.read` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -3434,6 +5266,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -3446,7 +5281,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Delete a project",
+        "description": "Delete a project. Requires `projects.delete` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -3468,7 +5303,10 @@
         ],
         "responses": {
           "204": {
-            "description": "Project deleted successfully"
+            "description": "Project deleted"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -3481,7 +5319,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Update a project",
+        "description": "Edit project metadata. Requires `projects.edit` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -3513,7 +5351,16 @@
         },
         "responses": {
           "204": {
-            "description": "Project updated successfully"
+            "description": "Project updated"
+          },
+          "400": {
+            "description": "Validation failed"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "422": {
+            "description": "Name conflicts with an existing project"
           }
         },
         "security": [
@@ -4095,18 +5942,6 @@
             }
           },
           {
-            "name": "user_id",
-            "in": "query",
-            "description": "Filter sessions by user ID",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
             "name": "rev",
             "in": "query",
             "description": "Filter sessions by git branch (worktree revision)",
@@ -4247,301 +6082,12 @@
         ]
       }
     },
-    "/orgs/{org_id}/projects/{project_id}/connections": {
-      "get": {
-        "tags": [
-          "projects"
-        ],
-        "description": "List connections for a project",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Connections listed successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListConnectionsResBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "projects"
-        ],
-        "description": "Connect a resource (KB or integration) to a project",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConnectToProject"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Connection created successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/projects/{project_id}/connections/{connection_id}": {
-      "delete": {
-        "tags": [
-          "projects"
-        ],
-        "description": "Delete a project connection",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "connection_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Connection deleted successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/projects/{project_id}/deployments": {
-      "get": {
-        "tags": [
-          "projects"
-        ],
-        "description": "List deployments for a project",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_env_id",
-            "in": "query",
-            "description": "DEPRECATED: use `rev` (git branch name) instead. Will be removed once all\nfrontends migrate. When both are passed, `rev` wins.",
-            "required": false,
-            "deprecated": true,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "rev",
-            "in": "query",
-            "description": "Git branch name of the env to filter by (e.g. `main`). Resolved\nserver-side against `ProjectEnvs.branch` for the current project.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "manifest_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "status",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "trigger",
-            "in": "query",
-            "description": "Optional trigger filter. Accepts:\n  * `latest` — return every row sharing the most recent `trigger_id` for\n    the resolved env; if the most recent row has no `trigger_id` (legacy\n    data), falls back to `DISTINCT ON (image_type, manifest_id)` i.e.\n    the latest row per component.\n  * a UUID — return every row with `trigger_id = \u003Cuuid\u003E`.\nRequires an env filter (`rev` or `project_env_id`). No-op otherwise.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Deployments listed successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListDeploymentsResBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/projects/{project_id}/deployments/{deployment_id}": {
-      "get": {
-        "tags": [
-          "projects"
-        ],
-        "description": "Get a deployment by ID",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "deployment_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Deployment details",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Deployment"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
     "/orgs/{org_id}/projects/{project_id}/envs": {
       "get": {
         "tags": [
           "projects"
         ],
-        "description": "List environments for a project",
+        "description": "List environments for a project. Requires `projects.envs.read` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4571,6 +6117,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -4583,7 +6132,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Create a new environment",
+        "description": "Create a new environment and a matching git branch from the repo default branch. Requires `projects.envs.create` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4616,6 +6165,15 @@
         "responses": {
           "201": {
             "description": "Environment created successfully"
+          },
+          "400": {
+            "description": "Invalid branch name or project has no repository"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "409": {
+            "description": "Environment with that name already exists"
           }
         },
         "security": [
@@ -4630,7 +6188,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Delete an environment",
+        "description": "Delete an environment. Requires `projects.envs.delete` on `projects:{project_id}:envs:{env_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4661,6 +6219,9 @@
         "responses": {
           "204": {
             "description": "Environment deleted successfully"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -4675,7 +6236,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Set or clear the branch for an environment",
+        "description": "Set or clear the branch for an environment. Requires `projects.envs.branch` on `projects:{project_id}:envs:{env_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4716,6 +6277,9 @@
         "responses": {
           "200": {
             "description": "Branch updated successfully"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -4730,7 +6294,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Update environment configuration (CPU, memory, etc.)",
+        "description": "Update environment deploy config (CPU, memory, ephemeral storage, replica count). Requires `projects.envs.deploy_config` on `projects:{project_id}:envs:{env_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4771,6 +6335,9 @@
         "responses": {
           "200": {
             "description": "Configuration updated successfully"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -4785,7 +6352,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Deploy an environment",
+        "description": "Deploy an environment (idempotent on the same rev). Requires `projects.envs.deploy` on `projects:{project_id}:envs:{env_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4826,6 +6393,114 @@
         "responses": {
           "202": {
             "description": "Deployment initiated"
+          },
+          "400": {
+            "description": "Rev does not exist in the project repo"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/deployments": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "description": "List deployments for an environment. Requires `projects.envs.read` on `projects:{project_id}`.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "component_id",
+            "in": "query",
+            "description": "Filter to a single workforce component by its numeric app id\n(the value the SDK reads from `TIMBAL_APP_ID`, also returned\nas `id` on each deployment in the response). Combines with\n`component_uid`: when both are set, rows must match both.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "component_uid",
+            "in": "query",
+            "description": "Filter to a single workforce component by its manifest uid\n(the `_id` field in `timbal.yaml`, also returned as `uid` on\neach deployment in the response). Display name is\ndeliberately not accepted as a filter — it's user-editable\nand not guaranteed unique within a project.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "trigger",
+            "in": "query",
+            "description": "Optional trigger filter. Accepts:\n  * `latest` — return every row sharing the most recent\n    trigger for this env; falls back to the latest row per\n    component when the env has no trigger history.\n  * a UUID — return every row produced by that trigger.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deployments listed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListDeploymentsResBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -4840,7 +6515,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Associate or disassociate a custom domain with an environment",
+        "description": "Attach, replace, or detach the custom domain mapped to an env. Set `domain_id` to assign or reassign; omit (or send null) to unassign. Requires `projects.envs.domain` on `projects:{project_id}:envs:{env_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4881,6 +6556,157 @@
         "responses": {
           "200": {
             "description": "Domain updated successfully"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/envs/{env_id}/logs": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "description": "Fetch runtime logs for the active deployment of a specific component within an env. `component` selects the component kind (`ui` / `api` / `workforce`); when `component=workforce`, supply exactly one of `component_id` or `component_uid` to identify which one. `workforce` covers agent and workflow components interchangeably. Requires `projects.envs.logs` on `projects:{project_id}:envs:{env_id}`. Always returns the active deployment's logs — a per-deployment override is not exposed yet, as logs from superseded deployments are not retained.",
+        "operationId": "handler",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "env_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "component",
+            "in": "query",
+            "description": "Which component's logs to fetch. Shared vocabulary with\n`GET /preview/logs` (which 501s on `workforce`). `workforce`\nhere covers agent and workflow components interchangeably.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Routing selector for the deployable units a Timbal project owns:\nthe project-level frontend (`Ui`), the project-level backend (`Api`),\nand the N workforce components (`Workforce`, keyed on\n`manifest_id`).\n\nUsed as a `?component=` query parameter on every surface that acts\non one component at a time (`GET /preview/logs`,\n`GET /envs/{env}/logs`, etc.). Wire values are lowercase\n(`ui`/`api`/`workforce`). Surfaces that don't apply to a given\nvariant (e.g. previews don't run workforce components today) reject\nwith `501 NotImplemented` instead of forking the schema — clients\nrely on a single shared vocabulary.\n\nDistinct from [`AppType`], which is a **type discriminator** on\nworkforce rows (`Agent` vs `Workflow`) carried in response payloads.\n`ProjectComponent` collapses both into `Workforce` because every\nsurface that *selects* a workforce component keys on `manifest_id`,\nnot on the Agent-vs-Workflow distinction (the underlying log\npipeline, deployment shape, etc. are identical for both). Use\n[`From\u003CAppType\u003E`] to bridge: any workforce type — including the\nforward-compat `AppType::Unknown` catch-all — maps to\n`ProjectComponent::Workforce`.",
+              "enum": [
+                "ui",
+                "api",
+                "workforce"
+              ]
+            }
+          },
+          {
+            "name": "component_id",
+            "in": "query",
+            "description": "Numeric workforce app id (the value the SDK reads from\n`TIMBAL_APP_ID`, also returned as `id` on each deployment in\nthe deployments-list response). XOR with `component_uid`\nwhen `component=workforce`; forbidden for `ui` / `api`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "component_uid",
+            "in": "query",
+            "description": "Workforce manifest uid (the `_id` field in `timbal.yaml`,\nalso returned as `uid` on each deployment in the\ndeployments-list response). XOR with `component_id`.\nDisplay name is deliberately not accepted as a selector —\nit's user-editable and not guaranteed unique within a\nproject.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "description": "ms since epoch. Defaults to `end_time - 1h`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "description": "ms since epoch. Defaults to now.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Defaults to 50.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Pagination cursor from a prior response. Returned only when\ncursor-based pagination is available for the component's\nruntime; ignored otherwise.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Logs fetched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Response"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query (workforce without exactly one of component_id/component_uid, or ui/api with either set)"
+          },
+          "403": {
+            "description": "Insufficient permissions, or no deployment found for the requested component"
           }
         },
         "security": [
@@ -4895,7 +6721,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Query environment metrics",
+        "description": "Query runtime metrics for an environment. Requires `projects.envs.metrics` on `projects:{project_id}:envs:{env_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -4958,6 +6784,9 @@
         "responses": {
           "200": {
             "description": "Metrics data"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -4972,7 +6801,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Stop an environment",
+        "description": "Stop an environment. Destructive. Requires `projects.envs.stop` on `projects:{project_id}:envs:{env_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -5003,6 +6832,9 @@
         "responses": {
           "202": {
             "description": "Stop initiated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -5116,7 +6948,7 @@
           "notifications"
         ],
         "summary": "List project notification rules",
-        "description": "Returns rules scoped to a single **project** (e.g. deployment lifecycle emails). Each rule includes linked channels. Any authenticated project member may call; **POST** on the same path requires **project admin**.",
+        "description": "Returns rules scoped to a single **project** (e.g. deployment lifecycle emails). Each rule includes linked channels. Requires `projects.notification_rules.read` on `projects:{project_id}`.",
         "operationId": "list_project_notification_rules",
         "parameters": [
           {
@@ -5148,14 +6980,7 @@
             }
           },
           "403": {
-            "description": "Caller is not a member of this project",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -5249,14 +7074,7 @@
             }
           },
           "403": {
-            "description": "Caller is not a project admin",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -5272,7 +7090,7 @@
           "notifications"
         ],
         "summary": "Delete a project-scoped notification rule",
-        "description": "Deletes a rule tied to this project. **Project admin** only.",
+        "description": "Deletes a rule tied to this project. Requires `projects.notification_rules.manage` on `projects:{project_id}`.",
         "operationId": "delete_project_notification_rule",
         "parameters": [
           {
@@ -5305,14 +7123,7 @@
             "description": "Rule deleted"
           },
           "403": {
-            "description": "Caller is not a project admin",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorMessage"
-                }
-              }
-            }
+            "description": "Insufficient permissions"
           },
           "404": {
             "description": "Rule not found for this project",
@@ -5523,13 +7334,15 @@
           {
             "name": "component",
             "in": "query",
-            "description": "Which component to fetch logs for.",
+            "description": "Which component to fetch logs for. Preview only runs `ui` and `api`\ntoday; passing `workforce` deserializes successfully but the handler\nreturns `501 NotImplemented` (the wire vocabulary is shared with\n`GET /envs/{env}/logs` so clients can use a single\n[`crate::models::ProjectComponent`] across surfaces).",
             "required": true,
             "schema": {
               "type": "string",
+              "description": "Routing selector for the deployable units a Timbal project owns:\nthe project-level frontend (`Ui`), the project-level backend (`Api`),\nand the N workforce components (`Workforce`, keyed on\n`manifest_id`).\n\nUsed as a `?component=` query parameter on every surface that acts\non one component at a time (`GET /preview/logs`,\n`GET /envs/{env}/logs`, etc.). Wire values are lowercase\n(`ui`/`api`/`workforce`). Surfaces that don't apply to a given\nvariant (e.g. previews don't run workforce components today) reject\nwith `501 NotImplemented` instead of forking the schema — clients\nrely on a single shared vocabulary.\n\nDistinct from [`AppType`], which is a **type discriminator** on\nworkforce rows (`Agent` vs `Workflow`) carried in response payloads.\n`ProjectComponent` collapses both into `Workforce` because every\nsurface that *selects* a workforce component keys on `manifest_id`,\nnot on the Agent-vs-Workflow distinction (the underlying log\npipeline, deployment shape, etc. are identical for both). Use\n[`From\u003CAppType\u003E`] to bridge: any workforce type — including the\nforward-compat `AppType::Unknown` catch-all — maps to\n`ProjectComponent::Workforce`.",
               "enum": [
+                "ui",
                 "api",
-                "ui"
+                "workforce"
               ]
             }
           },
@@ -5589,6 +7402,16 @@
           },
           "404": {
             "description": "No running preview for this branch/component, or log file missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "`component=workforce` not supported on previews yet",
             "content": {
               "application/json": {
                 "schema": {
@@ -5685,7 +7508,7 @@
         "tags": [
           "runs"
         ],
-        "description": "List runs for a specific project",
+        "description": "List runs for a project. Org members see their own runs; `projects.runs.list` is required to list all runs or filter by another user.",
         "operationId": "handler",
         "parameters": [
           {
@@ -5839,6 +7662,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -5853,7 +7679,7 @@
         "tags": [
           "runs"
         ],
-        "description": "Get a single run for a project (by run id or idempotency key)",
+        "description": "Get a single run for a project (by run id or idempotency key). Returned when you initiated the run, or when you hold `projects.runs.list` for the project.",
         "operationId": "handler",
         "parameters": [
           {
@@ -5892,6 +7718,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -5906,7 +7735,7 @@
         "tags": [
           "runs"
         ],
-        "description": "List reactions for a project run (admin only)",
+        "description": "List reactions for a project run. Returned when you initiated the run, or when you hold `projects.runs.list` for the project.",
         "operationId": "handler",
         "parameters": [
           {
@@ -5956,6 +7785,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -5968,7 +7800,7 @@
         "tags": [
           "runs"
         ],
-        "description": "Add a reaction to a project run",
+        "description": "Add a reaction to a project run. Allowed when the caller initiated the run, or when the caller holds `projects.runs.react` for the project.",
         "operationId": "handler",
         "parameters": [
           {
@@ -6010,193 +7842,9 @@
         "responses": {
           "204": {
             "description": "Reaction created"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/projects/{project_id}/users": {
-      "get": {
-        "tags": [
-          "projects"
-        ],
-        "description": "List users for a project",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
           },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Users listed successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListProjectUsersResBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "projects"
-        ],
-        "description": "Add a user to a project",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AddProjectUserReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "User added successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/projects/{project_id}/users/{user_id}": {
-      "delete": {
-        "tags": [
-          "projects"
-        ],
-        "description": "Remove a user from a project",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "user_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "User removed successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "patch": {
-        "tags": [
-          "projects"
-        ],
-        "description": "Update a user's role in a project",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "project_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "user_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EditProjectUserReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "User role updated successfully"
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -6211,7 +7859,7 @@
         "tags": [
           "projects"
         ],
-        "description": "List variables for a project",
+        "description": "List variables for a project. Requires `projects.vars.read` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -6253,6 +7901,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -6265,7 +7916,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Create a new variable",
+        "description": "Create a new variable. Requires `projects.vars.manage` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -6298,6 +7949,9 @@
         "responses": {
           "201": {
             "description": "Variable created successfully"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -6312,7 +7966,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Batch create variables",
+        "description": "Batch create variables. Requires `projects.vars.manage` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -6345,6 +7999,9 @@
         "responses": {
           "201": {
             "description": "Variables created successfully"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -6359,7 +8016,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Get a variable by ID",
+        "description": "Get a variable by ID. Requires `projects.vars.read` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -6397,6 +8054,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -6409,7 +8069,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Delete a variable",
+        "description": "Delete a variable. Requires `projects.vars.manage` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -6440,6 +8100,9 @@
         "responses": {
           "204": {
             "description": "Variable deleted successfully"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -6452,7 +8115,7 @@
         "tags": [
           "projects"
         ],
-        "description": "Update a variable",
+        "description": "Update a variable. Requires `projects.vars.manage` on `projects:{project_id}`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -6493,6 +8156,9 @@
         "responses": {
           "204": {
             "description": "Variable updated successfully"
+          },
+          "403": {
+            "description": "Insufficient permissions"
           }
         },
         "security": [
@@ -6507,7 +8173,7 @@
         "tags": [
           "projects"
         ],
-        "description": "List workforce components for the project. When `rev` is provided the response is scoped to that git branch and includes deployment URLs; when omitted all registered components are returned.",
+        "description": "List workforce components on the git branch given by `rev`.",
         "operationId": "handler",
         "parameters": [
           {
@@ -6529,8 +8195,8 @@
           {
             "name": "rev",
             "in": "query",
-            "description": "Git branch name (for example `main`). When omitted, all registered (non-deleted) workforce components are returned without deployment status.",
-            "required": false,
+            "description": "Git branch name (for example `main`).",
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -6712,6 +8378,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch name (for example `main`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -6849,6 +8524,15 @@
             "name": "workforce",
             "in": "path",
             "description": "Workforce component: numeric id, manifest UUID, or name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rev",
+            "in": "query",
+            "description": "Git branch name (for example `main`).",
             "required": true,
             "schema": {
               "type": "string"
@@ -7248,294 +8932,18 @@
         ]
       }
     },
-    "/orgs/{org_id}/roles": {
+    "/templates": {
       "get": {
         "tags": [
-          "roles"
+          "templates"
         ],
-        "description": "List roles available to an organization. Includes both system roles and any custom roles defined by the organization.",
+        "description": "Platform starter catalog for the CLI and create flows.",
         "operationId": "handler",
         "parameters": [
           {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Roles for the organization",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListOrgRolesResBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "roles"
-        ],
-        "description": "Create a custom role scoped to the organization.",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateRoleReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Role created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RoleDetail"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request body"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "409": {
-            "description": "A role with that name already exists in the organization"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/roles/{role_id}": {
-      "get": {
-        "tags": [
-          "roles"
-        ],
-        "description": "Retrieve a role and the full set of actions it grants.",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "role_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Role for the organization",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RoleDetail"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Role not found"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "roles"
-        ],
-        "description": "Delete a custom role. Fails with 409 if any member currently holds the role unless `force: true`, in which case those members are demoted to the system `user` role before the delete proceeds. System roles cannot be deleted.",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "role_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "description": "Optional — omit entirely or send `{}` for default (non-force) behavior.",
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DeleteRoleBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "Role deleted"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Role not found"
-          },
-          "409": {
-            "description": "Role is still assigned to one or more members",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RoleInUseConflict"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "patch": {
-        "tags": [
-          "roles"
-        ],
-        "description": "Partially update a custom role. System roles cannot be modified.",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "role_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EditRoleReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Role updated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RoleDetail"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request body"
-          },
-          "403": {
-            "description": "Forbidden"
-          },
-          "404": {
-            "description": "Role not found"
-          },
-          "409": {
-            "description": "A role with that name already exists in the organization"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      }
-    },
-    "/orgs/{org_id}/users": {
-      "get": {
-        "tags": [
-          "orgs"
-        ],
-        "description": "List users in an organization",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "q",
+            "name": "type",
             "in": "query",
-            "description": "Optional search query to filter users by name",
+            "description": "Filter by template type (`ui`, `api`, `agent`, `workflow`, `project`).",
             "required": false,
             "schema": {
               "type": [
@@ -7545,9 +8953,9 @@
             }
           },
           {
-            "name": "page_token",
+            "name": "slug",
             "in": "query",
-            "description": "Page token for pagination",
+            "description": "Filter by slug (e.g. `ui-simple-chat`).",
             "required": false,
             "schema": {
               "type": [
@@ -7559,132 +8967,16 @@
         ],
         "responses": {
           "200": {
-            "description": "Users listed successfully",
+            "description": "Active platform templates",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ListOrgUsersResBody"
+                  "$ref": "#/components/schemas/ListTemplatesResBody"
                 }
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "orgs"
-        ],
-        "description": "Invite a user to an organization",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/InviteOrgUserReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "User invited successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "orgs"
-        ],
-        "description": "Remove a user from an organization",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RemoveOrgUserReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "User removed successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
-      },
-      "patch": {
-        "tags": [
-          "orgs"
-        ],
-        "description": "Update a user's role in an organization",
-        "operationId": "handler",
-        "parameters": [
-          {
-            "name": "org_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EditOrgUserReqBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "204": {
-            "description": "User role updated successfully"
-          }
-        },
-        "security": [
-          {
-            "bearer_auth": []
-          }
-        ]
+        }
       }
     }
   },
@@ -7819,36 +9111,61 @@
           }
         }
       },
-      "Action": {
-        "type": "string",
-        "description": "A domain action a role can grant. Action keys follow\n`\u003Cscope\u003E.\u003Cresource\u003E.\u003Cverb\u003E` (e.g. `org.project.create`).",
-        "enum": [
-          "org.project.create",
-          "org.user.view",
-          "org.user.invite",
-          "org.user.remove",
-          "org.user.role.update",
-          "org.billing.manage",
-          "org.domain.view",
-          "org.domain.manage",
-          "org.kb.create",
-          "org.profile.update",
-          "org.role.manage",
-          "org.notification.channel.view",
-          "org.notification.channel.manage",
-          "org.notification.rule.view",
-          "org.notification.rule.manage"
-        ]
-      },
-      "AddProjectUserReqBody": {
+      "ActionInfo": {
         "type": "object",
         "required": [
-          "user_id"
+          "key",
+          "label",
+          "description"
         ],
         "properties": {
-          "user_id": {
-            "type": "integer",
-            "format": "int64"
+          "description": {
+            "type": "string",
+            "description": "One-sentence description for tooltips / role-builder copy."
+          },
+          "key": {
+            "type": "string",
+            "description": "Stable action key — pass as `RoleGrants.action` when authoring a\ncustom role."
+          },
+          "label": {
+            "type": "string",
+            "description": "Short, human-readable name for UI display."
+          },
+          "resource": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ActionResourceInfo",
+                "description": "`null` for actions that don't target a sub-resource (e.g.\n`users.read`, `billing.manage`); `RoleGrants.resource` MUST be\n`null` for these. Otherwise the resource shape spec."
+              }
+            ]
+          }
+        }
+      },
+      "ActionResourceInfo": {
+        "type": "object",
+        "required": [
+          "kind",
+          "segments",
+          "template"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "Stable wire name: `project`, `project_env`, `integration`, etc.\n`integration`. Discriminator the UI may key off when it wants a\nspecific picker variant."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered list of segment-kind names (e.g. `[\"projects\", \"envs\"]`).\n`segments.len()` is the number of `{id}` slots in `template`."
+          },
+          "template": {
+            "type": "string",
+            "description": "Canonical example path with `{id}` placeholders (e.g.\n`\"projects:{id}:envs:{id}\"`). Per-segment `*` wildcards are\naccepted by the evaluator."
           }
         }
       },
@@ -7861,13 +9178,215 @@
           "unknown"
         ]
       },
-      "AppTypeInput": {
-        "type": "string",
-        "description": "Strict input variant of [`AppType`] for API request bodies (e.g. `ProjectOrigin::Scratch`).\nRejects unknown strings and the literal `\"unknown\"` at deserialization (→ 400).",
-        "enum": [
-          "agent",
-          "workflow"
-        ]
+      "AttachmentReq": {
+        "type": "object",
+        "description": "A single (role, scope) attachment in the desired state.\n\n`scope` is an optional hierarchical resource path (`projects:42`,\n`projects:42:envs:5`). `null` / omitted = unscoped (the role's grants\napply as-written). The same role may appear multiple times with\ndifferent scopes — the unique key on `OrgUserRoles` is\n`(org, user, role, scope) NULLS NOT DISTINCT`.",
+        "required": [
+          "role_id"
+        ],
+        "properties": {
+          "role_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BTreeMap": {
+        "type": "object",
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "Replace the column value with a SQL literal expression (e.g. `'***'`).",
+              "required": [
+                "value",
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "redact"
+                  ]
+                },
+                "value": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "description": "Non-keyed hash. Use `pseudonymize` for stronger guarantees.",
+              "required": [
+                "algorithm",
+                "type"
+              ],
+              "properties": {
+                "algorithm": {
+                  "$ref": "#/components/schemas/HashAlg"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "hash"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "description": "HMAC-keyed deterministic pseudonym. Stable across queries that share `key_ref`.",
+              "required": [
+                "key_ref",
+                "algorithm",
+                "type"
+              ],
+              "properties": {
+                "algorithm": {
+                  "$ref": "#/components/schemas/HashAlg"
+                },
+                "key_ref": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "pseudonymize"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "description": "Truncate a string column to `length` characters, optionally pad-suffixed.",
+              "required": [
+                "length",
+                "type"
+              ],
+              "properties": {
+                "length": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                },
+                "pad": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "truncate"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "description": "Format-preserving redaction of a payment account number.",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "pan_last4"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "description": "Email with the local part hidden (`***@example.com`).",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "email_domain_only"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "description": "Generalize a date or timestamp to the start of the given unit.",
+              "required": [
+                "unit",
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "date_trunc"
+                  ]
+                },
+                "unit": {
+                  "$ref": "#/components/schemas/DateTruncUnit"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "description": "Cap a numeric column at a maximum value.",
+              "required": [
+                "max",
+                "type"
+              ],
+              "properties": {
+                "max": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "cap"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "description": "Power-user pattern replacement.",
+              "required": [
+                "pattern",
+                "replacement",
+                "type"
+              ],
+              "properties": {
+                "pattern": {
+                  "type": "string"
+                },
+                "replacement": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "regexp_replace"
+                  ]
+                }
+              }
+            }
+          ],
+          "description": "Per-column transformation applied to query results when this rule matches.\n\nThe full vocabulary is reserved at the API boundary so future deployments\ncan add masks without breaking existing clients. Only `redact`, `hash`,\nand `truncate` are accepted by the current release; the others return\n`400` until enforcement ships."
+        },
+        "propertyNames": {
+          "type": "string"
+        }
       },
       "BatchCreateVarsReqBody": {
         "type": "object",
@@ -7920,6 +9439,152 @@
           "day"
         ]
       },
+      "Budget": {
+        "type": "object",
+        "description": "Credit budget on a project (shared pool) or role (per attached user).",
+        "required": [
+          "budget_type",
+          "limit_credits"
+        ],
+        "properties": {
+          "budget_type": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "current_credits": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "limit_credits": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "period_end": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "period_start": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "project_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "project_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "role_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "BudgetListBody": {
+        "type": "object",
+        "required": [
+          "budgets"
+        ],
+        "properties": {
+          "budgets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Budget"
+            }
+          }
+        }
+      },
+      "BudgetPatchBody": {
+        "type": "object",
+        "description": "Partial budget update — merge rows without touching other configured targets.",
+        "properties": {
+          "budgets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BudgetPatchInput"
+            }
+          }
+        }
+      },
+      "BudgetPatchInput": {
+        "type": "object",
+        "description": "One budget change in a PATCH merge. `limit_credits: null` removes the budget.",
+        "required": [
+          "budget_type"
+        ],
+        "properties": {
+          "budget_type": {
+            "type": "string",
+            "description": "`project` or `role`."
+          },
+          "limit_credits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When null, removes the budget for this target. When set, must be \u003E 0."
+          },
+          "project_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "role_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
       "ChannelAction": {
         "type": "string",
         "description": "How the rule was wired to `NotificationChannels` for this create call.",
@@ -7928,6 +9593,128 @@
           "reused",
           "created"
         ]
+      },
+      "CheckInput": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Action key (e.g. `projects.envs.deploy`). Discover keys via\n`GET /orgs/{org_id}/iam/actions`. Unknown keys → 422."
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Concrete resource path for actions whose `resource.kind != \"none\"`\n(e.g. `projects:7:envs:3`). MUST be omitted / null for `none`-kind\nactions. Wildcards (`*`) are rejected — the simulator answers for\na concrete target, not a pattern."
+          }
+        }
+      },
+      "CheckReqBody": {
+        "type": "object",
+        "required": [
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckInput"
+            },
+            "description": "`(action, resource?)` tuples to evaluate. Capped at 50. An empty\nlist is rejected — almost always a client bug."
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Target user to evaluate. Defaults to the caller. Passing another\nuser's id requires the `users.read` grant on this org."
+          }
+        }
+      },
+      "CheckResBody": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "results"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckResult"
+            },
+            "description": "One result per input check, in input order."
+          },
+          "user_id": {
+            "type": "string",
+            "description": "Echoes the evaluated user id (input or caller)."
+          }
+        }
+      },
+      "CheckResult": {
+        "type": "object",
+        "required": [
+          "action",
+          "decision",
+          "matched_allows",
+          "matched_denies"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/Decision"
+          },
+          "matched_allows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GrantAttribution"
+            },
+            "description": "Grants that matched as `allow`. Empty for `no_allow` / `superadmin`."
+          },
+          "matched_denies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GrantAttribution"
+            },
+            "description": "Grants that matched as `deny`. Non-empty only for `deny_overrides`."
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CloudWatchLogEvent": {
+        "type": "object",
+        "description": "A single log event from CloudWatch Logs.",
+        "required": [
+          "timestamp",
+          "message",
+          "log_stream"
+        ],
+        "properties": {
+          "log_stream": {
+            "type": "string",
+            "description": "The log stream name this event came from."
+          },
+          "message": {
+            "type": "string",
+            "description": "The log message content."
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Timestamp in milliseconds since epoch."
+          }
+        }
       },
       "ComposeEffort": {
         "type": "string",
@@ -8013,48 +9800,6 @@
             "description": "Existing session ID to continue a conversation. Omit to start a new session."
           }
         }
-      },
-      "ConnectToProject": {
-        "oneOf": [
-          {
-            "type": "object",
-            "required": [
-              "id",
-              "type"
-            ],
-            "properties": {
-              "id": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "kb"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "id",
-              "type"
-            ],
-            "properties": {
-              "id": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "integration"
-                ]
-              }
-            }
-          }
-        ]
       },
       "Content": {
         "oneOf": [
@@ -8215,6 +9960,116 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "CreateK2PolicyAssignmentRequest": {
+        "type": "object",
+        "required": [
+          "role_id"
+        ],
+        "properties": {
+          "combine_mode": {
+            "$ref": "#/components/schemas/K2PolicyCombineMode"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "role_id": {
+            "type": "string"
+          },
+          "valid_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "valid_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "CreateK2PolicyRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "row_filter_dsl"
+        ],
+        "properties": {
+          "audit_level": {
+            "$ref": "#/components/schemas/K2PolicyAuditLevel"
+          },
+          "break_glass_allowed": {
+            "type": "boolean"
+          },
+          "column_masks": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BTreeMap"
+              }
+            ]
+          },
+          "compliance_tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Defaults to true; set false to author the rule in a draft state."
+          },
+          "external_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "type": "object",
+            "description": "Free-form key/value labels."
+          },
+          "name": {
+            "type": "string",
+            "description": "Operator-facing label."
+          },
+          "purpose_tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "row_filter_dsl": {
+            "type": "object",
+            "description": "Row predicate JSON. Stored opaquely in this release."
+          },
+          "source": {
+            "$ref": "#/components/schemas/K2PolicySource"
+          },
+          "table_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Target table within the knowledge base. Omit to apply to every table."
           }
         }
       },
@@ -8422,23 +10277,22 @@
           "name"
         ],
         "properties": {
-          "actions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Action"
-            },
-            "description": "Domain actions this role grants. Unknown action keys fail\ndeserialization (400). Empty list is allowed."
-          },
           "description": {
             "type": [
               "string",
               "null"
-            ],
-            "description": "Optional human-readable description."
+            ]
+          },
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoleGrant"
+            },
+            "description": "Grants this role carries. Empty list is allowed (creates a no-op\nrole; admin can extend it later)."
           },
           "name": {
             "type": "string",
-            "description": "Role name. Must be unique within the organization."
+            "description": "Role name. Must be unique within the org. Reserved system names\n(`admin`, `developer`, `billing`, `member`, `user`) are rejected."
           }
         }
       },
@@ -8594,6 +10448,26 @@
           }
         }
       },
+      "DateTruncUnit": {
+        "type": "string",
+        "description": "Granularity for the `date_trunc` mask.",
+        "enum": [
+          "year",
+          "quarter",
+          "month",
+          "week",
+          "day"
+        ]
+      },
+      "Decision": {
+        "type": "string",
+        "enum": [
+          "allow",
+          "deny_overrides",
+          "no_allow",
+          "superadmin"
+        ]
+      },
       "DeleteChannelBody": {
         "type": "object",
         "properties": {
@@ -8603,18 +10477,6 @@
               "null"
             ],
             "description": "When `true`, delete even if rules reference this channel (cascading unlink)."
-          }
-        }
-      },
-      "DeleteRoleBody": {
-        "type": "object",
-        "properties": {
-          "force": {
-            "type": [
-              "boolean",
-              "null"
-            ],
-            "description": "When `true`, demote any members currently holding this role to the\nsystem `user` role and proceed with the delete."
           }
         }
       },
@@ -8641,8 +10503,9 @@
           }
         }
       },
-      "Deployment": {
+      "DeploymentDetail": {
         "type": "object",
+        "description": "Public-API representation of a single deployment row, returned by the\nenv-scoped deployments list endpoint. Flattens the runtime config\n(cpu/memory/...) inline rather than nesting under `config` — frontend\nconsumes the fields directly.",
         "required": [
           "id",
           "type",
@@ -8729,7 +10592,7 @@
             ]
           },
           "target": {
-            "$ref": "#/components/schemas/Target"
+            "$ref": "#/components/schemas/DeploymentTarget"
           },
           "type": {
             "type": "string"
@@ -8737,6 +10600,39 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "DeploymentTarget": {
+        "type": "object",
+        "description": "Image/version pointer embedded in [`DeploymentDetail::target`]. Distinct\nfrom [`crate::deployments::models::DeployTarget`] (the domain-layer spec\ncarrying image URIs / platform). This shape is the public-API view of\nwhat a deployment is *of*.",
+        "required": [
+          "type",
+          "id"
+        ],
+        "properties": {
+          "commit": {
+
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "manifest_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          },
+          "version_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },
@@ -8902,44 +10798,10 @@
           }
         }
       },
-      "EditOrgUserReqBody": {
-        "type": "object",
-        "required": [
-          "email"
-        ],
-        "properties": {
-          "email": {
-            "type": "string",
-            "description": "User's email address"
-          },
-          "role": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "System role name. Standard values are `admin`, `developer`,\n`billing`, and `user`. Mutually exclusive with `role_id`.",
-            "example": "user"
-          },
-          "role_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Role identifier — either a system role or a custom role defined\nin this organization. Mutually exclusive with `role`."
-          }
-        }
-      },
       "EditProjectReqBody": {
         "type": "object",
         "properties": {
           "banner_url": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "default_role": {
             "type": [
               "string",
               "null"
@@ -8971,30 +10833,9 @@
           }
         }
       },
-      "EditProjectUserReqBody": {
-        "type": "object",
-        "required": [
-          "role"
-        ],
-        "properties": {
-          "role": {
-            "type": "string"
-          }
-        }
-      },
       "EditRoleReqBody": {
         "type": "object",
         "properties": {
-          "actions": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "$ref": "#/components/schemas/Action"
-            },
-            "description": "Replace the full action grant set. Omitted fields are left unchanged."
-          },
           "description": {
             "type": [
               "string",
@@ -9002,12 +10843,74 @@
             ],
             "description": "Human-readable description. Pass `null` to clear."
           },
+          "grants": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RoleGrant"
+            },
+            "description": "Full replacement of the role's grant set."
+          },
           "name": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Role name. Must remain unique within the organization."
+            "description": "New role name. Reserved system names rejected."
+          }
+        }
+      },
+      "EffectiveGrant": {
+        "type": "object",
+        "required": [
+          "effect",
+          "action",
+          "via"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "effect": {
+            "$ref": "#/components/schemas/GrantEffect"
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Scope-intersected resource — the pattern the live evaluator would\nmatch against. `null` for `none`-kind actions."
+          },
+          "via": {
+            "$ref": "#/components/schemas/GrantAttribution",
+            "description": "Attribution: which role + which attachment scope + the original\ngrant resource (pre-intersection)."
+          }
+        }
+      },
+      "EffectiveGrantsResBody": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "is_superadmin",
+          "grants"
+        ],
+        "properties": {
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectiveGrant"
+            },
+            "description": "One row per `(attachment × grant)` pair, ordered for stable\nrendering. May contain duplicates on `(effect, action, resource)`\nwhen multiple roles contribute the same grant — `via` distinguishes\nthem."
+          },
+          "is_superadmin": {
+            "type": "boolean",
+            "description": "`true` if the target is a platform superadmin. RBAC is bypassed\nfor every action regardless of `grants[]` (which will be empty\nunless a superadmin happens to also have org role attachments)."
+          },
+          "user_id": {
+            "type": "string",
+            "description": "Echoes the target user id."
           }
         }
       },
@@ -9190,6 +11093,50 @@
           }
         }
       },
+      "GrantAttribution": {
+        "type": "object",
+        "description": "Attribution for a single grant: which role contributed it, what\nattachment-level scope was in effect, and the resource pattern as\nauthored on the role (pre-scope-intersection).\n\nShared by `POST /iam/check` (matched_allows / matched_denies) and\n`GET /iam/users/{id}/effective-grants` (the `via` field on each row).\n\nTo derive the effective resource a grant matched against, compute\n`resource_pattern_intersect(grant_resource, attachment_scope)`. When\n`attachment_scope` is `null`, the effective resource equals\n`grant_resource`.",
+        "required": [
+          "role_id",
+          "role_name"
+        ],
+        "properties": {
+          "attachment_scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "grant_resource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role_id": {
+            "type": "string"
+          },
+          "role_name": {
+            "type": "string"
+          }
+        }
+      },
+      "GrantEffect": {
+        "type": "string",
+        "description": "Effect of a [`RoleGrant`]. `deny` wins at eval time.",
+        "enum": [
+          "allow",
+          "deny"
+        ]
+      },
+      "HashAlg": {
+        "type": "string",
+        "description": "Hash family for `hash` / `pseudonymize` masks.",
+        "enum": [
+          "sha256",
+          "sha512"
+        ]
+      },
       "InsertK2ChunkRequest": {
         "type": "object",
         "required": [
@@ -9270,11 +11217,19 @@
       "InviteOrgUserReqBody": {
         "type": "object",
         "required": [
-          "email"
+          "emails"
         ],
         "properties": {
-          "email": {
-            "type": "string"
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Email addresses to invite to the organization."
+          },
+          "send_email": {
+            "type": "boolean",
+            "description": "Whether to send an invitation email to each invitee. Defaults to `true`."
           }
         }
       },
@@ -9516,6 +11471,7 @@
           "vector_count",
           "index_count",
           "auto_processing_enabled",
+          "governance_enforced",
           "backup_enabled",
           "created_at",
           "updated_at"
@@ -9593,6 +11549,10 @@
               "string",
               "null"
             ]
+          },
+          "governance_enforced": {
+            "type": "boolean",
+            "description": "When true, K2 queries are enforced against active governance policies (rewritten or rejected). When false, governance is audit-only. Toggle via `PUT …/k2/{kb_id}/policies/enforcement` (`k2.policies.manage`)."
           },
           "id": {
             "type": "integer",
@@ -9865,6 +11825,18 @@
           }
         }
       },
+      "K2GovernanceEnforcementResponse": {
+        "type": "object",
+        "description": "Whether governance policies are enforced on queries (vs audit-only).",
+        "required": [
+          "governance_enforced"
+        ],
+        "properties": {
+          "governance_enforced": {
+            "type": "boolean"
+          }
+        }
+      },
       "K2Index": {
         "type": "object",
         "required": [
@@ -9890,6 +11862,222 @@
             "type": "string"
           }
         }
+      },
+      "K2Policy": {
+        "type": "object",
+        "required": [
+          "id",
+          "kb_id",
+          "name",
+          "enabled",
+          "row_filter_dsl",
+          "compliance_tags",
+          "purpose_tags",
+          "audit_level",
+          "break_glass_allowed",
+          "source",
+          "labels",
+          "revision",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "audit_level": {
+            "$ref": "#/components/schemas/K2PolicyAuditLevel"
+          },
+          "break_glass_allowed": {
+            "type": "boolean",
+            "description": "Whether sessions may bypass the rule via a logged escalation."
+          },
+          "column_masks": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BTreeMap",
+                "description": "Per-column transformation map. Null means no masks.\n`{\"col\": {\"type\":\"redact\"}}` is the canonical \"hide this column\"."
+              }
+            ]
+          },
+          "compliance_tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Compliance classifications (e.g. `hipaa.phi`, `pci.pan`)."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "When false, the rule body is inactive everywhere it is bound."
+          },
+          "external_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kb_id": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "object",
+            "description": "Free-form key/value labels."
+          },
+          "name": {
+            "type": "string",
+            "description": "Operator-facing label."
+          },
+          "purpose_tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Purpose-of-use bindings (e.g. `treatment`, `research`)."
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Optimistic-concurrency token. Echo back via `If-Match` on mutations."
+          },
+          "row_filter_dsl": {
+            "type": "object",
+            "description": "Row predicate authored as JSON. Stored opaquely in this release."
+          },
+          "source": {
+            "$ref": "#/components/schemas/K2PolicySource"
+          },
+          "table_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Target table within the knowledge base. Null applies to every table."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "K2PolicyAssignment": {
+        "type": "object",
+        "required": [
+          "id",
+          "policy_id",
+          "role_id",
+          "enabled",
+          "priority",
+          "combine_mode",
+          "granted_at",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "combine_mode": {
+            "$ref": "#/components/schemas/K2PolicyCombineMode"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "granted_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "granted_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "policy_id": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "revoked_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "valid_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "valid_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "K2PolicyAuditLevel": {
+        "type": "string",
+        "description": "Audit verbosity for matches against this rule.",
+        "enum": [
+          "none",
+          "normal",
+          "verbose"
+        ]
+      },
+      "K2PolicyCombineMode": {
+        "type": "string",
+        "description": "Postgres-RLS-style combination semantic for a policy binding.",
+        "enum": [
+          "restrictive",
+          "permissive"
+        ]
+      },
+      "K2PolicySource": {
+        "type": "string",
+        "description": "Provenance of the rule.",
+        "enum": [
+          "manual",
+          "imported",
+          "derived"
+        ]
       },
       "K2Preview": {
         "type": "object",
@@ -10203,6 +12391,21 @@
           }
         }
       },
+      "ListActionsResBody": {
+        "type": "object",
+        "required": [
+          "actions"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActionInfo"
+            },
+            "description": "Every action this org may grant on a role, in catalog order. Group\non the client by the first dot-segment of `key` (e.g. `users.*` →\n\"Users\", `notification_channels.*` → \"Notification channels\")."
+          }
+        }
+      },
       "ListBackupsResponse": {
         "type": "object",
         "required": [
@@ -10220,20 +12423,6 @@
               "string",
               "null"
             ]
-          }
-        }
-      },
-      "ListConnectionsResBody": {
-        "type": "object",
-        "required": [
-          "connections"
-        ],
-        "properties": {
-          "connections": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ProjectConnection"
-            }
           }
         }
       },
@@ -10260,7 +12449,7 @@
           "deployments": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Deployment"
+              "$ref": "#/components/schemas/DeploymentDetail"
             }
           }
         }
@@ -10347,6 +12536,46 @@
           }
         }
       },
+      "ListK2PoliciesResponse": {
+        "type": "object",
+        "required": [
+          "policies"
+        ],
+        "properties": {
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/K2Policy"
+            }
+          }
+        }
+      },
+      "ListK2PolicyAssignmentsResponse": {
+        "type": "object",
+        "required": [
+          "assignments"
+        ],
+        "properties": {
+          "assignments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/K2PolicyAssignment"
+            }
+          },
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ListK2Response": {
         "type": "object",
         "required": [
@@ -10423,7 +12652,7 @@
             "items": {
               "$ref": "#/components/schemas/RolePreview"
             },
-            "description": "Roles available to this organization, system roles first."
+            "description": "Roles available to this organization — system rows first, then\ncustom rows alphabetically by name."
           }
         }
       },
@@ -10512,20 +12741,6 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NotificationRuleOut"
-            }
-          }
-        }
-      },
-      "ListProjectUsersResBody": {
-        "type": "object",
-        "required": [
-          "users"
-        ],
-        "properties": {
-          "users": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/UserWithRole"
             }
           }
         }
@@ -10624,6 +12839,20 @@
           }
         }
       },
+      "ListTemplatesResBody": {
+        "type": "object",
+        "required": [
+          "templates"
+        ],
+        "properties": {
+          "templates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Template"
+            }
+          }
+        }
+      },
       "ListVarsResBody": {
         "type": "object",
         "required": [
@@ -10640,7 +12869,7 @@
       },
       "ListWorkforceResBody": {
         "type": "object",
-        "description": "Workforce components registered for the project. The `url` field is set only when the component has a **running** deployment for the git **branch** you queried (`rev`).",
+        "description": "Workforce components on the git branch given by `rev`. The `url` field is set only when the component has a **running** deployment for that branch.",
         "required": [
           "workforce"
         ],
@@ -10778,6 +13007,7 @@
           "plan",
           "plan_metadata",
           "overage_enabled",
+          "billing_suspended",
           "plan_cancel_at_period_end",
           "created_at",
           "role"
@@ -10788,6 +13018,10 @@
               "string",
               "null"
             ]
+          },
+          "billing_suspended": {
+            "type": "boolean",
+            "description": "`true` when billing is suspended because a finalized invoice charge\nfailed and is still unpaid. While suspended, credit-consuming requests\nare blocked until the outstanding invoice is paid."
           },
           "contact_email": {
             "type": [
@@ -11030,7 +13264,8 @@
         "type": "object",
         "required": [
           "email",
-          "role"
+          "role",
+          "roles"
         ],
         "properties": {
           "email": {
@@ -11060,7 +13295,14 @@
           },
           "role": {
             "type": "string",
-            "description": "User's role in the organization"
+            "description": "Legacy single-role text. Kept for backward compatibility; new\nintegrations should rely on `roles`."
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RolePreview"
+            },
+            "description": "Roles currently attached to this membership. Empty for pending\ninvites and for members with no role attachments."
           }
         }
       },
@@ -11094,6 +13336,104 @@
             ],
             "format": "int32",
             "description": "Tri-state: omit to leave unchanged, send `null` to clear, send an\ninteger to set."
+          }
+        }
+      },
+      "PatchK2PolicyRequest": {
+        "type": "object",
+        "properties": {
+          "audit_level": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/K2PolicyAuditLevel"
+              }
+            ]
+          },
+          "break_glass_allowed": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "column_masks": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BTreeMap",
+                "description": "Omit to leave unchanged; send `null` to clear all masks."
+              }
+            ]
+          },
+          "compliance_tags": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Omit to leave unchanged; send `null` to clear."
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "external_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "purpose_tags": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "row_filter_dsl": {
+            "description": "Omit to leave unchanged; send `null` to clear the row filter."
+          },
+          "source": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/K2PolicySource"
+              }
+            ]
+          },
+          "table_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Omit to leave unchanged; send `null` to apply to every table."
           }
         }
       },
@@ -11320,47 +13660,6 @@
           }
         }
       },
-      "ProjectConnection": {
-        "type": "object",
-        "required": [
-          "id",
-          "type",
-          "resource_id",
-          "resource_data",
-          "created_at",
-          "updated_at"
-        ],
-        "properties": {
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "resource_data": {
-
-          },
-          "resource_id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "resource_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "type": {
-            "type": "string"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        }
-      },
       "ProjectDetail": {
         "type": "object",
         "required": [
@@ -11574,16 +13873,15 @@
           {
             "type": "object",
             "required": [
-              "has_ui",
-              "app_type",
               "type"
             ],
             "properties": {
-              "app_type": {
-                "$ref": "#/components/schemas/AppTypeInput"
-              },
-              "has_ui": {
-                "type": "boolean"
+              "agents": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Agent directory names to scaffold under `workforce/`. Omit for an\nempty workforce directory."
               },
               "kb_id": {
                 "type": [
@@ -11598,20 +13896,17 @@
                 "enum": [
                   "Scratch"
                 ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "type"
-            ],
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "Blank"
-                ]
+              },
+              "with_ui": {
+                "type": "boolean",
+                "description": "Include the default web UI scaffold. Requires at least one entry in\n`agents` (workflows alone do not use the web UI)."
+              },
+              "workflows": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Workflow directory names to scaffold under `workforce/`."
               }
             }
           }
@@ -11851,6 +14146,98 @@
           }
         }
       },
+      "ReplaceRolesReqBody": {
+        "type": "object",
+        "required": [
+          "attachments"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttachmentReq"
+            },
+            "description": "Desired attachment set for this member. Attachments present today\nbut not in the list are detached; new ones are attached. An empty\nlist detaches everything. Duplicate `(role_id, scope)` pairs are\nignored."
+          }
+        }
+      },
+      "ReqBody": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "Credential kind. Defaults to `api_key`."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name (max 64 characters, unique per user)."
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Organization to bind the credential to. Set alone for an org-only key\n(full access within that org); required when `scope` is set. Omit with\n`scope` for a full-access key across all your orgs."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IAM scope path (e.g. `projects:42`) restricting the credential to one\nresource subtree. Requires `org_id`. Omit for an org-only or full-access key."
+          }
+        }
+      },
+      "ResBody": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "$ref": "#/components/schemas/Token"
+          }
+        }
+      },
+      "Response": {
+        "type": "object",
+        "description": "Resolved window echoed back so the client can paginate / refresh\nwithout re-deriving the defaults the server applied.",
+        "required": [
+          "events",
+          "start_time",
+          "end_time",
+          "limit"
+        ],
+        "properties": {
+          "end_time": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloudWatchLogEvent"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_time": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "Role": {
         "type": "string",
         "enum": [
@@ -11861,23 +14248,16 @@
       },
       "RoleDetail": {
         "type": "object",
-        "description": "A role with its full set of granted actions.",
+        "description": "A role with its full grant set.",
         "required": [
           "id",
           "name",
           "source",
-          "actions",
+          "grants",
           "created_at",
           "updated_at"
         ],
         "properties": {
-          "actions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Action"
-            },
-            "description": "Domain actions this role grants. May be empty."
-          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -11886,16 +14266,20 @@
             "type": [
               "string",
               "null"
-            ],
-            "description": "Optional human-readable description."
+            ]
+          },
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoleGrant"
+            },
+            "description": "Domain grants this role carries. May be empty."
           },
           "id": {
-            "type": "string",
-            "description": "Stable role identifier. Pass as `role_id` to\n`PATCH /orgs/{org_id}/users` to assign this role to a member."
+            "type": "string"
           },
           "name": {
-            "type": "string",
-            "description": "Role name. Unique within the organization (and globally for system roles)."
+            "type": "string"
           },
           "source": {
             "$ref": "#/components/schemas/RoleSource"
@@ -11906,42 +14290,58 @@
           }
         }
       },
+      "RoleGrant": {
+        "type": "object",
+        "description": "A single grant on a role — `(effect, action, resource?, condition?)`.\n\n`resource` is `None` for `ResourceKind::None` actions (`users.read`),\nor a hierarchical path like `projects:42:envs:5` (or `projects:42:envs:*`)\nfor typed actions.\n\n`condition` is opaque JSON reserved for future ABAC; ignored by the\nevaluator in v1, accepted and stored as-is by writes.",
+        "required": [
+          "effect",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "condition": {
+
+          },
+          "effect": {
+            "$ref": "#/components/schemas/GrantEffect"
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "RoleInUseConflict": {
         "type": "object",
-        "description": "Returned when `DELETE /orgs/{org_id}/roles/{role_id}` is called while the\nrole is still assigned and `force` is not set.",
+        "description": "Returned when `DELETE /orgs/{org_id}/iam/roles/{role_id}` is called while\nthe role is still attached to one or more members.",
         "required": [
           "code",
           "message",
-          "user_ids",
-          "pending_invite_count"
+          "user_ids"
         ],
         "properties": {
           "code": {
-            "type": "string",
-            "description": "Machine-readable error code."
+            "type": "string"
           },
           "message": {
-            "type": "string",
-            "description": "Human-readable description."
-          },
-          "pending_invite_count": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Pending invites (`user_id` not yet set) still pointing at this role.",
-            "minimum": 0
+            "type": "string"
           },
           "user_ids": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Accepted members currently holding this role."
+            "description": "Members currently holding this role via `OrgUserRoles`."
           }
         }
       },
       "RolePreview": {
         "type": "object",
-        "description": "Compact role record returned by listing endpoints. Fetch a single\nrole to retrieve the full action grant set.",
+        "description": "Compact role record returned by listing endpoints. Fetch a single\nrole to retrieve the full grant set.",
         "required": [
           "id",
           "name",
@@ -11958,16 +14358,14 @@
             "type": [
               "string",
               "null"
-            ],
-            "description": "Optional human-readable description."
+            ]
           },
           "id": {
-            "type": "string",
-            "description": "Stable role identifier. Pass as `role_id` to\n`PATCH /orgs/{org_id}/users` to assign this role to a member."
+            "type": "string"
           },
           "name": {
             "type": "string",
-            "description": "Role name. Unique within the organization (and globally for system roles)."
+            "description": "Role name. Unique per `(org_id)` for custom roles, globally unique\nfor system roles."
           },
           "source": {
             "$ref": "#/components/schemas/RoleSource"
@@ -12171,6 +14569,18 @@
           }
         }
       },
+      "SetK2GovernanceEnforcementRequest": {
+        "type": "object",
+        "required": [
+          "governance_enforced"
+        ],
+        "properties": {
+          "governance_enforced": {
+            "type": "boolean",
+            "description": "When true, queries are rewritten to satisfy active policies or rejected\nif they cannot be safely constrained. When false, governance is audit-only."
+          }
+        }
+      },
       "StartPreviewRequest": {
         "type": "object",
         "required": [
@@ -12196,38 +14606,6 @@
           "rev": {
             "type": "string",
             "description": "Git branch name you used when starting the preview (for example `main`)."
-          }
-        }
-      },
-      "Target": {
-        "type": "object",
-        "required": [
-          "type",
-          "id"
-        ],
-        "properties": {
-          "commit": {
-
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "manifest_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "type": {
-            "type": "string"
-          },
-          "version_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
           }
         }
       },
@@ -12269,6 +14647,128 @@
           "url": {
             "type": "string",
             "description": "Public URL where the file can be downloaded until it expires."
+          }
+        }
+      },
+      "Template": {
+        "type": "object",
+        "required": [
+          "id",
+          "slug",
+          "type",
+          "name",
+          "github_ref",
+          "target_path",
+          "is_default"
+        ],
+        "properties": {
+          "banner_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "github_ref": {
+            "type": "string",
+            "description": "Git branch or tag name used when building `tarball_url`."
+          },
+          "github_repo_full_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GitHub `owner/repo` for blueprint templates. Omitted for embedded scaffolds."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "When true, this row is the default pick for its `type` within the catalog scope."
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string",
+            "description": "Stable identifier for CLI and UI selection (e.g. `ui-simple-chat`)."
+          },
+          "tarball_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "GitHub archive tarball URL derived from `github_repo_full_name` and `github_ref`."
+          },
+          "target_path": {
+            "type": "string",
+            "description": "Project-relative directory to extract into (e.g. `ui`, `api`, `.`)."
+          },
+          "type": {
+            "type": "string",
+            "description": "Starter category: `ui`, `api`, `agent`, `workflow`, or `project`."
+          }
+        }
+      },
+      "Token": {
+        "type": "object",
+        "description": "User credential (API key or future kinds).",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "hint",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time as epoch milliseconds."
+          },
+          "hint": {
+            "type": "string",
+            "description": "Masked secret for display (prefix and suffix only)."
+          },
+          "id": {
+            "type": "string",
+            "description": "Credential identifier."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Credential kind (currently `api_key`)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name chosen at creation."
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Organization the credential is scoped to. Omitted for legacy full-access keys."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IAM scope path (e.g. `projects:42`). Omitted for legacy full-access keys."
+          },
+          "secret": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Full secret value. Present only in the create response; omitted on list."
           }
         }
       },
@@ -12480,36 +14980,6 @@
               "string",
               "null"
             ]
-          }
-        }
-      },
-      "UserWithRole": {
-        "type": "object",
-        "required": [
-          "id",
-          "email",
-          "name",
-          "role"
-        ],
-        "properties": {
-          "email": {
-            "type": "string"
-          },
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "name": {
-            "type": "string"
-          },
-          "photo_url": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "role": {
-            "type": "string"
           }
         }
       },
@@ -12763,6 +15233,10 @@
       "description": "File operations"
     },
     {
+      "name": "iam",
+      "description": "IAM — actions, roles, users, and authorization introspection"
+    },
+    {
       "name": "k2",
       "description": "Knowledge Bases v2 operations"
     },
@@ -12779,12 +15253,12 @@
       "description": "Project operations"
     },
     {
-      "name": "roles",
-      "description": "Roles and the actions they grant"
-    },
-    {
       "name": "runs",
       "description": "Execution operations"
+    },
+    {
+      "name": "templates",
+      "description": "Platform starter catalog"
     },
     {
       "name": "users",

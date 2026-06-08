@@ -1,0 +1,101 @@
+---
+title: "Commands"
+description: "Invoke tools, agents, and workflows directly with slash commands — no LLM round-trip"
+---
+
+Commands let users trigger a runnable directly from a message that starts with `/`. The agent parses the message, maps arguments to the handler's parameters, runs the runnable immediately, and **skips the LLM call** for that turn.
+
+This is useful for deterministic shortcuts in chat UIs, Slack bots, or internal tools where you already know which action to run.
+
+## Basic usage
+
+Set `command` on any `Tool`, `Agent`, or `Workflow` in the agent's `tools` list:
+
+```python
+from timbal import Agent, Tool
+
+def greet(name: str) -> str:
+    return f"Hello, {name}!"
+
+agent = Agent(
+    name="support_agent",
+    model="openai/gpt-4o-mini",
+    tools=[Tool(handler=greet, command="greet")],
+)
+
+result = await agent(prompt="/greet Alice").collect()
+# result.output → "Hello, Alice!"
+```
+
+The command name is matched with or without a leading slash — both `/greet` and registering `command="greet"` work. Unknown commands fall through to the LLM as a normal message.
+
+## Argument parsing
+
+Arguments after the command name are split with `shlex` (shell-style quoting) and mapped **positionally** to the handler's parameters in signature order:
+
+```python
+def add(a: int, b: int) -> int:
+    return a + b
+
+Tool(handler=add, command="add")
+
+# /add 5 3  →  add(a=5, b=3)
+# /echo "hello world"  →  echo(message="hello world")
+```
+
+- Extra arguments are ignored
+- Missing required arguments surface as normal validation errors on the tool
+- Only messages with a **single text block** starting with `/` are treated as commands
+
+## Agents and workflows as commands
+
+Any runnable in `tools` can expose a command — including nested agents and workflows:
+
+```python
+search_agent = Agent(
+    name="search_agent",
+    model="openai/gpt-4o-mini",
+    command="search",
+    description="Search and summarize",
+)
+
+main_agent = Agent(
+    name="main_agent",
+    model="openai/gpt-4o-mini",
+    tools=[search_agent],
+)
+
+# Quote multi-word prompts so they map to a single argument
+await main_agent(prompt='/search "python tutorials"').collect()
+```
+
+Workflows work the same way — arguments map to the workflow's combined parameter model (all step inputs in signature order):
+
+```python
+from timbal import Workflow
+
+workflow = Workflow(name="pipeline", command="pipeline")
+workflow.step(fetch_data)
+workflow.step(process_data, depends_on=["fetch_data"])
+
+agent = Agent(name="agent", model="openai/gpt-4o-mini", tools=[workflow])
+
+await agent(prompt='/pipeline "quarterly report"').collect()
+```
+
+## Behavior
+
+| Behavior | Detail |
+| --- | --- |
+| **No LLM call** | Matching commands execute the runnable directly — no tokens spent on tool selection |
+| **Memory** | Command invocations are recorded in conversation memory as a synthetic tool use + result |
+| **Unknown `/foo`** | Falls through to the LLM if `foo` is not a registered command |
+| **Collisions** | Two tools with the same `command` name log a warning; the first registered wins |
+
+## When to use commands
+
+- **Chat shortcuts** — `/help`, `/status`, `/reset` that should always hit the same handler
+- **Power users** — skip LLM routing for actions they already know by name
+- **Nested specialists** — `/search`, `/billing` to invoke sub-agents without the parent model choosing tools
+
+For LLM-driven tool selection (the default), see [Adding Tools](/agents/tools).

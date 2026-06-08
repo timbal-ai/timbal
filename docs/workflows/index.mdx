@@ -1,56 +1,77 @@
 ---
 title: "Overview"
-description: "Build multi-step AI pipelines using Workflows"
+description: "Build multi-step AI pipelines with explicit control flow"
 ---
 
-## What are Workflows?
+Workflows orchestrate **steps** in a DAG: you define what runs, Timbal infers dependencies and runs independent steps in parallel. Use them when the path is predictable (ETL, gated deploys, fan-out/fan-in, LLM routing) rather than leaving every decision to the model.
 
-Workflows are programmable execution pipelines that orchestrate step-by-step processing with explicit control flow.
+## Workflow vs Agent
+
+| | **Workflow** | **Agent** |
+|---|---|---|
+| Control | You define steps and order | The model decides what to do |
+| Best for | Pipelines, batch jobs, deterministic routing | Open-ended reasoning, tool picking |
+| Parallelism | Built-in across independent steps | Sequential tool loop |
+| Composition | Nest workflows, mix agents + functions | Tools and sub-agents |
+
+They share the same interface: call a Runnable to get an event stream, or chain `.collect()` for the final `OutputEvent`. A common pattern is a **workflow that routes to agents** (classify → specialist agent). See [Agents & LLMs](/workflows/agents-and-llms).
+
+## Reading guide
+
+1. **[Control flow](/workflows/control-flow)** — parallel execution, `step_span()`, `depends_on`, wiring data between steps
+2. **[Branching](/workflows/branching)** — conditional steps with `when`
+3. **[Errors & failure](/workflows/errors-and-failure)** — what happens when a step fails or is skipped
+4. **[Agents & LLMs](/workflows/agents-and-llms)** — agents as steps, LLM routing patterns
+5. **[Human in the loop](/workflows/human-in-the-loop)** — approval gates on workflow steps
+6. **Examples** below — copy-paste pipelines for common shapes
+
+## Quickstart
 
 ```python
-from timbal import Workflow
+import asyncio
 
-workflow = Workflow(name="my_workflow")
-```
-
-## Building Blocks of a Workflow: Steps
-
-Steps are the core units of work, which can process data, perform actions and pass results onward.
-
-### Adding Steps to the Workflow
-
-Use `.step()` to add steps to workflows. **Any Runnable is valid to create a step**.
-
-```python
 from timbal import Workflow
 from timbal.state import get_run_context
 
+
 def celsius_to_fahrenheit(celsius: float) -> float:
-    return (celsius * 9/5) + 32
+    return (celsius * 9 / 5) + 32
+
 
 def format_result(temperature: float) -> str:
     return f"Temperature: {temperature}°F"
+
 
 workflow = (
     Workflow(name="temperature_converter")
     .step(celsius_to_fahrenheit, celsius=35)
     .step(
         format_result,
-        temperature=lambda: get_run_context().step_span("celsius_to_fahrenheit").output
+        temperature=lambda: get_run_context().step_span("celsius_to_fahrenheit").output,
     )
 )
+
+
+async def main():
+    result = await workflow().collect()
+    print(result.output)
+
+
+asyncio.run(main())
 ```
 
 <Note>
-Functions used as workflow steps must accept and return Pydantic-serializable types (e.g., `str`, `int`, `float`, `bool`, `dict`, `list`, `BaseModel`). Custom classes that aren't Pydantic models cannot be passed between steps.
+Functions used as steps must accept and return Pydantic-serializable types (`str`, `int`, `float`, `bool`, `dict`, `list`, `BaseModel`). Custom classes that aren't Pydantic models cannot be passed between steps.
 </Note>
 
-### Step Names and Reusing Functions
+## Adding steps
 
-**Each step in a workflow must have a unique name**. Like all Runnables, steps are identified by their names, which must be distinct within the workflow.
+Use `.step()` to add a Runnable (function, Tool, Agent, or nested Workflow):
 
-To use the same function multiple times in a workflow, wrap it in a new Tool with a distinct name for each usage:
 ```python
+from timbal import Tool, Workflow
+
+# Same handler twice? Give each Tool a unique name.
 threshold_high = Tool(name="threshold_high", handler=check_threshold)
 threshold_low = Tool(name="threshold_low", handler=check_threshold)
 
@@ -61,92 +82,89 @@ workflow = (
 )
 ```
 
-## Step Context
+Each step name must be unique within the workflow. Timbal detects cycles when you link steps and raises if the graph would loop.
 
-The input and output from each step is stored in its Run Context, accessible via `get_run_context().current_span()`. You can also store custom variables and access data from sibling steps.
+## Workflow inputs
 
-See [Control Flow](/workflows/control-flow#context-access) for details and [Context & State Management](/core-concepts/context) for the full reference.
+Keyword arguments passed to the workflow are forwarded to steps. Parameters without a default on a step become **workflow-level inputs** (merged into the workflow's params schema):
 
-## Running the Workflow
-
-The workflow's final output is determined by the **last executed step** in the dependency graph.
-
-To run the workflow and receive directly the final output, use the `collect()` method:
 ```python
-result = await workflow().collect()
-print(result.output)
+workflow = (
+    Workflow(name="scraper")
+    .step(fetch)          # fetch(url: str) → url is a workflow input
+    .step(process, raw=lambda: get_run_context().step_span("fetch").output)
+)
+
+result = await workflow(url="https://example.com").collect()
 ```
 
-Or stream all events as they happen:
-```python
-async for event in workflow():
-    print(event)
-```
+Fixed values passed in `.step(name, key=value)` are defaults for that step only and are not exposed as workflow inputs.
 
-## Workflow Output
+## Output
 
-When you run a workflow, only the **last executed step's output** is returned. If you need outputs from multiple steps, create a final step that receives all of them and combines them:
+The workflow returns the **last executed step's output**. If you need multiple step results, add a final merge step:
 
 ```python
 workflow = (
     Workflow(name="pipeline")
-    .step(step1)
-    .step(step2)
-    .step(step3,
-        users=lambda: get_run_context().step_span("step1").output,
-        orders=lambda: get_run_context().step_span("step2").output)
+    .step(fetch_users)
+    .step(fetch_orders)
+    .step(
+        build_report,
+        users=lambda: get_run_context().step_span("fetch_users").output,
+        orders=lambda: get_run_context().step_span("fetch_orders").output,
+    )
 )
-# Only step3's output is returned, which includes both users and orders
+# build_report's return value is the workflow output
+```
+
+## Running
+
+```python
+# Collect final OutputEvent
+result = await workflow(url="https://example.com").collect()
+print(result.output)
+print(result.status.code)   # "success" | "error" | "cancelled"
+print(result.usage)
+
+# Or stream events from every step
+async for event in workflow(url="https://example.com"):
+    print(event)
 ```
 
 ## Composition
 
-Workflows can contain other workflows as steps:
+Nest workflows as steps. The inner workflow's final output becomes that step's output:
 
 ```python
-# Inner workflow
 data_pipeline = (
     Workflow(name="data_pipeline")
     .step(fetch_data, source="api")
-    .step(clean_data,
-        raw=lambda: get_run_context().step_span("fetch_data").output)
+    .step(clean_data, raw=lambda: get_run_context().step_span("fetch_data").output)
 )
 
-# Outer workflow uses the inner workflow as a step
 report_pipeline = (
     Workflow(name="report_pipeline")
     .step(data_pipeline)
-    .step(generate_report,
-        data=lambda: get_run_context().step_span("data_pipeline").output)
-    .step(send_email,
-        report=lambda: get_run_context().step_span("generate_report").output)
+    .step(generate_report, data=lambda: get_run_context().step_span("data_pipeline").output)
 )
 ```
 
-The inner workflow runs as a single step. Its final output becomes the step output accessible by subsequent steps.
+See [Workflow Composition](/examples/workflows/workflow-composition) for a full example.
 
-## Integrating LLMs
+## Examples
 
-### Using Agents
-
-Best for autonomous AI that needs to reason, use tools, and maintain conversation context:
-
-```python
-agent = Agent(
-    name="agent",
-    model="openai/gpt-5.2"
-)
-
-workflow = (
-    Workflow(name="text_processor")
-    .step(agent, prompt="what is the weather in london")
-)
-```
-
-## Key Features
-
-- **Composition**: Workflows can contain other workflows
-- **Parallel Execution**: Independent steps run concurrently
-- **Automatic Dependencies**: Lambda parameters create implicit execution order
-- **Type Safety**: Automatic parameter validation via Pydantic
-- **Error Isolation**: Failed steps skip dependents, others continue
+<CardGroup cols={2}>
+  <Card title="Sequential steps" icon="arrow-right" href="/examples/workflows/sequential-steps">
+    Chain steps with data passing between them
+  </Card>
+  <Card title="Parallel fan-out" icon="split" href="/examples/workflows/parallel-fan-out">
+    Fetch from multiple sources concurrently, then merge
+  </Card>
+  <Card title="Conditional routing" icon="code-branch" href="/examples/workflows/conditional-routing">
+    Route to different handlers based on validation
+  </Card>
+  <Card title="Workflow composition" icon="layer-group" href="/examples/workflows/workflow-composition">
+    Nest an inner workflow as a step
+  </Card>
+</CardGroup>

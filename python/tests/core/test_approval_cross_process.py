@@ -7,7 +7,7 @@ Real HITL is:
     2. some external system (queue, DB, UI) holds the ``approval_id``.
     3. process B starts fresh, asks the trace store for pending
        approvals, then calls the runnable again with
-       ``approval_decisions=...`` and ``parent_id=...``.
+       ``resume=...`` and ``parent_id=...``.
 
 If that flow doesn't work, the whole feature is an in-memory toy.
 
@@ -192,7 +192,7 @@ class TestSingleToolGate:
         out2 = await agent(
             prompt="wire 500",
             parent_id=out1.run_id,
-            approval_decisions={approvals[0].approval_id: True},
+            resume={approvals[0].approval_id: True},
         ).collect()
 
         assert out2.status.code == "success", out2.error
@@ -228,7 +228,7 @@ class TestSingleToolGate:
         out2 = await agent(
             prompt="charge 999",
             parent_id=out1.run_id,
-            approval_decisions={
+            resume={
                 approval.approval_id: {"approved": False, "reason": "policy"},
             },
         ).collect()
@@ -320,7 +320,7 @@ class TestExpiredResolution:
             e async for e in agent(
                 prompt="transfer 50",
                 parent_id=out1.run_id,
-                approval_decisions={approval.approval_id: already_expired},
+                resume={approval.approval_id: already_expired},
             )
         ]
         approvals2 = _approval_events(events2)
@@ -375,7 +375,7 @@ class TestParallelGatesResume:
         out2 = await wf(
             x=1, y=2,
             parent_id=out1.run_id,
-            approval_decisions=decisions,
+            resume=decisions,
         ).collect()
 
         assert out2.status.code == "success", out2.error
@@ -405,7 +405,7 @@ class TestParallelGatesResume:
             e async for e in wf(
                 x=1, y=2,
                 parent_id=out1.run_id,
-                approval_decisions={approvals["parallel_wf.step_a"].approval_id: True},
+                resume={approvals["parallel_wf.step_a"].approval_id: True},
             )
         ]
         out2 = _final_output(events2)
@@ -519,7 +519,7 @@ _RESUME_BODY = textwrap.dedent(
         out = await agent(
             prompt="wire 42",
             parent_id=RUN_ID,
-            approval_decisions={APPROVAL_ID: True},
+            resume={APPROVAL_ID: True},
         ).collect()
         sys.stdout.write("<<<RESULT>>>" + out.status.code + "<<<END>>>")
 
@@ -572,3 +572,455 @@ class TestRealSubprocessResume:
         assert resume.returncode == 0, f"resume failed:\nstdout={resume.stdout}\nstderr={resume.stderr}"
         assert _extract_result(resume.stdout) == "success", resume.stderr
         assert side_effect.read_text() == "wired 42", "tool must run after cross-process resume"
+
+
+# ---------------------------------------------------------------------------
+# Memory compaction must not eat the pending tool_use on the resume turn
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionDoesNotDropPendingToolUseOnResume:
+    """Regression: compaction runs inside resolve_memory on *every* turn,
+    including the resume turn. On resume the loaded memory ends with the
+    gated tool_use that has no tool_result yet — exactly what
+    _find_pending_tool_uses needs to re-execute the gated call without
+    re-calling the LLM.
+
+    Every structure-aware compactor treats that trailing unresolved tool_use
+    as an orphan (drop mode strips it; keep_last_n*/summarize run it through
+    _remove_orphaned_tool_parts which drops tool_use without a matching
+    tool_result). If compaction fires on resume, the pending tool_use is
+    erased, _find_pending_tool_uses returns nothing, and the agent re-plans
+    from scratch — which is nondeterministic in the real world and silently
+    drops the human's decision.
+
+    We model that nondeterminism: the second planning pass proposes a
+    *different* amount, so a re-plan produces a fresh approval_id that the
+    original resume value can't satisfy. With the bug the run pauses again
+    (decision lost); with the fix the original pending call is re-executed
+    and the decision lands.
+    """
+
+    @pytest.mark.asyncio
+    async def test_drop_mode_compaction_on_resume_preserves_decision(self, backend):
+        from timbal.core.memory_compaction import compact_tool_results
+
+        calls: list[int] = []
+        plans: dict[str, int] = {"n": 0}
+
+        def wire(amount: int) -> str:
+            calls.append(amount)
+            return f"wired {amount}"
+
+        def model_handler(messages):
+            # A planning-from-scratch call has no assistant message in memory.
+            # If compaction ate the pending tool_use, we land here a 2nd time
+            # and (like a real LLM) propose a different amount.
+            if not any(m.role == "assistant" for m in messages):
+                plans["n"] += 1
+                amount = 500 if plans["n"] == 1 else 999
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id=f"t{plans['n']}", name="wire", input={"amount": amount})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="compaction_resume_agent",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="wire", handler=wire, requires_approval=True)],
+            tracing_provider=backend.provider,
+            # ratio<=0 forces compaction unconditionally so the resume turn
+            # always tries to compact the loaded memory.
+            memory_compaction=compact_tool_results(),
+            memory_compaction_ratio=0.0,
+        )
+
+        events1 = [e async for e in agent(prompt="wire money")]
+        approvals = _approval_events(events1)
+        out1 = _final_output(events1)
+        assert out1.status.reason == "approval_required"
+        assert len(approvals) == 1
+        assert approvals[0].input == {"amount": 500}
+        assert calls == []
+        assert plans["n"] == 1, "exactly one planning pass on turn 1"
+
+        out2 = await agent(
+            prompt="wire money",
+            parent_id=out1.run_id,
+            resume={approvals[0].approval_id: True},
+        ).collect()
+
+        assert out2.status.code == "success", out2.error
+        assert calls == [500], (
+            "the originally-gated call must execute on resume; if compaction ate "
+            "the pending tool_use the agent re-planned (amount=999) and the "
+            "decision was lost"
+        )
+        assert plans["n"] == 1, "resume must NOT trigger a fresh planning pass"
+
+    @pytest.mark.asyncio
+    async def test_keep_last_n_messages_compaction_on_resume_preserves_decision(self, backend):
+        from timbal.core.memory_compaction import keep_last_n_messages
+
+        calls: list[int] = []
+        plans: dict[str, int] = {"n": 0}
+
+        def wire(amount: int) -> str:
+            calls.append(amount)
+            return f"wired {amount}"
+
+        def model_handler(messages):
+            if not any(m.role == "assistant" for m in messages):
+                plans["n"] += 1
+                amount = 500 if plans["n"] == 1 else 999
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id=f"t{plans['n']}", name="wire", input={"amount": amount})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="compaction_resume_agent_keepn",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="wire", handler=wire, requires_approval=True)],
+            tracing_provider=backend.provider,
+            memory_compaction=keep_last_n_messages(10),
+            memory_compaction_ratio=0.0,
+        )
+
+        events1 = [e async for e in agent(prompt="wire money")]
+        approvals = _approval_events(events1)
+        out1 = _final_output(events1)
+        assert out1.status.reason == "approval_required"
+        assert calls == []
+
+        out2 = await agent(
+            prompt="wire money",
+            parent_id=out1.run_id,
+            resume={approvals[0].approval_id: True},
+        ).collect()
+
+        assert out2.status.code == "success", out2.error
+        assert calls == [500]
+        assert plans["n"] == 1, "resume must not re-plan; orphan cleanup must not eat the pending tool_use"
+
+    @pytest.mark.asyncio
+    async def test_resume_compacts_history_before_the_gate_but_keeps_pending(self, backend):
+        """Deferred resume compaction: a long paused thread must compact the history
+        *before* the gated tool_use (so the continuation LLM call doesn't carry the full
+        uncompacted thread) while leaving the pending tool_use intact so the decision lands.
+
+        The agent runs a completed (non-gated) tool call and then a gated one in the same
+        turn, so at pause time memory is [user, assistant(lookup), tool(lookup_result),
+        assistant(wire pending)]. On resume, drop-mode compaction must strip the lookup
+        pair (head) but preserve the trailing wire tool_use (tail).
+        """
+        from timbal.core.memory_compaction import compact_tool_results
+
+        wire_calls: list[int] = []
+        lookup_calls: list[str] = []
+
+        def lookup(q: str) -> str:
+            lookup_calls.append(q)
+            return "rate is 1.0"
+
+        def wire(amount: int) -> str:
+            wire_calls.append(amount)
+            return f"wired {amount}"
+
+        def model_handler(messages):
+            has_assistant = any(m.role == "assistant" for m in messages)
+            has_wire_use = any(
+                isinstance(c, ToolUseContent) and c.name == "wire"
+                for m in messages
+                for c in m.content
+            )
+            if not has_assistant:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="look1", name="lookup", input={"q": "rate"})],
+                    stop_reason="tool_use",
+                )
+            if not has_wire_use:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="wire1", name="wire", input={"amount": 500})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="compaction_history_agent",
+            model=TestModel(handler=model_handler),
+            tools=[
+                Tool(name="lookup", handler=lookup),  # non-gated
+                Tool(name="wire", handler=wire, requires_approval=True),
+            ],
+            tracing_provider=backend.provider,
+            memory_compaction=compact_tool_results(),  # drop mode
+            memory_compaction_ratio=0.0,
+        )
+
+        events1 = [e async for e in agent(prompt="look up the rate then wire")]
+        approvals = _approval_events(events1)
+        out1 = _final_output(events1)
+        assert out1.status.reason == "approval_required"
+        assert lookup_calls == ["rate"], "the non-gated lookup must run on turn 1"
+        assert wire_calls == [], "the gated wire must not run before approval"
+        assert approvals[0].input == {"amount": 500}
+
+        out2 = await agent(
+            prompt="look up the rate then wire",
+            parent_id=out1.run_id,
+            resume={approvals[0].approval_id: True},
+        ).collect()
+
+        assert out2.status.code == "success", out2.error
+        assert wire_calls == [500], "the gated decision must land on resume"
+        assert lookup_calls == ["rate"], "lookup must not re-run (history was compacted, not replayed)"
+
+        # The resume run's agent span must record that compaction fired on the history,
+        # and the persisted continuation memory must no longer contain the lookup tool pair.
+        records = backend.load_records()
+        run2 = next(r for r in records if r["run_id"] == out2.run_id)
+        agent_span = next(
+            s for s in run2["spans"]
+            if s.get("path") == "compaction_history_agent" and (s.get("metadata") or {}).get("compaction")
+        )
+        assert agent_span["metadata"]["compaction"]["triggered"] is True
+        steps = agent_span["metadata"]["compaction"]["steps"]
+        assert any(step["after"] < step["before"] for step in steps), (
+            "compaction must have actually dropped messages from the pre-gate history"
+        )
+
+        def _has_tool_use(spans, name: str) -> bool:
+            for s in spans:
+                for msg in s.get("memory") or []:
+                    for c in msg.get("content") or []:
+                        if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == name:
+                            return True
+            return False
+
+        # The lookup tool_use lived in the pre-gate history → must be gone after compaction.
+        assert not _has_tool_use(run2["spans"], "lookup"), (
+            "the pre-gate lookup tool_use must be compacted out of the resume memory"
+        )
+        # The gated wire call must still be present (re-executed on resume).
+        assert _has_tool_use(run2["spans"], "wire"), "the resumed wire tool_use must survive compaction"
+
+    @pytest.mark.asyncio
+    async def test_resume_merges_trailing_assistant_into_pending_to_keep_alternation(self, backend):
+        """Cover the merge/alternation branch of _compact_on_resume.
+
+        The message before the pending assistant is always user/tool, so head normally ends
+        with one of those. But when the pre-gate assistant message is *mixed* (text + a
+        non-gated tool_use), drop-mode compaction strips the tool_use and keeps the text —
+        leaving head ending in an assistant message. Re-attaching the pending assistant tail
+        would then produce two consecutive assistant messages, which providers reject. The
+        fix folds head's trailing assistant into the pending message; this test asserts that
+        merge happens (single assistant carrying both the leftover text and the pending
+        tool_use) and the decision still lands.
+        """
+        from timbal.core.memory_compaction import compact_tool_results
+
+        wire_calls: list[int] = []
+        lookup_calls: list[str] = []
+
+        def lookup(q: str) -> str:
+            lookup_calls.append(q)
+            return "rate is 1.0"
+
+        def wire(amount: int) -> str:
+            wire_calls.append(amount)
+            return f"wired {amount}"
+
+        def model_handler(messages):
+            has_assistant = any(m.role == "assistant" for m in messages)
+            has_wire_use = any(
+                isinstance(c, ToolUseContent) and c.name == "wire"
+                for m in messages
+                for c in m.content
+            )
+            if not has_assistant:
+                # Mixed message: text + non-gated tool_use. Drop-mode keeps the text.
+                from timbal.types.content import TextContent
+                return Message(
+                    role="assistant",
+                    content=[
+                        TextContent(text="let me check the rate"),
+                        ToolUseContent(id="look1", name="lookup", input={"q": "rate"}),
+                    ],
+                    stop_reason="tool_use",
+                )
+            if not has_wire_use:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="wire1", name="wire", input={"amount": 500})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="merge_branch_agent",
+            model=TestModel(handler=model_handler),
+            tools=[
+                Tool(name="lookup", handler=lookup),
+                Tool(name="wire", handler=wire, requires_approval=True),
+            ],
+            tracing_provider=backend.provider,
+            memory_compaction=compact_tool_results(),  # drop mode
+            memory_compaction_ratio=0.0,
+        )
+
+        events1 = [e async for e in agent(prompt="check then wire")]
+        approvals = _approval_events(events1)
+        out1 = _final_output(events1)
+        assert out1.status.reason == "approval_required"
+        assert lookup_calls == ["rate"]
+        assert wire_calls == []
+
+        out2 = await agent(
+            prompt="check then wire",
+            parent_id=out1.run_id,
+            resume={approvals[0].approval_id: True},
+        ).collect()
+
+        assert out2.status.code == "success", out2.error
+        assert wire_calls == [500], "decision must land after the merge"
+        assert lookup_calls == ["rate"], "lookup must not re-run"
+
+        # Assert the merge actually happened: a single assistant message in the persisted
+        # resume memory carries BOTH the leftover text and the pending wire tool_use, and
+        # there are no two consecutive assistant messages anywhere.
+        records = backend.load_records()
+        run2 = next(r for r in records if r["run_id"] == out2.run_id)
+        agent_span = next(
+            s for s in run2["spans"]
+            if s.get("path") == "merge_branch_agent" and (s.get("metadata") or {}).get("compaction")
+        )
+        memory = agent_span.get("memory") or []
+
+        def _roles(mem):
+            return [m.get("role") for m in mem]
+
+        roles = _roles(memory)
+        assert not any(
+            roles[i] == "assistant" and roles[i + 1] == "assistant" for i in range(len(roles) - 1)
+        ), f"no two consecutive assistant messages allowed, got roles={roles}"
+
+        merged = next(
+            m for m in memory
+            if m.get("role") == "assistant"
+            and any(isinstance(c, dict) and c.get("type") == "text" for c in (m.get("content") or []))
+            and any(
+                isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "wire"
+                for c in (m.get("content") or [])
+            )
+        )
+        text_block = next(c for c in merged["content"] if c.get("type") == "text")
+        assert "let me check the rate" in text_block["text"]
+
+    @pytest.mark.asyncio
+    async def test_summarize_compactor_runs_on_resume_and_keeps_pending(self, backend):
+        """The async summarize compactor must work on the resume path too: it summarizes the
+        pre-gate history (a live LLM call inside resolve_memory) while the pending tool_use is
+        protected so the decision still lands."""
+        from timbal.core.memory_compaction import _SUMMARY_MARKER, summarize
+
+        wire_calls: list[int] = []
+        lookup_calls: list[str] = []
+        summarizer_calls: list[str] = []
+
+        def lookup(q: str) -> str:
+            lookup_calls.append(q)
+            return "rate is 1.0"
+
+        def wire(amount: int) -> str:
+            wire_calls.append(amount)
+            return f"wired {amount}"
+
+        def summarizer_handler(messages):
+            summarizer_calls.append(messages[-1].collect_text())
+            return "user asked to look up the rate (got 1.0) and then wire money"
+
+        def model_handler(messages):
+            has_assistant = any(m.role == "assistant" for m in messages)
+            has_wire_use = any(
+                isinstance(c, ToolUseContent) and c.name == "wire"
+                for m in messages
+                for c in m.content
+            )
+            if not has_assistant:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="look1", name="lookup", input={"q": "rate"})],
+                    stop_reason="tool_use",
+                )
+            if not has_wire_use:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id="wire1", name="wire", input={"amount": 500})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="summarize_resume_agent",
+            model=TestModel(handler=model_handler),
+            tools=[
+                Tool(name="lookup", handler=lookup),
+                Tool(name="wire", handler=wire, requires_approval=True),
+            ],
+            tracing_provider=backend.provider,
+            # Explicit summarizer model (TestModel) so no real LLM is hit; threshold low so it
+            # fires on the small pre-gate head.
+            memory_compaction=summarize(
+                threshold=1,
+                keep_last_n=1,
+                model=TestModel(handler=summarizer_handler),
+            ),
+            memory_compaction_ratio=0.0,
+        )
+
+        events1 = [e async for e in agent(prompt="check then wire")]
+        approvals = _approval_events(events1)
+        out1 = _final_output(events1)
+        assert out1.status.reason == "approval_required"
+        assert lookup_calls == ["rate"]
+        assert wire_calls == []
+
+        out2 = await agent(
+            prompt="check then wire",
+            parent_id=out1.run_id,
+            resume={approvals[0].approval_id: True},
+        ).collect()
+
+        assert out2.status.code == "success", out2.error
+        assert wire_calls == [500], "decision must land even though summarize rewrote the history"
+        assert lookup_calls == ["rate"], "lookup must not re-run"
+        assert summarizer_calls, "the summarize compactor must have run on the resume turn"
+
+        # The persisted resume memory must contain the summary marker (history was summarized)
+        # and still carry the pending wire tool_use.
+        records = backend.load_records()
+        run2 = next(r for r in records if r["run_id"] == out2.run_id)
+        agent_span = next(
+            s for s in run2["spans"]
+            if s.get("path") == "summarize_resume_agent" and (s.get("metadata") or {}).get("compaction")
+        )
+        memory = agent_span.get("memory") or []
+        all_text = " ".join(
+            c.get("text", "")
+            for m in memory
+            for c in (m.get("content") or [])
+            if isinstance(c, dict) and c.get("type") == "text"
+        )
+        assert _SUMMARY_MARKER in all_text, "the summarized history marker must be present"
+        assert any(
+            isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "wire"
+            for m in memory
+            for c in (m.get("content") or [])
+        ), "the pending wire tool_use must survive summarization"

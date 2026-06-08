@@ -21,6 +21,7 @@ Here's a simple example showing context access from a main handler:
 from datetime import datetime
 
 import httpx
+from timbal import Tool
 from timbal.state import get_run_context
 
 async def api_call(endpoint: str) -> dict:

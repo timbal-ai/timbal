@@ -195,7 +195,7 @@ class TestStreamBreakPreservesApprovalStatus:
 
 
 class TestMultiTurnApprovalResume:
-    """Resuming an agent with parent_id + approval_decisions must run the
+    """Resuming an agent with parent_id + resume must run the
     gated tool *with* the prior conversation history intact. Currently the
     early-return in resolve_memory drops all memory and the LLM may never
     re-emit the same tool call."""
@@ -242,7 +242,7 @@ class TestMultiTurnApprovalResume:
         out3 = await agent(
             prompt="run risky",
             parent_id=out2.run_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         assert calls == [7], (
@@ -297,7 +297,7 @@ class TestMultiTurnApprovalResume:
         out3 = await agent(
             prompt="now risky",
             parent_id=out2.run_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         span3 = _stored_span(out3.run_id)
@@ -343,7 +343,7 @@ class TestMultiTurnApprovalResume:
         out3 = await agent(
             prompt="run risky",
             parent_id=out2.run_id,
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         # Find the *first* LLM call in turn 3's trace.
@@ -394,7 +394,7 @@ class TestPreHookSemanticsUnderApproval:
         approval = _approval_event(events)
         gated_count = len(hook_calls)
 
-        await tool(x=1, approval_decisions={approval.approval_id: True}).collect()
+        await tool(x=1, resume={approval.approval_id: True}).collect()
 
         assert gated_count == 0, (
             f"pre_hook should not run on the gated attempt (no real work "
@@ -424,7 +424,7 @@ class TestPreHookSemanticsUnderApproval:
         events = [e async for e in tool(x=1)]
         approval = _approval_event(events)
 
-        await tool(x=1, approval_decisions={approval.approval_id: False}).collect()
+        await tool(x=1, resume={approval.approval_id: False}).collect()
 
         assert hook_calls == [], (
             f"pre_hook ran on a denied gate cycle — that's an external side "
@@ -467,7 +467,7 @@ class TestPreHookSemanticsUnderApproval:
 
         await agent(
             prompt="go",
-            approval_decisions={approval.approval_id: True},
+            resume={approval.approval_id: True},
         ).collect()
 
         assert len(hook_calls) == 1, (
@@ -599,7 +599,7 @@ class TestApprovalEventMetadata:
 
 
 # ---------------------------------------------------------------------------
-# 6. Unrecognised approval_decisions are silently dropped
+# 6. Unrecognised resume values are silently dropped
 # ---------------------------------------------------------------------------
 
 
@@ -618,7 +618,7 @@ class TestUnknownApprovalDecisionsAreSurfaced:
         """
         tool = Tool(name="t", handler=lambda x: x, requires_approval=True)
 
-        events = [e async for e in tool(x=1, approval_decisions={"definitely-not-a-real-id": True})]
+        events = [e async for e in tool(x=1, resume={"definitely-not-a-real-id": True})]
 
         captured = capfd.readouterr()
         log_text = captured.out + captured.err
@@ -628,9 +628,9 @@ class TestUnknownApprovalDecisionsAreSurfaced:
 
         assert (
             "definitely-not-a-real-id" in log_text
-            or "Unrecognized approval_decisions" in log_text
+            or "Unrecognized resume values" in log_text
         ), (
-            "An approval_decisions entry that matched no gate should produce "
+            "A resume entry that matched no gate should produce "
             "a WARNING. Otherwise typos/stale ids fail silently. "
             f"Captured output:\n{log_text!r}"
         )
@@ -646,7 +646,7 @@ class TestUnknownApprovalDecisionsAreSurfaced:
 
         result = await tool(
             x=1,
-            approval_decisions={
+            resume={
                 approval.approval_id: True,
                 "stale-other-id": True,
             },
@@ -662,7 +662,7 @@ class TestUnknownApprovalDecisionsAreSurfaced:
             f"Captured output:\n{log_text!r}"
         )
         # And conversely the matched id must not be reported as unused.
-        unused_lines = [line for line in log_text.splitlines() if "unused_approval_ids" in line]
+        unused_lines = [line for line in log_text.splitlines() if "unused_resume_ids" in line]
         assert all(approval.approval_id not in line for line in unused_lines), (
             f"Matched approval_id ({approval.approval_id}) was wrongly "
             f"flagged as unused. Captured output:\n{log_text!r}"

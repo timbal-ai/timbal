@@ -1,46 +1,53 @@
 ---
 title: "Overview"
-description: "Deploy your AI applications to production"
+description: "Run and deploy Timbal projects locally or in production"
 ---
 
-Deploying AI agents to production requires careful consideration of infrastructure, scalability, and operational requirements. Timbal provides enterprise-grade deployment options designed to meet diverse organizational needs and technical constraints.
+A Timbal project is three layers:
 
-From fully managed cloud deployments to self-hosted infrastructure, choose the approach that aligns with your security, compliance, and operational requirements.
+| Layer | Directory | Runtime |
+|-------|-----------|---------|
+| **UI** | `ui/` | React + Vite (Bun) |
+| **API** | `api/` | Elysia (Bun) — routes requests to workforce |
+| **Workforce** | `workforce/<name>/` | Python agents/workflows (`timbal.server.http`) |
 
-## Deployment Options
+Each workforce member has its own `timbal.yaml` manifest. The API and UI discover workforce services through env vars (`TIMBAL_START_WORKFORCE`, etc.) that `timbal start` wires up automatically.
 
-<h3>Timbal Platform <span style={{backgroundColor: '#000000', color: 'white', padding: '2px 8px', borderRadius: '12px', fontSize: '14px', marginLeft: '8px'}}>Recommended</span></h3>
-**Fully managed, zero-configuration deployment**
+## Local development
 
-The easiest way to deploy your Timbal agents. Simply upload your project and we handle everything - scaling, monitoring, security, and maintenance.
+For day-to-day work, use [`timbal start`](/quickstart#run-locally). It:
 
-- **Zero DevOps**: No servers, containers, or infrastructure to manage
-- **Auto-scaling**: Handles traffic spikes automatically
-- **Built-in monitoring**: Real-time metrics and logging
-- **Secure by default**: HTTPS, authentication, and compliance built-in
-- **Configurable resources**: Choose specific machines or instances for your workload
-- **Fast deployment**: Go live in minutes
+- Detects `ui/`, `api/`, and every `workforce/<name>/` with a valid `timbal.yaml`
+- Installs dependencies (`bun install`, `uv sync`)
+- Picks free ports (defaults: UI `3737`, API `3000`, workforce from `4455`)
+- Starts all services and multiplexes logs to one terminal
+- Exposes interactive commands (`o` open UI, `s` status, `r` restart, `f`/`m` log focus/mute, `q` quit)
 
-<h3>Self-Hosted with Docker</h3>
-**Complete control over your infrastructure**
+Override ports or env vars when needed:
 
-Use `timbal build` to generate a production-ready Docker container that you can deploy anywhere Docker runs.
+```bash
+timbal start --ui-port 4000 --api-port 3001 --port my-agent=4500
+timbal start --env OPENAI_API_KEY=sk-... --env my-agent:DEBUG=1
+timbal start --env-file .env --env-file my-agent:workforce/my-agent/.env
+```
 
-- **Full control**: Your infrastructure, your rules
+<Note>
+`--env` and `--env-file` accept an optional scope prefix (`ui:`, `api:`, or a workforce member name). Project-root `.env` applies to all services; `workforce/<name>/.env` applies to that member only.
+</Note>
 
-<h2>Next Steps</h2>
+## Production
 
-Choose your deployment path based on your requirements:
+For production you have two paths:
 
 <CardGroup cols={2}>
   <Card title="Timbal Platform" icon="cloud" href="/deployment/platform">
-    Zero-config deployment with automatic scaling and built-in monitoring
+    Managed hosting — connect your git repo, deploy a branch, platform runs UI, API, and workforce for you
   </Card>
-  <Card title="Self-Host with Docker" icon="docker" href="/deployment/self-hosted">
-    Complete infrastructure control with Docker containers you can deploy anywhere
+  <Card title="Self-hosted" icon="server" href="/deployment/self-hosted">
+    Run UI, API, and workforce on your own infra — you own process lifecycle, ports, env wiring, and logging
   </Card>
 </CardGroup>
 
 <Tip>
-Start with the Timbal Platform for the fastest time-to-production.
+Validate locally with `timbal start` before deploying. The same project layout is what the platform builds from your repo.
 </Tip>

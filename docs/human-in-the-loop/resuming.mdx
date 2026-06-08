@@ -1,0 +1,170 @@
+---
+title: "Resuming a paused run"
+description: "Resume any paused run (gate or suspension) with parent_id and resume={...}, in-process or across workers"
+---
+
+You resume any paused run, gate or suspension, by calling the runnable again with `parent_id` (the paused run id) and `resume={...}`. In-process this works out of the box; across processes you need a durable provider; and you can enumerate what's pending either way.
+
+## Cancelling instead of answering
+
+A human won't always say yes or no. Sometimes they close the dialog, hit Escape, or abandon the task. That's a **cancel**, and it's different from a deny:
+
+- **Deny / decline** continues the run. An approval `approved=False` is fed back to the model as a tool result so the agent can apologize or try another path; a `suspend()` decline is just a value your handler interprets.
+- **Cancel** aborts the *entire* run. Nothing is fed back to the model.
+
+Resume with `Cancel` (works on either an approval or a suspension id) to abort:
+
+```python
+from timbal.types.approval import Cancel
+
+result = await agent(
+    prompt="...",
+    parent_id=paused_run_id,
+    resume={pending_id: Cancel(reason="user closed the dialog")},
+).collect()
+
+# result.status.code == "cancelled"
+# result.status.reason == "cancelled"      # distinct from approval_denied / input_required
+# result.status.message == "user closed the dialog"
+```
+
+The handler never runs. The cancel reason lands on the cancelled span/status so it's queryable in traces, and a `Cancel` keyed to any pending id in a batch tears down the whole run.
+
+## Across processes (durable providers)
+
+Everything above works in-process by default. For "pause in a UI now, resume in a worker later" (the real human-in-the-loop shape) switch off the default `InMemoryTracingProvider` (which only resumes within the same Python process) to a durable provider. This applies identically to approval gates and `suspend()`.
+
+<Tabs>
+<Tab title="JSONL (local / single host)">
+
+```python
+from pathlib import Path
+from timbal import Agent
+from timbal.state.tracing.providers import JsonlTracingProvider
+
+provider = JsonlTracingProvider.configured(_path=Path("traces.jsonl"))
+
+agent = Agent(
+    name="support_agent",
+    model="openai/gpt-5",
+    tools=[refund],
+    tracing_provider=provider,
+)
+```
+
+`JsonlTracingProvider` writes one record per run and uses a sidecar lock file (`traces.jsonl.approval_claims.json` + `.lock` via `fcntl`) for cross-process approval claims. Good for local dev and single-host deployments. Not recommended for high-throughput production: `_store()` rewrites the file on each run.
+
+</Tab>
+<Tab title="SQLite (single host, higher throughput)">
+
+```python
+from pathlib import Path
+from timbal.state.tracing.providers import SqliteTracingProvider
+
+provider = SqliteTracingProvider.configured(_path=Path("traces.db"))
+```
+
+Same API as JSONL but uses a SQLite database with row-level locking. Better for higher write rates on a single host.
+
+</Tab>
+<Tab title="Timbal Platform (multi-host)">
+
+When `TIMBAL_API_KEY` and a project subject are set, runs auto-select `PlatformTracingProvider`. Paused runs replicate across workers without extra config.
+
+</Tab>
+</Tabs>
+
+To resume from a different process, pass the original run id as `parent_id`:
+
+```python
+result = await agent(
+    prompt="Refund $250",
+    parent_id=paused_run_id,
+    resume={approval_id: True},
+).collect()
+```
+
+Timbal loads the parent trace (input messages, pending gates/suspensions, prior tool calls) before executing the resolution, so the runnable sees exactly the state it was paused at.
+
+## Memory compaction on resume
+
+If the agent has `memory_compaction` configured, a resume turn is treated like a continuation of the paused turn, not a fresh one. The loaded memory ends with the gated/suspended `tool_use` that has **no `tool_result` yet** — that trailing block is exactly what Timbal re-executes to settle the pause without re-calling the model.
+
+Compaction is structure-aware about this:
+
+- The pending `tool_use` is **never** compacted away. (A naive pass would treat it as an orphaned tool call, strip it, and force the model to re-plan — which is nondeterministic and would silently drop the human's decision.)
+- The **history before** the pending call is still compacted, so resuming a long paused thread doesn't carry the full uncompacted transcript into the continuation LLM call and overflow the context window.
+
+This holds for every built-in strategy (`compact_tool_results`, `keep_last_n_messages`, `keep_last_n_turns`, `summarize`) and any custom compactor. You don't configure anything extra — it just works on the same `resume=` call.
+
+<Note>
+Compaction runs at turn boundaries **and** between iterations within a turn (mid-loop), so a single turn that makes many or large tool calls is compacted as it grows once utilization crosses `memory_compaction_ratio`. Mid-loop compaction always protects the most recent (unconsumed) assistant tool batch — the results the next model call must read — so it bounds context without sending the agent back to re-plan the same step.
+
+In a `Workflow`, compaction is a per-step concern: a `Workflow` has no LLM context of its own, and an `Agent` used as a step runs with isolated context (no cross-turn memory) but still mid-loop-compacts a long tool loop inside that step. Step outputs passed between steps are not "context" and are never compacted.
+</Note>
+
+## Duplicate worker protection
+
+When multiple workers consume the same queue, two of them might race to resume the same `(parent_id, approval_id)`. Timbal **claims** the pair before executing the resolution. The first claimer wins; later duplicates stop before handler execution with `status.reason == "approval_already_claimed"`.
+
+```python
+result = await agent(
+    prompt="Refund $250",
+    parent_id=paused_run_id,
+    resume={approval_id: True},
+).collect()
+
+if result.status.reason == "approval_already_claimed":
+    # Another worker already executed this approval. Safe to no-op.
+    return
+```
+
+This protection is implemented by `JsonlTracingProvider` and `SqliteTracingProvider` out of the box. **Custom providers must override `claim_approval(parent_id, approval_id, run_id)`** to get the same durable-lock behavior; the base class default is a no-op.
+
+## Enumerating what's pending
+
+When a run cancels and the runnable had multiple concurrent calls, each pause emits its own event. There are two ergonomic ways to enumerate them, and the same shape applies to both approvals and interactions.
+
+**During the stream**, capture every event:
+
+```python
+pending_approvals, pending_interactions = [], []
+async for event in agent(prompt="..."):
+    if isinstance(event, ApprovalEvent):
+        pending_approvals.append(event)
+    if isinstance(event, InteractionEvent):
+        pending_interactions.append(event)
+```
+
+**After `.collect()`**, read the lists the collector attaches to `OutputEvent.metadata` (the `status` only references the first pause):
+
+```python
+result = await agent(prompt="...").collect()
+
+if result.status.reason == "approval_required":
+    for entry in result.metadata["pending_approvals"]:
+        print(entry["approval_id"], entry["runnable_path"], entry["prompt"], entry["input"])
+
+if result.status.reason == "input_required":
+    for entry in result.metadata["pending_interactions"]:
+        print(entry["interaction_id"], entry["kind"], entry["payload"])
+```
+
+Resume by passing **all** the decisions/answers you want to settle in one call:
+
+```python
+resume = {entry["approval_id"]: True for entry in result.metadata["pending_approvals"]}
+result = await agent(prompt="...", parent_id=paused_run_id, resume=resume).collect()
+```
+
+For server-side traversal of a loaded trace (e.g. building a review queue from durable storage), `RunContext.pending_approvals()` and `RunContext.pending_interactions()` walk `RunContext._trace` directly. They tolerate both live `RunStatus` and dict-after-reload shapes, so they work against in-memory, JSONL, SQLite, and platform traces. Approval entries use the **redacted** input snapshot, never the raw secrets.
+
+<Note>
+`metadata["pending_*"]` is added by `.collect()`. Over the HTTP server (which streams **raw** events) the frontend reads the `APPROVAL` / `INTERACTION` events directly instead. See [Client integration (HTTP)](/human-in-the-loop/client-integration).
+</Note>
+
+## See also
+
+- [Approval gates](/human-in-the-loop/approval-gates) — declarative gates for irreversible actions
+- [Suspend & interaction tools](/human-in-the-loop/suspend) — ask the user for arbitrary input
+- [Client integration (HTTP)](/human-in-the-loop/client-integration) — the `/stream` wire contract

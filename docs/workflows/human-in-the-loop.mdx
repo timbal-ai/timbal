@@ -1,0 +1,47 @@
+---
+title: "Human in the Loop"
+description: "Pause workflow steps for approval or user input, then resume"
+---
+
+Human-in-the-loop works on **workflow steps** the same way it works on agents and tools. Any step wrapped in a `Tool` (or any Runnable) can use `requires_approval`, and any handler can call `suspend()`.
+
+## Approval gates on steps
+
+Wrap a step function in a `Tool` with `requires_approval`:
+
+```python
+from timbal import Tool, Workflow
+
+deploy_prod = Tool(
+    name="deploy_prod",
+    handler=deploy_prod_impl,
+    requires_approval=True,
+    approval_prompt="Promote to production?",
+)
+
+workflow = (
+    Workflow(name="release_pipeline")
+    .step(deploy_staging)
+    .step(deploy_prod)
+    .step(announce, depends_on=["deploy_prod"])
+)
+```
+
+When the gate fires, the workflow pauses with `status.reason == "approval_required"`. Independent gates in parallel all emit before the workflow stops, so you can approve multiple steps in one `resume={...}` call.
+
+Full reference: [Approval gates](/human-in-the-loop/approval-gates), including edit-on-approve, redaction, time limits, and [approvals in workflows](/human-in-the-loop/approval-gates#approvals-in-workflows).
+
+## Suspend inside a step
+
+Handlers that call `suspend()` pause the workflow mid-step. The handler re-runs from the top on resume, so keep side effects after the `suspend()` call or make them idempotent.
+
+Use [Suspend & interaction tools](/human-in-the-loop/suspend) for `ask_user`, `confirm`, and custom interaction tools.
+
+## Resuming
+
+Call the workflow again with `parent_id` (the paused run id) and `resume={approval_id: True}` or `resume={interaction_id: value}`. Cross-process resume needs a durable [tracing provider](/human-in-the-loop/resuming).
+
+## See also
+
+- [Errors & failure](/workflows/errors-and-failure) — pauses vs failures
+- [Human in the Loop overview](/human-in-the-loop)

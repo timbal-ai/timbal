@@ -1138,6 +1138,189 @@ class TestCompactionMetadata:
 
 
 # ---------------------------------------------------------------------------
+# Mid-loop compaction (within a single turn)
+# ---------------------------------------------------------------------------
+
+
+class TestMidLoopCompaction:
+    """resolve_memory only compacts at turn start — and not at all on a turn with no parent.
+    A single turn that makes many/large tool calls would otherwise grow memory unbounded and
+    overflow the context window mid-run. Mid-loop compaction fixes that, while protecting the
+    trailing (unconsumed) assistant tool batch so the model never loops back to re-plan.
+    """
+
+    @pytest.mark.asyncio
+    async def test_long_tool_loop_compacts_mid_turn_and_stays_bounded(self, monkeypatch) -> None:
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.core.tool import Tool
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        # Small window so a couple of large tool results cross the 0.75 ratio mid-turn.
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000)
+
+        fetch_calls: list[int] = []
+
+        def fetch(n: int) -> str:
+            fetch_calls.append(n)
+            return f"payload-{n}: " + ("x" * 4_000)  # ~1k tokens each
+
+        plan = {"n": 0}
+
+        def model_handler(_messages):
+            plan["n"] += 1
+            if plan["n"] <= 3:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id=f"f{plan['n']}", name="fetch", input={"n": plan["n"]})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="midloop_agent",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=fetch)],
+            # drop mode (keep_last_n=None) is the most aggressive config: only the protected
+            # trailing batch should survive each pass.
+            memory_compaction=compact_tool_results(),
+            memory_compaction_ratio=0.75,
+        )
+
+        # Single turn, NO parent_id → resolve_memory cannot compact. Any compaction observed
+        # here must have come from the mid-loop path.
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx)
+        result = await agent(prompt="fetch a few things then summarize").collect()
+
+        assert result.status.code == "success", result.error
+        assert fetch_calls == [1, 2, 3], "the model must progress through every tool call (no re-plan loop)"
+
+        agent_span = ctx._trace.get_path(agent._path)[0]
+        meta = agent_span.metadata.get("compaction")
+        assert meta is not None and meta["triggered"] is True, "mid-loop compaction must have fired within the turn"
+        assert meta.get("passes", 0) >= 1
+
+        # Memory stayed bounded: drop-mode keeps only the latest protected tool batch, so the
+        # final memory holds at most one tool result, not all three.
+        tool_msgs = [m for m in agent_span.memory if m.role == "tool"]
+        assert len(tool_msgs) <= 1, f"memory must be bounded by mid-loop compaction, got {len(tool_msgs)} tool msgs"
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_no_midloop_compaction_below_ratio(self, monkeypatch) -> None:
+        """Mid-loop compaction must not fire when utilization stays under the ratio."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.core.tool import Tool
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000_000)
+
+        fetch_calls: list[int] = []
+
+        def fetch(n: int) -> str:
+            fetch_calls.append(n)
+            return f"small-{n}"
+
+        plan = {"n": 0}
+
+        def model_handler(_messages):
+            plan["n"] += 1
+            if plan["n"] <= 2:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id=f"f{plan['n']}", name="fetch", input={"n": plan["n"]})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        agent = Agent(
+            name="midloop_agent_low",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=fetch)],
+            memory_compaction=compact_tool_results(),
+            memory_compaction_ratio=0.75,
+        )
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx)
+        result = await agent(prompt="fetch a couple small things").collect()
+
+        assert result.status.code == "success", result.error
+        assert fetch_calls == [1, 2]
+        agent_span = ctx._trace.get_path(agent._path)[0]
+        assert "compaction" not in agent_span.metadata, "compaction must not fire below the ratio"
+        # All tool results retained (nothing compacted).
+        assert len([m for m in agent_span.memory if m.role == "tool"]) == 2
+
+        InMemoryTracingProvider._storage.clear()
+
+    @pytest.mark.asyncio
+    async def test_midloop_compaction_works_for_agent_step_inside_workflow(self, monkeypatch) -> None:
+        """Workflows have no LLM context of their own — compaction is an Agent concern. An
+        Agent used as a workflow step runs as a subagent (isolated context: no turn-start /
+        parent-memory compaction), but mid-loop compaction still bounds a long tool loop
+        inside that step. This pins that the only place compaction matters in a workflow
+        keeps working."""
+        from timbal.core.agent import Agent
+        from timbal.core.memory_compaction import compact_tool_results
+        from timbal.core.tool import Tool
+        from timbal.core.workflow import Workflow
+        from timbal.state import set_run_context
+        from timbal.state.context import RunContext
+        from timbal.state.tracing.providers import InMemoryTracingProvider
+
+        monkeypatch.setattr("timbal.core.agent.get_context_window", lambda _model: 1_000)
+
+        fetch_calls: list[int] = []
+
+        def fetch(n: int) -> str:
+            fetch_calls.append(n)
+            return f"payload-{n}: " + ("x" * 4_000)
+
+        plan = {"n": 0}
+
+        def model_handler(_messages):
+            plan["n"] += 1
+            if plan["n"] <= 3:
+                return Message(
+                    role="assistant",
+                    content=[ToolUseContent(id=f"f{plan['n']}", name="fetch", input={"n": plan["n"]})],
+                    stop_reason="tool_use",
+                )
+            return "done"
+
+        worker = Agent(
+            name="worker",
+            model=TestModel(handler=model_handler),
+            tools=[Tool(name="fetch", handler=fetch)],
+            memory_compaction=compact_tool_results(),
+            memory_compaction_ratio=0.75,
+        )
+        wf = Workflow(name="wf").step(worker)
+
+        ctx = RunContext(tracing_provider=InMemoryTracingProvider)
+        set_run_context(ctx)
+        result = await wf(prompt="fetch a few things").collect()
+
+        assert result.status.code == "success", result.error
+        assert fetch_calls == [1, 2, 3], "agent step must progress through every tool call"
+
+        step_span = ctx._trace.get_path("wf.worker")[0]
+        meta = step_span.metadata.get("compaction")
+        assert meta is not None and meta["triggered"] is True, "mid-loop compaction must fire inside the agent step"
+        assert len([m for m in step_span.memory if m.role == "tool"]) <= 1, "agent-step memory must stay bounded"
+
+        InMemoryTracingProvider._storage.clear()
+
+
+# ---------------------------------------------------------------------------
 # Context-window-aware triggering (unit test with mocked usage)
 # ---------------------------------------------------------------------------
 

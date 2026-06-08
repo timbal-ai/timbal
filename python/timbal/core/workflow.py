@@ -14,7 +14,7 @@ except ImportError:
 import structlog
 from pydantic import BaseModel, ConfigDict, PrivateAttr, computed_field, create_model
 
-from ..errors import ApprovalRequired, InterruptError, SpanNotFound, WorkflowStepError
+from ..errors import InterruptError, PauseRequired, RunCancelled, SpanNotFound, WorkflowStepError
 from ..state import get_call_id, get_parent_call_id, set_parent_call_id
 from ..types.events.output import OutputEvent
 from .runnable import Runnable, RunnableLike
@@ -180,7 +180,7 @@ class Workflow(Runnable):
         """Execute a single workflow step and enqueue its events to the shared queue.
 
         Sentinel contract: this coroutine MUST push exactly one sentinel value to
-        ``queue`` on every exit path (None, an Exception, or an ApprovalRequired).
+        ``queue`` on every exit path (None, an Exception, or a PauseRequired).
         The consumer in :meth:`handler` decrements ``remaining`` on each sentinel,
         and a missed sentinel hangs the consumer on ``queue.get()`` forever. The
         outer try/finally below guarantees this even when a ``BaseException``
@@ -190,7 +190,7 @@ class Workflow(Runnable):
         status = statuses[step.name]
         # Value pushed to the queue exactly once when this coroutine exits.
         # Defaults to None (= regular completion); branches that need a different
-        # signal (Exception, ApprovalRequired) overwrite it before returning.
+        # signal (Exception, PauseRequired) overwrite it before returning.
         sentinel: Any = None
 
         try:
@@ -251,11 +251,22 @@ class Workflow(Runnable):
                     if (
                         isinstance(event, OutputEvent)
                         and event.status.code == "cancelled"
-                        and event.status.reason in {"approval_required", "approval_denied"}
+                        and event.status.reason in {"approval_required", "approval_denied", "input_required"}
                     ):
-                        logger.info(f"Step {step.name} cancelled because approval is required or denied.")
+                        logger.info(f"Step {step.name} paused ({event.status.reason}).")
                         status.state = StepState.FAILED
-                        sentinel = ApprovalRequired(event)
+                        sentinel = PauseRequired(event)
+                        return
+                    if (
+                        isinstance(event, OutputEvent)
+                        and event.status.code == "cancelled"
+                        and event.status.reason == "cancelled"
+                    ):
+                        # A human cancelled this step via Cancel(); terminate the
+                        # whole workflow run rather than continuing other steps.
+                        logger.info(f"Step {step.name} cancelled by user.")
+                        status.state = StepState.FAILED
+                        sentinel = RunCancelled(event.status.message or "Run cancelled by user.")
                         return
                     if isinstance(event, OutputEvent) and event.error is not None:
                         logger.info(f"Step {step.name} completed with error.")
@@ -306,12 +317,13 @@ class Workflow(Runnable):
     async def handler(self, **kwargs: Any) -> AsyncGenerator[Any, None]:
         """Execute all steps concurrently, respecting dependencies.
 
-        When multiple parallel steps require approval, every gate is drained
-        (so each step emits its OutputEvent + ApprovalEvent) before the
-        workflow itself raises ``ApprovalRequired``. This lets a caller
-        collect every pending ``approval_id`` from a single run and resume
-        with all decisions at once. Mirrors the agent's tool-multiplexing
-        behaviour and prevents the first gate from cancelling later gates.
+        When multiple parallel steps pause (approval gate or suspend()), every
+        pause is drained (so each step emits its OutputEvent + Approval/
+        Interaction event) before the workflow itself raises ``PauseRequired``.
+        This lets a caller collect every pending id from a single run and resume
+        with all of them at once via ``resume={...}``. Mirrors the agent's
+        tool-multiplexing behaviour and prevents the first pause from cancelling
+        later ones.
         """
         queue = asyncio.Queue()
         statuses = {step_name: StepStatus() for step_name in self._steps.keys()}
@@ -320,7 +332,7 @@ class Workflow(Runnable):
             for step in self._steps.values()
         ]
 
-        first_pending_approval: ApprovalRequired | None = None
+        first_pending_pause: PauseRequired | None = None
         first_pending_exception: Exception | None = None
 
         try:
@@ -329,9 +341,9 @@ class Workflow(Runnable):
                 event = await queue.get()
                 if isinstance(event, InterruptError):
                     raise event
-                if isinstance(event, ApprovalRequired):
-                    if first_pending_approval is None:
-                        first_pending_approval = event
+                if isinstance(event, PauseRequired):
+                    if first_pending_pause is None:
+                        first_pending_pause = event
                     remaining -= 1
                     continue
                 if isinstance(event, Exception):
@@ -343,8 +355,10 @@ class Workflow(Runnable):
                     remaining -= 1
                 else:
                     yield event
-            if first_pending_approval is not None:
-                raise first_pending_approval
+            # A pause (approval or suspend) takes precedence over a step error in
+            # the surfaced status; both ride the same durable resume rails.
+            if first_pending_pause is not None:
+                raise first_pending_pause
             if first_pending_exception is not None:
                 raise first_pending_exception
             failed_steps = sorted(

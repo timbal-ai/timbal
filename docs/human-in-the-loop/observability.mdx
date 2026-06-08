@@ -1,0 +1,72 @@
+---
+title: "Observability"
+description: "Status reasons, usage counters, and common patterns for paused runs"
+---
+
+## Status reasons
+
+When the run cancels, `OutputEvent.status.reason` carries one of:
+
+- `approval_required` — a gate emitted an `ApprovalEvent` and is waiting on a decision
+- `approval_denied` — a denying resolution was consumed (direct call only; agents convert this to a tool result)
+- `approval_already_claimed` — durable claim said another worker already resumed this gate
+- `approval_policy_error` — a `requires_approval` / `approval_prompt` callable raised
+- `input_required` — a `suspend()` call emitted an `InteractionEvent` and is waiting on a value
+- `cancelled` — a `Cancel` was supplied on resume (approval or suspension); the whole run aborted and nothing was fed back to the model
+
+## Usage counters
+
+`OutputEvent.usage` records pause-lifecycle counters so you can plot them in dashboards:
+
+- `approvals:required` — a gate emitted an `ApprovalEvent`
+- `approvals:approved` — a valid approved resolution was consumed
+- `approvals:denied` — a valid denied resolution was consumed
+- `approvals:expired` — an expired resolution was ignored and the gate re-emitted
+- `approvals:cancelled` — a `Cancel` aborted the run at a gate
+- `suspends:required` — a `suspend()` call paused the run
+
+These propagate through the usage merge tree just like token counts, so a parent agent run aggregates pause counts from every nested tool/workflow gate or suspension.
+
+## Common patterns
+
+<AccordionGroup>
+<Accordion title="Approve from a UI, resume from a worker">
+1. Configure a durable provider (`JsonlTracingProvider` / `SqliteTracingProvider` / `PlatformTracingProvider`).
+2. UI calls `agent(prompt=...)`, captures `ApprovalEvent` (or polls the trace for `pending_approvals()`), shows reviewer the prompt + redacted input.
+3. Reviewer clicks Approve/Deny. UI persists `(approval_id, ApprovalResolution)` to a queue.
+4. Worker pulls the message and calls `agent(prompt=..., parent_id=run_id, resume={approval_id: resolution})`.
+5. If `result.status.reason == "approval_already_claimed"`, no-op. Otherwise, the handler executed exactly once.
+</Accordion>
+
+<Accordion title="Ask the user a clarifying question mid-task">
+Give the agent the `ask_user` tool. When it's blocked it calls `ask_user`, the run ends `input_required` with an `InteractionEvent`, your UI renders the question, and you resume with `resume={interaction_id: answer}`. Keep everything before the `suspend()` call idempotent: the handler re-runs from the top on resume.
+</Accordion>
+
+<Accordion title="Settle a batch of pauses in one round-trip">
+The agent may call multiple gated/suspending tools in parallel. Each pause emits its own event and the run cancels once they all settle. Collect every id, present them as a checklist, and resume with the full dict in one call: approvals and interactions can be mixed freely.
+</Accordion>
+
+<Accordion title="Force a fresh decision for each call">
+The default `approval_id` is stable across retries of the same `(path, input)`. To require a fresh decision per invocation, include a per-call unique value in the input, typically an `idempotency_key=str(uuid4())`, so each call derives a distinct id.
+</Accordion>
+
+<Accordion title="Hide secrets from reviewers">
+Use `approval_redact_keys=["api_key", "password"]` for the simple case. Use `approval_redactor=lambda input: {...}` for partial masking (e.g. mask the local-part of an email but keep the domain). The handler still receives the unredacted input.
+</Accordion>
+
+<Accordion title="Approve with a correction (edit on approve)">
+The model proposed a slightly-wrong argument (a typo'd email, an amount that should be lower). Instead of denying and round-tripping, approve with `ApprovalResolution(approved=True, override_input={"to": "fixed@example.com"})`. The override merges over the proposal, re-validates through the params model, and the handler runs with the corrected input. Over HTTP send `{"approved": true, "override_input": {...}}`.
+</Accordion>
+
+<Accordion title="Cancel a task the user abandoned">
+When the user closes the dialog or navigates away rather than deciding, resume with `Cancel(reason=...)` (HTTP: `{"type": "timbal.cancel", "reason": "..."}`) keyed to any pending id. The run ends `status.reason == "cancelled"` and nothing is fed back to the model, distinct from a denial, which the agent would see and react to.
+</Accordion>
+</AccordionGroup>
+
+## See also
+
+- [Approval-Required Tools example](/examples/agents/approval-required-tools) — runnable end-to-end snippet
+- [Events & Streaming](/core-concepts/events) — the event stream
+- [Tracing](/core-concepts/tracing) — how runs are persisted and replayed
+- [Context & State Management](/core-concepts/context) — `RunContext` internals
+- [Tools](/agents/tools) — tool configuration reference

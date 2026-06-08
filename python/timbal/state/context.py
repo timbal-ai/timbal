@@ -93,20 +93,22 @@ class RunContext(BaseModel):
     _trace: Trace = PrivateAttr()
     _tracing_provider: type[TracingProvider] = PrivateAttr()
     _session_data: dict[str, Any] | None = PrivateAttr(default=None)
-    _approval_decisions: dict[str, Any] = PrivateAttr(default_factory=dict)
-    """Active approval resolutions keyed by approval_id (values: ApprovalResolution).
-    Typed as ``Any`` to avoid an import cycle with ``..types.approval`` — the
-    invariant is enforced at write time by ``_normalize_approval_decisions``."""
-    _used_approval_ids: set[str] = PrivateAttr(default_factory=set)
-    """Approval IDs that matched a gate during this run. Used to warn about
-    unrecognized decisions (typos, stale IDs) at run completion."""
+    _resume_values: dict[str, Any] = PrivateAttr(default_factory=dict)
+    """Active resume values keyed by id, supplied via ``resume=`` to fulfill a
+    paused run. The id is an approval_id for an approval gate (value normalized
+    to ``ApprovalResolution``) or a suspension_id for a ``suspend()`` call (value
+    is arbitrary). The two id-spaces are disjoint hashes, so one store routes
+    unambiguously to the right consumer."""
+    _used_resume_ids: set[str] = PrivateAttr(default_factory=set)
+    """Resume ids that matched a gate or ``suspend()`` during this run. Used to
+    warn about unrecognized resume values (typos, stale IDs) at run completion."""
 
     def pending_approvals(self) -> list[dict[str, Any]]:
         """Return metadata for every span currently waiting on approval.
 
         Useful when an OutputEvent's status is cancelled/approval_required and
         the caller wants to enumerate every approval that needs a decision
-        before retrying the run with ``approval_decisions={...}``. Includes
+        before retrying the run with ``resume={...}``. Includes
         ``expired``/``expired_at`` when the previous decision was rejected for
         TTL reasons so a UI can flag stale approvals to the operator.
 
@@ -125,8 +127,12 @@ class RunContext(BaseModel):
                         "approval_id": approval["id"],
                         "path": span.path,
                         "call_id": span.call_id,
+                        "tool_call_id": approval.get("tool_call_id"),
                         "prompt": approval.get("prompt"),
                         "description": approval.get("description"),
+                        "kind": approval.get("kind"),
+                        "ui": approval.get("ui"),
+                        "input_schema": approval.get("input_schema"),
                         "metadata": approval.get("metadata", {}),
                         "input": approval.get("input"),
                     }
@@ -134,6 +140,37 @@ class RunContext(BaseModel):
                         entry["expired"] = True
                         entry["expired_at"] = approval.get("expired_at")
                     pending.append(entry)
+        return pending
+
+    def pending_interactions(self) -> list[dict[str, Any]]:
+        """Return metadata for every span currently suspended on input.
+
+        Mirror of :meth:`pending_approvals` for ``suspend()``-based interactions
+        (e.g. ``ask_user``, ``confirm``, or any custom interaction tool). When an
+        OutputEvent's status is cancelled/input_required, enumerate every
+        suspension so a UI can render each prompt and the caller can retry the
+        run with ``resume={interaction_id: value, ...}``.
+
+        Tolerates both ``RunStatus`` instances and dicts, since traces loaded
+        from JSONL/SQLite providers carry status as a dict.
+        """
+        pending: list[dict[str, Any]] = []
+        for span in self._trace.values():
+            status = span.status
+            code = status.get("code") if isinstance(status, dict) else getattr(status, "code", None)
+            reason = status.get("reason") if isinstance(status, dict) else getattr(status, "reason", None)
+            if code == "cancelled" and reason == "input_required":
+                suspension = (span.metadata or {}).get("suspension")
+                if suspension and suspension.get("id"):
+                    pending.append({
+                        "interaction_id": suspension["id"],
+                        "kind": suspension.get("kind", "suspend"),
+                        "path": span.path,
+                        "call_id": span.call_id,
+                        "tool_call_id": suspension.get("tool_call_id"),
+                        "payload": suspension.get("payload", {}),
+                        "response_schema": suspension.get("response_schema"),
+                    })
         return pending
 
     def model_post_init(self, __context: Any) -> None:
