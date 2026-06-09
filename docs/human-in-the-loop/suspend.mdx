@@ -54,7 +54,7 @@ def confirm(action: str) -> bool:
     return bool(suspend({"action": action}, kind="confirm"))
 ```
 
-`suspend` is exported at the top level (`from timbal import suspend`), and the ready-made `ask_user` / `confirm` tools ship in `timbal.tools` (`from timbal.tools import ask_user, confirm`).
+`suspend` is exported at the top level (`from timbal import suspend`), and the ready-made `ask_user` / `ask_user_multi` / `confirm` tools ship in `timbal.tools` (`from timbal.tools import ask_user, ask_user_multi, confirm`).
 
 <Warning>
 Because the handler **re-executes from the top** on resume, `suspend()` must come before any non-idempotent side-effect in the handler (same constraint as LangGraph's `interrupt()`). Put the `suspend()` call first, or make everything before it idempotent. This is exactly why irreversible actions belong behind an [approval gate](/human-in-the-loop/approval-gates) instead: the gate guarantees zero handler code runs until approved.

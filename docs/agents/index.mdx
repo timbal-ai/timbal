@@ -39,7 +39,7 @@ This page covers running agents, models, and I/O. The sections below are the ref
 
 ## Model Providers
 
-You can specify any model using the "provider/model" format. See all supported models in [Model Capabilities](../model_capabilities).
+You can specify any model using the "provider/model" format. See all supported models in the [Model Reference](/models/overview).
 
 Some models require specific parameters (like `max_tokens` for Claude). Pass it as a top-level field:
 
@@ -104,7 +104,7 @@ Fallback only switches models before the first streamed chunk is emitted. If a s
 
 ### Thinking and reasoning
 
-Some models support extended thinking before responding. Check which models support it on [Model Capabilities](/model_capabilities).
+Some models support extended thinking before responding. Check per-model capabilities on the [Model Reference](/models/overview) pages.
 
 Configure at construction time via `model_params` (per-request overrides use `provider_params` — see [Overriding Model Configuration](#overriding-model-configuration) below):
 

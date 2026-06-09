@@ -524,6 +524,9 @@ When filtering, response includes pagination metadata and full model objects:
 | `output_price` | float \| null | USD per 1M output tokens |
 | `context_window` | int \| null | Maximum context in tokens |
 | `capabilities` | string[] | Subset of `vision`, `tools`, `reasoning`, `audio`, `video`, `image_generation` |
+| `requires_activation` | bool | Optional. Model must be enabled in the provider console before first use (e.g. BytePlus Ark). Requires `notes`. |
+| `dedicated_only` | bool | Optional. Not serverless — requires a dedicated deployment/endpoint (e.g. TogetherAI). Requires `notes`. |
+| `notes` | string | Human-readable availability instructions; required when `requires_activation` or `dedicated_only` is set. |
 
 **Model registry (`models.yaml`):**
 

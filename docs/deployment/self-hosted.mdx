@@ -65,7 +65,7 @@ The API and UI need to know where workforce members live. `timbal start` injects
 
 `TIMBAL_START_WORKFORCE` uses the `_id` from each member's `timbal.yaml`, not the directory name.
 
-Also pass through model keys and integration secrets (`OPENAI_API_KEY`, etc.) — same `.env` files you'd use locally.
+Also pass through model keys and integration secrets (`OPENAI_API_KEY`, etc.). Locally, `timbal start` auto-loads `<project>/.env` and `workforce/<name>/.env` into each process; when self-hosting you must export or inject those variables yourself (e.g. via your process manager or a secrets store). See [Environment variables](/deployment#environment-variables).
 
 <Warning>
 If any of `TIMBAL_START_*` are missing, platform SDK helpers that resolve service URLs will fail. Mirror what `timbal start` sets before debugging routing issues.

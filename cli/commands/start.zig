@@ -641,12 +641,12 @@ fn printUsage() !void {
         "                                  NAME is `ui`, `api`, or a workforce member name.\n" ++
         "\n" ++
         "\x1b[1;32mEnvironment overrides:\n" ++
+        "    \x1b[0m<project>/.env is auto-loaded into every service when present;\n" ++
+        "    workforce/<member>/.env applies to that member only. Use --env and --env-file\n" ++
+        "    for extras or overrides (SCOPE: ui, api, or member name). Precedence (low → high):\n" ++
+        "    built-ins, shell env, auto .env, --env-file, --env, runtime (PORT, TIMBAL_START_*).\n" ++
         "    \x1b[1;36m--env [SCOPE:]KEY=VALUE    \x1b[0mSet an env var for one or all services (repeatable)\n" ++
         "    \x1b[1;36m--env-file [SCOPE:]PATH    \x1b[0mLoad env vars from a .env file (repeatable)\n" ++
-        "                                  SCOPE is `ui`, `api`, or a workforce member name.\n" ++
-        "                                  Auto-loads <project>/.env and workforce/<member>/.env if present.\n" ++
-        "                                  Precedence (low → high): timbal built-ins, shell env,\n" ++
-        "                                  auto-loaded .env, --env-file, --env.\n" ++
         "\n" ++
         "\x1b[1;32mInteractive commands:\n" ++
         "    \x1b[1;36mr\x1b[0m, \x1b[1;36mrestart  \x1b[0mRestart all services\n" ++

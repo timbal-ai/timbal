@@ -28,12 +28,51 @@ Override ports or env vars when needed:
 ```bash
 timbal start --ui-port 4000 --api-port 3001 --port my-agent=4500
 timbal start --env OPENAI_API_KEY=sk-... --env my-agent:DEBUG=1
-timbal start --env-file .env --env-file my-agent:workforce/my-agent/.env
+timbal start --env-file .env.staging --env-file api:.env.api
 ```
 
+## Environment variables
+
+`timbal start` composes a separate environment for each service before spawning it. You do not need `--env-file` for the standard project layout — these files are **auto-loaded** when present:
+
+| File | Scope |
+|------|-------|
+| `<project>/.env` | All services (UI, API, every workforce member) |
+| `workforce/<name>/.env` | That workforce member only |
+
+Missing files are skipped silently.
+
+Override or add variables at the CLI:
+
+```bash
+timbal start --env DEBUG=1                    # all services
+timbal start --env api:LOG_LEVEL=debug      # API only
+timbal start --env-file .env.staging        # extra file, all services
+timbal start --env-file my-agent:.env.local # extra file, one member
+```
+
+`--env` and `--env-file` accept an optional scope prefix: `ui:`, `api:`, or a workforce member name. Unscoped entries apply globally.
+
+### Precedence (low → high)
+
+Later layers win over earlier ones:
+
+1. Timbal built-ins (`TIMBAL_LOG_FORMAT`, `TIMBAL_API_KEY`, etc. from your CLI profile)
+2. Inherited shell environment (`PORT` from your shell is ignored so it does not leak into services)
+3. Auto-loaded `<project>/.env`, then auto-loaded `workforce/<name>/.env` (members only)
+4. `--env-file` (in flag order; scoped files apply only to that service)
+5. `--env` (in flag order; scoped entries apply only to that service)
+6. Runtime wiring that always wins (`PORT`, `TIMBAL_START_*`, `TIMBAL_WORKFORCE`)
+
+Restart services (`r` in the `timbal start` terminal, or quit and re-run) after changing `.env` files — changes are read at startup, not hot-reloaded.
+
 <Note>
-`--env` and `--env-file` accept an optional scope prefix (`ui:`, `api:`, or a workforce member name). Project-root `.env` applies to all services; `workforce/<name>/.env` applies to that member only.
+`.env` parsing is intentionally minimal: `KEY=VALUE` lines, optional `export` prefix, optional quotes, `#` comments. No variable expansion, line continuations, or shell escapes. For complex values, set the variable in your shell or use `--env`.
 </Note>
+
+<Tip>
+Vite and Bun may also read `ui/.env` and `api/.env` from those directories at dev time. Project-root `.env` is still the usual place for secrets shared across the stack (model API keys, integration tokens).
+</Tip>
 
 ## Production
 

@@ -3,24 +3,11 @@ title: "TogetherAI"
 description: "Open-source models via TogetherAI inference with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [TogetherAI model docs](https://docs.together.ai/docs/chat-models). All model IDs use the prefix `togetherai/`.</Note>
+<Note>Source: [TogetherAI model docs](https://docs.together.ai/docs/chat-models). All model IDs use the prefix `togetherai/`. Models with a dedicated-only warning are not serverless — you must create and start a dedicated endpoint first.</Note>
 
 ## Meta LLaMA
 
 <CardGroup cols={2}>
-  <Card title="Llama-4-Maverick-17B-128E-Instruct-FP8">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`
-
-  Natively multimodal MoE with 17B active parameters and 128 experts (400B total), supporting 1M token context. Outperforms GPT-4o and Gemini 2.0 Flash across multimodal benchmarks.
-
-  - &#36;0.27 / &#36;0.85
-  - <Icon icon="window-maximize" size={14} /> 1M context
-  - <Icon icon="keyboard" size={14} /> Text, Image input
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Aug 2024
-  </Card>
-
   <Card title="Llama-3.3-70B-Instruct-Turbo">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
@@ -29,19 +16,6 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
   Multilingual instruction-tuned model with 70B parameters, delivering enhanced performance relative to Llama 3.1 70B and matching Llama 3.2 90B on text-only tasks.
 
   - &#36;0.88 / &#36;0.88
-  - <Icon icon="window-maximize" size={14} /> 128K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Dec 2023
-  </Card>
-
-  <Card title="Llama-3.2-3B-Instruct-Turbo">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/meta-llama/Llama-3.2-3B-Instruct-Turbo`
-
-  Lightweight 3B-parameter model optimized for on-device use cases including summarization, instruction following, and rewriting tasks.
-
-  - &#36;0.06 / &#36;0.06
   - <Icon icon="window-maximize" size={14} /> 128K context
   - <Icon icon="keyboard" size={14} /> Text input
   - <Icon icon="calendar" size={14} /> Knowledge cutoff Dec 2023
@@ -80,26 +54,14 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
   - <Icon icon="calendar" size={14} /> Knowledge cutoff ~early 2025
   </Card>
 
-  <Card title="Qwen3-235B-A22B-Thinking-2507">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/Qwen/Qwen3-235B-A22B-Thinking-2507`
-
-  The always-thinking variant of Qwen3-235B, with deep chain-of-thought reasoning for complex math, coding, and analytical tasks.
-
-  - &#36;0.65 / &#36;3
-  - <Icon icon="window-maximize" size={14} /> 262K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking always
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~early 2025
-  </Card>
-
   <Card title="Qwen3-Coder-480B-A35B-Instruct-FP8">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
   `togetherai/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8`
 
   Qwen's most agentic code model, a 480B-parameter MoE (35B active) achieving results comparable to Claude Sonnet on agentic coding, browser-use, and repository-scale tasks.
+
+  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8) before use.</Warning>
 
   - &#36;0.22 / &#36;1
   - <Icon icon="window-maximize" size={14} /> 262K context
@@ -113,6 +75,8 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Next-generation coding model with hybrid thinking mode for adaptive reasoning depth.
 
+  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/Qwen/Qwen3-Coder-Next-FP8) before use.</Warning>
+
   - &#36;0.50 / &#36;1.20
   - <Icon icon="window-maximize" size={14} /> 256K context
   - <Icon icon="keyboard" size={14} /> Text input
@@ -125,6 +89,8 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
   `togetherai/Qwen/Qwen3-Next-80B-A3B-Instruct`
 
   First model in the Qwen3-Next series with 80B total parameters (3.9B active), featuring hybrid attention. Matches Qwen3-235B performance while using less than 10% training cost.
+
+  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/Qwen/Qwen3-Next-80B-A3B-Instruct) before use.</Warning>
 
   - &#36;0.15 / &#36;1.50
   - <Icon icon="window-maximize" size={14} /> 262K context
@@ -158,6 +124,8 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 
   Hybrid model supporting both thinking and non-thinking modes. Features significantly improved tool usage and agent task performance, with quality comparable to DeepSeek-R1-0528 in thinking mode.
 
+  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/deepseek-ai/DeepSeek-V3.1) before use.</Warning>
+
   - &#36;0.60 / &#36;1.70
   - <Icon icon="window-maximize" size={14} /> 128K context
   - <Icon icon="keyboard" size={14} /> Text input
@@ -165,18 +133,18 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
   - <Icon icon="calendar" size={14} /> Knowledge cutoff ~mid 2025
   </Card>
 
-  <Card title="DeepSeek-R1">
+  <Card title="DeepSeek-V4-Pro">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
-  `togetherai/deepseek-ai/DeepSeek-R1`
+  `togetherai/deepseek-ai/DeepSeek-V4-Pro`
 
-  Open reasoning model with 671B total parameters (37B active, MoE), trained via large-scale reinforcement learning. Achieves performance comparable to OpenAI o1 across math, code, and reasoning. MIT license.
+  DeepSeek V4 Pro on Together serverless: hybrid attention, up to 512K context, strong coding and agent benchmarks.
 
-  - ~&#36;3 / ~&#36;7
-  - <Icon icon="window-maximize" size={14} /> 128K context
+  - &#36;2.10 / &#36;4.40
+  - <Icon icon="window-maximize" size={14} /> 512K context
   - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking always
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jul 2024
+  - <Icon icon="brain" size={14} /> Hybrid thinking
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~2025
   </Card>
 </CardGroup>
 
@@ -185,56 +153,28 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
 ## Kimi / MiniMax / GLM / Other
 
 <CardGroup cols={2}>
-  <Card title="Kimi-K2.5">
+  <Card title="Kimi-K2.6">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
-  `togetherai/moonshotai/Kimi-K2.5`
+  `togetherai/moonshotai/Kimi-K2.6`
 
-  Moonshot AI's open-source multimodal model with 1T total parameters (32B active, MoE). Features Agent Swarm technology coordinating up to 100 specialized AI agents simultaneously.
+  Moonshot Kimi K2.6 on Together serverless: 1T-scale MoE with tool calling and JSON mode for agentic and multimodal workloads.
 
-  - &#36;0.50 / &#36;2.80
-  - <Icon icon="window-maximize" size={14} /> 256K context
-  - <Icon icon="keyboard" size={14} /> Text, Image, Video input
-  - <Icon icon="brain" size={14} /> Thinking
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Apr 2024
+  - &#36;1.20 / &#36;4.50
+  - <Icon icon="window-maximize" size={14} /> 262K context
+  - <Icon icon="keyboard" size={14} /> Text, Image input
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~2025
   </Card>
 
-  <Card title="Kimi-K2-Instruct-0905">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/moonshotai/Kimi-K2-Instruct-0905`
-
-  General-purpose chat and agentic model with 1T total parameters (32B active), optimized as a reflex-grade model without long thinking. Strong autonomous tool-calling.
-
-  - &#36;1 / &#36;3
-  - <Icon icon="window-maximize" size={14} /> 256K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff Sep 2024
-  </Card>
-
-  <Card title="Kimi-K2-Thinking">
-  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
-
-  `togetherai/moonshotai/Kimi-K2-Thinking`
-
-  Open-source thinking agent that reasons step-by-step while dynamically invoking tools. Sets state-of-the-art on Humanity's Last Exam and BrowseComp, supporting 200-300 sequential tool calls without drift.
-
-  - &#36;1.20 / &#36;4
-  - <Icon icon="window-maximize" size={14} /> 256K context
-  - <Icon icon="keyboard" size={14} /> Text input
-  - <Icon icon="brain" size={14} /> Thinking always
-  - <Icon icon="calendar" size={14} /> Knowledge cutoff ~Sep 2024
-  </Card>
-
-  <Card title="MiniMax-M2.5">
+  <Card title="MiniMax-M2.7">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
-  `togetherai/MiniMaxAI/MiniMax-M2.5`
+  `togetherai/MiniMaxAI/MiniMax-M2.7`
 
-  MoE model with 230B total parameters (10B active), extensively trained with RL in complex real-world environments. Achieves SOTA in coding (80.2% SWE-Bench Verified) and agentic tool use.
+  MiniMax successor MoE (~229B) with improved coding and agentic tool use, JSON mode, and prompt caching on Together serverless.
 
   - &#36;0.30 / &#36;1.20
-  - <Icon icon="window-maximize" size={14} /> 200K context
+  - <Icon icon="window-maximize" size={14} /> 203K context
   - <Icon icon="keyboard" size={14} /> Text input
   </Card>
 
@@ -252,12 +192,28 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
   - <Icon icon="calendar" size={14} /> Knowledge cutoff late 2025
   </Card>
 
+  <Card title="GLM-5.1">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `togetherai/zai-org/GLM-5.1`
+
+  Z.ai post-training upgrade to GLM-5: 754B MoE (40B active), 200K context, thinking mode, tool calling, and stronger coding via RL.
+
+  - &#36;1.40 / &#36;4.40
+  - <Icon icon="window-maximize" size={14} /> 200K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Thinking
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff late 2025
+  </Card>
+
   <Card title="GLM-4.7">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
   `togetherai/zai-org/GLM-4.7`
 
   Zhipu AI's foundation model with ~400B parameters and 200K context, designed for real-world development environments with strong coding, reasoning, and agentic capabilities.
+
+  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/zai-org/GLM-4.7) before use.</Warning>
 
   - &#36;0.45 / &#36;2
   - <Icon icon="window-maximize" size={14} /> 200K context
@@ -274,6 +230,20 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
   OpenAI's open-weight MoE model with 120B total parameters (5.1B active per token). Achieves near-parity with o4-mini on core reasoning benchmarks while running on a single 80GB GPU. Apache 2.0.
 
   - &#36;0.15 / &#36;0.60
+  - <Icon icon="window-maximize" size={14} /> 128K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Thinking
+  - <Icon icon="calendar" size={14} /> Knowledge cutoff Jun 2024
+  </Card>
+
+  <Card title="gpt-oss-20b">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `togetherai/openai/gpt-oss-20b`
+
+  OpenAI's compact 20B MoE delivering o3-mini-level results on Together serverless. Apache 2.0.
+
+  - &#36;0.05 / &#36;0.20
   - <Icon icon="window-maximize" size={14} /> 128K context
   - <Icon icon="keyboard" size={14} /> Text input
   - <Icon icon="brain" size={14} /> Thinking
@@ -298,6 +268,8 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
   `togetherai/google/gemma-3-27b-it`
 
   Google's multimodal open model with 27B parameters, built from the same technology as Gemini 2.0. Supports 128K context, 140+ languages, and runs on a single GPU/TPU.
+
+  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/google/gemma-3-27b-it) before use.</Warning>
 
   - ~&#36;0.10 / ~&#36;0.10
   - <Icon icon="window-maximize" size={14} /> 128K context
@@ -324,6 +296,8 @@ description: "Open-source models via TogetherAI inference with specs, pricing, a
   `togetherai/mistralai/Mistral-Small-24B-Instruct-2501`
 
   A 24B-parameter dense model setting new benchmarks in the sub-70B category, with native function calling, JSON output, and support for dozens of languages. Fits on a single RTX 4090.
+
+  <Warning>Dedicated only — create and start a [dedicated endpoint](https://api.together.ai/models/mistralai/Mistral-Small-24B-Instruct-2501) before use.</Warning>
 
   - &#36;0.10 / &#36;0.30
   - <Icon icon="window-maximize" size={14} /> 32K context

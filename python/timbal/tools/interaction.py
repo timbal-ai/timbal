@@ -7,9 +7,9 @@ externally-supplied value. The frontend renders the suspension ``payload``
 Pass them straight to an agent::
 
     from timbal import Agent
-    from timbal.tools.interaction import ask_user
+    from timbal.tools.interaction import ask_user, ask_user_multi
 
-    agent = Agent(name="assistant", model="...", tools=[ask_user])
+    agent = Agent(name="assistant", model="...", tools=[ask_user, ask_user_multi])
 
 When the model is blocked it calls ``ask_user``; the run ends with status
 ``input_required`` and emits an ``InteractionEvent``. Resume with the answer::
@@ -40,6 +40,30 @@ def ask_user(question: str, options: list[str] | None = None) -> str:
         The user's answer.
     """
     return suspend({"question": question, "options": options}, kind="ask_user")
+
+
+def ask_user_multi(question: str, options: list[str]) -> list[str]:
+    """Ask the user to pick one or more options and wait for their answer.
+
+    Like :func:`ask_user`, but the user may select multiple choices. Renders as
+    a multi-select picker; resumes with a list of selected option strings.
+
+    Args:
+        question: The question to ask the user.
+        options: List of choices to present.
+
+    Returns:
+        The user's selected options (one or more).
+    """
+    return suspend(
+        {"question": question, "options": options},
+        kind="ask_user_multi",
+        response_schema={
+            "type": "array",
+            "items": {"type": "string", "enum": options},
+            "minItems": 1,
+        },
+    )
 
 
 def confirm(action: str) -> bool:

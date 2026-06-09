@@ -23,9 +23,9 @@ def ask_choice(question: str, options: list[str]) -> str:
     return suspend({"question": question, "options": options}, kind="ask_choice")
 
 
-def ask_multi_choice(question: str, options: list[str]) -> list[str]:
+def ask_user_multi(question: str, options: list[str]) -> list[str]:
     """Ask the user to pick any number of options. Resumes with a list."""
-    return suspend({"question": question, "options": options}, kind="ask_multi_choice")
+    return suspend({"question": question, "options": options}, kind="ask_user_multi")
 
 
 def confirm(action: str) -> bool:
@@ -54,7 +54,7 @@ def review_chart(title: str, series: list[dict]) -> dict:
     return suspend({"title": title, "series": series}, kind="review_chart")
 ```
 
-`suspend` is exported at the top level (`from timbal import suspend`). Ready-made `ask_user` and `confirm` also ship in `timbal.tools` (`from timbal.tools import ask_user, confirm`).
+`suspend` is exported at the top level (`from timbal import suspend`). Ready-made `ask_user`, `ask_user_multi`, and `confirm` also ship in `timbal.tools` (`from timbal.tools import ask_user, ask_user_multi, confirm`).
 
 <Warning>
 The handler **re-executes from the top** on resume, so put `suspend()` before any non-idempotent side-effect (or make everything before it idempotent). For irreversible actions, gate them with [`requires_approval`](/human-in-the-loop/approval-gates) instead — that pauses *before* any handler code runs.
@@ -68,7 +68,7 @@ This is the contract your frontend renders against. Switch your UI on `kind`, re
 | --- | --- | --- |
 | `ask_text` | `{ "question": str }` | `str` |
 | `ask_choice` | `{ "question": str, "options": [str] }` | `str` (one option) |
-| `ask_multi_choice` | `{ "question": str, "options": [str] }` | `[str]` |
+| `ask_user_multi` | `{ "question": str, "options": [str] }` | `[str]` |
 | `confirm` | `{ "action": str }` | `bool` |
 | `ask_form` | `{ "title": str, "fields": [{name, label, type}] }` | `{ name: value }` |
 | `ask_rating` | `{ "question": str, "scale": int }` | `int` |
@@ -87,7 +87,7 @@ from timbal.types.events import InteractionEvent, OutputEvent
 agent = Agent(
     name="onboarding_assistant",
     model="openai/gpt-5",
-    tools=[ask_text, ask_choice, ask_multi_choice, confirm, ask_form, ask_rating],
+    tools=[ask_text, ask_choice, ask_user_multi, confirm, ask_form, ask_rating],
     system_prompt=(
         "You onboard new users. Gather what you need by calling the interaction "
         "tools — never guess a value the user hasn't given you."
@@ -101,7 +101,7 @@ def render_and_collect(kind: str, payload: dict):
         return True
     if kind == "ask_choice":
         return payload["options"][0]
-    if kind == "ask_multi_choice":
+    if kind == "ask_user_multi":
         return payload["options"][:2]
     if kind == "ask_form":
         return {f["name"]: "..." for f in payload["fields"]}

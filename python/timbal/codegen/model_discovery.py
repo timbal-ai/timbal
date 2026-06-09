@@ -14,6 +14,8 @@ _PROVIDER_LOGOS = {
     "fireworks": "https://content.timbal.ai/assets/fireworks_favicon.svg",
     "xiaomi": "https://content.timbal.ai/assets/xiaomi_favicon.svg",
     "byteplus": "https://content.timbal.ai/assets/byteplus_favicon.svg",
+    "cerebras": "https://content.timbal.ai/assets/cerebras_favicon.svg",
+    "sambanova": "https://content.timbal.ai/assets/sambanova_favicon.svg",
 }
 
 
@@ -21,7 +23,8 @@ def get_models() -> list[dict]:
     """Return all supported LLM models from models.yaml.
 
     Each entry contains: id, provider, display_name, description, input_price,
-    output_price, context_window, capabilities.
+    output_price, context_window, capabilities, and optional availability fields
+    (requires_activation, dedicated_only, notes).
     """
     with _MODELS_YAML.open() as f:
         data = yaml.safe_load(f)
