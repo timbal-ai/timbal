@@ -45,6 +45,8 @@ my-project/
 
 ## Run locally
 
+Run `timbal configure` before your first `timbal start` — it stores your Timbal credentials locally. For model calls, platform auth from configure is enough; otherwise set `OPENAI_API_KEY` in `<project>/.env` (or the key for whichever provider your model uses).
+
 From the project directory, start the full stack — API, workforce (your Python agents/workflows), and UI if you included one:
 
 ```bash
@@ -53,6 +55,8 @@ timbal start
 ```
 
 `timbal start` prints the local URLs and keeps services running until you quit (`q`). While it's running you can press `o` to open the UI in your browser, or `h` for other commands.
+
+If `<project>/.env` exists, `timbal start` loads it automatically and injects those variables into every service (UI, API, and all workforce members). Per-member overrides can live in `workforce/<name>/.env`. See [Environment variables](/deployment#environment-variables) for scoping, precedence, and overrides.
 
 <Tip>
 To test a workforce member in isolation, you can also run its Python file directly: `uv run python workforce/<name>/agent.py` (the scaffold includes a small terminal REPL).
@@ -74,7 +78,7 @@ agent = Agent(
 ```
 
 <Info>
-You'll need to set the appropriate environment variables for your chosen model (e.g., `OPENAI_API_KEY`). Store these in a `.env` file and never commit them to version control.
+If you use your own provider key instead of platform auth, set it in a `.env` file at the project root (e.g. `OPENAI_API_KEY` for OpenAI models) — `timbal start` picks it up automatically. Never commit `.env` to version control.
 </Info>
 
 The scaffold already includes a terminal REPL (`main()` at the bottom of `agent.py`). After editing, restart with `timbal start` to pick up changes in the full app, or run the file directly for a quick loop.
