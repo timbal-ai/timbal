@@ -200,7 +200,7 @@ if TYPE_CHECKING:
         HubSpotUpdateTicket,
         UpdateEngagement,
     )
-    from .interaction import ask_user, confirm
+    from .interaction import ask_user, ask_user_multi, confirm
     from .jira import (
         JiraAddAttachment,
         JiraAddUserToGroup,
@@ -1040,6 +1040,7 @@ __all__ = [
     "Bash",
     "CalaQuery",
     "ask_user",
+    "ask_user_multi",
     "confirm",
     "CalaSearch",
     "Edit",
@@ -2008,6 +2009,7 @@ __all__ = [
 _LAZY_IMPORTS = {
     "Bash": ".bash",
     "ask_user": ".interaction",
+    "ask_user_multi": ".interaction",
     "confirm": ".interaction",
     "CalaQuery": ".cala",
     "CalaSearch": ".cala",

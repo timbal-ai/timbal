@@ -8,6 +8,7 @@ from timbal import Agent, Tool, Workflow
 from timbal.core.test_model import TestModel
 from timbal.state import get_run_context, suspend
 from timbal.tools import ask_user as builtin_ask_user
+from timbal.tools import ask_user_multi as builtin_ask_user_multi
 from timbal.tools import confirm as builtin_confirm
 from timbal.types.events import InteractionEvent, OutputEvent
 from timbal.types.message import Message
@@ -371,6 +372,40 @@ class TestBuiltinInteractionTools:
         ).collect()
         assert result.status.code == "success"
         assert result.output.collect_text() == "Using postgres."
+
+    async def test_ask_user_multi_round_trip(self):
+        tool_call = Message.validate({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "ask_user_multi",
+                "input": {
+                    "question": "Which integrations?",
+                    "options": ["slack", "gmail", "jira"],
+                },
+            }],
+        })
+        model = TestModel(responses=[tool_call, "Enabled slack and gmail."])
+        agent = Agent(name="assistant", model=model, tools=[builtin_ask_user_multi])
+
+        first = await agent(prompt="set up integrations").collect()
+        assert first.status.reason == "input_required"
+        pending = first.metadata["pending_interactions"][0]
+        assert pending["kind"] == "ask_user_multi"
+        assert pending["response_schema"] == {
+            "type": "array",
+            "items": {"type": "string", "enum": ["slack", "gmail", "jira"]},
+            "minItems": 1,
+        }
+
+        result = await agent(
+            prompt="set up integrations",
+            parent_id=first.run_id,
+            resume={pending["interaction_id"]: ["slack", "gmail"]},
+        ).collect()
+        assert result.status.code == "success"
+        assert result.output.collect_text() == "Enabled slack and gmail."
 
     async def test_confirm_returns_bool(self):
         tool = Tool(handler=builtin_confirm)
