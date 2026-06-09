@@ -476,17 +476,17 @@
             "group": "Model Reference",
             "pages": [
               "models/overview",
-              "models/openai",
               "models/anthropic",
-              "models/google",
-              "models/xai",
-              "models/togetherai",
-              "models/groq",
-              "models/fireworks",
-              "models/xiaomi",
               "models/byteplus",
               "models/cerebras",
-              "models/sambanova"
+              "models/fireworks",
+              "models/google",
+              "models/groq",
+              "models/openai",
+              "models/sambanova",
+              "models/togetherai",
+              "models/xai",
+              "models/xiaomi"
             ]
           }
         ]

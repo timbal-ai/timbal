@@ -3,17 +3,19 @@ title: "BytePlus"
 description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities"
 ---
 
-<Note>Source: [BytePlus ModelArk docs](https://docs.byteplus.com/en/docs/ModelArk). All models support tool/function calling. Activate each model in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before use.</Note>
+<Note>Source: [BytePlus ModelArk docs](https://docs.byteplus.com/en/docs/ModelArk). All models support tool/function calling. Models with an activation warning must be enabled in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before use.</Note>
 
 ## Seed 2.0
 
 <CardGroup cols={2}>
-  <Card title="seed-2-0-pro-260215">
+  <Card title="seed-2-0-pro-260328">
   <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
 
-  `byteplus/seed-2-0-pro-260215`
+  `byteplus/seed-2-0-pro-260328`
 
   BytePlus's flagship Seed 2.0 model. Excels at complex reasoning, coding, and agentic tasks with deep thinking capability and multimodal understanding across text, images, and video.
+
+  <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
 
   - ~&#36;0.47 / ~&#36;2.37
   - <Icon icon="window-maximize" size={14} /> 256K context
@@ -74,6 +76,134 @@ description: "Seed 2.0 and Seed 1.8 models with specs, pricing, and capabilities
 
   - ~&#36;0.25 / ~&#36;2
   - <Icon icon="window-maximize" size={14} /> 262K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  </Card>
+</CardGroup>
+
+---
+
+## Third-party (Ark)
+
+<CardGroup cols={2}>
+  <Card title="kimi-k2-250905">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `byteplus/kimi-k2-250905`
+
+  Moonshot Kimi K2 agentic model on BytePlus ModelArk for tool calling and autonomous tasks.
+
+  <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
+
+  - ~&#36;0.50 / ~&#36;2
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  </Card>
+
+  <Card title="kimi-k2-thinking-251104">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `byteplus/kimi-k2-thinking-251104`
+
+  Moonshot Kimi K2 thinking variant on BytePlus ModelArk with chain-of-thought reasoning and tool use.
+
+  <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
+
+  - ~&#36;0.60 / ~&#36;2.50
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Thinking
+  </Card>
+
+  <Card title="deepseek-v4-pro-260425">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `byteplus/deepseek-v4-pro-260425`
+
+  DeepSeek V4 Pro on BytePlus ModelArk: frontier open MoE for coding, reasoning, and long-context agent workloads.
+
+  <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
+
+  - ~&#36;0.47 / ~&#36;2.37
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  </Card>
+
+  <Card title="deepseek-v4-flash-260425">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `byteplus/deepseek-v4-flash-260425`
+
+  Cost-efficient DeepSeek V4 Flash on BytePlus ModelArk for fast reasoning and agent workloads.
+
+  <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
+
+  - ~&#36;0.25 / ~&#36;1
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  </Card>
+
+  <Card title="deepseek-v3-2-251201">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `byteplus/deepseek-v3-2-251201`
+
+  DeepSeek V3.2 on BytePlus ModelArk with improved reasoning and tool use over V3.1.
+
+  - ~&#36;0.25 / ~&#36;1
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  </Card>
+
+  <Card title="deepseek-r1-250528">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `byteplus/deepseek-r1-250528`
+
+  DeepSeek R1 reasoning model on BytePlus ModelArk (May 2025 checkpoint).
+
+  <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
+
+  - ~&#36;0.50 / ~&#36;2
+  - <Icon icon="window-maximize" size={14} /> 256K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  - <Icon icon="brain" size={14} /> Thinking
+  </Card>
+
+  <Card title="gpt-oss-120b-250805">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `byteplus/gpt-oss-120b-250805`
+
+  OpenAI GPT OSS 120B on BytePlus ModelArk. Apache 2.0.
+
+  - ~&#36;0.15 / ~&#36;0.60
+  - <Icon icon="window-maximize" size={14} /> 128K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  </Card>
+
+  <Card title="glm-4-7-251222">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `byteplus/glm-4-7-251222`
+
+  Zhipu GLM-4.7 on BytePlus ModelArk for coding, reasoning, and agentic tasks.
+
+  - ~&#36;0.25 / ~&#36;1
+  - <Icon icon="window-maximize" size={14} /> 128K context
+  - <Icon icon="keyboard" size={14} /> Text input
+  </Card>
+
+  <Card title="seed-2-0-code-preview-260328">
+  <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> <Icon icon="lightbulb" size={14} /> Reasoning · <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> <Icon icon="bolt" size={14} /> Speed
+
+  `byteplus/seed-2-0-code-preview-260328`
+
+  Seed 2.0 code-specialized preview on BytePlus ModelArk for agentic coding workloads.
+
+  <Warning>Activation required — enable in the [Ark Console](https://console.byteplus.com/ark/region:ark+ap-southeast-1/models) before first use.</Warning>
+
+  - ~&#36;0.25 / ~&#36;1
+  - <Icon icon="window-maximize" size={14} /> 256K context
   - <Icon icon="keyboard" size={14} /> Text input
   </Card>
 </CardGroup>
