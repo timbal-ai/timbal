@@ -2443,6 +2443,11 @@ test "parsePortKv splits NAME=PORT and validates both sides" {
         try std.testing.expectEqualStrings("my-agent", kv.name);
         try std.testing.expectEqual(@as(u16, 4500), kv.port);
     }
+    {
+        const kv = parsePortKv("My Agent=4500").?;
+        try std.testing.expectEqualStrings("My Agent", kv.name);
+        try std.testing.expectEqual(@as(u16, 4500), kv.port);
+    }
     try std.testing.expectEqual(@as(?PortKv, null), parsePortKv("noequals"));
     try std.testing.expectEqual(@as(?PortKv, null), parsePortKv("=3000"));
     try std.testing.expectEqual(@as(?PortKv, null), parsePortKv("ui="));

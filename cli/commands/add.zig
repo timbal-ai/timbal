@@ -15,7 +15,7 @@ fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.writeAll("Add a component to an existing timbal project.\n" ++
         "\n" ++
-        "\x1b[1;32mUsage: \x1b[1;36mtimbal add \x1b[0;36m<COMPONENT> \x1b[0;33m[name] \x1b[0m[options]\n" ++
+        "\x1b[1;32mUsage: \x1b[1;36mtimbal add \x1b[0;36m<COMPONENT> \x1b[0;33m<name> \x1b[0m[options]\n" ++
         "\n" ++
         "\x1b[1;32mComponents:\n" ++
         "    \x1b[1;36magent    \x1b[0mAdd a new agent to the workforce\n" ++
@@ -24,10 +24,10 @@ fn printUsage() !void {
         "    \x1b[1;36mapi      \x1b[0mAdd the API blueprint (Elysia + Bun)\n" ++
         "\n" ++
         "\x1b[1;32mArguments:\n" ++
-        "    \x1b[1;33mname     \x1b[0mOptional name for the workforce member (agent/workflow only)\n" ++
+        "    \x1b[1;33mname     \x1b[0mRequired for agent/workflow (cannot contain = : , / \\)\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
-        "    \x1b[1;36m-f\x1b[0m, \x1b[1;36m--force      \x1b[0mOverwrite the target directory without prompting (ui/api only)\n" ++
+        "    \x1b[1;36m-f\x1b[0m, \x1b[1;36m--force      \x1b[0mReplace ui/, api/, or workforce/<name>/ if it already exists\n" ++
         "\n" ++
         utils.global_options_help ++
         "\n");
@@ -146,21 +146,40 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (std.mem.eql(u8, comp, "agent") or std.mem.eql(u8, comp, "workflow")) {
         const project_type: utils.ProjectType = if (std.mem.eql(u8, comp, "agent")) .agent else .workflow;
 
+        const member_name = name orelse {
+            try printUsageWithError("Error: missing required argument: name");
+            return;
+        };
+
         // Check that workforce/ directory exists
         cwd.access("workforce", .{}) catch {
             std.debug.print("Error: No 'workforce' directory found. Are you in a timbal project?\n", .{});
             return;
         };
 
-        const funny_name = try utils.addWorkforceMember(allocator, cwd, project_name, project_type, name);
-        defer allocator.free(funny_name);
+        const member_dir = try std.fmt.allocPrint(allocator, "workforce/{s}", .{member_name});
+        defer allocator.free(member_dir);
+
+        if (cwd.access(member_dir, .{})) |_| {
+            if (!shouldOverwrite(member_dir, force)) return;
+            try cwd.deleteTree(member_dir);
+        } else |_| {}
+
+        const used_name = utils.addWorkforceMember(allocator, cwd, project_name, project_type, member_name) catch |err| switch (err) {
+            error.InvalidWorkforceName, error.ReservedWorkforceName, error.WorkforceMemberExists => {
+                utils.printWorkforceNameError(err, member_name);
+                return;
+            },
+            else => |e| return e,
+        };
+        defer allocator.free(used_name);
 
         try stdout.print("\n{s}✓{s} {s}Added {s} '{s}' to workforce{s}\n\n", .{
             Color.bold_green,
             Color.reset,
             Color.bold,
             comp,
-            funny_name,
+            used_name,
             Color.reset,
         });
     } else if (std.mem.eql(u8, comp, "ui")) {

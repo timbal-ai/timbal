@@ -7,12 +7,6 @@ const Color = utils.Color;
 
 const ProjectType = utils.ProjectType;
 
-const UIType = enum {
-    /// blueprint-ui-simple-chat
-    simple_chat,
-    none,
-};
-
 fn printUsageWithError(err: []const u8) !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.print("{s}\n\n", .{err});
@@ -21,36 +15,20 @@ fn printUsageWithError(err: []const u8) !void {
 
 fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
-    try stderr.writeAll("Create a new timbal project (interactive by default, or pass flags for scripts).\n" ++
+    try stderr.writeAll("Create a new timbal project (interactive by default).\n" ++
         "\n" ++
-        "\x1b[1;32mUsage: \x1b[1;36mtimbal create \x1b[0;36m[OPTIONS] [PATH]\n" ++
+        "\x1b[1;32mUsage: \x1b[1;36mtimbal create \x1b[0;36m[OPTIONS] <PATH>\n" ++
         "\n" ++
         "\x1b[1;32mArguments:\n" ++
-        "    \x1b[0;36m[PATH]\x1b[0m The path where the project will be created (default: current directory)\n" ++
+        "    \x1b[0;33m<PATH>\x1b[0m  Project directory (use '.' for the current directory)\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
-        "    \x1b[1;36m--type <KIND>\x1b[0m   \x1b[0;36magent\x1b[0m or \x1b[0;36mworkflow\x1b[0m (with \x1b[0;36m--ui\x1b[0m, skips prompts)\n" ++
-        "    \x1b[1;36m--ui <yes|no>\x1b[0m Include the default web UI or API-only (with \x1b[0;36m--type\x1b[0m, skips prompts)\n" ++
-        "    \x1b[1;36m--no-ui\x1b[0m         Same as \x1b[0;36m--ui no\x1b[0m\n" ++
-        "    \x1b[1;36m--template <URL>\x1b[0m Use a template from a URL\n" ++
+        "    \x1b[1;36m--agent <NAME>\x1b[0m    Add an agent at workforce/<NAME>/ (repeat for multiple)\n" ++
+        "    \x1b[1;36m--workflow <NAME>\x1b[0m Add a workflow at workforce/<NAME>/ (repeat for multiple)\n" ++
+        "    \x1b[1;36m--with-ui\x1b[0m         Include the default web UI (requires at least one agent)\n" ++
         "\n" ++
         utils.global_options_help ++
-        "\n" ++
-        "\x1b[1;32mNon-interactive:\x1b[0m Pass \x1b[0;36m--type\x1b[0m and \x1b[0;36m--ui\x1b[0m together (no prompts, no editor).\n" ++
-        "    \x1b[0;36m-q\x1b[0m / \x1b[0;36m--quiet\x1b[0m only works with non-interactive create (prints the project path only).\n" ++
         "\n");
-}
-
-fn parseUiFlag(value: []const u8) ?UIType {
-    if (std.ascii.eqlIgnoreCase(value, "yes") or
-        std.ascii.eqlIgnoreCase(value, "y") or
-        std.ascii.eqlIgnoreCase(value, "true") or
-        std.mem.eql(u8, value, "1")) return .simple_chat;
-    if (std.ascii.eqlIgnoreCase(value, "no") or
-        std.ascii.eqlIgnoreCase(value, "n") or
-        std.ascii.eqlIgnoreCase(value, "false") or
-        std.mem.eql(u8, value, "0")) return .none;
-    return null;
 }
 
 const Editor = enum {
@@ -78,12 +56,156 @@ const Editor = enum {
     }
 };
 
-const ProjectConfig = struct {
+const WorkforceMemberSpec = struct {
+    name: []const u8,
     project_type: ProjectType,
-    ui_type: UIType,
-    path: []const u8, // absolute path for display
-    relative_path: []const u8, // original path for commands
 };
+
+const ProjectConfig = struct {
+    members: []WorkforceMemberSpec,
+    include_ui: bool,
+    path: []const u8,
+    relative_path: []const u8,
+
+    pub fn deinit(self: *ProjectConfig, allocator: std.mem.Allocator) void {
+        for (self.members) |m| allocator.free(m.name);
+        allocator.free(self.members);
+    }
+
+    pub fn hasAgent(self: ProjectConfig) bool {
+        for (self.members) |m| {
+            if (m.project_type == .agent) return true;
+        }
+        return false;
+    }
+};
+
+fn projectDirName(path: []const u8) []const u8 {
+    const last_fwd = std.mem.lastIndexOf(u8, path, "/");
+    const last_back = std.mem.lastIndexOf(u8, path, "\\");
+    const last_sep = if (last_fwd) |f| if (last_back) |b| @max(f, b) else f else last_back;
+    if (last_sep) |idx| {
+        return path[idx + 1 ..];
+    }
+    return path;
+}
+
+fn promptMemberName(allocator: std.mem.Allocator, kind_label: []const u8, term_state: TerminalState) ![]u8 {
+    const stdout = std.io.getStdOut().writer();
+    const stderr = std.io.getStdErr().writer();
+    const stdin = std.io.getStdIn().reader();
+
+    while (true) {
+        try stdout.print("\n{s}?{s} {s}{s} name{s}: ", .{
+            Color.bold_green,
+            Color.reset,
+            Color.bold,
+            kind_label,
+            Color.reset,
+        });
+
+        terminal.disableRawMode(term_state);
+        defer _ = terminal.enableRawMode() catch {};
+
+        var buf: [256]u8 = undefined;
+        const line = try stdin.readUntilDelimiterOrEof(&buf, '\n');
+        const trimmed = std.mem.trim(u8, line orelse "", " \t\r");
+        if (trimmed.len == 0) {
+            try stderr.writeAll("Name is required.\n");
+            continue;
+        }
+
+        return utils.prepareWorkforceMemberName(allocator, trimmed) catch |err| {
+            utils.printWorkforceNameError(err, trimmed);
+            try stderr.writeAll("Try again.\n");
+            continue;
+        };
+    }
+}
+
+fn printAppendMemberError(err: anyerror, name: []const u8) void {
+    switch (err) {
+        error.InvalidWorkforceName, error.ReservedWorkforceName => utils.printWorkforceNameError(err, name),
+        error.DuplicateMemberName => {
+            const stderr = std.io.getStdErr().writer();
+            stderr.print("Error: duplicate workforce member name '{s}'.\n", .{name}) catch {};
+        },
+        else => {},
+    }
+}
+
+fn appendMember(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(WorkforceMemberSpec),
+    project_type: ProjectType,
+    name: []const u8,
+) !void {
+    const owned = try utils.prepareWorkforceMemberName(allocator, name);
+    errdefer allocator.free(owned);
+
+    for (list.items) |existing| {
+        if (std.mem.eql(u8, existing.name, owned)) {
+            return error.DuplicateMemberName;
+        }
+    }
+    try list.append(.{ .name = owned, .project_type = project_type });
+}
+
+fn collectMembersInteractive(allocator: std.mem.Allocator, term_state: TerminalState) ![]WorkforceMemberSpec {
+    var list = std.ArrayList(WorkforceMemberSpec).init(allocator);
+    errdefer {
+        for (list.items) |m| allocator.free(m.name);
+        list.deinit();
+    }
+
+    const options = [_][]const u8{ "Add agent", "Add workflow", "Continue" };
+    const descriptions = [_][]const u8{
+        "Scaffold workforce/<name>/ with agent.py",
+        "Scaffold workforce/<name>/ with workflow.py",
+        "Finish adding members (api/ is always created)",
+    };
+
+    while (true) {
+        const selected = try selectOption("Add workforce members", &options, &descriptions);
+        switch (selected) {
+            0 => {
+                const name = try promptMemberName(allocator, "Agent", term_state);
+                defer allocator.free(name);
+                appendMember(allocator, &list, .agent, name) catch |err| {
+                    printAppendMemberError(err, name);
+                    return err;
+                };
+            },
+            1 => {
+                const name = try promptMemberName(allocator, "Workflow", term_state);
+                defer allocator.free(name);
+                appendMember(allocator, &list, .workflow, name) catch |err| {
+                    printAppendMemberError(err, name);
+                    return err;
+                };
+            },
+            2 => return try list.toOwnedSlice(),
+            else => unreachable,
+        }
+    }
+}
+
+fn resolveIncludeUi(
+    with_ui_flag: bool,
+    with_ui_set: bool,
+    members: []const WorkforceMemberSpec,
+) !bool {
+    const any_agent = blk: {
+        for (members) |m| {
+            if (m.project_type == .agent) break :blk true;
+        }
+        break :blk false;
+    };
+
+    if (with_ui_set and with_ui_flag and !any_agent) return error.WithUiRequiresAgent;
+    if (with_ui_set) return with_ui_flag and any_agent;
+    return false;
+}
 
 fn clearLine() void {
     const stdout = std.io.getStdOut().writer();
@@ -254,23 +376,7 @@ fn selectOption(comptime prompt: []const u8, comptime options: []const []const u
     return selected;
 }
 
-fn selectProjectType() !ProjectType {
-    const options = [_][]const u8{ "Agent", "Workflow" };
-    const descriptions = [_][]const u8{
-        "LLM autonomously decides execution paths and tool usage",
-        "Explicit step-by-step workflow with data mapping",
-    };
-
-    const selected = try selectOption("What do you want to build?", &options, &descriptions);
-
-    return switch (selected) {
-        0 => .agent,
-        1 => .workflow,
-        else => unreachable,
-    };
-}
-
-fn selectWantUI() !UIType {
+fn selectWantUI() !bool {
     const options = [_][]const u8{ "Yes", "No" };
     const descriptions = [_][]const u8{
         "Our default web UI—sensible defaults and config so you can customize and ship faster",
@@ -279,11 +385,7 @@ fn selectWantUI() !UIType {
 
     const selected = try selectOption("Do you want a UI?", &options, &descriptions);
 
-    return switch (selected) {
-        0 => .simple_chat,
-        1 => .none,
-        else => unreachable,
-    };
+    return selected == 0;
 }
 
 fn isCommandAvailable(allocator: std.mem.Allocator, cmd: []const u8) bool {
@@ -483,22 +585,25 @@ fn openEditor(allocator: std.mem.Allocator, editor: Editor, path: []const u8) !v
 fn printSummary(config: ProjectConfig) !void {
     const stdout = std.io.getStdOut().writer();
 
-    const project_type_str = switch (config.project_type) {
-        .agent => "Agent",
-        .workflow => "Workflow",
-    };
-
-    const ui_str = switch (config.ui_type) {
-        .simple_chat => "Yes (default web UI)",
-        .none => "No",
-    };
+    const ui_str = if (config.include_ui) "Yes (default web UI)" else if (config.hasAgent()) "No" else "No (workflows only)";
 
     try stdout.writeAll("\n");
     try stdout.print("{s}  Project Summary{s}\n", .{ Color.bold, Color.reset });
     try stdout.print("  {s}─────────────────{s}\n", .{ Color.dim, Color.reset });
     try stdout.print("  {s}Location:{s}  {s}\n", .{ Color.dim, Color.reset, config.path });
-    try stdout.print("  {s}Type:{s}      {s}{s}{s}\n", .{ Color.dim, Color.reset, Color.cyan, project_type_str, Color.reset });
     try stdout.print("  {s}UI:{s}        {s}{s}{s}\n", .{ Color.dim, Color.reset, Color.cyan, ui_str, Color.reset });
+    if (config.members.len == 0) {
+        try stdout.print("  {s}Workforce:{s} {s}(none — use timbal add agent|workflow <name>){s}\n", .{ Color.dim, Color.reset, Color.dim, Color.reset });
+    } else {
+        try stdout.print("  {s}Workforce:{s}\n", .{ Color.dim, Color.reset });
+        for (config.members) |m| {
+            const kind = switch (m.project_type) {
+                .agent => "agent",
+                .workflow => "workflow",
+            };
+            try stdout.print("    {s}{s}{s}  {s}{s}{s}\n", .{ Color.cyan, kind, Color.reset, Color.cyan, m.name, Color.reset });
+        }
+    }
     try stdout.writeAll("\n");
 }
 
@@ -530,32 +635,45 @@ fn initGitRepo(allocator: std.mem.Allocator, path: []const u8) !void {
     }
 }
 
-fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config: ProjectConfig) !void {
-    // Extract project name from path (handle both / and \ separators)
-    const project_name = blk: {
-        const last_fwd = std.mem.lastIndexOf(u8, config.path, "/");
-        const last_back = std.mem.lastIndexOf(u8, config.path, "\\");
-        const last_sep = if (last_fwd) |f| if (last_back) |b| @max(f, b) else f else last_back;
-        if (last_sep) |idx| {
-            break :blk config.path[idx + 1 ..];
-        }
-        break :blk config.path;
-    };
+const CreateScaffoldOptions = struct {
+    fetch_blueprints: bool = true,
+    init_git: bool = true,
+};
 
-    // Download blueprints
-    if (config.ui_type != .none) {
-        const ui_url = switch (config.ui_type) {
-            .simple_chat => utils.blueprint_ui_simple_chat_url,
-            .none => unreachable,
-        };
-        try utils.fetchBlueprint(allocator, config.path, "ui", ui_url);
+fn createProjectStructure(
+    allocator: std.mem.Allocator,
+    app_dir: fs.Dir,
+    config: ProjectConfig,
+    opts: CreateScaffoldOptions,
+) !void {
+    const project_name = projectDirName(config.path);
+
+    if (opts.fetch_blueprints) {
+        if (config.include_ui) {
+            try utils.fetchBlueprint(allocator, config.path, "ui", utils.blueprint_ui_simple_chat_url);
+        }
+        try utils.fetchBlueprint(allocator, config.path, "api", utils.blueprint_api_url);
+    } else {
+        if (config.include_ui) {
+            try app_dir.makePath("ui");
+        }
+        try app_dir.makePath("api");
     }
 
-    try utils.fetchBlueprint(allocator, config.path, "api", utils.blueprint_api_url);
+    app_dir.makePath("workforce") catch |err| {
+        if (err != error.PathAlreadyExists) return err;
+    };
 
-    // Create workforce member
-    const funny_name = try utils.addWorkforceMember(allocator, app_dir, project_name, config.project_type, null);
-    defer allocator.free(funny_name);
+    for (config.members) |member| {
+        const used_name = utils.addWorkforceMember(allocator, app_dir, project_name, member.project_type, member.name) catch |err| switch (err) {
+            error.InvalidWorkforceName, error.ReservedWorkforceName, error.WorkforceMemberExists => {
+                utils.printWorkforceNameError(err, member.name);
+                return err;
+            },
+            else => |e| return e,
+        };
+        defer allocator.free(used_name);
+    }
 
     // Create .gitignore in the project root
     const gitignore_content =
@@ -613,16 +731,12 @@ fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config:
     try gitignore_file.writeAll(gitignore_content);
 
     // Create README.md
-    const app_py_display = switch (config.project_type) {
-        .agent => "agent.py",
-        .workflow => "workflow.py",
-    };
-    const ui_section = if (config.ui_type != .none)
+    const ui_section = if (config.include_ui)
         \\ui/              - React + Vite + TypeScript + shadcn (Bun)
         \\
     else
         "";
-    const ui_note = if (config.ui_type != .none)
+    const ui_note = if (config.include_ui)
         \\
         \\> Do not rename or move the `api/`, `ui/`, or `workforce/` directories.
         \\> You are free to edit the contents inside each one.
@@ -640,18 +754,41 @@ fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config:
         \\- **workforce/** - Your timbal components (Python)
         \\
     ;
-    const readme_content = try std.fmt.allocPrint(allocator,
+    const readme_content = if (config.members.len == 1) blk: {
+        const member = config.members[0];
+        const app_py_display = switch (member.project_type) {
+            .agent => "agent.py",
+            .workflow => "workflow.py",
+        };
+        break :blk try std.fmt.allocPrint(allocator,
+            \\# {s}
+            \\
+            \\## Project Structure
+            \\
+            \\```
+            \\{s}api/             - Elysia API server (Bun)
+            \\workforce/       - Your timbal components
+            \\  {s}/
+            \\    {s}  - Main app logic
+            \\    timbal.yaml    - Timbal configuration
+            \\    pyproject.toml - Python dependencies
+            \\```
+            \\{s}
+            \\## Getting Started
+            \\
+            \\Connect the Timbal MCP to your AI-powered IDE to help you build and customize your project:
+            \\
+            \\https://docs.timbal.ai/mcp-integration
+            \\
+        , .{ project_name, ui_section, member.name, app_py_display, ui_note });
+    } else if (config.members.len > 1) try std.fmt.allocPrint(allocator,
         \\# {s}
         \\
         \\## Project Structure
         \\
         \\```
         \\{s}api/             - Elysia API server (Bun)
-        \\workforce/       - Your timbal components
-        \\  {s}/
-        \\    {s}  - Main app logic
-        \\    timbal.yaml    - Timbal configuration
-        \\    pyproject.toml - Python dependencies
+        \\workforce/       - Your timbal components (one directory per member)
         \\```
         \\{s}
         \\## Getting Started
@@ -660,14 +797,37 @@ fn createProjectStructure(allocator: std.mem.Allocator, app_dir: fs.Dir, config:
         \\
         \\https://docs.timbal.ai/mcp-integration
         \\
-    , .{ project_name, ui_section, funny_name, app_py_display, ui_note });
+    , .{ project_name, ui_section, ui_note }) else try std.fmt.allocPrint(allocator,
+        \\# {s}
+        \\
+        \\## Project Structure
+        \\
+        \\```
+        \\{s}api/             - Elysia API server (Bun)
+        \\workforce/       - Add agents/workflows with `timbal add`
+        \\```
+        \\{s}
+        \\## Getting Started
+        \\
+        \\Add your first component:
+        \\
+        \\```bash
+        \\timbal add agent my-agent
+        \\```
+        \\
+        \\Connect the Timbal MCP to your AI-powered IDE to help you build and customize your project:
+        \\
+        \\https://docs.timbal.ai/mcp-integration
+        \\
+    , .{ project_name, ui_section, ui_note });
     defer allocator.free(readme_content);
     const readme_file = try app_dir.createFile("README.md", .{});
     defer readme_file.close();
     try readme_file.writeAll(readme_content);
 
-    // Initialize git repository
-    try initGitRepo(allocator, config.path);
+    if (opts.init_git) {
+        try initGitRepo(allocator, config.path);
+    }
 }
 
 const builtin = @import("builtin");
@@ -765,13 +925,51 @@ const terminal = if (is_windows) struct {
     }
 };
 
+fn openAppDir(cwd: fs.Dir, target_path: []const u8, use_current_dir: bool) !fs.Dir {
+    if (use_current_dir) return cwd;
+    cwd.makePath(target_path) catch |err| {
+        std.debug.print("Error creating directory: {}\n", .{err});
+        return err;
+    };
+    return cwd.openDir(target_path, .{});
+}
+
+fn finishCreate(
+    allocator: std.mem.Allocator,
+    app_dir: fs.Dir,
+    config: *ProjectConfig,
+    quiet: bool,
+) !void {
+    try createProjectStructure(allocator, app_dir, config.*, .{});
+
+    if (quiet) {
+        const stdout = std.io.getStdOut().writer();
+        try stdout.print("{s}\n", .{config.path});
+    } else {
+        try printSuccess();
+        try printSummary(config.*);
+    }
+}
+
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var arg_path: ?[]const u8 = null;
-    var template: ?[]const u8 = null;
     var verbose: bool = false;
     var quiet: bool = false;
-    var project_type_opt: ?ProjectType = null;
-    var ui_type_opt: ?UIType = null;
+
+    var agent_names = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (agent_names.items) |n| allocator.free(n);
+        agent_names.deinit();
+    }
+    var workflow_names = std.ArrayList([]const u8).init(allocator);
+    defer {
+        for (workflow_names.items) |n| allocator.free(n);
+        workflow_names.deinit();
+    }
+
+    var with_ui = false;
+    var with_ui_set = false;
+    var script_mode = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -780,45 +978,31 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try printUsage();
             return;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            script_mode = true;
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            script_mode = true;
             quiet = true;
-        } else if (std.mem.eql(u8, arg, "--no-ui")) {
-            ui_type_opt = .none;
-        } else if (std.mem.eql(u8, arg, "--type")) {
+        } else if (std.mem.eql(u8, arg, "--with-ui")) {
+            script_mode = true;
+            with_ui = true;
+            with_ui_set = true;
+        } else if (std.mem.eql(u8, arg, "--agent")) {
+            script_mode = true;
             i += 1;
             if (i >= args.len) {
-                try printUsageWithError("Error: --type requires agent or workflow");
+                try printUsageWithError("Error: --agent requires a name");
                 return;
             }
-            const v = args[i];
-            if (std.ascii.eqlIgnoreCase(v, "agent")) {
-                project_type_opt = .agent;
-            } else if (std.ascii.eqlIgnoreCase(v, "workflow")) {
-                project_type_opt = .workflow;
-            } else {
-                try printUsageWithError("Error: --type must be agent or workflow");
-                return;
-            }
-        } else if (std.mem.eql(u8, arg, "--ui")) {
+            try agent_names.append(try allocator.dupe(u8, args[i]));
+        } else if (std.mem.eql(u8, arg, "--workflow")) {
+            script_mode = true;
             i += 1;
             if (i >= args.len) {
-                try printUsageWithError("Error: --ui requires yes or no");
+                try printUsageWithError("Error: --workflow requires a name");
                 return;
             }
-            if (parseUiFlag(args[i])) |u| {
-                ui_type_opt = u;
-            } else {
-                try printUsageWithError("Error: --ui must be yes or no");
-                return;
-            }
-        } else if (std.mem.eql(u8, arg, "--template")) {
-            i += 1;
-            if (i >= args.len) {
-                try printUsageWithError("Error: --template requires a URL argument");
-                return;
-            }
-            template = args[i];
+            try workflow_names.append(try allocator.dupe(u8, args[i]));
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             if (arg_path != null) {
                 try printUsageWithError("Error: multiple target paths provided");
@@ -831,66 +1015,70 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }
 
-    const non_interactive = (project_type_opt != null and ui_type_opt != null);
-
-    if (quiet and !non_interactive) {
-        try printUsageWithError("Error: -q/--quiet only works with non-interactive create (pass both --type and --ui)");
+    if (quiet and !script_mode) {
+        try printUsageWithError("Error: -q/--quiet requires a non-interactive create (pass at least one option)");
         return;
     }
 
-    // TODO: use verbose for detailed output
-    // TODO: implement template support
     if (verbose) {
         std.debug.print("Verbose mode enabled\n", .{});
     }
-    if (template) |t| {
-        std.debug.print("Using template: {s}\n", .{t});
-    }
 
-    const target_path = arg_path orelse ".";
-
+    const target_path = arg_path orelse {
+        try printUsageWithError("Error: a target path is required (use '.' for the current directory)");
+        return;
+    };
     const cwd = fs.cwd();
     const use_current_dir = std.mem.eql(u8, target_path, ".");
 
-    if (non_interactive) {
-        const project_type = project_type_opt.?;
-        const ui_type = ui_type_opt.?;
+    var app_dir = try openAppDir(cwd, target_path, use_current_dir);
+    defer if (!use_current_dir) app_dir.close();
 
-        var app_dir: fs.Dir = undefined;
-        if (use_current_dir) {
-            app_dir = cwd;
-        } else {
-            cwd.makePath(target_path) catch |err| {
-                std.debug.print("Error creating directory: {}\n", .{err});
-                return;
-            };
-            app_dir = try cwd.openDir(target_path, .{});
+    const path = try app_dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+
+    if (script_mode) {
+        var members = std.ArrayList(WorkforceMemberSpec).init(allocator);
+        defer {
+            for (members.items) |m| allocator.free(m.name);
+            members.deinit();
         }
 
-        const path = try app_dir.realpathAlloc(allocator, ".");
-        defer allocator.free(path);
+        for (agent_names.items) |name| {
+            appendMember(allocator, &members, .agent, name) catch |err| {
+                printAppendMemberError(err, name);
+                return err;
+            };
+        }
+        for (workflow_names.items) |name| {
+            appendMember(allocator, &members, .workflow, name) catch |err| {
+                printAppendMemberError(err, name);
+                return err;
+            };
+        }
 
-        const config = ProjectConfig{
-            .project_type = project_type,
-            .ui_type = ui_type,
+        const include_ui = resolveIncludeUi(with_ui, with_ui_set, members.items) catch |err| {
+            if (err == error.WithUiRequiresAgent) {
+                const stderr = std.io.getStdErr().writer();
+                try stderr.writeAll("Error: --with-ui requires at least one agent (workflows alone do not use the web UI).\n");
+                return;
+            }
+            return err;
+        };
+
+        var config = ProjectConfig{
+            .members = try members.toOwnedSlice(),
+            .include_ui = include_ui,
             .path = path,
             .relative_path = target_path,
         };
+        defer config.deinit(allocator);
 
-        try createProjectStructure(allocator, app_dir, config);
-
-        if (quiet) {
-            // Machine-friendly: absolute path only
-            const stdout = std.io.getStdOut().writer();
-            try stdout.print("{s}\n", .{path});
-        } else {
-            try printSuccess();
-            try printSummary(config);
-        }
+        try finishCreate(allocator, app_dir, &config, quiet);
         return;
     }
 
-    // Enable raw mode for arrow key input
+    // Interactive mode
     const original_termios = terminal.enableRawMode() catch {
         std.debug.print("Warning: Could not enable raw mode for interactive input\n", .{});
         return;
@@ -899,7 +1087,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     try printBanner();
 
-    const project_type = if (project_type_opt) |p| p else selectProjectType() catch |err| {
+    const members = collectMembersInteractive(allocator, original_termios) catch |err| {
         if (err == error.UserCancelled) {
             showCursor();
             std.debug.print("\n{s}Cancelled.{s}\n", .{ Color.dim, Color.reset });
@@ -908,40 +1096,36 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
-    const ui_type = if (ui_type_opt) |u| u else selectWantUI() catch |err| {
-        if (err == error.UserCancelled) {
-            showCursor();
-            std.debug.print("\n{s}Cancelled.{s}\n", .{ Color.dim, Color.reset });
-            return;
+    const include_ui = blk: {
+        var any_agent = false;
+        for (members) |m| {
+            if (m.project_type == .agent) {
+                any_agent = true;
+                break;
+            }
         }
-        return err;
-    };
+        if (!any_agent) break :blk false;
 
-    var app_dir: fs.Dir = undefined;
-    if (use_current_dir) {
-        app_dir = cwd;
-    } else {
-        cwd.makePath(target_path) catch |err| {
-            std.debug.print("Error creating directory: {}\n", .{err});
-            return;
+        const want_ui = selectWantUI() catch |err| {
+            if (err == error.UserCancelled) {
+                showCursor();
+                std.debug.print("\n{s}Cancelled.{s}\n", .{ Color.dim, Color.reset });
+                return;
+            }
+            return err;
         };
-        app_dir = try cwd.openDir(target_path, .{});
-    }
+        break :blk want_ui;
+    };
 
-    const path = try app_dir.realpathAlloc(allocator, ".");
-    defer allocator.free(path);
-
-    const config = ProjectConfig{
-        .project_type = project_type,
-        .ui_type = ui_type,
+    var config = ProjectConfig{
+        .members = members,
+        .include_ui = include_ui,
         .path = path,
         .relative_path = target_path,
     };
+    defer config.deinit(allocator);
 
-    try createProjectStructure(allocator, app_dir, config);
-
-    try printSuccess();
-    try printSummary(config);
+    try finishCreate(allocator, app_dir, &config, false);
 
     const available_editors = detectAvailableEditors(allocator);
     defer allocator.free(available_editors);
@@ -958,4 +1142,120 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (selected_editor) |editor| {
         try openEditor(allocator, editor, target_path);
     }
+}
+
+test "projectDirName extracts final path segment" {
+    try std.testing.expectEqualStrings("myapp", projectDirName("myapp"));
+    try std.testing.expectEqualStrings("myapp", projectDirName("./myapp"));
+    try std.testing.expectEqualStrings("myapp", projectDirName("/tmp/foo/myapp"));
+    try std.testing.expectEqualStrings("myapp", projectDirName("C:\\Users\\me\\myapp"));
+}
+
+test "resolveIncludeUi requires an agent when --with-ui is set" {
+    const workflow_only = [_]WorkforceMemberSpec{
+        .{ .name = "etl", .project_type = .workflow },
+    };
+    try std.testing.expectError(
+        error.WithUiRequiresAgent,
+        resolveIncludeUi(true, true, &workflow_only),
+    );
+    try std.testing.expect(!try resolveIncludeUi(false, true, &workflow_only));
+
+    const with_agent = [_]WorkforceMemberSpec{
+        .{ .name = "bot", .project_type = .agent },
+    };
+    try std.testing.expect(try resolveIncludeUi(true, true, &with_agent));
+    try std.testing.expect(!try resolveIncludeUi(false, true, &with_agent));
+    try std.testing.expect(!try resolveIncludeUi(true, false, &with_agent));
+}
+
+test "appendMember prepares names and rejects duplicates" {
+    const a = std.testing.allocator;
+    var list = std.ArrayList(WorkforceMemberSpec).init(a);
+    defer {
+        for (list.items) |m| a.free(m.name);
+        list.deinit();
+    }
+
+    try appendMember(a, &list, .agent, "  My Agent  ");
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqualStrings("My Agent", list.items[0].name);
+
+    try std.testing.expectError(error.DuplicateMemberName, appendMember(a, &list, .agent, "My Agent"));
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+
+    // Case is preserved; "my agent" is a distinct member from "My Agent".
+    try appendMember(a, &list, .workflow, "my agent");
+    try std.testing.expectEqual(@as(usize, 2), list.items.len);
+
+    try std.testing.expectError(error.InvalidWorkforceName, appendMember(a, &list, .agent, "bad/name"));
+}
+
+fn expectEntryExists(dir: fs.Dir, rel_path: []const u8) !void {
+    try dir.access(rel_path, .{});
+}
+
+fn expectEntryMissing(dir: fs.Dir, rel_path: []const u8) !void {
+    dir.access(rel_path, .{}) catch |err| {
+        if (err == error.FileNotFound) return;
+        return err;
+    };
+    return error.TestUnexpectedResult;
+}
+
+// Scaffolds workforce members and project metadata without network or git (fast, deterministic).
+test "createProjectStructure scaffolds workforce and project files" {
+    const a = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(path);
+
+    const foo_name = try a.dupe(u8, "foo");
+    defer a.free(foo_name);
+    const bar_name = try a.dupe(u8, "bar");
+    defer a.free(bar_name);
+    var members_list = std.ArrayList(WorkforceMemberSpec).init(a);
+    defer members_list.deinit();
+    try members_list.append(.{ .name = foo_name, .project_type = .agent });
+    try members_list.append(.{ .name = bar_name, .project_type = .workflow });
+
+    const config = ProjectConfig{
+        .members = members_list.items,
+        .include_ui = false,
+        .path = path,
+        .relative_path = ".",
+    };
+
+    try createProjectStructure(a, tmp.dir, config, .{
+        .fetch_blueprints = false,
+        .init_git = false,
+    });
+
+    try expectEntryExists(tmp.dir, "api");
+    try expectEntryExists(tmp.dir, "workforce/foo/agent.py");
+    try expectEntryExists(tmp.dir, "workforce/foo/timbal.yaml");
+    try expectEntryExists(tmp.dir, "workforce/foo/pyproject.toml");
+    try expectEntryExists(tmp.dir, "workforce/bar/workflow.py");
+    try expectEntryExists(tmp.dir, "workforce/bar/timbal.yaml");
+    try expectEntryExists(tmp.dir, "workforce/bar/pyproject.toml");
+    try expectEntryExists(tmp.dir, ".gitignore");
+    try expectEntryExists(tmp.dir, "README.md");
+    try expectEntryMissing(tmp.dir, "ui");
+
+    const agent_yaml = try tmp.dir.readFileAlloc(a, "workforce/foo/timbal.yaml", 64 * 1024);
+    defer a.free(agent_yaml);
+    var agent_cfg = utils.parseTimbalYaml(a, agent_yaml) orelse return error.TestUnexpectedResult;
+    defer agent_cfg.deinit(a);
+    try std.testing.expectEqualStrings("agent", agent_cfg.type);
+    try std.testing.expectEqualStrings("agent.py::agent", agent_cfg.fqn);
+
+    const workflow_yaml = try tmp.dir.readFileAlloc(a, "workforce/bar/timbal.yaml", 64 * 1024);
+    defer a.free(workflow_yaml);
+    var workflow_cfg = utils.parseTimbalYaml(a, workflow_yaml) orelse return error.TestUnexpectedResult;
+    defer workflow_cfg.deinit(a);
+    try std.testing.expectEqualStrings("workflow", workflow_cfg.type);
+    try std.testing.expectEqualStrings("workflow.py::workflow", workflow_cfg.fqn);
 }
