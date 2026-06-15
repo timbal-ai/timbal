@@ -13,19 +13,39 @@ from ..cst_utils import (
 )
 
 
-def key_to_accessor(key: str) -> str:
+def key_to_accessor(key: str, subscript_subkeys: bool = True) -> str:
     """Convert a dot-notation key path to Python accessor syntax.
 
-    Examples:
+    The first segment is an attribute on the step ``Span`` (e.g. ``.output``).
+    Numeric segments are always subscripts (list/tuple indexing).
+
+    The access style for string sub-keys depends on the source step's output
+    type, controlled by ``subscript_subkeys``:
+
+    - ``True`` (dicts): ``output.cleaned`` → ``.output["cleaned"]``.
+      Custom function / tool steps return dicts; attribute access would raise
+      ``AttributeError``.
+    - ``False`` (objects): ``output.content`` → ``.output.content``.
+      Agent steps expose a ``Message`` / Pydantic model on ``Span.output``,
+      which has no mapping access; subscripting would raise ``TypeError``.
+
+    Examples (dict mode):
         "output"                              → ".output"
-        "output.cleaned"                      → ".output.cleaned"
-        "output.0.something.something_else.0" → ".output[0].something.something_else[0]"
+        "output.cleaned"                      → '.output["cleaned"]'
+        "output.0.something.something_else.0" → '.output[0]["something"]["something_else"][0]'
+    Examples (object mode):
+        "output.content"                      → ".output.content"
+        "output.0.text"                       → ".output[0].text"
     """
     parts = key.split(".")
     result = ""
-    for part in parts:
+    for i, part in enumerate(parts):
         if part.isdigit():
             result += f"[{part}]"
+        elif i == 0:
+            result += f".{part}"
+        elif subscript_subkeys:
+            result += f'["{part}"]'
         else:
             result += f".{part}"
     return result
@@ -163,6 +183,19 @@ class ParamSetter(cst.CSTTransformer):
             and call.func.attr.value == "step"
         )
 
+    def _source_uses_attribute_access(self) -> bool:
+        """Whether the source step's output is accessed via attributes (not subscript).
+
+        Agent steps expose a ``Message`` / Pydantic ``output_model`` instance on
+        ``Span.output`` — attribute access. Custom function and tool steps return
+        dicts — subscript access. Bare functions (not assigned to a constructor
+        call) and unknown sources default to dict access.
+        """
+        for call in self.assignments.values():
+            if resolve_runnable_name(call) == self.source and isinstance(call.func, cst.Name):
+                return call.func.value == "Agent"
+        return False
+
     def _matches_target(self, call: cst.Call) -> bool:
         if not call.args:
             return False
@@ -227,7 +260,7 @@ class ParamSetter(cst.CSTTransformer):
         if self.param_type == "map":
             base = f'get_run_context().step_span("{self.source}")'
             if self.key:
-                accessor = key_to_accessor(self.key)
+                accessor = key_to_accessor(self.key, subscript_subkeys=not self._source_uses_attribute_access())
                 parts.append(f"{self.param_name}=lambda: {base}{accessor}")
             else:
                 parts.append(f"{self.param_name}=lambda: {base}.output")
