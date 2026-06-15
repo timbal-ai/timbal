@@ -50,7 +50,7 @@ class TestMapParam:
         workflow.step(agent_b)
         """)
         output = _run(ws, target="agent_b", name="prompt", param_type="map", source="agent_a", key="output.valor", value=None)
-        assert 'get_run_context().step_span("agent_a").output.valor' in output
+        assert 'get_run_context().step_span("agent_a").output["valor"]' in output
 
     def test_map_param_with_nested_key(self, wf_workspace):
         ws = wf_workspace("""\
@@ -67,7 +67,7 @@ class TestMapParam:
             ws, target="agent_b", name="prompt", param_type="map",
             source="agent_a", key="output.0.items.name", value=None,
         )
-        assert 'get_run_context().step_span("agent_a").output[0].items.name' in output
+        assert 'get_run_context().step_span("agent_a").output[0]["items"]["name"]' in output
 
     def test_map_param_from_different_source(self, wf_workspace):
         ws = wf_workspace("""\
@@ -99,7 +99,7 @@ class TestMapParam:
         workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
         """)
         output = _run(ws, target="agent_b", name="prompt", param_type="map", source="agent_a", key="output.text", value=None)
-        assert 'get_run_context().step_span("agent_a").output.text' in output
+        assert 'get_run_context().step_span("agent_a").output["text"]' in output
 
     def test_preserves_other_kwargs(self, wf_workspace):
         ws = wf_workspace("""\
@@ -115,6 +115,83 @@ class TestMapParam:
         output = _run(ws, target="agent_b", name="prompt", param_type="map", source="agent_a", key=None, value=None)
         assert "depends_on" in output
         assert 'get_run_context().step_span("agent_a").output' in output
+
+
+class TestMapParamDictAccess:
+    """Mapping a sub-key of a dict step output must use subscript, not attribute access.
+
+    Custom function steps return dicts; ``.output.key`` raises AttributeError at
+    runtime, whereas ``.output["key"]`` works.
+    """
+
+    def test_map_dict_subkey_uses_subscript(self, wf_workspace):
+        ws = wf_workspace("""\
+        from timbal import Workflow
+        from timbal.core import Tool
+
+        def transcribe() -> dict:
+            return {"transcript_text": "hello", "lang": "en"}
+
+        def summarize(text: str) -> str:
+            return text
+
+        transcribe_tool = Tool(name="transcribe", handler=transcribe)
+        summarize_tool = Tool(name="summarize", handler=summarize)
+
+        workflow = Workflow(name="wf")
+        workflow.step(transcribe_tool)
+        workflow.step(summarize_tool)
+        """)
+        output = _run(
+            ws, target="summarize", name="text", param_type="map",
+            source="transcribe", key="output.transcript_text", value=None,
+        )
+        assert 'get_run_context().step_span("transcribe").output["transcript_text"]' in output
+        assert ".output.transcript_text" not in output
+
+    async def test_mapped_dict_subkey_runs(self, wf_workspace):
+        """End-to-end: the generated workflow must execute against a dict output."""
+        import importlib.util
+        import sys
+        import uuid
+
+        ws = wf_workspace("""\
+        from timbal import Workflow
+        from timbal.core import Tool
+
+        def transcribe() -> dict:
+            return {"transcript_text": "hello world", "lang": "en"}
+
+        def summarize(text: str) -> str:
+            return f"SUMMARY: {text}"
+
+        transcribe_tool = Tool(name="transcribe", handler=transcribe)
+        summarize_tool = Tool(name="summarize", handler=summarize)
+
+        workflow = Workflow(name="wf")
+        workflow.step(transcribe_tool)
+        workflow.step(summarize_tool)
+        """)
+        output = _run(
+            ws, target="summarize", name="text", param_type="map",
+            source="transcribe", key="output.transcript_text", value=None,
+        )
+        # Write to disk and import as a real module so the auto-wiring's
+        # source introspection (inspect.getsource on the lambda) works.
+        wf_path = ws / "workflow.py"
+        wf_path.write_text(output)
+        mod_name = f"_gen_wf_{uuid.uuid4().hex}"
+        spec = importlib.util.spec_from_file_location(mod_name, wf_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = module
+        try:
+            spec.loader.exec_module(module)
+            result = await module.workflow().collect()
+        finally:
+            sys.modules.pop(mod_name, None)
+
+        assert result.status.code == "success", result.error
+        assert result.output == "SUMMARY: hello world"
 
 
 class TestValueParam:
@@ -212,16 +289,20 @@ class TestKeyConversion:
         assert key_to_accessor("output") == ".output"
 
     def test_key_to_accessor_attribute(self):
-        assert key_to_accessor("output.cleaned") == ".output.cleaned"
+        assert key_to_accessor("output.cleaned") == '.output["cleaned"]'
 
     def test_key_to_accessor_index(self):
         assert key_to_accessor("output.0") == ".output[0]"
 
     def test_key_to_accessor_nested(self):
-        assert key_to_accessor("output.0.items.name") == ".output[0].items.name"
+        assert key_to_accessor("output.0.items.name") == '.output[0]["items"]["name"]'
 
     def test_key_to_accessor_deep(self):
-        assert key_to_accessor("output.0.something.something_else.0") == ".output[0].something.something_else[0]"
+        assert key_to_accessor("output.0.something.something_else.0") == '.output[0]["something"]["something_else"][0]'
+
+    def test_key_to_accessor_string_subkey_is_subscript(self):
+        # First segment (`.output`) is a Span attribute; sub-keys index a dict.
+        assert key_to_accessor("output.transcript_text") == '.output["transcript_text"]'
 
     def test_accessor_to_key_simple(self):
         assert accessor_to_key(".output") == "output"

@@ -16,18 +16,25 @@ from ..cst_utils import (
 def key_to_accessor(key: str) -> str:
     """Convert a dot-notation key path to Python accessor syntax.
 
+    The first segment is an attribute on the step ``Span`` (e.g. ``.output``).
+    Every subsequent segment indexes into the (dict / list) output value, so it
+    is emitted as a subscript — attribute access (``.key``) would raise
+    ``AttributeError`` on a plain dict, which is what custom function steps return.
+
     Examples:
         "output"                              → ".output"
-        "output.cleaned"                      → ".output.cleaned"
-        "output.0.something.something_else.0" → ".output[0].something.something_else[0]"
+        "output.cleaned"                      → '.output["cleaned"]'
+        "output.0.something.something_else.0" → '.output[0]["something"]["something_else"][0]'
     """
     parts = key.split(".")
     result = ""
-    for part in parts:
+    for i, part in enumerate(parts):
         if part.isdigit():
             result += f"[{part}]"
-        else:
+        elif i == 0:
             result += f".{part}"
+        else:
+            result += f'["{part}"]'
     return result
 
 

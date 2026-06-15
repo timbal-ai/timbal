@@ -530,7 +530,7 @@ class TestComplexWorkflow:
         source = _read_source(ws)
 
         assert 'step_span("preprocessor")' in source
-        assert ".output.cleaned" in source
+        assert '.output["cleaned"]' in source
         assert "get_run_context" in source
         assert "from timbal.state import get_run_context" in source
 
@@ -540,7 +540,7 @@ class TestComplexWorkflow:
         source = _read_source(ws)
 
         assert 'step_span("reviewer").output' in source
-        assert 'step_span("preprocessor").output.word_count' in source
+        assert 'step_span("preprocessor").output["word_count"]' in source
 
         # -- 5c. Set postprocessor depends_on preprocessor (ordering only) --
         _run(ws, "add-edge", "--source", "preprocessor", "--target", "postprocessor")
@@ -738,7 +738,7 @@ class TestComplexWorkflow:
         ns = _exec_code(source)
 
         assert ns["final_agent"].model == "openai/gpt-4o"
-        assert 'step_span("preprocessor").output.cleaned' in source
+        assert 'step_span("preprocessor").output["cleaned"]' in source
         assert _count_step_calls(source) == 3
 
         # ===============================================================
