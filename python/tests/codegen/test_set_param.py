@@ -50,7 +50,8 @@ class TestMapParam:
         workflow.step(agent_b)
         """)
         output = _run(ws, target="agent_b", name="prompt", param_type="map", source="agent_a", key="output.valor", value=None)
-        assert 'get_run_context().step_span("agent_a").output["valor"]' in output
+        # agent_a is an Agent → Message/Pydantic output → attribute access.
+        assert 'get_run_context().step_span("agent_a").output.valor' in output
 
     def test_map_param_with_nested_key(self, wf_workspace):
         ws = wf_workspace("""\
@@ -67,7 +68,7 @@ class TestMapParam:
             ws, target="agent_b", name="prompt", param_type="map",
             source="agent_a", key="output.0.items.name", value=None,
         )
-        assert 'get_run_context().step_span("agent_a").output[0]["items"]["name"]' in output
+        assert 'get_run_context().step_span("agent_a").output[0].items.name' in output
 
     def test_map_param_from_different_source(self, wf_workspace):
         ws = wf_workspace("""\
@@ -99,7 +100,7 @@ class TestMapParam:
         workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
         """)
         output = _run(ws, target="agent_b", name="prompt", param_type="map", source="agent_a", key="output.text", value=None)
-        assert 'get_run_context().step_span("agent_a").output["text"]' in output
+        assert 'get_run_context().step_span("agent_a").output.text' in output
 
     def test_preserves_other_kwargs(self, wf_workspace):
         ws = wf_workspace("""\
@@ -192,6 +193,133 @@ class TestMapParamDictAccess:
 
         assert result.status.code == "success", result.error
         assert result.output == "SUMMARY: hello world"
+
+
+class TestMapParamObjectAccess:
+    """Mapping a sub-key from an Agent step output must use attribute access.
+
+    Agent steps expose a ``Message`` (or Pydantic ``output_model``) on
+    ``Span.output``; subscripting it raises ``TypeError``.
+    """
+
+    def test_map_agent_subkey_uses_attribute(self, wf_workspace):
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.core import Tool
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        def consume(content) -> str:
+            return str(content)
+
+        consume_tool = Tool(name="consume", handler=consume)
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_a)
+        workflow.step(consume_tool)
+        """)
+        output = _run(
+            ws, target="consume", name="content", param_type="map",
+            source="agent_a", key="output.content", value=None,
+        )
+        assert 'get_run_context().step_span("agent_a").output.content' in output
+        assert '.output["content"]' not in output
+
+    async def test_mapped_agent_subkey_runs(self, wf_workspace):
+        """End-to-end: an Agent-source map must execute against a Message output."""
+        import importlib.util
+        import sys
+        import uuid
+
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.core import Tool
+        from timbal.core.test_model import TestModel
+
+        agent_a = Agent(name="agent_a", model=TestModel(responses=["hi from agent"]))
+
+        def consume(content) -> str:
+            return f"GOT:{type(content).__name__}"
+
+        consume_tool = Tool(name="consume", handler=consume)
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_a)
+        workflow.step(consume_tool)
+        """)
+        output = _run(
+            ws, target="consume", name="content", param_type="map",
+            source="agent_a", key="output.content", value=None,
+        )
+        wf_path = ws / "workflow.py"
+        wf_path.write_text(output)
+        mod_name = f"_gen_wf_{uuid.uuid4().hex}"
+        spec = importlib.util.spec_from_file_location(mod_name, wf_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = module
+        try:
+            spec.loader.exec_module(module)
+            result = await module.workflow(prompt="hi").collect()
+        finally:
+            sys.modules.pop(mod_name, None)
+
+        assert result.status.code == "success", result.error
+        # Message.content is a list — proves attribute access resolved (not a TypeError).
+        assert result.output == "GOT:list"
+
+    async def test_mapped_agent_output_model_subkey_runs(self, wf_workspace):
+        """End-to-end: an Agent with output_model exposes a Pydantic model on
+        Span.output — sub-keys must resolve via attribute access, not subscript."""
+        import importlib.util
+        import sys
+        import uuid
+
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.core import Tool
+        from timbal.core.test_model import TestModel
+        from pydantic import BaseModel
+
+        class Analysis(BaseModel):
+            summary: str
+            score: int
+
+        analyst = Agent(
+            name="analyst",
+            model=TestModel(responses=['{"summary": "all good", "score": 7}']),
+            output_model=Analysis,
+        )
+
+        def consume(summary) -> str:
+            return f"SUMMARY:{summary}"
+
+        consume_tool = Tool(name="consume", handler=consume)
+
+        workflow = Workflow(name="wf")
+        workflow.step(analyst)
+        workflow.step(consume_tool)
+        """)
+        output = _run(
+            ws, target="consume", name="summary", param_type="map",
+            source="analyst", key="output.summary", value=None,
+        )
+        # Agent source → attribute access (Pydantic model has no __getitem__).
+        assert 'get_run_context().step_span("analyst").output.summary' in output
+
+        wf_path = ws / "workflow.py"
+        wf_path.write_text(output)
+        mod_name = f"_gen_wf_{uuid.uuid4().hex}"
+        spec = importlib.util.spec_from_file_location(mod_name, wf_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = module
+        try:
+            spec.loader.exec_module(module)
+            result = await module.workflow(prompt="analyze").collect()
+        finally:
+            sys.modules.pop(mod_name, None)
+
+        assert result.status.code == "success", result.error
+        assert result.output == "SUMMARY:all good"
 
 
 class TestValueParam:
@@ -303,6 +431,13 @@ class TestKeyConversion:
     def test_key_to_accessor_string_subkey_is_subscript(self):
         # First segment (`.output`) is a Span attribute; sub-keys index a dict.
         assert key_to_accessor("output.transcript_text") == '.output["transcript_text"]'
+
+    def test_key_to_accessor_attribute_mode(self):
+        # Object outputs (e.g. Agent Message / Pydantic) use attribute access.
+        assert key_to_accessor("output.content", subscript_subkeys=False) == ".output.content"
+
+    def test_key_to_accessor_attribute_mode_with_index(self):
+        assert key_to_accessor("output.0.text", subscript_subkeys=False) == ".output[0].text"
 
     def test_accessor_to_key_simple(self):
         assert accessor_to_key(".output") == "output"
