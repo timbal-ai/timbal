@@ -283,7 +283,10 @@ def apply_operation(workspace_path: str | Path, operation: str, **kwargs) -> str
         raise FileNotFoundError(f"source file not found: {spec.path}")
 
     source = spec.path.read_text()
-    tree = cst.parse_module(source)
+    try:
+        tree = cst.parse_module(source)
+    except cst.ParserSyntaxError as e:
+        raise ValueError(f"Cannot parse {spec.path}: {e}") from e
 
     modules = _get_transformer_modules()
     mod = modules.get(operation)

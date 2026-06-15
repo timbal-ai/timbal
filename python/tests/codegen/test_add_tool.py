@@ -169,6 +169,34 @@ class TestCustomTool:
         assert result.returncode != 0
 
 
+class TestEntryPointValidation:
+    def test_rejects_fqn_variable_mismatch(self, workspace):
+        """add-tool must not run when timbal.yaml target != Agent variable name."""
+        ws = workspace("""\
+        import asyncio
+        from timbal import Agent
+
+        flow = Agent(name="a", model="openai/gpt-4o-mini", tools=[])
+
+        async def main():
+            pass
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+        """)
+        result = subprocess.run(
+            codegen_cmd("--path", str(ws), "add-tool", "--type", "HappyScribeListTranscriptions"),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "Entry point variable 'agent' not found" in result.stderr
+        source = (ws / "agent.py").read_text()
+        assert "HappyScribeListTranscriptions" not in source
+        assert "flow = Agent" in source
+        compile(source, "agent.py", "exec")
+
+
 # ---------------------------------------------------------------------------
 # Explicit --name flag
 # ---------------------------------------------------------------------------

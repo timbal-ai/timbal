@@ -7,7 +7,9 @@ from ..cli_utils import arg_input
 from ..cst_utils import (
     build_cst_value,
     collect_assignments,
+    collect_step_names,
     has_import,
+    is_bare_function_step,
     resolve_entry_point_type,
     resolve_runnable_name,
 )
@@ -66,6 +68,25 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
     target = step if step else entry_point
     assignments = collect_assignments(tree) if tree else {}
+
+    if tree is not None:
+        if step:
+            step_names = collect_step_names(tree, entry_point, assignments)
+            if (
+                step not in step_names
+                and step not in assignments
+                and not is_bare_function_step(tree, entry_point, step, assignments)
+            ):
+                raise ValueError(
+                    f"Workflow step '{step}' not found. "
+                    "Use the step variable name from .step(...), not the runtime name."
+                )
+        elif entry_point not in assignments:
+            raise ValueError(
+                f"Entry point variable '{entry_point}' not found in source. "
+                "Ensure timbal.yaml fqn matches the Agent/Workflow variable name."
+            )
+
     tool_type = args.tool_type
     valid_types = [*get_framework_tools().keys(), "Custom"]
 
