@@ -1091,14 +1091,25 @@ class Runnable(ABC, BaseModel):
             # previous run — chain session data via parent_id.
             # If the root span is still running (t1 is None), this context
             # belongs to a concurrent sibling — create a fresh context.
+            # Inherit the parent's platform_config: a forked child run (linked
+            # by parent_id, same process/deployment) shares it. Without this, the
+            # fresh context re-resolves from env only and an explicitly-injected
+            # platform_config is lost — breaking platform API calls (e.g. a
+            # standalone Agent instantiated inside a step body).
+            _inherited_platform_config = run_context.platform_config
             root = run_context.root_span()
             if root is not None and root.t1 is not None:
                 run_context = RunContext(
                     parent_id=explicit_parent_id or run_context.id,
                     tracing_provider=self.tracing_provider,
+                    platform_config=_inherited_platform_config,
                 )
             else:
-                run_context = RunContext(parent_id=explicit_parent_id, tracing_provider=self.tracing_provider)
+                run_context = RunContext(
+                    parent_id=explicit_parent_id,
+                    tracing_provider=self.tracing_provider,
+                    platform_config=_inherited_platform_config,
+                )
             _parent_call_id = None
             _call_id = None
         await run_context.get_session()
