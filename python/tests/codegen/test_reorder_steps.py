@@ -150,6 +150,75 @@ class TestReorderViaAddEdge:
         assert _step_order(output) == ["agent_a", "agent_b"]
 
 
+class TestReorderViaAddStep:
+    """Test that add-step triggers reordering end-to-end.
+
+    Re-adding a step (after remove-step) appends its .step() call last. If
+    existing steps depend on it (via step_span / depends_on), the source ends
+    up with a dependent before its dependency, which fails at runtime with
+    "Source step <x> not found in workflow". add-step must topologically
+    re-sort so the re-added dependency lands before its dependents.
+    """
+
+    def test_readd_dependency_lands_before_dependents(self, wf_workspace):
+        # Post-remove state: agent_b references agent_a, but agent_a is gone.
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
+        """)
+        output = apply_operation(
+            ws, "add_step",
+            step_type="Agent",
+            config='{"name": "agent_a", "model": "openai/gpt-4o-mini"}',
+            definition=None, step_name=None, x=None, y=None,
+        )
+        assert _step_order(output) == ["agent_a", "agent_b"]
+
+    def test_add_step_fixes_existing_violation(self, wf_workspace):
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+        from timbal.state import get_run_context
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+        agent_b = Agent(name="agent_b", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_b, prompt=lambda: get_run_context().step_span("agent_a").output)
+        workflow.step(agent_a)
+        """)
+        output = apply_operation(
+            ws, "add_step",
+            step_type="Agent",
+            config='{"name": "agent_c", "model": "openai/gpt-4o-mini"}',
+            definition=None, step_name=None, x=None, y=None,
+        )
+        order = _step_order(output)
+        assert order.index("agent_a") < order.index("agent_b")
+
+    def test_independent_step_preserves_order(self, wf_workspace):
+        ws = wf_workspace("""\
+        from timbal import Agent, Workflow
+
+        agent_a = Agent(name="agent_a", model="openai/gpt-4o-mini")
+
+        workflow = Workflow(name="wf")
+        workflow.step(agent_a)
+        """)
+        output = apply_operation(
+            ws, "add_step",
+            step_type="Agent",
+            config='{"name": "agent_b", "model": "openai/gpt-4o-mini"}',
+            definition=None, step_name=None, x=None, y=None,
+        )
+        # No dependency between them — original order preserved.
+        assert _step_order(output) == ["agent_a", "agent_b"]
+
+
 class TestReorderViaSetParam:
     """Test that set-param type=map triggers reordering end-to-end."""
 
