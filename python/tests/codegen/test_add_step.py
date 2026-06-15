@@ -1,3 +1,4 @@
+import ast
 import subprocess
 import textwrap
 from pathlib import Path
@@ -97,6 +98,27 @@ class TestAgentStep:
         a_idx = output.index("workflow.step(agent_a)")
         b_idx = output.index("workflow.step(agent_b)")
         assert b_idx > a_idx
+
+    def test_multiline_system_prompt_produces_valid_python(self, workspace):
+        """A multi-line system_prompt must not break the generated source."""
+        import json
+
+        ws = workspace("""\
+        from timbal import Workflow
+
+        workflow = Workflow(name="my_workflow")
+        """)
+        prompt = "You are a helpful assistant.\nBe concise.\nAlways use tools."
+        config = json.dumps({
+            "name": "agent_a",
+            "model": "openai/gpt-4o-mini",
+            "system_prompt": prompt,
+        })
+        output = _run_dry(ws, "--type", "Agent", "--config", config)
+        # The generated module must be syntactically valid Python.
+        ast.parse(output)
+        assert "agent_a" in output
+        assert "Be concise." in output
 
     def test_idempotent_agent_step(self, workspace):
         """Re-adding an existing Agent step updates it rather than duplicating."""

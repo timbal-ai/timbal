@@ -383,9 +383,18 @@ class StepAdder(cst.CSTTransformer):
                 stmts_to_add.append(cst.parse_statement(self.definition + "\n"))
 
         # --- Variable assignment (Agent / framework tool / Custom Tool wrapper) ---
+        # Build via CST (not string interpolation) so values with special chars
+        # — e.g. a multi-line system_prompt — are escaped correctly.
         if not self._assignment_updated:
-            assignment_code = f"{self.var_name} = {self._build_assignment_code()}\n"
-            stmts_to_add.append(cst.parse_statement(assignment_code))
+            assign_stmt = cst.SimpleStatementLine(
+                body=[
+                    cst.Assign(
+                        targets=[cst.AssignTarget(target=cst.Name(self.var_name))],
+                        value=self._build_assignment_call(),
+                    )
+                ]
+            )
+            stmts_to_add.append(assign_stmt)
 
         body = list(updated_node.body)
 
@@ -496,30 +505,6 @@ class StepAdder(cst.CSTTransformer):
             args.append(cst.Arg(keyword=cst.Name("name"), value=cst.SimpleString(f'"{self.step_name}"')))
         args.append(metadata_arg)
         return cst.Call(func=cst.Name(self.class_name), args=args)
-
-    def _metadata_code(self) -> str:
-        """Build the metadata keyword argument as a source code fragment."""
-        x, y = self.position["x"], self.position["y"]
-        return f'metadata={{"position": {{"x": {x}, "y": {y}}}}}'
-
-    def _build_assignment_code(self) -> str:
-        """Build the source code string for the variable assignment RHS."""
-        meta = self._metadata_code()
-
-        if self.step_type == "Agent":
-            config_parts = ", ".join(
-                f'{k}="{v}"' if isinstance(v, str) else f"{k}={v}"
-                for k, v in self.config.items()
-            )
-            sep = ", " if config_parts else ""
-            return f"Agent({config_parts}{sep}{meta})"
-
-        if self.step_type == "Custom":
-            return f'Tool(name="{self.runtime_name}", handler={self.func_name}, {meta})'
-
-        # Framework tool.
-        name_part = f'name="{self.step_name}", ' if self.step_name else ""
-        return f"{self.class_name}({name_part}{meta})"
 
     def _build_step_call(self) -> cst.Call:
         """Build the CST Call node for workflow.step(...)."""
