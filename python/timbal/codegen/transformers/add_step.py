@@ -274,6 +274,10 @@ def run(entry_point: str, args: argparse.Namespace, *, tree: cst.Module | None =
 
 
 class StepAdder(cst.CSTTransformer):
+    # A re-added step's .step() call is appended last; if existing steps depend
+    # on it, topologically re-sort so dependencies precede their dependents.
+    needs_reorder = True
+
     def __init__(
         self,
         entry_point: str,
