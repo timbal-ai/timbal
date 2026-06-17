@@ -1,0 +1,53 @@
+name: CLI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "cli/**"
+      - ".github/workflows/cli.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.1
+
+      - name: Unit tests
+        run: zig build test
+        working-directory: cli
+
+      - name: Build
+        run: zig build
+        working-directory: cli
+
+      # On PRs we run only the hermetic (offline) cases; the network success
+      # cases (blueprint fetch) run on manual dispatch. github.event_name is
+      # "pull_request" only for PR events.
+      - name: Integration tests (Unix)
+        if: runner.os != 'Windows'
+        env:
+          TIMBAL_CLI_E2E_NETWORK: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+        run: bash cli/integration_tests.sh
+
+      - name: Integration tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TIMBAL_CLI_E2E_NETWORK: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+        run: pwsh -NoProfile -File cli/integration_tests.ps1

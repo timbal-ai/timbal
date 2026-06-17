@@ -49,11 +49,23 @@ pub fn main() !void {
 
     if (args.len < 2) {
         try printUsageWithError("Error: missing command");
-        return;
+        std.process.exit(2);
     }
 
     const action = args[1];
 
+    // Sub-commands signal usage errors by exiting with code 2 directly. Any
+    // error that propagates here is a runtime failure: print a concise message
+    // (the sub-command has usually already explained the details) and exit 1.
+    // This keeps a clean, scriptable exit-code contract: 0 success, 2 usage, 1 runtime.
+    dispatch(allocator, action, args) catch |err| {
+        const stderr = std.io.getStdErr().writer();
+        stderr.print("Error: {s}\n", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+}
+
+fn dispatch(allocator: std.mem.Allocator, action: []const u8, args: []const []const u8) !void {
     if (std.mem.eql(u8, action, "add")) {
         try add_cmd.run(allocator, args[2..]);
     } else if (std.mem.eql(u8, action, "create")) {
@@ -73,5 +85,6 @@ pub fn main() !void {
         try printUsage();
     } else {
         try printUsageWithError("Error: unknown command");
+        std.process.exit(2);
     }
 }

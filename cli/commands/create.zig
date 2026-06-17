@@ -624,14 +624,21 @@ fn initGitRepo(allocator: std.mem.Allocator, path: []const u8) !void {
         .argv = &[_][]const u8{ "git", "init" },
         .cwd = path,
     }) catch |err| {
-        std.debug.print("Warning: Failed to initialize git repository: {}\n", .{err});
-        return;
+        std.debug.print("Error: failed to initialize git repository: {}\n", .{err});
+        return err;
     };
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    if (result.term.Exited != 0) {
-        std.debug.print("Warning: git init failed\n", .{});
+    switch (result.term) {
+        .Exited => |code| if (code != 0) {
+            std.debug.print("Error: git init failed (exit {d}).\n", .{code});
+            return error.GitInitFailed;
+        },
+        else => {
+            std.debug.print("Error: git init terminated abnormally.\n", .{});
+            return error.GitInitFailed;
+        },
     }
 }
 
@@ -927,6 +934,29 @@ const terminal = if (is_windows) struct {
 
 fn openAppDir(cwd: fs.Dir, target_path: []const u8, use_current_dir: bool) !fs.Dir {
     if (use_current_dir) return cwd;
+
+    // Refuse to scaffold into an existing, non-empty directory: merging into a
+    // populated path risks clobbering files and leaves an ambiguous result for
+    // callers that pinned this path. An empty existing directory is fine to reuse.
+    if (cwd.openDir(target_path, .{ .iterate = true })) |existing_dir| {
+        var existing = existing_dir;
+        var it = existing.iterate();
+        const has_entry = (try it.next()) != null;
+        if (has_entry) {
+            existing.close();
+            const stderr = std.io.getStdErr().writer();
+            stderr.print("Error: target directory '{s}' already exists and is not empty.\n", .{target_path}) catch {};
+            std.process.exit(2);
+        }
+        return existing;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => {
+            std.debug.print("Error opening directory: {}\n", .{err});
+            return err;
+        },
+    }
+
     cwd.makePath(target_path) catch |err| {
         std.debug.print("Error creating directory: {}\n", .{err});
         return err;
@@ -978,7 +1008,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try printUsage();
             return;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
-            script_mode = true;
             verbose = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             script_mode = true;
@@ -992,7 +1021,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             i += 1;
             if (i >= args.len) {
                 try printUsageWithError("Error: --agent requires a name");
-                return;
+                std.process.exit(2);
             }
             try agent_names.append(try allocator.dupe(u8, args[i]));
         } else if (std.mem.eql(u8, arg, "--workflow")) {
@@ -1000,24 +1029,19 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             i += 1;
             if (i >= args.len) {
                 try printUsageWithError("Error: --workflow requires a name");
-                return;
+                std.process.exit(2);
             }
             try workflow_names.append(try allocator.dupe(u8, args[i]));
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             if (arg_path != null) {
                 try printUsageWithError("Error: multiple target paths provided");
-                return;
+                std.process.exit(2);
             }
             arg_path = arg;
         } else {
             try printUsageWithError("Error: unknown option");
-            return;
+            std.process.exit(2);
         }
-    }
-
-    if (quiet and !script_mode) {
-        try printUsageWithError("Error: -q/--quiet requires a non-interactive create (pass at least one option)");
-        return;
     }
 
     if (verbose) {
@@ -1026,7 +1050,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const target_path = arg_path orelse {
         try printUsageWithError("Error: a target path is required (use '.' for the current directory)");
-        return;
+        std.process.exit(2);
     };
     const cwd = fs.cwd();
     const use_current_dir = std.mem.eql(u8, target_path, ".");
@@ -1047,13 +1071,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         for (agent_names.items) |name| {
             appendMember(allocator, &members, .agent, name) catch |err| {
                 printAppendMemberError(err, name);
-                return err;
+                std.process.exit(2);
             };
         }
         for (workflow_names.items) |name| {
             appendMember(allocator, &members, .workflow, name) catch |err| {
                 printAppendMemberError(err, name);
-                return err;
+                std.process.exit(2);
             };
         }
 
@@ -1061,7 +1085,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             if (err == error.WithUiRequiresAgent) {
                 const stderr = std.io.getStdErr().writer();
                 try stderr.writeAll("Error: --with-ui requires at least one agent (workflows alone do not use the web UI).\n");
-                return;
+                std.process.exit(2);
             }
             return err;
         };
@@ -1078,10 +1102,20 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    // Interactive mode
+    // Interactive mode requires a real terminal. If stdin isn't a TTY (piped,
+    // redirected, or running under CI), there's no way to prompt — fail loudly
+    // and point at the non-interactive flags instead of silently doing nothing.
+    if (!std.io.getStdIn().isTty()) {
+        const stderr = std.io.getStdErr().writer();
+        try stderr.writeAll("Error: interactive create requires a terminal. " ++
+            "Pass --agent <name> and/or --workflow <name> (optionally --with-ui) for non-interactive use.\n");
+        std.process.exit(2);
+    }
+
     const original_termios = terminal.enableRawMode() catch {
-        std.debug.print("Warning: Could not enable raw mode for interactive input\n", .{});
-        return;
+        const stderr = std.io.getStdErr().writer();
+        stderr.writeAll("Error: failed to set up the terminal for interactive input.\n") catch {};
+        std.process.exit(1);
     };
     defer terminal.disableRawMode(original_termios);
 

@@ -246,7 +246,9 @@ pub fn genSecureId(allocator: std.mem.Allocator) ![]u8 {
 
 /// Downloads and extracts a blueprint tarball into a project directory.
 pub fn fetchBlueprint(allocator: std.mem.Allocator, project_path: []const u8, dest_dir: []const u8, tarball_url: []const u8) !void {
-    const stdout = std.io.getStdOut().writer();
+    // Progress goes to stderr so stdout stays machine-parseable (the quiet-mode
+    // contract reserves stdout for the created project path only).
+    const progress = std.io.getStdErr().writer();
     const dest_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ project_path, dest_dir });
     defer allocator.free(dest_path);
 
@@ -256,7 +258,7 @@ pub fn fetchBlueprint(allocator: std.mem.Allocator, project_path: []const u8, de
     };
 
     // Download the tarball using Zig's HTTP client
-    try stdout.print("  {s}Downloading {s}...{s}\n", .{ Color.dim, dest_dir, Color.reset });
+    try progress.print("  {s}Downloading {s}...{s}\n", .{ Color.dim, dest_dir, Color.reset });
 
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
@@ -278,7 +280,7 @@ pub fn fetchBlueprint(allocator: std.mem.Allocator, project_path: []const u8, de
         return error.HttpError;
     }
 
-    try stdout.print("  {s}Extracting {s}...{s}\n", .{ Color.dim, dest_dir, Color.reset });
+    try progress.print("  {s}Extracting {s}...{s}\n", .{ Color.dim, dest_dir, Color.reset });
 
     // Decompress gzip and extract tar into the destination directory
     var dir = try std.fs.openDirAbsolute(dest_path, .{});
