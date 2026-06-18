@@ -5,12 +5,9 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
-from ._google_oauth import auth_headers, config_fields, resolve_google_token
 
 _DATA_BASE = "https://analyticsdata.googleapis.com/v1beta"
 _ADMIN_BASE = "https://analyticsadmin.googleapis.com/v1beta"
-_REFRESH_TOKEN_ENV = "GOOGLE_ANALYTICS_REFRESH_TOKEN"
-
 
 def _normalize_property_id(property_id: str) -> str:
     if property_id.startswith("properties/"):
@@ -29,25 +26,27 @@ def _resolve_property_id(tool: Any, property_id: str | None) -> str:
 
 
 async def _resolve_token(tool: Any) -> str:
-    return await resolve_google_token(
-        provider_name="Google Analytics",
-        integration=tool.integration,
-        token=tool.token,
-        refresh_token=tool.refresh_token,
-        refresh_token_env=_REFRESH_TOKEN_ENV,
-        access_token_env="GOOGLE_ANALYTICS_ACCESS_TOKEN",
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["token"]
+    if tool.token is not None:
+        return tool.token.get_secret_value()
+    raise ValueError(
+        "Google Analytics credentials not found. Configure an integration or pass token."
     )
 
+
+def _auth_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 class GoogleAnalyticsListAccountSummaries(Tool):
     name: str = "google_analytics_list_account_summaries"
     description: str | None = "List GA4 account summaries and accessible properties."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        return {**super().get_config(), **config_fields(self)}
+        return {**super().get_config(), **self._annotate_config({"integration": self.integration, "token": self.token})}
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_account_summaries(
@@ -64,7 +63,7 @@ class GoogleAnalyticsListAccountSummaries(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/accountSummaries",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     params=params,
                 )
                 response.raise_for_status()
@@ -78,13 +77,12 @@ class GoogleAnalyticsRunReport(Tool):
     description: str | None = "Run a standard GA4 report with dimensions, metrics, and date ranges."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_property_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_property_id": self.default_property_id}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_property_id": self.default_property_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -122,7 +120,7 @@ class GoogleAnalyticsRunReport(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_DATA_BASE}/{prop}:runReport",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     json=body,
                 )
                 response.raise_for_status()
@@ -136,13 +134,12 @@ class GoogleAnalyticsRunRealtimeReport(Tool):
     description: str | None = "Run a GA4 realtime report for active users and events."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_property_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_property_id": self.default_property_id}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_property_id": self.default_property_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -172,7 +169,7 @@ class GoogleAnalyticsRunRealtimeReport(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_DATA_BASE}/{prop}:runRealtimeReport",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     json=body,
                 )
                 response.raise_for_status()
@@ -186,13 +183,12 @@ class GoogleAnalyticsRunPivotReport(Tool):
     description: str | None = "Run a GA4 pivot report."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_property_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_property_id": self.default_property_id}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_property_id": self.default_property_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -219,7 +215,7 @@ class GoogleAnalyticsRunPivotReport(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_DATA_BASE}/{prop}:runPivotReport",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     json=body,
                 )
                 response.raise_for_status()
@@ -233,13 +229,12 @@ class GoogleAnalyticsBatchRunReports(Tool):
     description: str | None = "Run multiple GA4 reports in a single batch request."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_property_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_property_id": self.default_property_id}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_property_id": self.default_property_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -254,7 +249,7 @@ class GoogleAnalyticsBatchRunReports(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_DATA_BASE}/{prop}:batchRunReports",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     json={"requests": requests},
                 )
                 response.raise_for_status()
@@ -268,13 +263,12 @@ class GoogleAnalyticsGetMetadata(Tool):
     description: str | None = "Get available GA4 dimensions and metrics metadata for a property."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_property_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_property_id": self.default_property_id}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_property_id": self.default_property_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -288,7 +282,7 @@ class GoogleAnalyticsGetMetadata(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_DATA_BASE}/{prop}/metadata",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -301,10 +295,9 @@ class GoogleAnalyticsListProperties(Tool):
     description: str | None = "List GA4 properties under an account."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        return {**super().get_config(), **config_fields(self)}
+        return {**super().get_config(), **self._annotate_config({"integration": self.integration, "token": self.token})}
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_properties(
@@ -328,7 +321,7 @@ class GoogleAnalyticsListProperties(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/properties",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     params=params,
                 )
                 response.raise_for_status()
@@ -342,13 +335,12 @@ class GoogleAnalyticsGetProperty(Tool):
     description: str | None = "Get GA4 property details."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_property_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_property_id": self.default_property_id}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_property_id": self.default_property_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -362,7 +354,7 @@ class GoogleAnalyticsGetProperty(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/{prop}",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -375,13 +367,12 @@ class GoogleAnalyticsListDataStreams(Tool):
     description: str | None = "List GA4 data streams for a property."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_property_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_property_id": self.default_property_id}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_property_id": self.default_property_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -401,7 +392,7 @@ class GoogleAnalyticsListDataStreams(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/{prop}/dataStreams",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     params=params,
                 )
                 response.raise_for_status()
@@ -415,13 +406,12 @@ class GoogleAnalyticsGetDataStream(Tool):
     description: str | None = "Get a GA4 data stream by ID."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_property_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_property_id": self.default_property_id}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_property_id": self.default_property_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -437,7 +427,7 @@ class GoogleAnalyticsGetDataStream(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/{prop}/{stream}",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -450,13 +440,12 @@ class GoogleAnalyticsListCustomDimensions(Tool):
     description: str | None = "List custom dimensions for a GA4 property."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_property_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_property_id": self.default_property_id}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_property_id": self.default_property_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -476,7 +465,7 @@ class GoogleAnalyticsListCustomDimensions(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/{prop}/customDimensions",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     params=params,
                 )
                 response.raise_for_status()
@@ -490,13 +479,12 @@ class GoogleAnalyticsListCustomMetrics(Tool):
     description: str | None = "List custom metrics for a GA4 property."
     integration: Annotated[str, Integration("google_analytics")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_property_id: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_property_id": self.default_property_id}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_property_id": self.default_property_id}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -516,7 +504,7 @@ class GoogleAnalyticsListCustomMetrics(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/{prop}/customMetrics",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     params=params,
                 )
                 response.raise_for_status()

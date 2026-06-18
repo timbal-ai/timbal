@@ -6,12 +6,9 @@ from pydantic import Field, SecretStr
 
 from ..core.tool import Tool
 from ..platform.integrations import Integration
-from ._google_oauth import auth_headers, config_fields, resolve_google_token
 
 _WEBMASTERS_BASE = "https://searchconsole.googleapis.com/webmasters/v3"
 _INSPECTION_BASE = "https://searchconsole.googleapis.com/v1"
-_REFRESH_TOKEN_ENV = "GOOGLE_SEARCH_CONSOLE_REFRESH_TOKEN"
-
 
 def _resolve_site_url(tool: Any, site_url: str | None) -> str:
     resolved = site_url or tool.default_site_url or os.getenv("GOOGLE_SEARCH_CONSOLE_SITE_URL")
@@ -28,25 +25,27 @@ def _encoded_site_url(site_url: str) -> str:
 
 
 async def _resolve_token(tool: Any) -> str:
-    return await resolve_google_token(
-        provider_name="Google Search Console",
-        integration=tool.integration,
-        token=tool.token,
-        refresh_token=tool.refresh_token,
-        refresh_token_env=_REFRESH_TOKEN_ENV,
-        access_token_env="GOOGLE_SEARCH_CONSOLE_ACCESS_TOKEN",
+    if isinstance(tool.integration, Integration):
+        credentials = await tool.integration.resolve()
+        return credentials["token"]
+    if tool.token is not None:
+        return tool.token.get_secret_value()
+    raise ValueError(
+        "Google Search Console credentials not found. Configure an integration or pass token."
     )
 
+
+def _auth_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 class GoogleSearchConsoleListSites(Tool):
     name: str = "google_search_console_list_sites"
     description: str | None = "List sites verified in Google Search Console."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        return {**super().get_config(), **config_fields(self)}
+        return {**super().get_config(), **self._annotate_config({"integration": self.integration, "token": self.token})}
 
     def __init__(self, **kwargs: Any) -> None:
         async def _list_sites() -> Any:
@@ -56,7 +55,7 @@ class GoogleSearchConsoleListSites(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_WEBMASTERS_BASE}/sites",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -69,13 +68,12 @@ class GoogleSearchConsoleGetSite(Tool):
     description: str | None = "Get Search Console site metadata and permission level."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_site_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_site_url": self.default_site_url}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_site_url": self.default_site_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -91,7 +89,7 @@ class GoogleSearchConsoleGetSite(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -104,10 +102,9 @@ class GoogleSearchConsoleAddSite(Tool):
     description: str | None = "Add a site to Google Search Console."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
 
     def get_config(self) -> dict[str, Any]:
-        return {**super().get_config(), **config_fields(self)}
+        return {**super().get_config(), **self._annotate_config({"integration": self.integration, "token": self.token})}
 
     def __init__(self, **kwargs: Any) -> None:
         async def _add_site(
@@ -119,7 +116,7 @@ class GoogleSearchConsoleAddSite(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.put(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site_url)}",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -132,13 +129,12 @@ class GoogleSearchConsoleDeleteSite(Tool):
     description: str | None = "Remove a site from Google Search Console."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_site_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_site_url": self.default_site_url}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_site_url": self.default_site_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -152,7 +148,7 @@ class GoogleSearchConsoleDeleteSite(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return {"deleted": True, "siteUrl": site}
@@ -165,13 +161,12 @@ class GoogleSearchConsoleSearchAnalytics(Tool):
     description: str | None = "Query Search Console performance data with flexible dimensions and filters."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_site_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_site_url": self.default_site_url}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_site_url": self.default_site_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -209,7 +204,7 @@ class GoogleSearchConsoleSearchAnalytics(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/searchAnalytics/query",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     json=body,
                 )
                 response.raise_for_status()
@@ -223,13 +218,12 @@ class GoogleSearchConsoleListSitemaps(Tool):
     description: str | None = "List sitemaps submitted for a Search Console site."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_site_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_site_url": self.default_site_url}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_site_url": self.default_site_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -243,7 +237,7 @@ class GoogleSearchConsoleListSitemaps(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/sitemaps",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -256,13 +250,12 @@ class GoogleSearchConsoleGetSitemap(Tool):
     description: str | None = "Get details for a submitted sitemap."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_site_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_site_url": self.default_site_url}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_site_url": self.default_site_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -277,7 +270,7 @@ class GoogleSearchConsoleGetSitemap(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/sitemaps/{_encoded_site_url(feedpath)}",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -290,13 +283,12 @@ class GoogleSearchConsoleSubmitSitemap(Tool):
     description: str | None = "Submit a sitemap URL to Google Search Console."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_site_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_site_url": self.default_site_url}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_site_url": self.default_site_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -311,7 +303,7 @@ class GoogleSearchConsoleSubmitSitemap(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.put(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/sitemaps/{_encoded_site_url(feedpath)}",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return response.json()
@@ -324,13 +316,12 @@ class GoogleSearchConsoleDeleteSitemap(Tool):
     description: str | None = "Delete a sitemap from Google Search Console."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_site_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_site_url": self.default_site_url}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_site_url": self.default_site_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -345,7 +336,7 @@ class GoogleSearchConsoleDeleteSitemap(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.delete(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/sitemaps/{_encoded_site_url(feedpath)}",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                 )
                 response.raise_for_status()
                 return {"deleted": True, "feedpath": feedpath, "siteUrl": site}
@@ -358,13 +349,12 @@ class GoogleSearchConsoleInspectUrl(Tool):
     description: str | None = "Inspect a URL index status via the Search Console URL Inspection API."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_site_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_site_url": self.default_site_url}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_site_url": self.default_site_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -386,7 +376,7 @@ class GoogleSearchConsoleInspectUrl(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_INSPECTION_BASE}/urlInspection/index:inspect",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     json=body,
                 )
                 response.raise_for_status()
@@ -400,13 +390,12 @@ class GoogleSearchConsoleSearchAnalyticsByPage(Tool):
     description: str | None = "Query Search Console performance grouped by page."
     integration: Annotated[str, Integration("google_search_console")] | None = None
     token: SecretStr | None = None
-    refresh_token: SecretStr | None = None
     default_site_url: str | None = None
 
     def get_config(self) -> dict[str, Any]:
         return {
             **super().get_config(),
-            **config_fields(self, extra={"default_site_url": self.default_site_url}),
+            **self._annotate_config({"integration": self.integration, "token": self.token, "default_site_url": self.default_site_url}),
         }
 
     def __init__(self, **kwargs: Any) -> None:
@@ -434,7 +423,7 @@ class GoogleSearchConsoleSearchAnalyticsByPage(Tool):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/searchAnalytics/query",
-                    headers=auth_headers(token),
+                    headers=_auth_headers(token),
                     json=body,
                 )
                 response.raise_for_status()
