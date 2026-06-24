@@ -171,17 +171,25 @@ fn collectMembersInteractive(allocator: std.mem.Allocator, term_state: TerminalS
             0 => {
                 const name = try promptMemberName(allocator, "Agent", term_state);
                 defer allocator.free(name);
-                appendMember(allocator, &list, .agent, name) catch |err| {
-                    printAppendMemberError(err, name);
-                    return err;
+                appendMember(allocator, &list, .agent, name) catch |err| switch (err) {
+                    // Recoverable: report and stay in the menu so the user can
+                    // pick another name instead of losing the whole session.
+                    error.DuplicateMemberName, error.InvalidWorkforceName, error.ReservedWorkforceName => {
+                        printAppendMemberError(err, name);
+                        continue;
+                    },
+                    else => |e| return e,
                 };
             },
             1 => {
                 const name = try promptMemberName(allocator, "Workflow", term_state);
                 defer allocator.free(name);
-                appendMember(allocator, &list, .workflow, name) catch |err| {
-                    printAppendMemberError(err, name);
-                    return err;
+                appendMember(allocator, &list, .workflow, name) catch |err| switch (err) {
+                    error.DuplicateMemberName, error.InvalidWorkforceName, error.ReservedWorkforceName => {
+                        printAppendMemberError(err, name);
+                        continue;
+                    },
+                    else => |e| return e,
                 };
             },
             2 => return try list.toOwnedSlice(),
