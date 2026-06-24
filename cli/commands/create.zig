@@ -647,6 +647,23 @@ const CreateScaffoldOptions = struct {
     init_git: bool = true,
 };
 
+/// Register a top-level scaffold entry for rollback, but only if it does not
+/// already exist. This keeps rollback safe in `timbal create .` (or an empty
+/// reused directory) where pre-existing user files must never be deleted: we
+/// only ever remove entries this scaffold actually created.
+fn markForRollback(
+    allocator: std.mem.Allocator,
+    app_dir: fs.Dir,
+    created: *std.ArrayList([]u8),
+    rel_path: []const u8,
+) !void {
+    app_dir.access(rel_path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            try created.append(try allocator.dupe(u8, rel_path));
+        }
+    };
+}
+
 fn createProjectStructure(
     allocator: std.mem.Allocator,
     app_dir: fs.Dir,
@@ -655,18 +672,43 @@ fn createProjectStructure(
 ) !void {
     const project_name = projectDirName(config.path);
 
+    // Track newly-created top-level entries so that if scaffolding fails
+    // partway through (a member name is invalid, a blueprint fetch fails,
+    // git init errors, ...) we roll back to the starting state. Otherwise the
+    // half-written project trips the non-empty directory guard in openAppDir
+    // and a `timbal create` retry on the same path can't finish.
+    var created = std.ArrayList([]u8).init(allocator);
+    defer {
+        for (created.items) |p| allocator.free(p);
+        created.deinit();
+    }
+    errdefer {
+        // Best-effort, reverse order; ignore errors so the original failure
+        // is what propagates.
+        var idx = created.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            app_dir.deleteTree(created.items[idx]) catch {};
+        }
+    }
+
     if (opts.fetch_blueprints) {
         if (config.include_ui) {
+            try markForRollback(allocator, app_dir, &created, "ui");
             try utils.fetchBlueprint(allocator, config.path, "ui", utils.blueprint_ui_simple_chat_url);
         }
+        try markForRollback(allocator, app_dir, &created, "api");
         try utils.fetchBlueprint(allocator, config.path, "api", utils.blueprint_api_url);
     } else {
         if (config.include_ui) {
+            try markForRollback(allocator, app_dir, &created, "ui");
             try app_dir.makePath("ui");
         }
+        try markForRollback(allocator, app_dir, &created, "api");
         try app_dir.makePath("api");
     }
 
+    try markForRollback(allocator, app_dir, &created, "workforce");
     app_dir.makePath("workforce") catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
@@ -680,6 +722,10 @@ fn createProjectStructure(
             else => |e| return e,
         };
         defer allocator.free(used_name);
+        // Track each member dir explicitly: when `workforce/` already existed
+        // it isn't itself slated for rollback, so the members we add must be
+        // removed individually.
+        try created.append(try std.fmt.allocPrint(allocator, "workforce/{s}", .{used_name}));
     }
 
     // Create .gitignore in the project root
@@ -733,6 +779,7 @@ fn createProjectStructure(
         \\
     ;
 
+    try markForRollback(allocator, app_dir, &created, ".gitignore");
     const gitignore_file = try app_dir.createFile(".gitignore", .{});
     defer gitignore_file.close();
     try gitignore_file.writeAll(gitignore_content);
@@ -828,11 +875,13 @@ fn createProjectStructure(
         \\
     , .{ project_name, ui_section, ui_note });
     defer allocator.free(readme_content);
+    try markForRollback(allocator, app_dir, &created, "README.md");
     const readme_file = try app_dir.createFile("README.md", .{});
     defer readme_file.close();
     try readme_file.writeAll(readme_content);
 
     if (opts.init_git) {
+        try markForRollback(allocator, app_dir, &created, ".git");
         try initGitRepo(allocator, config.path);
     }
 }
@@ -1292,4 +1341,46 @@ test "createProjectStructure scaffolds workforce and project files" {
     defer workflow_cfg.deinit(a);
     try std.testing.expectEqualStrings("workflow", workflow_cfg.type);
     try std.testing.expectEqualStrings("workflow.py::workflow", workflow_cfg.fqn);
+}
+
+// A failure partway through must leave nothing behind, so a retry on the same
+// path isn't blocked by the non-empty directory guard.
+test "createProjectStructure rolls back a partial scaffold on failure" {
+    const a = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(path);
+
+    // Force a quiet I/O failure late in scaffolding: a pre-existing directory
+    // named "README.md" makes the README createFile fail with error.IsDir,
+    // after the member, api/, and workforce/ have already been written.
+    try tmp.dir.makeDir("README.md");
+
+    const good_name = try a.dupe(u8, "foo");
+    defer a.free(good_name);
+    var members_list = std.ArrayList(WorkforceMemberSpec).init(a);
+    defer members_list.deinit();
+    try members_list.append(.{ .name = good_name, .project_type = .agent });
+
+    const config = ProjectConfig{
+        .members = members_list.items,
+        .include_ui = false,
+        .path = path,
+        .relative_path = ".",
+    };
+
+    try std.testing.expectError(error.IsDir, createProjectStructure(a, tmp.dir, config, .{
+        .fetch_blueprints = false,
+        .init_git = false,
+    }));
+
+    // Everything the scaffold created must be gone. The pre-existing
+    // "README.md" directory (not created by us) must be left untouched.
+    try expectEntryMissing(tmp.dir, "api");
+    try expectEntryMissing(tmp.dir, "workforce");
+    try expectEntryMissing(tmp.dir, ".gitignore");
+    try expectEntryExists(tmp.dir, "README.md");
 }

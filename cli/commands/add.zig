@@ -172,19 +172,41 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const member_dir = try std.fmt.allocPrint(allocator, "workforce/{s}", .{prepared_name});
         defer allocator.free(member_dir);
 
+        // When replacing an existing member, move it aside instead of deleting
+        // it outright. addWorkforceMember scaffolds a fresh tree and can fail
+        // partway (I/O, template write, ...); deleting up front would leave the
+        // slot empty with no replacement. Commit (delete backup) on success,
+        // restore it on failure. The backup name starts with '.' so it can
+        // never collide with a real member (names can't start with '.').
+        var backup_dir: ?[]u8 = null;
+        defer if (backup_dir) |b| allocator.free(b);
         if (cwd.access(member_dir, .{})) |_| {
             if (!shouldOverwrite(member_dir, force)) return;
-            try cwd.deleteTree(member_dir);
+            const b = try std.fmt.allocPrint(allocator, "workforce/.{s}.bak", .{prepared_name});
+            cwd.deleteTree(b) catch {}; // clear any stale backup from a prior interrupted run
+            try cwd.rename(member_dir, b);
+            backup_dir = b;
         } else |_| {}
 
-        const used_name = utils.addWorkforceMember(allocator, cwd, project_name, project_type, prepared_name) catch |err| switch (err) {
-            error.InvalidWorkforceName, error.ReservedWorkforceName, error.WorkforceMemberExists => {
-                utils.printWorkforceNameError(err, prepared_name);
-                std.process.exit(2);
-            },
-            else => |e| return e,
+        const used_name = utils.addWorkforceMember(allocator, cwd, project_name, project_type, prepared_name) catch |err| {
+            // Roll back: drop any partial new tree and restore the backup so
+            // the previous member is never lost.
+            if (backup_dir) |b| {
+                cwd.deleteTree(member_dir) catch {};
+                cwd.rename(b, member_dir) catch {};
+            }
+            switch (err) {
+                error.InvalidWorkforceName, error.ReservedWorkforceName, error.WorkforceMemberExists => {
+                    utils.printWorkforceNameError(err, prepared_name);
+                    std.process.exit(2);
+                },
+                else => |e| return e,
+            }
         };
         defer allocator.free(used_name);
+
+        // Replacement succeeded — discard the backup.
+        if (backup_dir) |b| cwd.deleteTree(b) catch {};
 
         try stdout.print("\n{s}✓{s} {s}Added {s} '{s}' to workforce{s}\n\n", .{
             Color.bold_green,
