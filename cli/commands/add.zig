@@ -125,17 +125,17 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 name = arg;
             } else {
                 try printUsageWithError("Error: too many arguments provided");
-                return;
+                std.process.exit(2);
             }
         } else {
             try printUsageWithError("Error: unknown option");
-            return;
+            std.process.exit(2);
         }
     }
 
     const comp = component orelse {
         try printUsageWithError("Error: missing component (agent, workflow, ui, or api)");
-        return;
+        std.process.exit(2);
     };
 
     const cwd = fs.cwd();
@@ -148,16 +148,28 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         const member_name = name orelse {
             try printUsageWithError("Error: missing required argument: name");
-            return;
+            std.process.exit(2);
         };
 
         // Check that workforce/ directory exists
         cwd.access("workforce", .{}) catch {
             std.debug.print("Error: No 'workforce' directory found. Are you in a timbal project?\n", .{});
-            return;
+            std.process.exit(1);
         };
 
-        const member_dir = try std.fmt.allocPrint(allocator, "workforce/{s}", .{member_name});
+        // Normalize/validate the name up front so the existence check, the
+        // --force deletion, and addWorkforceMember all operate on the same
+        // prepared path (addWorkforceMember trims + validates internally and
+        // creates workforce/{prepared}). Using the raw CLI arg here would
+        // target a different path and break --force/replace for names with
+        // surrounding whitespace.
+        const prepared_name = utils.prepareWorkforceMemberName(allocator, member_name) catch |err| {
+            utils.printWorkforceNameError(err, member_name);
+            std.process.exit(2);
+        };
+        defer allocator.free(prepared_name);
+
+        const member_dir = try std.fmt.allocPrint(allocator, "workforce/{s}", .{prepared_name});
         defer allocator.free(member_dir);
 
         if (cwd.access(member_dir, .{})) |_| {
@@ -165,10 +177,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try cwd.deleteTree(member_dir);
         } else |_| {}
 
-        const used_name = utils.addWorkforceMember(allocator, cwd, project_name, project_type, member_name) catch |err| switch (err) {
+        const used_name = utils.addWorkforceMember(allocator, cwd, project_name, project_type, prepared_name) catch |err| switch (err) {
             error.InvalidWorkforceName, error.ReservedWorkforceName, error.WorkforceMemberExists => {
-                utils.printWorkforceNameError(err, member_name);
-                return;
+                utils.printWorkforceNameError(err, prepared_name);
+                std.process.exit(2);
             },
             else => |e| return e,
         };
@@ -212,6 +224,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         });
     } else {
         try printUsageWithError("Error: unknown component. Expected: agent, workflow, ui, or api");
-        return;
+        std.process.exit(2);
     }
 }
