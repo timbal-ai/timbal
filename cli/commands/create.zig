@@ -108,8 +108,11 @@ fn promptMemberName(allocator: std.mem.Allocator, kind_label: []const u8, term_s
         defer _ = terminal.enableRawMode() catch {};
 
         var buf: [256]u8 = undefined;
-        const line = try stdin.readUntilDelimiterOrEof(&buf, '\n');
-        const trimmed = std.mem.trim(u8, line orelse "", " \t\r");
+        // EOF (Ctrl+D / closed stdin) yields null. Treat it as cancellation so
+        // we don't loop forever printing "Name is required." — match the other
+        // interactive prompts that return UserCancelled.
+        const line = try stdin.readUntilDelimiterOrEof(&buf, '\n') orelse return error.UserCancelled;
+        const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) {
             try stderr.writeAll("Name is required.\n");
             continue;
