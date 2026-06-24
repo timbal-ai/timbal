@@ -192,8 +192,22 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             // Roll back: drop any partial new tree and restore the backup so
             // the previous member is never lost.
             if (backup_dir) |b| {
+                // Clear any partial new tree so the backup can be renamed back.
                 cwd.deleteTree(member_dir) catch {};
-                cwd.rename(b, member_dir) catch {};
+                cwd.rename(b, member_dir) catch |restore_err| {
+                    // Restore failed: the previous member is intact at the
+                    // backup path, but `timbal start` skips dot-prefixed dirs,
+                    // so it would silently vanish from the project. Warn loudly
+                    // with recovery instructions and exit non-zero instead.
+                    const stderr = std.io.getStdErr().writer();
+                    stderr.print(
+                        "Error: failed to replace '{s}' ({s}) and could not restore the previous " ++
+                            "member ({s}).\nYour data is preserved at 'workforce/.{s}.bak'; rename it " ++
+                            "back to 'workforce/{s}' to recover it.\n",
+                        .{ member_dir, @errorName(err), @errorName(restore_err), prepared_name, prepared_name },
+                    ) catch {};
+                    std.process.exit(1);
+                };
             }
             switch (err) {
                 error.InvalidWorkforceName, error.ReservedWorkforceName, error.WorkforceMemberExists => {
