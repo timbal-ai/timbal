@@ -1187,6 +1187,15 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
+    // Own `members` until it's handed off to `config` below. This covers the
+    // early returns in the UI prompt (cancel/error), which would otherwise
+    // leak the allocated member names and the slice.
+    var members_transferred = false;
+    defer if (!members_transferred) {
+        for (members) |m| allocator.free(m.name);
+        allocator.free(members);
+    };
+
     const include_ui = blk: {
         var any_agent = false;
         for (members) |m| {
@@ -1214,6 +1223,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .path = path,
         .relative_path = target_path,
     };
+    members_transferred = true;
     defer config.deinit(allocator);
 
     try finishCreate(allocator, app_dir, &config, false);
