@@ -15,7 +15,7 @@ fn printUsage() !void {
     const stderr = std.io.getStdErr().writer();
     try stderr.writeAll("Add a component to an existing timbal project.\n" ++
         "\n" ++
-        "\x1b[1;32mUsage: \x1b[1;36mtimbal add \x1b[0;36m<COMPONENT> \x1b[0;33m[name] \x1b[0m[options]\n" ++
+        "\x1b[1;32mUsage: \x1b[1;36mtimbal add \x1b[0;36m<COMPONENT> \x1b[0;33m<name> \x1b[0m[options]\n" ++
         "\n" ++
         "\x1b[1;32mComponents:\n" ++
         "    \x1b[1;36magent    \x1b[0mAdd a new agent to the workforce\n" ++
@@ -24,10 +24,10 @@ fn printUsage() !void {
         "    \x1b[1;36mapi      \x1b[0mAdd the API blueprint (Elysia + Bun)\n" ++
         "\n" ++
         "\x1b[1;32mArguments:\n" ++
-        "    \x1b[1;33mname     \x1b[0mOptional name for the workforce member (agent/workflow only)\n" ++
+        "    \x1b[1;33mname     \x1b[0mRequired for agent/workflow (cannot contain = : , / \\)\n" ++
         "\n" ++
         "\x1b[1;32mOptions:\n" ++
-        "    \x1b[1;36m-f\x1b[0m, \x1b[1;36m--force      \x1b[0mOverwrite the target directory without prompting (ui/api only)\n" ++
+        "    \x1b[1;36m-f\x1b[0m, \x1b[1;36m--force      \x1b[0mReplace ui/, api/, or workforce/<name>/ if it already exists\n" ++
         "\n" ++
         utils.global_options_help ++
         "\n");
@@ -125,17 +125,17 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 name = arg;
             } else {
                 try printUsageWithError("Error: too many arguments provided");
-                return;
+                std.process.exit(2);
             }
         } else {
             try printUsageWithError("Error: unknown option");
-            return;
+            std.process.exit(2);
         }
     }
 
     const comp = component orelse {
         try printUsageWithError("Error: missing component (agent, workflow, ui, or api)");
-        return;
+        std.process.exit(2);
     };
 
     const cwd = fs.cwd();
@@ -146,21 +146,88 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (std.mem.eql(u8, comp, "agent") or std.mem.eql(u8, comp, "workflow")) {
         const project_type: utils.ProjectType = if (std.mem.eql(u8, comp, "agent")) .agent else .workflow;
 
+        const member_name = name orelse {
+            try printUsageWithError("Error: missing required argument: name");
+            std.process.exit(2);
+        };
+
         // Check that workforce/ directory exists
         cwd.access("workforce", .{}) catch {
             std.debug.print("Error: No 'workforce' directory found. Are you in a timbal project?\n", .{});
-            return;
+            std.process.exit(1);
         };
 
-        const funny_name = try utils.addWorkforceMember(allocator, cwd, project_name, project_type, name);
-        defer allocator.free(funny_name);
+        // Normalize/validate the name up front so the existence check, the
+        // --force deletion, and addWorkforceMember all operate on the same
+        // prepared path (addWorkforceMember trims + validates internally and
+        // creates workforce/{prepared}). Using the raw CLI arg here would
+        // target a different path and break --force/replace for names with
+        // surrounding whitespace.
+        const prepared_name = utils.prepareWorkforceMemberName(allocator, member_name) catch |err| {
+            utils.printWorkforceNameError(err, member_name);
+            std.process.exit(2);
+        };
+        defer allocator.free(prepared_name);
+
+        const member_dir = try std.fmt.allocPrint(allocator, "workforce/{s}", .{prepared_name});
+        defer allocator.free(member_dir);
+
+        // When replacing an existing member, move it aside instead of deleting
+        // it outright. addWorkforceMember scaffolds a fresh tree and can fail
+        // partway (I/O, template write, ...); deleting up front would leave the
+        // slot empty with no replacement. Commit (delete backup) on success,
+        // restore it on failure. The backup name starts with '.' so it can
+        // never collide with a real member (names can't start with '.').
+        var backup_dir: ?[]u8 = null;
+        defer if (backup_dir) |b| allocator.free(b);
+        if (cwd.access(member_dir, .{})) |_| {
+            if (!shouldOverwrite(member_dir, force)) return;
+            const b = try std.fmt.allocPrint(allocator, "workforce/.{s}.bak", .{prepared_name});
+            cwd.deleteTree(b) catch {}; // clear any stale backup from a prior interrupted run
+            try cwd.rename(member_dir, b);
+            backup_dir = b;
+        } else |_| {}
+
+        const used_name = utils.addWorkforceMember(allocator, cwd, project_name, project_type, prepared_name) catch |err| {
+            // Roll back: drop any partial new tree and restore the backup so
+            // the previous member is never lost.
+            if (backup_dir) |b| {
+                // Clear any partial new tree so the backup can be renamed back.
+                cwd.deleteTree(member_dir) catch {};
+                cwd.rename(b, member_dir) catch |restore_err| {
+                    // Restore failed: the previous member is intact at the
+                    // backup path, but `timbal start` skips dot-prefixed dirs,
+                    // so it would silently vanish from the project. Warn loudly
+                    // with recovery instructions and exit non-zero instead.
+                    const stderr = std.io.getStdErr().writer();
+                    stderr.print(
+                        "Error: failed to replace '{s}' ({s}) and could not restore the previous " ++
+                            "member ({s}).\nYour data is preserved at 'workforce/.{s}.bak'; rename it " ++
+                            "back to 'workforce/{s}' to recover it.\n",
+                        .{ member_dir, @errorName(err), @errorName(restore_err), prepared_name, prepared_name },
+                    ) catch {};
+                    std.process.exit(1);
+                };
+            }
+            switch (err) {
+                error.InvalidWorkforceName, error.ReservedWorkforceName, error.WorkforceMemberExists => {
+                    utils.printWorkforceNameError(err, prepared_name);
+                    std.process.exit(2);
+                },
+                else => |e| return e,
+            }
+        };
+        defer allocator.free(used_name);
+
+        // Replacement succeeded — discard the backup.
+        if (backup_dir) |b| cwd.deleteTree(b) catch {};
 
         try stdout.print("\n{s}✓{s} {s}Added {s} '{s}' to workforce{s}\n\n", .{
             Color.bold_green,
             Color.reset,
             Color.bold,
             comp,
-            funny_name,
+            used_name,
             Color.reset,
         });
     } else if (std.mem.eql(u8, comp, "ui")) {
@@ -193,6 +260,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         });
     } else {
         try printUsageWithError("Error: unknown component. Expected: agent, workflow, ui, or api");
-        return;
+        std.process.exit(2);
     }
 }

@@ -34,27 +34,61 @@ const tmpl_timbal_yaml = @embedFile("init-templates/timbal.yaml");
 const tmpl_agent_py = @embedFile("init-templates/agent.py");
 const tmpl_workflow_py = @embedFile("init-templates/workflow.py");
 
-const adjectives = [_][]const u8{
-    "condescending", "sleepy",   "curious",   "eager",   "spicy",     "grumpy",
-    "sparkling",     "chaotic",  "zen",       "witty",   "noisy",     "ghostly",
-    "awkward",       "hyper",    "mellow",    "bouncy",  "brave",     "clever",
-    "dizzy",         "electric", "fuzzy",     "gentle",  "goofy",     "happy",
-    "jolly",         "lucky",    "magnetic",  "mystic",  "nocturnal", "odd",
-    "peppy",         "quirky",   "radiant",   "shiny",   "sneaky",    "snuggly",
-    "sparkly",       "spirited", "spry",      "stellar", "stormy",    "sunny",
-    "swift",         "tiny",     "whimsical", "wild",    "zesty",
+pub const reserved_workforce_names = [_][]const u8{ "ui", "api", "workforce", "all" };
+
+pub const WorkforceNameError = error{
+    InvalidWorkforceName,
+    ReservedWorkforceName,
+    WorkforceMemberExists,
 };
 
-const nouns = [_][]const u8{
-    "quokka",  "llama",   "otter",    "capybara", "hedgehog", "lemur",
-    "koala",   "walrus",  "panda",    "sloth",    "narwhal",  "raccoon",
-    "gecko",   "gopher",  "wombat",   "badger",   "beaver",   "chipmunk",
-    "dolphin", "ferret",  "fox",      "hamster",  "jaguar",   "kangaroo",
-    "lynx",    "manatee", "meerkat",  "moose",    "octopus",  "owl",
-    "pelican", "penguin", "platypus", "puffin",   "rabbit",   "redpanda",
-    "seal",    "squid",   "squirrel", "tortoise", "turtle",   "weasel",
-    "yak",     "zebra",
-};
+/// Validates a workforce member name (directory name and `timbal start` routing key).
+/// Allows any character except the routing/path-breaking set `= : , / \` and control
+/// chars; spaces and mixed case are fine; must not start with `.` or `-`.
+pub fn validateWorkforceMemberName(name: []const u8) WorkforceNameError!void {
+    if (name.len == 0 or name.len > 64) return error.InvalidWorkforceName;
+
+    for (reserved_workforce_names) |reserved| {
+        if (std.ascii.eqlIgnoreCase(name, reserved)) return error.ReservedWorkforceName;
+    }
+
+    const first = name[0];
+    if (first == '.' or first == '-') return error.InvalidWorkforceName;
+
+    for (name) |c| {
+        switch (c) {
+            '=', ':', ',', '/', '\\' => return error.InvalidWorkforceName,
+            else => if (c < 0x20 or c == 0x7f) return error.InvalidWorkforceName,
+        }
+    }
+}
+
+/// Trims surrounding whitespace, validates, and returns an owned name (case preserved).
+pub fn prepareWorkforceMemberName(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    try validateWorkforceMemberName(trimmed);
+    return allocator.dupe(u8, trimmed);
+}
+
+pub fn printWorkforceNameError(err: anyerror, name: []const u8) void {
+    const stderr = std.io.getStdErr().writer();
+    switch (err) {
+        error.InvalidWorkforceName => {
+            stderr.print(
+                "Error: invalid workforce name '{s}'. Spaces and mixed case are fine, but it cannot " ++
+                    "contain = : , / \\, cannot start with '.' or '-', and must be 1-64 characters.\n",
+                .{name},
+            ) catch {};
+        },
+        error.ReservedWorkforceName => {
+            stderr.print("Error: workforce name '{s}' is reserved (ui, api, workforce, all).\n", .{name}) catch {};
+        },
+        error.WorkforceMemberExists => {
+            stderr.print("Error: workforce member '{s}' already exists. Re-run with --force to replace it.\n", .{name}) catch {};
+        },
+        else => {},
+    }
+}
 
 /// Parsed representation of a timbal.yaml configuration file.
 pub const TimbalYaml = struct {
@@ -201,21 +235,6 @@ pub fn parseTimbalYaml(allocator: std.mem.Allocator, content: []const u8) ?Timba
     };
 }
 
-/// Generates a funny name like "curious-quokka" or "zesty-penguin".
-/// The caller owns the returned memory and must free it with the provided allocator.
-pub fn genFunnyName(allocator: std.mem.Allocator) ![]u8 {
-    var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
-    const random = prng.random();
-
-    const adj_idx = random.intRangeAtMost(usize, 0, adjectives.len - 1);
-    const noun_idx = random.intRangeAtMost(usize, 0, nouns.len - 1);
-
-    const adj = adjectives[adj_idx];
-    const noun = nouns[noun_idx];
-
-    return std.fmt.allocPrint(allocator, "{s}-{s}", .{ adj, noun });
-}
-
 /// Generates a 32-character lowercase hex string from 16 cryptographically secure random bytes.
 /// The caller owns the returned memory and must free it with the provided allocator.
 pub fn genSecureId(allocator: std.mem.Allocator) ![]u8 {
@@ -227,7 +246,9 @@ pub fn genSecureId(allocator: std.mem.Allocator) ![]u8 {
 
 /// Downloads and extracts a blueprint tarball into a project directory.
 pub fn fetchBlueprint(allocator: std.mem.Allocator, project_path: []const u8, dest_dir: []const u8, tarball_url: []const u8) !void {
-    const stdout = std.io.getStdOut().writer();
+    // Progress goes to stderr so stdout stays machine-parseable (the quiet-mode
+    // contract reserves stdout for the created project path only).
+    const progress = std.io.getStdErr().writer();
     const dest_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ project_path, dest_dir });
     defer allocator.free(dest_path);
 
@@ -237,7 +258,7 @@ pub fn fetchBlueprint(allocator: std.mem.Allocator, project_path: []const u8, de
     };
 
     // Download the tarball using Zig's HTTP client
-    try stdout.print("  {s}Downloading {s}...{s}\n", .{ Color.dim, dest_dir, Color.reset });
+    try progress.print("  {s}Downloading {s}...{s}\n", .{ Color.dim, dest_dir, Color.reset });
 
     var client: std.http.Client = .{ .allocator = allocator };
     defer client.deinit();
@@ -259,7 +280,7 @@ pub fn fetchBlueprint(allocator: std.mem.Allocator, project_path: []const u8, de
         return error.HttpError;
     }
 
-    try stdout.print("  {s}Extracting {s}...{s}\n", .{ Color.dim, dest_dir, Color.reset });
+    try progress.print("  {s}Extracting {s}...{s}\n", .{ Color.dim, dest_dir, Color.reset });
 
     // Decompress gzip and extract tar into the destination directory
     var dir = try std.fs.openDirAbsolute(dest_path, .{});
@@ -277,10 +298,9 @@ pub fn fetchBlueprint(allocator: std.mem.Allocator, project_path: []const u8, de
 
 /// Creates a new workforce member directory with template files.
 /// Returns the name used (caller owns the memory).
-pub fn addWorkforceMember(allocator: std.mem.Allocator, app_dir: std.fs.Dir, project_name: []const u8, project_type: ProjectType, maybe_name: ?[]const u8) ![]u8 {
-    // Use provided name or generate a funny one
-    const funny_name = if (maybe_name) |n| try allocator.dupe(u8, n) else try genFunnyName(allocator);
-    errdefer allocator.free(funny_name);
+pub fn addWorkforceMember(allocator: std.mem.Allocator, app_dir: std.fs.Dir, project_name: []const u8, project_type: ProjectType, name: []const u8) ![]u8 {
+    const prepared = try prepareWorkforceMemberName(allocator, name);
+    errdefer allocator.free(prepared);
 
     // Determine the fully qualified name based on project type
     const fqn = switch (project_type) {
@@ -288,13 +308,18 @@ pub fn addWorkforceMember(allocator: std.mem.Allocator, app_dir: std.fs.Dir, pro
         .workflow => "workflow.py::workflow",
     };
 
-    // Create workforce member directory (e.g., workforce/curious-quokka)
-    const member_dir_name = try std.fmt.allocPrint(allocator, "workforce/{s}", .{funny_name});
+    const member_dir_name = try std.fmt.allocPrint(allocator, "workforce/{s}", .{prepared});
     defer allocator.free(member_dir_name);
 
-    app_dir.makePath(member_dir_name) catch |err| {
-        if (err != error.PathAlreadyExists) return err;
-    };
+    if (app_dir.access(member_dir_name, .{})) |_| {
+        return error.WorkforceMemberExists;
+    } else |_| {}
+
+    try app_dir.makePath(member_dir_name);
+    // We just confirmed the dir didn't exist, so on any failure below (template
+    // render OOM, open/create/write I/O) remove the partial tree we created.
+    // Otherwise a retry would hit WorkforceMemberExists or start a broken member.
+    errdefer app_dir.deleteTree(member_dir_name) catch {};
 
     // Open the member directory to write template files into it
     var member_dir = try app_dir.openDir(member_dir_name, .{});
@@ -340,5 +365,100 @@ pub fn addWorkforceMember(allocator: std.mem.Allocator, app_dir: std.fs.Dir, pro
         try file.writeAll(tmpl.content);
     }
 
-    return funny_name;
+    return prepared;
+}
+
+test "validateWorkforceMemberName accepts flexible names" {
+    try validateWorkforceMemberName("support-bot");
+    try validateWorkforceMemberName("ingest2");
+    try validateWorkforceMemberName("support_bot");
+    try validateWorkforceMemberName("agent-2");
+    try validateWorkforceMemberName("bad-");
+    try validateWorkforceMemberName("My Agent");
+    try validateWorkforceMemberName("Agent.v2");
+    try validateWorkforceMemberName("2fa-bot");
+}
+
+test "validateWorkforceMemberName rejects invalid and reserved" {
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName(""));
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName(".hidden"));
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName("-leading"));
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName("a/b"));
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName("a=b"));
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName("a:b"));
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName("a,b"));
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName("a\\b"));
+    try std.testing.expectError(error.ReservedWorkforceName, validateWorkforceMemberName("ui"));
+    try std.testing.expectError(error.ReservedWorkforceName, validateWorkforceMemberName("UI"));
+}
+
+test "prepareWorkforceMemberName trims and preserves case" {
+    const name = try prepareWorkforceMemberName(std.testing.allocator, "  My Agent  ");
+    defer std.testing.allocator.free(name);
+    try std.testing.expectEqualStrings("My Agent", name);
+}
+
+test "prepareWorkforceMemberName rejects whitespace-only input" {
+    try std.testing.expectError(error.InvalidWorkforceName, prepareWorkforceMemberName(std.testing.allocator, "   "));
+}
+
+test "validateWorkforceMemberName enforces max length" {
+    var long: [65]u8 = undefined;
+    @memset(&long, 'a');
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName(&long));
+    try validateWorkforceMemberName(long[0..64]);
+}
+
+test "validateWorkforceMemberName rejects control characters" {
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName("agent\x01"));
+    try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName("agent\x7f"));
+}
+
+test "addWorkforceMember scaffolds a member directory and trims the name" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const used = try addWorkforceMember(a, tmp.dir, "proj", .agent, "  bot  ");
+    defer a.free(used);
+    try std.testing.expectEqualStrings("bot", used);
+
+    try tmp.dir.access("workforce/bot/agent.py", .{});
+    try tmp.dir.access("workforce/bot/timbal.yaml", .{});
+    try tmp.dir.access("workforce/bot/pyproject.toml", .{});
+}
+
+test "addWorkforceMember rejects an already-existing member" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const used = try addWorkforceMember(a, tmp.dir, "proj", .agent, "bot");
+    defer a.free(used);
+
+    try std.testing.expectError(
+        error.WorkforceMemberExists,
+        addWorkforceMember(a, tmp.dir, "proj", .workflow, "bot"),
+    );
+}
+
+// Regression: a failure after the member directory is created must not leave a
+// partial tree behind — otherwise a retry hits WorkforceMemberExists or starts
+// a broken member. We force an allocation failure during template rendering
+// (after makePath has created workforce/bot) and assert the directory is gone.
+test "addWorkforceMember removes the partial directory when scaffolding fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // fail_index 2: alloc 0 = prepared name dupe, alloc 1 = member_dir path,
+    // then makePath/openDir (no allocator use), alloc 2 = first template render.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    const a = failing.allocator();
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        addWorkforceMember(a, tmp.dir, "proj", .agent, "bot"),
+    );
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("workforce/bot", .{}));
 }
