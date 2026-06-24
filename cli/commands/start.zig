@@ -1779,6 +1779,12 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         var iter = workforce_dir.iterate();
         while (try iter.next()) |entry| {
             if (entry.kind != .directory) continue;
+            // Skip dot-prefixed directories (hidden/internal). `timbal add`
+            // parks the previous member at `workforce/.{name}.bak` while
+            // replacing it; a backup left behind by an interrupted run must
+            // not be started as a phantom member. Real member names can never
+            // start with '.' (validateWorkforceMemberName rejects it).
+            if (entry.name.len > 0 and entry.name[0] == '.') continue;
 
             const yaml_path = try std.fmt.allocPrint(allocator, "workforce/{s}/timbal.yaml", .{entry.name});
             defer allocator.free(yaml_path);
