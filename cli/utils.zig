@@ -316,6 +316,10 @@ pub fn addWorkforceMember(allocator: std.mem.Allocator, app_dir: std.fs.Dir, pro
     } else |_| {}
 
     try app_dir.makePath(member_dir_name);
+    // We just confirmed the dir didn't exist, so on any failure below (template
+    // render OOM, open/create/write I/O) remove the partial tree we created.
+    // Otherwise a retry would hit WorkforceMemberExists or start a broken member.
+    errdefer app_dir.deleteTree(member_dir_name) catch {};
 
     // Open the member directory to write template files into it
     var member_dir = try app_dir.openDir(member_dir_name, .{});
@@ -408,4 +412,53 @@ test "validateWorkforceMemberName enforces max length" {
 test "validateWorkforceMemberName rejects control characters" {
     try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName("agent\x01"));
     try std.testing.expectError(error.InvalidWorkforceName, validateWorkforceMemberName("agent\x7f"));
+}
+
+test "addWorkforceMember scaffolds a member directory and trims the name" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const used = try addWorkforceMember(a, tmp.dir, "proj", .agent, "  bot  ");
+    defer a.free(used);
+    try std.testing.expectEqualStrings("bot", used);
+
+    try tmp.dir.access("workforce/bot/agent.py", .{});
+    try tmp.dir.access("workforce/bot/timbal.yaml", .{});
+    try tmp.dir.access("workforce/bot/pyproject.toml", .{});
+}
+
+test "addWorkforceMember rejects an already-existing member" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const used = try addWorkforceMember(a, tmp.dir, "proj", .agent, "bot");
+    defer a.free(used);
+
+    try std.testing.expectError(
+        error.WorkforceMemberExists,
+        addWorkforceMember(a, tmp.dir, "proj", .workflow, "bot"),
+    );
+}
+
+// Regression: a failure after the member directory is created must not leave a
+// partial tree behind — otherwise a retry hits WorkforceMemberExists or starts
+// a broken member. We force an allocation failure during template rendering
+// (after makePath has created workforce/bot) and assert the directory is gone.
+test "addWorkforceMember removes the partial directory when scaffolding fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // fail_index 2: alloc 0 = prepared name dupe, alloc 1 = member_dir path,
+    // then makePath/openDir (no allocator use), alloc 2 = first template render.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    const a = failing.allocator();
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        addWorkforceMember(a, tmp.dir, "proj", .agent, "bot"),
+    );
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("workforce/bot", .{}));
 }

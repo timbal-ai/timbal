@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Integration tests for the `timbal create` exit-code / output contract.
+# Integration tests for the `timbal create` and `timbal add` exit-code / output
+# contract.
 #
 # These assert the behaviour that downstream callers (e.g. the monolith) depend
 # on and that cannot be covered by the in-process zig unit tests because the
@@ -77,6 +78,60 @@ assert_cli() {
         FAIL=$((FAIL + 1)); red "FAIL $desc"; fi
 }
 
+# assert_add <desc> <expected_code> <stderr_substring> <project_dir> -- <add-args...>
+# Runs `timbal add <args...>` with cwd = project_dir and asserts exit code +
+# stderr substring. (stdout is not checked: `add` prints its success banner to
+# stdout, and these cases are error paths.)
+assert_add() {
+    local desc="$1" expected="$2" substr="$3" dir="$4"
+    shift 4
+    [ "${1:-}" = "--" ] && shift
+
+    local errfile code
+    errfile="$(mktemp)"
+    ( cd "$dir" && "$BIN" add "$@" ) >/dev/null 2>"$errfile" </dev/null
+    code=$?
+
+    local ok=1
+    [ "$code" -eq "$expected" ] || { ok=0; red "  exit: got $code, want $expected"; }
+    if [ -n "$substr" ] && ! grep -qF "$substr" "$errfile"; then
+        ok=0
+        red "  stderr missing: '$substr' (got: '$(head -1 "$errfile")')"
+    fi
+    rm -f "$errfile"
+
+    if [ "$ok" -eq 1 ]; then PASS=$((PASS + 1)); green "ok   $desc (exit $code)"; else
+        FAIL=$((FAIL + 1)); red "FAIL $desc"; fi
+}
+
+# Offline success: `add <comp> <name>` exits 0 and scaffolds the member files.
+assert_add_success() {
+    local dir="$1" comp="$2" name="$3" code
+    ( cd "$dir" && "$BIN" add "$comp" "$name" ) >/dev/null 2>&1 </dev/null
+    code=$?
+    local app="agent.py"; [ "$comp" = "workflow" ] && app="workflow.py"
+    local ok=1
+    [ "$code" -eq 0 ] || { ok=0; red "  exit: got $code, want 0"; }
+    [ -f "$dir/workforce/$name/$app" ] || { ok=0; red "  missing workforce/$name/$app"; }
+    [ -f "$dir/workforce/$name/timbal.yaml" ] || { ok=0; red "  missing workforce/$name/timbal.yaml"; }
+    if [ "$ok" -eq 1 ]; then PASS=$((PASS + 1)); green "ok   add $comp $name success"; else
+        FAIL=$((FAIL + 1)); red "FAIL add $comp $name success"; fi
+}
+
+# --force replaces an existing member in place (exit 0) and must not leave the
+# `workforce/.<name>.bak` backup behind once the replacement succeeds.
+assert_add_force_replace() {
+    local dir="$1" comp="$2" name="$3" code
+    ( cd "$dir" && "$BIN" add "$comp" "$name" --force ) >/dev/null 2>&1 </dev/null
+    code=$?
+    local ok=1
+    [ "$code" -eq 0 ] || { ok=0; red "  exit: got $code, want 0"; }
+    [ -f "$dir/workforce/$name/timbal.yaml" ] || { ok=0; red "  missing timbal.yaml after replace"; }
+    [ ! -e "$dir/workforce/.$name.bak" ] || { ok=0; red "  leftover backup workforce/.$name.bak"; }
+    if [ "$ok" -eq 1 ]; then PASS=$((PASS + 1)); green "ok   add --force replace (backup cleaned)"; else
+        FAIL=$((FAIL + 1)); red "FAIL add --force replace"; fi
+}
+
 main() {
     local BIN
     BIN="$(detect_bin)"
@@ -108,6 +163,28 @@ main() {
     echo "== preconditions =="
     mkdir -p "$T/nonempty" && touch "$T/nonempty/keep"
     assert_cli "existing non-empty dir" 2 "already exists and is not empty" -- "$BIN" create "$T/nonempty" --agent foo
+
+    echo
+    echo "== add: usage / precondition errors =="
+    # `add agent/workflow` scaffolds from local templates (no network), so these
+    # all run hermetically. A bare `workforce/` dir is enough of a project.
+    mkdir -p "$T/proj/workforce"
+    assert_add "add missing component"   2 "missing component"                 "$T/proj" --
+    assert_add "add agent missing name"  2 "missing required argument: name"   "$T/proj" -- agent
+    assert_add "add invalid name"        2 "invalid workforce name"            "$T/proj" -- agent "a/b"
+    assert_add "add reserved name"       2 "is reserved"                       "$T/proj" -- agent ui
+    assert_add "add unknown component"   2 "unknown component"                 "$T/proj" -- frobnicate x
+    assert_add "add unknown option"      2 "unknown option"                    "$T/proj" -- agent foo --nope
+    mkdir -p "$T/noproj"
+    assert_add "add without workforce/"  1 "No 'workforce' directory found"    "$T/noproj" -- agent foo
+
+    echo
+    echo "== add: success + --force replace (offline) =="
+    assert_add_success "$T/proj" agent foo
+    # Re-adding without --force on a non-TTY must fail loudly (exit 1), not silently.
+    assert_add "add duplicate, no --force" 1 "Re-run with --force"            "$T/proj" -- agent foo
+    # --force replaces in place, exits 0, and leaves no .bak backup behind.
+    assert_add_force_replace "$T/proj" agent foo
 
     echo
     echo "== help (expect exit 0) =="

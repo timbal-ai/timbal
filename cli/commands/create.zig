@@ -1129,15 +1129,24 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
 
         for (agent_names.items) |name| {
-            appendMember(allocator, &members, .agent, name) catch |err| {
-                printAppendMemberError(err, name);
-                std.process.exit(2);
+            appendMember(allocator, &members, .agent, name) catch |err| switch (err) {
+                // Validation/duplicate are usage errors → exit 2 with a message.
+                // Anything else (e.g. OutOfMemory) is a runtime failure: let it
+                // propagate to main, which reports it and exits 1.
+                error.InvalidWorkforceName, error.ReservedWorkforceName, error.DuplicateMemberName => {
+                    printAppendMemberError(err, name);
+                    std.process.exit(2);
+                },
+                else => |e| return e,
             };
         }
         for (workflow_names.items) |name| {
-            appendMember(allocator, &members, .workflow, name) catch |err| {
-                printAppendMemberError(err, name);
-                std.process.exit(2);
+            appendMember(allocator, &members, .workflow, name) catch |err| switch (err) {
+                error.InvalidWorkforceName, error.ReservedWorkforceName, error.DuplicateMemberName => {
+                    printAppendMemberError(err, name);
+                    std.process.exit(2);
+                },
+                else => |e| return e,
             };
         }
 
