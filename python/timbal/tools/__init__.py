@@ -659,6 +659,7 @@ if TYPE_CHECKING:
         WriteOffInvoice,
     )
     from .tavily import TavilyCrawl, TavilyExtract, TavilyMap, TavilySearch
+    from .video import VideoGenerate, VideoListModels
     from .web_search import WebSearch
     from .write import Write
     from .xai import XSearch
@@ -1296,6 +1297,8 @@ __all__ = [
     "TavilyExtract",
     "TavilyMap",
     "TavilySearch",
+    "VideoGenerate",
+    "VideoListModels",
     "WebSearch",
     "Write",
     "XSearch",
@@ -2336,6 +2339,8 @@ _LAZY_IMPORTS = {
     "TavilyExtract": ".tavily",
     "TavilyMap": ".tavily",
     "TavilySearch": ".tavily",
+    "VideoGenerate": ".video",
+    "VideoListModels": ".video",
     "WebSearch": ".web_search",
     "Write": ".write",
     "XSearch": ".xai",
