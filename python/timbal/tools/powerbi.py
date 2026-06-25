@@ -63,7 +63,7 @@ class PowerBIListWorkspaces(Tool):
             if filter:
                 params["$filter"] = filter
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/groups",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -95,7 +95,7 @@ class PowerBIListDatasets(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     _datasets_url(workspace_id),
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -127,7 +127,7 @@ class PowerBIGetDataset(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     _datasets_url(workspace_id, f"/{dataset_id}"),
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -165,7 +165,7 @@ class PowerBIQueryDataset(Tool):
             if impersonated_user_name:
                 body["impersonatedUserName"] = impersonated_user_name
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _datasets_url(workspace_id, f"/{dataset_id}/executeQueries"),
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -195,7 +195,7 @@ class PowerBIListReports(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     _reports_url(workspace_id),
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -227,7 +227,7 @@ class PowerBIGetReport(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     _reports_url(workspace_id, f"/{report_id}"),
                     headers={"Authorization": f"Bearer {api_key}"},

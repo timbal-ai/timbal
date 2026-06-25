@@ -78,7 +78,7 @@ class GoogleBusinessListAccounts(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ACCOUNT_BASE}/accounts",
                     headers=_auth_headers(token),
@@ -129,7 +129,7 @@ class GoogleBusinessListLocations(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_INFO_BASE}/{account}/locations",
                     headers=_auth_headers(token),
@@ -176,7 +176,7 @@ class GoogleBusinessGetLocation(Tool):
             location = _resolve_location_id(self, location_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_INFO_BASE}/{account}/{location}",
                     headers=_auth_headers(token),
@@ -222,7 +222,7 @@ class GoogleBusinessUpdateLocation(Tool):
             if validate_only:
                 params["validateOnly"] = "true"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_INFO_BASE}/{location['name']}",
                     headers=_auth_headers(token),
@@ -272,7 +272,7 @@ class GoogleBusinessListReviews(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_LEGACY_BASE}/{account}/{location}/reviews",
                     headers=_auth_headers(token),
@@ -316,7 +316,7 @@ class GoogleBusinessGetReview(Tool):
             location = _resolve_location_id(self, location_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_LEGACY_BASE}/{account}/{location}/reviews/{review_id}",
                     headers=_auth_headers(token),
@@ -360,7 +360,7 @@ class GoogleBusinessReplyToReview(Tool):
             location = _resolve_location_id(self, location_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{_LEGACY_BASE}/{account}/{location}/reviews/{review_id}/reply",
                     headers=_auth_headers(token),
@@ -404,7 +404,7 @@ class GoogleBusinessDeleteReviewReply(Tool):
             location = _resolve_location_id(self, location_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_LEGACY_BASE}/{account}/{location}/reviews/{review_id}/reply",
                     headers=_auth_headers(token),
@@ -464,7 +464,7 @@ class GoogleBusinessGetDailyMetrics(Tool):
                 },
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_PERFORMANCE_BASE}/{location}:getDailyMetricsTimeSeries",
                     headers=_auth_headers(token),
@@ -522,7 +522,7 @@ class GoogleBusinessGetMultiDailyMetrics(Tool):
                 },
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_PERFORMANCE_BASE}/{location}:fetchMultiDailyMetricsTimeSeries",
                     headers=_auth_headers(token),
@@ -566,7 +566,7 @@ class GoogleBusinessListCategories(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_INFO_BASE}/categories",
                     headers=_auth_headers(token),
@@ -610,7 +610,7 @@ class GoogleBusinessCreateLocalPost(Tool):
             location = _resolve_location_id(self, location_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_LEGACY_BASE}/{account}/{location}/localPosts",
                     headers=_auth_headers(token),

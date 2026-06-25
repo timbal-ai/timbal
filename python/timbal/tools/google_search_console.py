@@ -52,7 +52,7 @@ class GoogleSearchConsoleListSites(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_WEBMASTERS_BASE}/sites",
                     headers=_auth_headers(token),
@@ -86,7 +86,7 @@ class GoogleSearchConsoleGetSite(Tool):
             site = _resolve_site_url(self, site_url)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}",
                     headers=_auth_headers(token),
@@ -113,7 +113,7 @@ class GoogleSearchConsoleAddSite(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site_url)}",
                     headers=_auth_headers(token),
@@ -145,7 +145,7 @@ class GoogleSearchConsoleDeleteSite(Tool):
             site = _resolve_site_url(self, site_url)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}",
                     headers=_auth_headers(token),
@@ -201,7 +201,7 @@ class GoogleSearchConsoleSearchAnalytics(Tool):
             if data_state:
                 body["dataState"] = data_state
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/searchAnalytics/query",
                     headers=_auth_headers(token),
@@ -234,7 +234,7 @@ class GoogleSearchConsoleListSitemaps(Tool):
             site = _resolve_site_url(self, site_url)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/sitemaps",
                     headers=_auth_headers(token),
@@ -267,7 +267,7 @@ class GoogleSearchConsoleGetSitemap(Tool):
             site = _resolve_site_url(self, site_url)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/sitemaps/{_encoded_site_url(feedpath)}",
                     headers=_auth_headers(token),
@@ -300,7 +300,7 @@ class GoogleSearchConsoleSubmitSitemap(Tool):
             site = _resolve_site_url(self, site_url)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/sitemaps/{_encoded_site_url(feedpath)}",
                     headers=_auth_headers(token),
@@ -333,7 +333,7 @@ class GoogleSearchConsoleDeleteSitemap(Tool):
             site = _resolve_site_url(self, site_url)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/sitemaps/{_encoded_site_url(feedpath)}",
                     headers=_auth_headers(token),
@@ -373,7 +373,7 @@ class GoogleSearchConsoleInspectUrl(Tool):
                 "languageCode": language_code,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_INSPECTION_BASE}/urlInspection/index:inspect",
                     headers=_auth_headers(token),
@@ -420,7 +420,7 @@ class GoogleSearchConsoleSearchAnalyticsByPage(Tool):
                 "startRow": start_row,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_WEBMASTERS_BASE}/sites/{_encoded_site_url(site)}/searchAnalytics/query",
                     headers=_auth_headers(token),

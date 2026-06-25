@@ -63,7 +63,7 @@ class OutlookReadEmails(Tool):
             if select:
                 params["$select"] = ",".join(select)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/me/mailFolders/{folder}/messages",
                     headers={"Authorization": f"Bearer {token}"},
@@ -99,7 +99,7 @@ class OutlookSend(Tool):
         async def _download_and_encode(url: str) -> str:
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 return base64.b64encode(response.content).decode("utf-8")
@@ -173,7 +173,7 @@ class OutlookSend(Tool):
 
                 message["attachments"] = attachment_data
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/me/sendMail",
                     headers={"Authorization": f"Bearer {token}"},
@@ -218,7 +218,7 @@ class OutlookUpdateEmail(Tool):
             if categories is not None:
                 body["categories"] = categories
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_BASE_URL}/me/messages/{message_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -271,7 +271,7 @@ class OutlookCreateDraft(Tool):
             if bcc:
                 message["bccRecipients"] = _address_list(bcc)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/me/messages",
                     headers={"Authorization": f"Bearer {token}"},
@@ -313,7 +313,7 @@ class OutlookForward(Tool):
             if comment:
                 body["comment"] = comment
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/me/messages/{message_id}/forward",
                     headers={"Authorization": f"Bearer {token}"},
@@ -347,7 +347,7 @@ class OutlookArchive(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/me/messages/{message_id}/move",
                     headers={"Authorization": f"Bearer {token}"},
@@ -381,7 +381,7 @@ class OutlookTrash(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/me/messages/{message_id}/move",
                     headers={"Authorization": f"Bearer {token}"},
@@ -500,7 +500,7 @@ class OutlookListEvents(Tool):
             if timezone:
                 headers["Prefer"] = f'outlook.timezone="{timezone}"'
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers=headers, params=params)
                 response.raise_for_status()
                 return response.json()
@@ -558,7 +558,7 @@ class OutlookGetEvent(Tool):
             if timezone:
                 headers["Prefer"] = f'outlook.timezone="{timezone}"'
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(url, headers=headers, params=params)
                 response.raise_for_status()
                 return response.json()
@@ -614,7 +614,7 @@ class OutlookGetSchedule(Tool):
                 "availabilityViewInterval": availability_view_interval,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/me/calendar/getSchedule",
                     headers={"Authorization": f"Bearer {token}"},
@@ -697,7 +697,7 @@ class OutlookFindMeetingTimes(Tool):
                     ]
                 }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/me/findMeetingTimes",
                     headers={"Authorization": f"Bearer {token}"},
@@ -802,7 +802,7 @@ class OutlookCreateEvent(Tool):
             if calendar_id:
                 base = f"{base}/calendars/{calendar_id}"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{base}/events",
                     headers={"Authorization": f"Bearer {token}"},
@@ -901,7 +901,7 @@ class OutlookManageEvent(Tool):
             event_url = f"{base}/events/{event_id}"
             headers = {"Authorization": f"Bearer {token}"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 if action == "update":
                     body_payload: dict[str, Any] = {}
                     if subject is not None:
@@ -991,7 +991,7 @@ class OutlookGetAttachments(Tool):
             if not include_content:
                 params["$select"] = "id,name,contentType,size,isInline,lastModifiedDateTime"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/me/messages/{message_id}/attachments",
                     headers={"Authorization": f"Bearer {token}"},

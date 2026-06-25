@@ -106,7 +106,7 @@ async def _request(
     api_key = await _resolve_api_key(integration=tool.integration, api_key=tool.api_key)
     import httpx
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
         response = await client.request(
             method,
             f"{_BASE_URL}{path}",
@@ -136,7 +136,7 @@ async def _load_upload_bytes(
         return base64.b64decode(file_content_base64), None
     import httpx
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
         response = await client.get(file_url, timeout=httpx.Timeout(120.0, read=None))
         response.raise_for_status()
         filename = file_url.rsplit("/", 1)[-1].split("?", 1)[0] if file_url else None
@@ -199,7 +199,7 @@ class HappyScribeUploadFile(_HappyScribeTool):
             import httpx
 
             headers = {"Content-Type": content_type or "application/octet-stream"}
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.put(
                     signed_url,
                     content=content,

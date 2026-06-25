@@ -85,7 +85,7 @@ class GoogleMapsTextSearch(Tool):
                     }
                 }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_PLACES_BASE_URL}/places:searchText",
                     headers={
@@ -127,7 +127,7 @@ class GoogleMapsPlaceDetails(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_PLACES_BASE_URL}/places/{place_id}",
                     headers={
@@ -184,7 +184,7 @@ class GoogleMapsNearbySearch(Tool):
                 "languageCode": language_code,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_PLACES_BASE_URL}/places:searchNearby",
                     headers={
@@ -241,7 +241,7 @@ class GoogleMapsValidateAddress(Tool):
             if postal_code:
                 address["postalCode"] = postal_code
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _ADDRESS_VALIDATION_URL,
                     headers={

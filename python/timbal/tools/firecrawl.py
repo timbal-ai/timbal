@@ -113,7 +113,7 @@ class FirecrawlScrape(Tool):
             if actions:
                 payload["actions"] = actions
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/scrape",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -204,7 +204,7 @@ class FirecrawlSearch(Tool):
                     scrape_opts["excludeTags"] = scrape_exclude_tags
                 payload["scrapeOptions"] = scrape_opts
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/search",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -283,7 +283,7 @@ class FirecrawlCrawl(Tool):
 
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 # Start the crawl job.
                 response = await client.post(
                     f"{_BASE_URL}/crawl",
@@ -347,7 +347,7 @@ class FirecrawlMap(Tool):
             if search:
                 payload["search"] = search
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/map",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -407,7 +407,7 @@ class FirecrawlExtract(Tool):
             if schema:
                 payload["schema"] = schema
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/extract",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},

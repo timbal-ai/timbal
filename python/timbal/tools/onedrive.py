@@ -33,7 +33,7 @@ class OneDriveSearchFiles(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/me/drive/root/search(q='{query}')",
                     headers={"Authorization": f"Bearer {token}"},
@@ -68,7 +68,7 @@ class OneDriveUploadFile(Tool):
             import httpx
 
             if url:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                     response = await client.get(url, timeout=httpx.Timeout(30.0, read=None))
                     response.raise_for_status()
                     content = response.text
@@ -77,7 +77,7 @@ class OneDriveUploadFile(Tool):
             if folder_id:
                 upload_url = f"{_BASE_URL}/me/drive/items/{folder_id}:/{name}:/content"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.put(
                     upload_url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -113,7 +113,7 @@ class OneDriveListFiles(Tool):
             if folder_id:
                 url = f"{_BASE_URL}/me/drive/items/{folder_id}/children"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -142,7 +142,7 @@ class OneDriveGetFile(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient(follow_redirects=True) as client:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 metadata_response = await client.get(
                     f"{_BASE_URL}/me/drive/items/{file_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -189,7 +189,7 @@ class OneDriveFindFile(Tool):
             if folder_id:
                 search_url = f"{_BASE_URL}/me/drive/items/{folder_id}/search(q='{name}')"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     search_url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -225,7 +225,7 @@ class OneDriveDownloadFile(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient(follow_redirects=True) as client:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/me/drive/items/{file_id}/content",
                     headers={"Authorization": f"Bearer {token}"},

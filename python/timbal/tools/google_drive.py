@@ -58,7 +58,7 @@ class GoogleDriveCreateFile(Tool):
                 "file": (name, file_content, mime_type)
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_DRIVE_UPLOAD_BASE}/files",
                     headers={
@@ -117,7 +117,7 @@ class GoogleDriveGetDownloadLink(Tool):
                 params["driveId"] = drive
                 params["includeItemsFromAllDrives"] = "true"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_DRIVE_BASE}/files/{file_id}",
                     headers={
@@ -160,7 +160,7 @@ class GoogleDriveGetFile(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_DRIVE_BASE}/files/{file_id}",
                     headers={
@@ -212,7 +212,7 @@ class GoogleDriveCreateFolder(Tool):
             if parent_folder_id:
                 folder_metadata["parents"] = [parent_folder_id]
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_DRIVE_BASE}/files",
                     headers={
@@ -262,7 +262,7 @@ class GoogleDriveSearchFolders(Tool):
             else:
                 query = f"'me' in parents and {query}"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 all_folders = []
                 page_token = None
                 
@@ -355,7 +355,7 @@ class GoogleDriveSearchFiles(Tool):
             query_string = " and ".join(query_parts)
             fields_param = fields or "files(id,name,parents,mimeType,webViewLink,modifiedTime,createdTime,size)"
             
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 all_files = []
                 page_token = None
                 
@@ -427,7 +427,7 @@ class GoogleDriveUploadFile(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(file_url)
                 response.raise_for_status()
                 file_content = response.content
@@ -495,7 +495,7 @@ class GoogleDriveCreateSharedDrive(Tool):
                 "name": name
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_DRIVE_BASE}/drives",
                     headers={

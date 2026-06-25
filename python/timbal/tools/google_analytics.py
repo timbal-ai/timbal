@@ -60,7 +60,7 @@ class GoogleAnalyticsListAccountSummaries(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/accountSummaries",
                     headers=_auth_headers(token),
@@ -117,7 +117,7 @@ class GoogleAnalyticsRunReport(Tool):
             if order_bys:
                 body["orderBys"] = order_bys
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_DATA_BASE}/{prop}:runReport",
                     headers=_auth_headers(token),
@@ -166,7 +166,7 @@ class GoogleAnalyticsRunRealtimeReport(Tool):
             if metric_filter:
                 body["metricFilter"] = metric_filter
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_DATA_BASE}/{prop}:runRealtimeReport",
                     headers=_auth_headers(token),
@@ -212,7 +212,7 @@ class GoogleAnalyticsRunPivotReport(Tool):
             if dimensions:
                 body["dimensions"] = [{"name": d} for d in dimensions]
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_DATA_BASE}/{prop}:runPivotReport",
                     headers=_auth_headers(token),
@@ -246,7 +246,7 @@ class GoogleAnalyticsBatchRunReports(Tool):
             prop = _resolve_property_id(self, property_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_DATA_BASE}/{prop}:batchRunReports",
                     headers=_auth_headers(token),
@@ -279,7 +279,7 @@ class GoogleAnalyticsGetMetadata(Tool):
             prop = _resolve_property_id(self, property_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_DATA_BASE}/{prop}/metadata",
                     headers=_auth_headers(token),
@@ -318,7 +318,7 @@ class GoogleAnalyticsListProperties(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/properties",
                     headers=_auth_headers(token),
@@ -351,7 +351,7 @@ class GoogleAnalyticsGetProperty(Tool):
             prop = _resolve_property_id(self, property_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/{prop}",
                     headers=_auth_headers(token),
@@ -389,7 +389,7 @@ class GoogleAnalyticsListDataStreams(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/{prop}/dataStreams",
                     headers=_auth_headers(token),
@@ -424,7 +424,7 @@ class GoogleAnalyticsGetDataStream(Tool):
             stream = data_stream_id if data_stream_id.startswith("dataStreams/") else f"dataStreams/{data_stream_id}"
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/{prop}/{stream}",
                     headers=_auth_headers(token),
@@ -462,7 +462,7 @@ class GoogleAnalyticsListCustomDimensions(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/{prop}/customDimensions",
                     headers=_auth_headers(token),
@@ -501,7 +501,7 @@ class GoogleAnalyticsListCustomMetrics(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ADMIN_BASE}/{prop}/customMetrics",
                     headers=_auth_headers(token),

@@ -52,7 +52,7 @@ class GoogleMerchantListAccounts(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_CONTENT_BASE}/accounts",
                     headers=_auth_headers(token),
@@ -89,7 +89,7 @@ class GoogleMerchantGetAccount(Tool):
             acct = account_id or merchant
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_CONTENT_BASE}/{merchant}/accounts/{acct}",
                     headers=_auth_headers(token),
@@ -129,7 +129,7 @@ class GoogleMerchantListProducts(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_CONTENT_BASE}/{merchant}/products",
                     headers=_auth_headers(token),
@@ -167,7 +167,7 @@ class GoogleMerchantGetProduct(Tool):
             merchant = _resolve_merchant_id(self, merchant_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_CONTENT_BASE}/{merchant}/products/{product_id}",
                     headers=_auth_headers(token),
@@ -202,7 +202,7 @@ class GoogleMerchantInsertProduct(Tool):
             merchant = _resolve_merchant_id(self, merchant_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_CONTENT_BASE}/{merchant}/products",
                     headers=_auth_headers(token),
@@ -239,7 +239,7 @@ class GoogleMerchantUpdateProduct(Tool):
             merchant = _resolve_merchant_id(self, merchant_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{_CONTENT_BASE}/{merchant}/products/{product_id}",
                     headers=_auth_headers(token),
@@ -275,7 +275,7 @@ class GoogleMerchantDeleteProduct(Tool):
             merchant = _resolve_merchant_id(self, merchant_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_CONTENT_BASE}/{merchant}/products/{product_id}",
                     headers=_auth_headers(token),
@@ -315,7 +315,7 @@ class GoogleMerchantListProductStatuses(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_CONTENT_BASE}/{merchant}/productstatuses",
                     headers=_auth_headers(token),
@@ -351,7 +351,7 @@ class GoogleMerchantGetProductStatus(Tool):
             merchant = _resolve_merchant_id(self, merchant_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_CONTENT_BASE}/{merchant}/productstatuses/{product_id}",
                     headers=_auth_headers(token),
@@ -391,7 +391,7 @@ class GoogleMerchantListDatafeeds(Tool):
             if page_token:
                 params["pageToken"] = page_token
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_CONTENT_BASE}/{merchant}/datafeeds",
                     headers=_auth_headers(token),
@@ -427,7 +427,7 @@ class GoogleMerchantGetDatafeed(Tool):
             merchant = _resolve_merchant_id(self, merchant_id)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_CONTENT_BASE}/{merchant}/datafeeds/{datafeed_id}",
                     headers=_auth_headers(token),

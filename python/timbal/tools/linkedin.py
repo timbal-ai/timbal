@@ -91,7 +91,7 @@ class LinkedInSearchPeople(Tool):
             if network_depths:
                 params["facetNetwork"] = network_depths
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/search",
                     headers={
@@ -150,7 +150,7 @@ class LinkedInSearchCompanies(Tool):
             if company_sizes:
                 params["facetCompanySize"] = company_sizes
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/organizationsLookup",
                     headers={
@@ -223,7 +223,7 @@ class LinkedInSearchJobs(Tool):
             if posted_at_range:
                 params["f_TPR"] = posted_at_range
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/jobSearch",
                     headers={
@@ -341,7 +341,7 @@ class LinkedInSearch(Tool):
                     params["f_TPR"] = parsed["posted"][0]
                 endpoint = f"{_BASE_URL}/jobSearch"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     endpoint,
                     headers={

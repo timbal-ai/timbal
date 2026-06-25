@@ -102,7 +102,7 @@ class FalQueueSubmit(Tool):
                 sep = "&" if "?" in url else "?"
                 url = f"{url}{sep}fal_webhook={quote(webhook_url, safe='')}"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.post(
                     url,
                     headers=_fal_auth_headers(api_key),
@@ -157,7 +157,7 @@ class FalQueueStatus(Tool):
             if include_logs:
                 url = f"{url}?logs=1"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Key {api_key}"},
@@ -203,7 +203,7 @@ class FalQueueResult(Tool):
             path = _encode_model_path(model_id)
             url = f"{_QUEUE_BASE}/{path}/requests/{request_id}"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Key {api_key}"},
@@ -248,7 +248,7 @@ class FalQueueCancel(Tool):
             path = _encode_model_path(model_id)
             url = f"{_QUEUE_BASE}/{path}/requests/{request_id}/cancel"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.put(
                     url,
                     headers={"Authorization": f"Key {api_key}"},

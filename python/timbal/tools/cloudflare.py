@@ -140,7 +140,7 @@ class CloudflareCrawlStart(Tool):
             if options:
                 body["options"] = options
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_CF_API_BASE}/{account_id}/browser-rendering/crawl",
                     headers=_auth_headers(api_token),
@@ -196,7 +196,7 @@ class CloudflareCrawlGet(Tool):
             if status_filter is not None:
                 params["status"] = status_filter
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_CF_API_BASE}/{account_id}/browser-rendering/crawl/{job_id}",
                     headers=_auth_headers(api_token),
@@ -228,7 +228,7 @@ class CloudflareCrawlCancel(Tool):
             api_token, account_id = await _resolve_credentials(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_CF_API_BASE}/{account_id}/browser-rendering/crawl/{job_id}",
                     headers=_auth_headers(api_token),

@@ -145,7 +145,7 @@ class FathomListMeetings(Tool):
             if include_crm_matches:
                 params.append(("include_crm_matches", "true"))
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_FATHOM_BASE}/meetings",
                     headers=_fathom_headers(kind=auth_kind, credential=credential),
@@ -188,7 +188,7 @@ class FathomGetRecordingSummary(Tool):
             if destination_url is not None:
                 params["destination_url"] = destination_url
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_FATHOM_BASE}/recordings/{recording_id}/summary",
                     headers=_fathom_headers(kind=auth_kind, credential=credential),
@@ -233,7 +233,7 @@ class FathomGetRecordingTranscript(Tool):
             if destination_url is not None:
                 params["destination_url"] = destination_url
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_FATHOM_BASE}/recordings/{recording_id}/transcript",
                     headers=_fathom_headers(kind=auth_kind, credential=credential),
@@ -272,7 +272,7 @@ class FathomListTeams(Tool):
             if cursor is not None:
                 params["cursor"] = cursor
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_FATHOM_BASE}/teams",
                     headers=_fathom_headers(kind=auth_kind, credential=credential),
@@ -314,7 +314,7 @@ class FathomListTeamMembers(Tool):
             if team is not None:
                 params["team"] = team
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_FATHOM_BASE}/team_members",
                     headers=_fathom_headers(kind=auth_kind, credential=credential),

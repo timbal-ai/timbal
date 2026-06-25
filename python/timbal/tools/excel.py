@@ -60,7 +60,7 @@ class MicrosoftExcelWriteToSheet(Tool):
             cols = max(len(r) for r in values) if values else 1
             range_addr = _expand_address(address, rows, cols)
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/range(address='{range_addr}')",
                     headers={"Authorization": f"Bearer {token}"},
@@ -98,7 +98,7 @@ class MicrosoftExcelClearSheet(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/range/clear",
                     headers={"Authorization": f"Bearer {token}"},
@@ -131,7 +131,7 @@ class MicrosoftExcelCreateSheet(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_wb(drive_id, workbook_id)}/worksheets/add",
                     headers={"Authorization": f"Bearer {token}"},
@@ -164,7 +164,7 @@ class MicrosoftExcelDeleteSheet(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -195,7 +195,7 @@ class MicrosoftExcelListSheets(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_wb(drive_id, workbook_id)}/worksheets",
                     headers={"Authorization": f"Bearer {token}"},
@@ -235,7 +235,7 @@ class MicrosoftExcelReadFromSheet(Tool):
             else:
                 url = f"{_sheet(drive_id, workbook_id, sheet_name)}/usedRange"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -269,7 +269,7 @@ class MicrosoftExcelUpdateCell(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/range(address='{address}')",
                     headers={"Authorization": f"Bearer {token}"},
@@ -312,7 +312,7 @@ class MicrosoftExcelFindRow(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/usedRange",
                     headers={"Authorization": f"Bearer {token}"},
@@ -358,7 +358,7 @@ class MicrosoftExcelGetCellsInRange(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/range(address='{address}')",
                     headers={"Authorization": f"Bearer {token}"},
@@ -392,7 +392,7 @@ class MicrosoftExcelGetRowByIndex(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/usedRange",
                     headers={"Authorization": f"Bearer {token}"},
@@ -446,7 +446,7 @@ class MicrosoftExcelUpdateRow(Tool):
             end_col = _col_index_to_letter(cols - 1)
             address = f"A{excel_row}:{end_col}{excel_row}"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/range(address='{address}')",
                     headers={"Authorization": f"Bearer {token}"},
@@ -486,7 +486,7 @@ class MicrosoftExcelAddDataToTable(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/tables/{table_name}/rows/add",
                     headers={"Authorization": f"Bearer {token}"},
@@ -523,7 +523,7 @@ class MicrosoftExcelCreateTable(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}/tables/add",
                     headers={"Authorization": f"Bearer {token}"},
@@ -579,7 +579,7 @@ class MicrosoftExcelCreateWorkbook(Tool):
                 else:
                     url = f"{_GRAPH_BASE}/me/drive/root:/{name}:/content"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     url,
                     headers={
@@ -628,7 +628,7 @@ class MicrosoftExcelListWorkbooks(Tool):
                 else:
                     url = f"{_GRAPH_BASE}/me/drive/root/children"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -666,7 +666,7 @@ class MicrosoftExcelGetSheetById(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_wb(drive_id, workbook_id)}/worksheets/{sheet_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -699,7 +699,7 @@ class MicrosoftExcelRenameSheet(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_sheet(drive_id, workbook_id, sheet_name)}",
                     headers={"Authorization": f"Bearer {token}"},

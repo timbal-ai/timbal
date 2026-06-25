@@ -35,7 +35,7 @@ async def _post_cala(
 ) -> dict:
     import httpx
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         response = await client.post(
             f"{_normalize_base_url(base_url)}{path}",
             headers={"x-api-key": api_key, "Content-Type": "application/json"},

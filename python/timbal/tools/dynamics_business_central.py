@@ -23,7 +23,7 @@ async def _get_token_from_client_credentials(
     import httpx
 
     token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         response = await client.post(
             token_url,
             data={
@@ -148,7 +148,7 @@ class DynamicsBCCreateCustomer(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     _bc_url(tenant_id, environment_name, company_id, "customers"),
                     headers={
@@ -230,7 +230,7 @@ class DynamicsBCUpdateCustomer(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     _bc_url(tenant_id, environment_name, company_id, f"customers({customer_id})"),
                     headers={
@@ -286,7 +286,7 @@ class DynamicsBCGetSalesOrder(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -373,7 +373,7 @@ class DynamicsBCGetItemPrices(Tool):
 
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     url,
                     headers={

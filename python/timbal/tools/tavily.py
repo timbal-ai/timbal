@@ -64,7 +64,7 @@ class TavilySearch(Tool):
             if exclude_domains:
                 payload["exclude_domains"] = exclude_domains
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/search",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -107,7 +107,7 @@ class TavilyExtract(Tool):
                 "format": format,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/extract",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -170,7 +170,7 @@ class TavilyCrawl(Tool):
             if exclude_paths:
                 payload["exclude_paths"] = exclude_paths
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/crawl",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -227,7 +227,7 @@ class TavilyMap(Tool):
             if exclude_paths:
                 payload["exclude_paths"] = exclude_paths
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/map",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},

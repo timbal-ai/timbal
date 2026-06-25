@@ -95,7 +95,7 @@ def _make_tavily_handler(
         if blocked_domains:
             payload["exclude_domains"] = blocked_domains
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             response = await client.post(
                 f"{_TAVILY_BASE_URL}/search",
                 headers={"Authorization": f"Bearer {resolved_key}", "Content-Type": "application/json"},
@@ -134,7 +134,7 @@ def _make_scraperapi_handler(*, integration=None, api_key=None, user_location=No
         if start is not None:
             params["start"] = start
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             response = await client.get(
                 f"{_SCRAPERAPI_STRUCTURED_URL}/google/search",
                 params=params,
@@ -196,7 +196,7 @@ def _make_firecrawl_handler(*, integration=None, api_key=None, max_results=None)
         if country:
             payload["country"] = country
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             response = await client.post(
                 f"{_FIRECRAWL_BASE_URL}/search",
                 headers={"Authorization": f"Bearer {resolved_key}", "Content-Type": "application/json"},
@@ -284,7 +284,7 @@ def _make_google_handler(
         if date_restrict:
             params["dateRestrict"] = date_restrict
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             response = await client.get(
                 _GOOGLE_BASE_URL,
                 params=params,

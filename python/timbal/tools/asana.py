@@ -69,7 +69,7 @@ class AsanaCreateProject(Tool):
             if due_on:
                 data["due_on"] = due_on
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ASANA_API_BASE}/projects",
                     headers=_auth_headers(token),
@@ -98,7 +98,7 @@ class AsanaListWorkspaces(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ASANA_API_BASE}/workspaces",
                     headers=_auth_headers(token),
@@ -145,7 +145,7 @@ class AsanaUpdateTask(Tool):
             if assignee_gid is not None:
                 data["assignee"] = assignee_gid
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.put(
                     f"{_ASANA_API_BASE}/tasks/{task_gid}",
                     headers=_auth_headers(token),
@@ -187,7 +187,7 @@ class AsanaListUserProjects(Tool):
             if owner_gid:
                 params["owner"] = owner_gid
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ASANA_API_BASE}/projects",
                     headers=_auth_headers(token),
@@ -227,7 +227,7 @@ class AsanaListTeams(Tool):
                 "limit": limit,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ASANA_API_BASE}/teams",
                     headers=_auth_headers(token),
@@ -268,7 +268,7 @@ class AsanaSearchTasks(Tool):
                 "limit": limit,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ASANA_API_BASE}/tasks/search",
                     headers=_auth_headers(token),
@@ -300,7 +300,7 @@ class AsanaSearchSections(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ASANA_API_BASE}/projects/{project_gid}/sections",
                     headers=_auth_headers(token),
@@ -339,7 +339,7 @@ class AsanaSearchProjects(Tool):
                 "archived": str(archived).lower(),
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ASANA_API_BASE}/projects",
                     headers=_auth_headers(token),
@@ -372,7 +372,7 @@ class AsanaListTaskStories(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ASANA_API_BASE}/tasks/{task_gid}/stories",
                     headers=_auth_headers(token),
@@ -415,7 +415,7 @@ class AsanaGetTasksFromTaskList(Tool):
 
             resolved_user_task_list_gid = user_task_list_gid
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 # If only user_gid is provided, resolve the corresponding user_task_list first.
                 if resolved_user_task_list_gid is None and user_gid is not None:
                     resolve_resp = await client.get(
@@ -459,7 +459,7 @@ class AsanaFindTaskById(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_ASANA_API_BASE}/tasks/{task_gid}",
                     headers=_auth_headers(token),
@@ -489,7 +489,7 @@ class AsanaDeleteTask(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_ASANA_API_BASE}/tasks/{task_gid}",
                     headers=_auth_headers(token),
@@ -540,7 +540,7 @@ class AsanaCreateTask(Tool):
             if due_on is not None:
                 data["due_on"] = due_on
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ASANA_API_BASE}/tasks",
                     headers=_auth_headers(token),
@@ -586,7 +586,7 @@ class AsanaCreateTaskFromTemplate(Tool):
             if workspace_gid is not None:
                 data["workspace"] = workspace_gid
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ASANA_API_BASE}/tasks",
                     headers=_auth_headers(token),
@@ -622,7 +622,7 @@ class AsanaCreateTaskComment(Tool):
                 "text": text,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ASANA_API_BASE}/tasks/{task_gid}/stories",
                     headers=_auth_headers(token),
@@ -667,7 +667,7 @@ class AsanaCreateSubtask(Tool):
             if due_on is not None:
                 data["due_on"] = due_on
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ASANA_API_BASE}/tasks/{parent_task_gid}/subtasks",
                     headers=_auth_headers(token),
@@ -703,7 +703,7 @@ class AsanaAddTaskToSection(Tool):
                 "task": task_gid,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_ASANA_API_BASE}/sections/{section_gid}/addTask",
                     headers=_auth_headers(token),

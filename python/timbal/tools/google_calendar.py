@@ -55,7 +55,7 @@ class GoogleCalendarListEvents(Tool):
             if q:
                 params["q"] = q
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_CALENDAR_BASE}/calendars/{calendar_id}/events",
                     headers={"Authorization": f"Bearer {token}"},
@@ -105,7 +105,7 @@ class GoogleCalendarCreateEvent(Tool):
             if attendees:
                 body["attendees"] = [{"email": email} for email in attendees]
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_CALENDAR_BASE}/calendars/{calendar_id}/events",
                     headers={"Authorization": f"Bearer {token}"},
@@ -157,7 +157,7 @@ class GoogleCalendarUpdateEvent(Tool):
             if end:
                 body["end"] = {"dateTime": end, "timeZone": timezone or "UTC"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.patch(
                     f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -189,7 +189,7 @@ class GoogleCalendarDeleteEvent(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.delete(
                     f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -227,7 +227,7 @@ class GoogleCalendarUpdateAttendeeStatus(Tool):
 
             headers = {"Authorization": f"Bearer {token}"}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 get_response = await client.get(
                     f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}",
                     headers=headers,
@@ -285,7 +285,7 @@ class GoogleCalendarCheckFreeSlots(Tool):
                 "items": [{"id": cal_id} for cal_id in calendar_ids],
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_CALENDAR_BASE}/freeBusy",
                     headers={"Authorization": f"Bearer {token}"},

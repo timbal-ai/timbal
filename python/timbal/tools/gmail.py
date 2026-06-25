@@ -269,7 +269,7 @@ class GmailSend(Tool):
             message = "\r\n".join(message_parts)
             raw = base64.urlsafe_b64encode(message.encode()).decode()
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/messages/send",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -404,7 +404,7 @@ class GmailCreateDraft(Tool):
             if thread_id:
                 draft_message["threadId"] = thread_id
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/drafts",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -450,7 +450,7 @@ class GmailReply(Tool):
             api_key = credentials["token"]
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/messages/{email_conversation}",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -601,7 +601,7 @@ class GmailReply(Tool):
             message = "\r\n".join(message_parts)
             raw = base64.urlsafe_b64encode(message.encode()).decode()
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 send_data = {"raw": raw}
                 if not reply_to_specific_message:
                     send_data["threadId"] = thread_id
@@ -646,7 +646,7 @@ class GmailSearch(Tool):
             api_key = credentials["token"]
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/messages",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -659,7 +659,7 @@ class GmailSearch(Tool):
             messages = search_results.get("messages", [])
             full_messages = []
 
-            async with httpx.AsyncClient() as detail_client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as detail_client:
                 for msg in messages:
                     msg_id = msg["id"]
                     msg_response = await detail_client.get(
@@ -751,7 +751,7 @@ class GmailAddLabel(Tool):
             api_key = credentials["token"]
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/labels",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -772,7 +772,7 @@ class GmailAddLabel(Tool):
                 else:
                     return {"status": "error", "message": f"Label '{label_name_item}' not found."}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/messages/{email_to_label}/modify",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -819,7 +819,7 @@ class GmailListLabels(Tool):
             api_key = credentials["token"]
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/labels",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -891,7 +891,7 @@ class GmailRemoveLabel(Tool):
             api_key = credentials["token"]
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/labels",
                     headers={"Authorization": f"Bearer {api_key}"},
@@ -912,7 +912,7 @@ class GmailRemoveLabel(Tool):
                 else:
                     return {"status": "error", "message": f"Label '{label_name_item}' not found."}
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/messages/{email_to_update}/modify",
                     headers={"Authorization": f"Bearer {api_key}"},

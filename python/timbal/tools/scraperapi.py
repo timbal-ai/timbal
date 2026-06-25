@@ -88,7 +88,7 @@ class ScraperAPIScrape(Tool):
             if retry_404:
                 params["retry_404"] = "true"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     _BASE_URL,
                     params=params,
@@ -148,7 +148,7 @@ class ScraperAPIAsyncScrape(Tool):
             if premium:
                 payload["premium"] = "true"
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 # Submit the job.
                 response = await client.post(
                     f"{_ASYNC_URL}/jobs",
@@ -223,7 +223,7 @@ class ScraperAPIGoogleSearch(Tool):
             if tbs:
                 params["tbs"] = tbs
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_STRUCTURED_URL}/google/search",
                     params=params,
@@ -270,7 +270,7 @@ class ScraperAPIAmazonProduct(Tool):
             if tld:
                 params["tld"] = tld
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_STRUCTURED_URL}/amazon/product",
                     params=params,
@@ -317,7 +317,7 @@ class ScraperAPIAmazonSearch(Tool):
             if tld:
                 params["tld"] = tld
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_STRUCTURED_URL}/amazon/search",
                     params=params,

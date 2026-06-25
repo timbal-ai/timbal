@@ -172,7 +172,7 @@ class GoogleDocsFindDocument(Tool):
             if folder_id:
                 query_parts.append(f"'{folder_id}' in parents")
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_DRIVE_BASE}/files",
                     headers={"Authorization": f"Bearer {token}"},
@@ -233,7 +233,7 @@ class GoogleDocsCreateFromTemplate(Tool):
             if folder_id:
                 copy_body["parents"] = [folder_id]
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_DRIVE_BASE}/files/{template_id}/copy",
                     headers=_auth_headers(token),
@@ -295,7 +295,7 @@ class GoogleDocsReplaceText(Tool):
                 }
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 result = await _batch_update(client, token, document_id, [request])
 
             replies = result.get("replies", [])
@@ -337,7 +337,7 @@ class GoogleDocsReplaceImage(Tool):
                 }
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 await _batch_update(client, token, document_id, [request])
 
             return {"documentId": document_id, "imageObjectId": image_object_id}
@@ -371,7 +371,7 @@ class GoogleDocsInsertText(Tool):
                 }
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 await _batch_update(client, token, document_id, [request])
 
             return {"documentId": document_id, "insertedLength": len(text)}
@@ -399,7 +399,7 @@ class GoogleDocsInsertTable(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 if index is None:
                     doc = await _get_document(client, token, document_id, include_tabs_content=tab_id is not None)
                     index = _document_end_index(doc, tab_id=tab_id)
@@ -440,7 +440,7 @@ class GoogleDocsInsertPageBreak(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 if index is None:
                     doc = await _get_document(client, token, document_id, include_tabs_content=tab_id is not None)
                     index = _document_end_index(doc, tab_id=tab_id)
@@ -481,7 +481,7 @@ class GoogleDocsGetTabContent(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 document = await _get_document(client, token, document_id, include_tabs_content=True)
 
             tab = _find_tab(document, tab_id) if tab_id else _find_tab_by_title(document, tab_title or "")
@@ -525,7 +525,7 @@ class GoogleDocsGetDocument(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 return await _get_document(
                     client,
                     token,
@@ -556,7 +556,7 @@ class GoogleDocsCreate(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 created = await _create_document_file(client, token, title=title, folder_id=folder_id)
                 document_id = created["id"]
 
@@ -595,7 +595,7 @@ class GoogleDocsAppendText(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 document = await _get_document(client, token, document_id, include_tabs_content=tab_id is not None)
                 index = _document_end_index(document, tab_id=tab_id)
                 await _batch_update(
@@ -633,7 +633,7 @@ class GoogleDocsAppendImage(Tool):
             token = await _resolve_token(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 document = await _get_document(client, token, document_id, include_tabs_content=tab_id is not None)
                 index = _document_end_index(document, tab_id=tab_id)
                 request = {

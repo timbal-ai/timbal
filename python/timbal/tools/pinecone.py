@@ -45,7 +45,7 @@ class PineconeListIndexes(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"{_BASE_URL}/indexes",
                     headers={"Api-Key": api_key},
@@ -89,7 +89,7 @@ class PineconeCreateIndex(Tool):
                 "deletion_protection": deletion_protection,
             }
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"{_BASE_URL}/indexes",
                     headers={"Api-Key": api_key, "Content-Type": "application/json"},
@@ -126,7 +126,7 @@ class PineconeIndexStats(Tool):
             if metadata_filter:
                 body["filter"] = metadata_filter
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"https://{index_host}/describe_index_stats",
                     headers={"Api-Key": api_key},
@@ -162,7 +162,7 @@ class PineconeUpsertVectors(Tool):
             api_key = await _resolve_api_key(self)
             import httpx
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"https://{index_host}/vectors/upsert",
                     headers={"Api-Key": api_key},
@@ -212,7 +212,7 @@ class PineconeQuery(Tool):
             if metadata_filter:
                 body["filter"] = metadata_filter
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"https://{index_host}/query",
                     headers={"Api-Key": api_key},
@@ -250,7 +250,7 @@ class PineconeFetchVectors(Tool):
             if namespace:
                 params["namespace"] = namespace
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.get(
                     f"https://{index_host}/vectors/fetch",
                     headers={"Api-Key": api_key},
@@ -296,7 +296,7 @@ class PineconeDeleteVectors(Tool):
             if metadata_filter:
                 body["filter"] = metadata_filter
 
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
                 response = await client.post(
                     f"https://{index_host}/vectors/delete",
                     headers={"Api-Key": api_key},
