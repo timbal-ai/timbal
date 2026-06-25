@@ -587,6 +587,81 @@ double(21)
         assert out["return_value"] == 42
 
 
+class TestRunPythonRunner:
+    """Unit tests for the stdlib-only child runner module (no subprocess)."""
+
+    def test_execute_user_code_sync_last_expr(self):
+        from timbal.tools._run_python_runner import execute_user_code
+
+        out = execute_user_code("1 + 2", {})
+        assert out["error"] is None
+        assert out["return_value"] == 3
+
+    def test_execute_user_code_sync_exec_only(self):
+        from timbal.tools._run_python_runner import execute_user_code
+
+        out = execute_user_code("x = 10", {})
+        assert out["error"] is None
+        assert out["return_value"] is None
+
+    def test_execute_user_code_catches_exception(self):
+        from timbal.tools._run_python_runner import execute_user_code
+
+        out = execute_user_code("1 / 0", {})
+        assert out["return_value"] is None
+        assert out["error"]["type"] == "ZeroDivisionError"
+
+    def test_execute_user_code_non_json_serializable_return(self):
+        from timbal.tools._run_python_runner import execute_user_code
+
+        out = execute_user_code("object()", {})
+        assert out["error"] is None
+        assert isinstance(out["return_value"], str)
+        assert "object" in out["return_value"]
+
+    def test_has_top_level_await_detects_await(self):
+        import ast
+
+        from timbal.tools._run_python_runner import has_top_level_await
+
+        tree = ast.parse("import asyncio\nawait asyncio.sleep(0)")
+        assert has_top_level_await(tree) is True
+
+    def test_has_top_level_await_ignores_nested(self):
+        import ast
+
+        from timbal.tools._run_python_runner import has_top_level_await
+
+        tree = ast.parse("async def f():\n    await asyncio.sleep(0)")
+        assert has_top_level_await(tree) is False
+
+    def test_execute_user_code_top_level_await(self):
+        from timbal.tools._run_python_runner import execute_user_code
+
+        code = """
+import asyncio
+await asyncio.sleep(0)
+sum(range(4))
+"""
+        out = execute_user_code(code, {})
+        assert out["error"] is None
+        assert out["return_value"] == 6
+
+    def test_build_proxies_calls_call_tool(self, monkeypatch: pytest.MonkeyPatch):
+        from timbal.tools._run_python_runner import build_proxies
+
+        calls: list[tuple[str, list[Any], dict[str, Any]]] = []
+
+        def fake_call_tool(name: str, args: list[Any], kwargs: dict[str, Any]) -> Any:
+            calls.append((name, args, kwargs))
+            return 42
+
+        monkeypatch.setattr("timbal.tools._run_python_runner.call_tool", fake_call_tool)
+        proxies = build_proxies(["double"])
+        assert proxies["double"](21) == 42
+        assert calls == [("double", [21], {})]
+
+
 class TestTimbalInTimbal:
     """Install timbal inside the sandbox and run an Agent within an Agent.
 

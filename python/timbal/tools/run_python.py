@@ -2,7 +2,7 @@
 RunPython tool for executing Python scripts in isolated environments.
 
 Supports:
-- Real CPython execution via uv (PEP 723 inline dependencies) with venv+pip fallback
+- Real CPython execution via uv (--with dependencies) with venv+pip fallback
 - Auto-detection of dependencies from import statements
 - Code mode: scripts can call back into other Timbal tools via a unix-socket RPC bridge
 - Structured stdout/stderr/return_value/error capture
@@ -43,7 +43,11 @@ _IMPORT_TO_PACKAGE: dict[str, str] = {
 }
 
 _RESULT_FILENAME = ".timbal_run_result.json"
+_USER_CODE_FILENAME = "user_code.py"
 _RPC_ENV_VAR = "TIMBAL_RPC_SOCKET"
+_USER_CODE_PATH_ENV = "TIMBAL_USER_CODE_PATH"
+_EXPOSED_TOOLS_ENV = "TIMBAL_EXPOSED_TOOLS"
+_RUNNER_PATH = Path(__file__).parent / "_run_python_runner.py"
 
 # Hardening limits.
 _MAX_CODE_CHARS = 200_000
@@ -84,125 +88,6 @@ _SAFE_ENV_VARS: frozenset[str] = frozenset({
     "XDG_CONFIG_HOME",
     "PYTHONPATH",
 })
-
-# Preamble injected before user code in the child process.
-_CHILD_PREAMBLE = '''
-import ast as __timbal_ast
-import builtins as __timbal_builtins__
-import json as __timbal_json
-import os as __timbal_os
-import socket as __timbal_socket
-import sys as __timbal_sys
-import traceback as __timbal_traceback
-
-__TIMBAL_RESULT_PATH = __timbal_os.environ.get("TIMBAL_RESULT_PATH", "")
-
-
-def __timbal_call_tool__(name, args, kwargs):
-    sock_path = __timbal_os.environ.get({rpc_env!r})
-    if not sock_path:
-        raise RuntimeError("Code mode is not available: RPC socket not configured")
-    payload = __timbal_json.dumps({{"name": name, "args": args, "kwargs": kwargs}}).encode()
-    with __timbal_socket.socket(__timbal_socket.AF_UNIX, __timbal_socket.SOCK_STREAM) as sock:
-        sock.connect(sock_path)
-        sock.sendall(payload + b"\\n")
-        chunks = []
-        while True:
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            if b"\\n" in chunk:
-                break
-    line = b"".join(chunks).split(b"\\n", 1)[0]
-    response = __timbal_json.loads(line.decode())
-    if response.get("error"):
-        err = response["error"]
-        exc_name = err.get("type", "RuntimeError")
-        message = err.get("message", str(err))
-        exc_cls = getattr(__timbal_builtins__, exc_name, None)
-        if exc_cls is None or not isinstance(exc_cls, type) or not issubclass(exc_cls, BaseException):
-            if exc_name == "KeyError" and "Unknown tool" in message:
-                raise NameError(f"name '{{name}}' is not defined")
-            exc_cls = RuntimeError
-            message = f"{{exc_name}}: {{message}}"
-        raise exc_cls(message)
-    return response.get("output")
-
-
-def __timbal_write_result__(payload):
-    if __TIMBAL_RESULT_PATH:
-        with open(__TIMBAL_RESULT_PATH, "w", encoding="utf-8") as fh:
-            __timbal_json.dump(payload, fh)
-
-
-def __timbal_has_top_level_await__(tree):
-    class _Visitor(__timbal_ast.NodeVisitor):
-        def __init__(self):
-            self.found = False
-        def visit_FunctionDef(self, node):
-            return None
-        def visit_AsyncFunctionDef(self, node):
-            return None
-        def visit_Lambda(self, node):
-            return None
-        def visit_Await(self, node):
-            self.found = True
-        def visit_AsyncFor(self, node):
-            self.found = True
-            self.generic_visit(node)
-        def visit_AsyncWith(self, node):
-            self.found = True
-            self.generic_visit(node)
-    visitor = _Visitor()
-    visitor.visit(tree)
-    return visitor.found
-
-
-def __timbal_execute_user_code__(code):
-    result = {{"return_value": None, "error": None}}
-    try:
-        tree = __timbal_ast.parse(code)
-        namespace = dict(globals())
-        namespace["__name__"] = "__main__"
-        if __timbal_has_top_level_await__(tree):
-            import asyncio as __timbal_asyncio
-            import textwrap as __timbal_textwrap
-            if tree.body and isinstance(tree.body[-1], __timbal_ast.Expr):
-                __timbal_ret = __timbal_ast.Return(value=tree.body[-1].value)
-                __timbal_ast.copy_location(__timbal_ret, tree.body[-1])
-                tree.body[-1] = __timbal_ret
-                __timbal_ast.fix_missing_locations(tree)
-            __timbal_wrapped = (
-                "async def __timbal_async_main__():\\n"
-                + __timbal_textwrap.indent(__timbal_ast.unparse(tree), "    ")
-            )
-            exec(compile(__timbal_wrapped, "<user>", "exec"), namespace)
-            result["return_value"] = __timbal_asyncio.run(namespace["__timbal_async_main__"]())
-        elif tree.body and isinstance(tree.body[-1], __timbal_ast.Expr):
-            if len(tree.body) > 1:
-                exec(
-                    compile(__timbal_ast.Module(body=tree.body[:-1], type_ignores=[]), "<user>", "exec"),
-                    namespace,
-                )
-            last_expr = compile(__timbal_ast.Expression(body=tree.body[-1].value), "<user>", "eval")
-            result["return_value"] = eval(last_expr, namespace)
-        else:
-            exec(compile(tree, "<user>", "exec"), namespace)
-    except Exception as exc:
-        result["error"] = {{
-            "type": type(exc).__name__,
-            "message": str(exc),
-            "traceback": __timbal_traceback.format_exc(),
-        }}
-    if result["error"] is None:
-        try:
-            __timbal_json.dumps(result["return_value"])
-        except (TypeError, ValueError):
-            result["return_value"] = repr(result["return_value"])
-    return result
-'''.format(rpc_env=_RPC_ENV_VAR)  # noqa: UP032
-
 
 def _build_child_env(passthrough: list[str] | None) -> dict[str, str]:
     """Build a minimal environment for the child process.
@@ -303,41 +188,6 @@ def _resolve_dependencies(
         add(package)
 
     return resolved
-
-
-def _build_pep723_header(dependencies: list[str]) -> str:
-    if not dependencies:
-        return ""
-    lines = ["# /// script", "# dependencies = ["]
-    for dep in dependencies:
-        lines.append(f'#   "{dep}",')
-    lines.append("# ]")
-    lines.append("# ///")
-    return "\n".join(lines) + "\n"
-
-
-def _build_proxy_functions(tools: dict[str, Tool]) -> str:
-    lines: list[str] = []
-    for name in tools:
-        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
-            continue
-        lines.append(
-            f"def {name}(*args, **kwargs):\n"
-            f'    return __timbal_call_tool__("{name}", list(args), kwargs)\n'
-        )
-    return "\n".join(lines)
-
-
-def _build_script(code: str, tools: dict[str, Tool], dependencies: list[str]) -> str:
-    header = _build_pep723_header(dependencies)
-    proxies = _build_proxy_functions(tools)
-    proxy_block = f"\n{proxies}\n" if proxies else "\n"
-    body = f'''
-{proxy_block}
-__timbal_result__ = __timbal_execute_user_code__({json.dumps(code)})
-__timbal_write_result__(__timbal_result__)
-'''
-    return header + _CHILD_PREAMBLE + body
 
 
 def _serialize_output(value: Any) -> Any:
@@ -516,14 +366,20 @@ async def _run_subprocess(
     return process.returncode or 0, stdout, stderr
 
 
-def _build_command(script_path: Path, executor: Literal["uv", "venv"], venv_python: Path | None) -> list[str]:
+def _build_command(
+    dependencies: list[str],
+    executor: Literal["uv", "venv"],
+    venv_python: Path | None,
+) -> list[str]:
+    runner = str(_RUNNER_PATH)
     if executor == "uv":
         uv = shutil.which("uv")
         if uv:
-            return [uv, "run", "--no-project", str(script_path)]
+            cmd = [uv, "run", "--no-project", *(f"--with={dep}" for dep in dependencies), runner]
+            return cmd
     if venv_python is not None:
-        return [str(venv_python), str(script_path)]
-    return [sys.executable, str(script_path)]
+        return [str(venv_python), runner]
+    return [sys.executable, runner]
 
 
 async def _ensure_venv_deps(venv_dir: Path, dependencies: list[str]) -> Path:
@@ -580,7 +436,7 @@ class RunPython(Tool):
     timeout: float = Field(default=60.0, description="Maximum execution time in seconds.")
     executor: Literal["uv", "venv", "auto"] = Field(
         default="auto",
-        description="Execution backend: uv (PEP 723), venv+pip fallback, or auto (prefer uv).",
+        description="Execution backend: uv (--with deps), venv+pip fallback, or auto (prefer uv).",
     )
     exposed_tools: list[Any] = Field(
         default_factory=list,
@@ -652,10 +508,9 @@ class RunPython(Tool):
             run_dir = Path(tempfile.mkdtemp(prefix=".timbal_run_", dir=base_dir))
 
             resolved_deps = _resolve_dependencies(code, dependencies, default_deps)
-            script_content = _build_script(code, tool_map, resolved_deps)
-            script_path = run_dir / "script.py"
+            user_code_path = run_dir / _USER_CODE_FILENAME
             result_path = run_dir / _RESULT_FILENAME
-            script_path.write_text(script_content, encoding="utf-8")
+            user_code_path.write_text(code, encoding="utf-8")
 
             rpc = _ToolRpcServer(tool_map)
             await rpc.start()
@@ -663,6 +518,8 @@ class RunPython(Tool):
             # Strip host secrets: only forward a safe baseline + explicit allowlist.
             env = _build_child_env(env_passthrough)
             env["TIMBAL_RESULT_PATH"] = str(result_path)
+            env[_USER_CODE_PATH_ENV] = str(user_code_path)
+            env[_EXPOSED_TOOLS_ENV] = json.dumps(list(tool_map.keys()))
             if rpc.socket_path:
                 env[_RPC_ENV_VAR] = rpc.socket_path
 
@@ -679,7 +536,7 @@ class RunPython(Tool):
                     venv_python = await _ensure_venv_deps(venv_dir, resolved_deps)
                     chosen_executor = "venv"
 
-                cmd = _build_command(script_path, chosen_executor, venv_python)
+                cmd = _build_command(resolved_deps, chosen_executor, venv_python)
                 try:
                     returncode, stdout, stderr = await _run_subprocess(
                         cmd,
