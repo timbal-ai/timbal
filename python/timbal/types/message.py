@@ -165,13 +165,22 @@ class Message:
         if isinstance(value, Message):
             return value
         if isinstance(value, dict):
-            role = value.get("role", "user")
-            content = value.get("content", None)
-            stop_reason = value.get("stop_reason", None)
-            if not isinstance(content, list):
-                content = [content]
-            content = [content_factory(item) for item in content]
-            return cls(role=role, content=content, stop_reason=stop_reason)
+            # Only treat a dict as a message envelope when it actually looks like one.
+            # Every internal envelope producer (Message.serialize, collectors, agent)
+            # emits both "role" and "content", so require both to avoid misclassifying
+            # arbitrary payload dicts (which commonly carry a lone "content"/"role" key).
+            if "role" in value and "content" in value:
+                role = value.get("role", "user")
+                content = value.get("content", None)
+                stop_reason = value.get("stop_reason", None)
+                if not isinstance(content, list):
+                    content = [content]
+                content = [content_factory(item) for item in content]
+                return cls(role=role, content=content, stop_reason=stop_reason)
+            # Arbitrary payload (e.g. a tool's dict output wired straight into a prompt):
+            # stringify the whole dict via content_factory instead of silently dropping
+            # it to the literal "None" (which is what the envelope path used to produce).
+            return cls(role="user", content=[content_factory(value)])
         return cls.validate(
             {
                 "role": "user",

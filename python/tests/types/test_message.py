@@ -21,6 +21,39 @@ def test_message_text_validation() -> None:
         Message.validate({"role": "assistant", "content": [{"type": "text", "text": 123}]})
 
 
+def test_message_non_envelope_dict_is_stringified() -> None:
+    # A payload dict (no role/content keys, e.g. a tool's output wired into a prompt)
+    # must be stringified whole, NOT silently dropped to the literal "None".
+    payload = {"emails": [{"subject": "hi"}]}
+    message = Message.validate(payload)
+    assert message.role == "user"
+    assert len(message.content) == 1
+    assert message.content[0].type == "text"
+    assert message.content[0].text == str(payload)
+    assert message.content[0].text != "None"
+
+
+def test_message_partial_envelope_dict_is_stringified() -> None:
+    # A dict with only "role" (or only "content") is NOT a valid envelope, since every
+    # real envelope carries both. Treat it as a payload and stringify it whole.
+    role_only = {"role": "user"}
+    message = Message.validate(role_only)
+    assert message.role == "user"
+    assert message.content == [TextContent(text=str(role_only))]
+
+    content_only = {"content": "hi"}
+    message = Message.validate(content_only)
+    assert message.role == "user"
+    assert message.content == [TextContent(text=str(content_only))]
+
+
+def test_message_full_envelope_dict_is_parsed() -> None:
+    # A dict with both "role" and "content" takes the envelope path.
+    message = Message.validate({"role": "assistant", "content": "hi"})
+    assert message.role == "assistant"
+    assert message.content == [TextContent(text="hi")]
+
+
 def test_message_text_to_openai_chat_completions_input() -> None:
     message = Message(role="assistant", content=[TextContent(text="Hello, World!")])
     assert message.to_openai_chat_completions_input() == {"role": "assistant", "content": [{"type": "text", "text": "Hello, World!"}]}
